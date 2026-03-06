@@ -1,0 +1,46 @@
+name: Interop
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  curl-interop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build native + tests
+        run: npm run build && npm run build:test
+
+      - name: Run curl interop tests
+        run: node --test dist-test/test/curl-interop.test.js
+
+  quiche-loopback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run quiche UDP loopback interop tests
+        run: cargo test --test udp_loopback
+
+      - name: Run quiche curl interop tests
+        run: cargo test --test curl_interop

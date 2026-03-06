@@ -1,0 +1,65 @@
+{
+  "family": "http3-node24",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<account-id>:role/http3-task-role",
+  "containerDefinitions": [
+    {
+      "name": "http3-server",
+      "image": "<account-id>.dkr.ecr.<region>.amazonaws.com/http3-server:<tag>",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 443,
+          "hostPort": 443,
+          "protocol": "udp"
+        },
+        {
+          "containerPort": 443,
+          "hostPort": 443,
+          "protocol": "tcp"
+        },
+        {
+          "containerPort": 8080,
+          "hostPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV", "value": "production" },
+        { "name": "PORT", "value": "443" },
+        { "name": "HEALTH_PORT", "value": "8080" },
+        { "name": "HTTP3_QUIC_LB", "value": "0" },
+        { "name": "HTTP3_SERVER_ID", "value": "0x1122334455667788" }
+      ],
+      "secrets": [
+        {
+          "name": "HTTP3_TLS_SECRET_JSON",
+          "valueFrom": "arn:aws:secretsmanager:<region>:<account-id>:secret:http3/tls"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/readyz || exit 1"],
+        "interval": 10,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 20
+      },
+      "linuxParameters": {
+        "initProcessEnabled": true
+      },
+      "stopTimeout": 30,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/http3-node24",
+          "awslogs-region": "<region>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

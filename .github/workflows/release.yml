@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: npm dist-tag to publish
+        required: true
+        default: canary
+        type: choice
+        options:
+          - canary
+          - rc
+          - latest
+      dry_run:
+        description: Run checks without publishing
+        required: true
+        default: true
+        type: boolean
+      safari_validation_completed:
+        description: Confirm Safari runbook has been executed with artifacts (required for rc/latest)
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  prebuilds:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: npm ci
+
+      - name: Build native prebuild
+        run: npx napi build --release --platform --target ${{ matrix.target }}
+
+      - name: Upload prebuild artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-${{ matrix.target }}
+          path: '*.node'
+          if-no-files-found: error
+
+  publish:
+    needs: prebuilds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: npm ci
+
+      - name: Download prebuild artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: prebuild-*
+          merge-multiple: true
+
+      - name: Verify expected prebuilds
+        run: node scripts/verify-prebuilds.mjs
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: Release gate checks
+        run: npm run release:check
+
+      - name: Enforce Safari validation for rc/latest
+        if: ${{ inputs.dist_tag != 'canary' && !inputs.safari_validation_completed }}
+        run: |
+          echo "Safari validation must be completed before publishing rc/latest."
+          exit 1
+
+      - name: Smoke install packed artifact
+        run: npm run smoke:install
+
+      - name: Publish dry run
+        if: ${{ inputs.dry_run }}
+        run: npm publish --tag ${{ inputs.dist_tag }} --provenance --dry-run
+
+      - name: Publish package
+        if: ${{ !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --tag ${{ inputs.dist_tag }} --provenance

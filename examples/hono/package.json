@@ -1,0 +1,8 @@
+{
+  "name": "http3-hono-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "hono": "^4"
+  }
+}

@@ -1,0 +1,23 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "http3-node24"
+  },
+  {
+    "ParameterKey": "ContainerImage",
+    "ParameterValue": "123456789012.dkr.ecr.us-west-2.amazonaws.com/http3-server:latest"
+  },
+  {
+    "ParameterKey": "TlsSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-west-2:123456789012:secret:http3/tls"
+  },
+  {
+    "ParameterKey": "DesiredCount",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "AssignPublicIp",
+    "ParameterValue": "ENABLED"
+  }
+]
+

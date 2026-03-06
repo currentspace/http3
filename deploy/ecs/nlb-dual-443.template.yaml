@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Legacy NLB with TCP+UDP 443 listeners for unified H3/H2 origin
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+
+Resources:
+  DualProtocolNlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: http3-dual-443
+      Type: network
+      Scheme: internet-facing
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+
+  UdpTargetGroup443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: http3-udp-443
+      Port: 443
+      Protocol: UDP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '8080'
+
+  TcpTargetGroup443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: http3-tcp-443
+      Port: 443
+      Protocol: TCP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '8080'
+
+  ListenerUdp443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UdpTargetGroup443
+      LoadBalancerArn: !Ref DualProtocolNlb
+      Port: 443
+      Protocol: UDP
+
+  ListenerTcp443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TcpTargetGroup443
+      LoadBalancerArn: !Ref DualProtocolNlb
+      Port: 443
+      Protocol: TCP
+
+Outputs:
+  NlbDnsName:
+    Value: !GetAtt DualProtocolNlb.DNSName
+  UdpTargetGroupArn:
+    Value: !Ref UdpTargetGroup443
+  TcpTargetGroupArn:
+    Value: !Ref TcpTargetGroup443

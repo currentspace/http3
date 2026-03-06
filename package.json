@@ -1,0 +1,116 @@
+{
+  "name": "@currentspace/http3",
+  "version": "0.1.0",
+  "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
+  "author": "brianathere <brian@current.space>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/currentspace/http3.git"
+  },
+  "homepage": "https://github.com/currentspace/http3#readme",
+  "bugs": {
+    "url": "https://github.com/currentspace/http3/issues"
+  },
+  "keywords": [
+    "http3",
+    "quic",
+    "http2",
+    "nodejs",
+    "napi",
+    "quiche"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./fetch": {
+      "types": "./dist/fetch-adapter.d.ts",
+      "default": "./dist/fetch-adapter.js"
+    },
+    "./sse": {
+      "types": "./dist/sse.d.ts",
+      "default": "./dist/sse.js"
+    },
+    "./eventsource": {
+      "types": "./dist/eventsource.d.ts",
+      "default": "./dist/eventsource.js"
+    },
+    "./ops": {
+      "types": "./dist/ops.d.ts",
+      "default": "./dist/ops.js"
+    },
+    "./aws-cert": {
+      "types": "./dist/aws-cert.d.ts",
+      "default": "./dist/aws-cert.js"
+    },
+    "./express": {
+      "types": "./dist/express-adapter.d.ts",
+      "default": "./dist/express-adapter.js"
+    },
+    "./parity": {
+      "types": "./dist/http2-parity.d.ts",
+      "default": "./dist/http2-parity.js"
+    },
+    "./h3": {
+      "types": "./dist/http3-extensions.d.ts",
+      "default": "./dist/http3-extensions.js"
+    }
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "napi": {
+    "binaryName": "http3",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release && tsc",
+    "build:debug": "napi build --platform && tsc",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint lib/ test/",
+    "test": "npm run build:test && node --test dist-test/test/**/*.test.js",
+    "test:interop": "npm run build:test && node --test dist-test/test/curl-interop.test.js",
+    "test:browser:e2e": "npm run build:test && HTTP3_BROWSER_E2E=1 node --test dist-test/test/browser-e2e.test.js",
+    "test:concurrency": "npm run build:test && node --test dist-test/test/worker-concurrency.test.js",
+    "perf:concurrency-gate": "npm run build:test && node scripts/concurrency-gate.mjs",
+    "perf:load-smoke-gate": "npm run build:test && node --test dist-test/test/load-smoke.test.js",
+    "smoke:install": "npm run build && npm pack --silent && node scripts/smoke-install.mjs",
+    "safari:checklist": "node scripts/safari-validation-checklist.mjs",
+    "sbom": "npm sbom --omit=dev > sbom.spdx.json",
+    "release:check": "npm run lint && npm run typecheck && npm test && npm run test:interop && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate",
+    "prepublishOnly": "napi prepublish -t npm",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f http3",
+    "load:curl:h3": "PROTO=h3 TOTAL=500 CONCURRENCY=50 bash scripts/load-curl-http.sh https://127.0.0.1:8443/",
+    "load:curl:h2": "PROTO=h2 TOTAL=500 CONCURRENCY=50 bash scripts/load-curl-http.sh https://127.0.0.1:8443/",
+    "load:rust:h3": "cargo run --release --manifest-path tools/rust-h3-load/Cargo.toml -- --addr 127.0.0.1:8443 --host localhost --path / --clients 10 --requests-per-client 20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@napi-rs/cli": "^3.0.0",
+    "@types/node": "^25.3.3",
+    "eslint": "^10.0.2",
+    "playwright": "^1.55.1",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.56.1"
+  }
+}
