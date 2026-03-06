@@ -1,0 +1,10 @@
+{
+  "name": "http3-express-example",
+  "private": true,
+  "dependencies": {
+    "express": "^5"
+  },
+  "devDependencies": {
+    "@types/express": "^5"
+  }
+}

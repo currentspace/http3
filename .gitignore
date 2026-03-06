@@ -1,0 +1,7 @@
+dist/
+dist-test/
+target/
+*.node
+node_modules/
+examples/certs/server.key
+examples/certs/server.crt

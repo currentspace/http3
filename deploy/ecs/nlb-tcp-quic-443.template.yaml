@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NLB with TCP_QUIC 443 listener for QUIC-LB server-ID routing
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+
+Resources:
+  TcpQuicNlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: http3-tcp-quic-443
+      Type: network
+      Scheme: internet-facing
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+
+  TcpQuicTargetGroup443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: http3-tcp-quic-443
+      Port: 443
+      Protocol: TCP_QUIC
+      # QUIC-LB target registration requires QuicServerId, which is assigned
+      # when registering each target. Use instance mode for EC2-based targets.
+      TargetType: instance
+      VpcId: !Ref VpcId
+      HealthCheckProtocol: TCP
+      HealthCheckPort: '8080'
+
+  ListenerTcpQuic443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TcpQuicTargetGroup443
+      LoadBalancerArn: !Ref TcpQuicNlb
+      Port: 443
+      Protocol: TCP_QUIC
+
+Outputs:
+  NlbDnsName:
+    Value: !GetAtt TcpQuicNlb.DNSName
+  TcpQuicTargetGroupArn:
+    Value: !Ref TcpQuicTargetGroup443

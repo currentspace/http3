@@ -1,0 +1,17 @@
+# Production Readiness Docs
+
+- API contract: [API_CONTRACT.md](./API_CONTRACT.md)
+- HTTP/2 parity matrix: [HTTP2_PARITY_MATRIX.md](./HTTP2_PARITY_MATRIX.md)
+- Support matrix: [SUPPORT_MATRIX.md](./SUPPORT_MATRIX.md)
+- Quickstart: [QUICKSTART.md](./QUICKSTART.md)
+- Test strategy: [TEST_STRATEGY.md](./TEST_STRATEGY.md)
+- Safari validation runbook: [SAFARI_VALIDATION_RUNBOOK.md](./SAFARI_VALIDATION_RUNBOOK.md)
+- Deployment examples: [DEPLOYMENT_EXAMPLES.md](./DEPLOYMENT_EXAMPLES.md)
+- ECS deployment: [ECS_FARGATE_DEPLOYMENT.md](./ECS_FARGATE_DEPLOYMENT.md)
+- AWS NLB QUIC passthrough: [AWS_NLB_QUIC_PASSTHROUGH.md](./AWS_NLB_QUIC_PASSTHROUGH.md)
+- AWS cert operations: [AWS_CERT_OPERATIONS.md](./AWS_CERT_OPERATIONS.md)
+- Cloudflare lockdown mode: [CLOUDFLARE_LOCKDOWN.md](./CLOUDFLARE_LOCKDOWN.md)
+- Observability runbook: [OBSERVABILITY_RUNBOOK.md](./OBSERVABILITY_RUNBOOK.md)
+- Security/supply chain: [SECURITY_SUPPLY_CHAIN.md](./SECURITY_SUPPLY_CHAIN.md)
+- Release process: [RELEASE_RUNBOOK.md](./RELEASE_RUNBOOK.md)
+- Local Docker load test: [LOCAL_DOCKER_LOADTEST.md](./LOCAL_DOCKER_LOADTEST.md)

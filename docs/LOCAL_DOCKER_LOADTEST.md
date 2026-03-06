@@ -1,0 +1,107 @@
+# Local Docker + Load Test Guide
+
+This runbook starts the unified H3/H2 server in Docker and runs load tests
+using either curl (`--http3-only` / `--http2`) or a Rust QUIC client.
+
+## 1) Generate local TLS certs
+
+```bash
+./examples/certs/generate.sh
+```
+
+This creates:
+
+- `examples/certs/server.crt`
+- `examples/certs/server.key`
+
+## 2) Build and run container
+
+```bash
+npm run docker:build
+npm run docker:up
+```
+
+Default local ports:
+
+- `8443/tcp` -> container `443/tcp` (H2)
+- `8443/udp` -> container `443/udp` (H3)
+- `8080/tcp` -> health endpoints
+
+## 3) Smoke checks
+
+Readiness:
+
+```bash
+curl -sSf http://127.0.0.1:8080/readyz
+```
+
+HTTP/3:
+
+```bash
+curl --http3-only -k https://127.0.0.1:8443/
+```
+
+HTTP/2:
+
+```bash
+curl --http2 -k https://127.0.0.1:8443/
+```
+
+## 4) Curl-based load tests
+
+HTTP/3 load:
+
+```bash
+npm run load:curl:h3
+```
+
+HTTP/2 load:
+
+```bash
+npm run load:curl:h2
+```
+
+Tune parameters:
+
+```bash
+PROTO=h3 TOTAL=2000 CONCURRENCY=100 MAX_TIME=10 bash scripts/load-curl-http.sh https://127.0.0.1:8443/
+```
+
+The script prints:
+
+- success/failures
+- elapsed time and RPS
+- avg/p50/p95/p99 latency (ms)
+
+## 5) Rust QUIC client load
+
+```bash
+npm run load:rust:h3
+```
+
+Custom run:
+
+```bash
+cargo run --release --manifest-path tools/rust-h3-load/Cargo.toml -- \
+  --addr 127.0.0.1:8443 \
+  --host localhost \
+  --path / \
+  --clients 20 \
+  --requests-per-client 50 \
+  --timeout-ms 5000 \
+  --verify-peer false
+```
+
+## 6) Inspect logs and stop
+
+```bash
+npm run docker:logs
+npm run docker:down
+```
+
+## Notes
+
+- If your local curl lacks HTTP/3 support, H3 load tests will fail quickly.
+- Use the Rust load client path as a fallback for H3 benchmarking.
+- For privileged host port 443 mapping, adjust `docker-compose.yml` published
+  ports from `8443` to `443` for both TCP and UDP.

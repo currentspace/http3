@@ -1,0 +1,50 @@
+[package]
+name = "http3"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", features = ["napi4", "napi6", "napi8"] }
+napi-derive = "3"
+quiche = { version = "0.24", features = ["qlog"] }
+ring = "0.17"
+log = "0.4"
+slab = "0.4"
+bytes = "1"
+crossbeam-channel = "0.5"
+mio = { version = "1", features = ["os-poll", "net"] }
+libc = "0.2"
+socket2 = "0.5"
+
+[build-dependencies]
+napi-build = "2"
+
+[dev-dependencies]
+rcgen = "0.13"
+
+[lints.rust]
+unsafe_code = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that conflict with napi-rs generated code or QUIC domain
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+needless_pass_by_value = "allow"   # napi macro requires owned String params
+cast_possible_wrap = "allow"       # u64→i64 casts required by napi JS interop
+cast_sign_loss = "allow"           # i64→u64 casts required by napi JS interop
+cast_possible_truncation = "allow" # u128→i64 for millisecond timers
+doc_markdown = "allow"             # QUIC/HTTP/3 identifiers in docs
+unnecessary_wraps = "allow"        # napi requires Result return types on all methods
+# Restriction lints (cherry-picked)
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"

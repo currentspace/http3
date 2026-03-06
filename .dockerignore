@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+dist-test
+target
+*.tgz
+*.log
+coverage
+.DS_Store
+examples/certs/server.key
+examples/certs/server.crt
