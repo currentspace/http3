@@ -43,6 +43,18 @@ function sleepAbortable(ms, signal) {
   });
 }
 
+function loadSessionTicketKeysFromEnv() {
+  const raw = process.env.HTTP3_SESSION_TICKET_KEYS_B64;
+  if (!raw) return undefined;
+
+  const key = Buffer.from(raw, 'base64');
+  if (key.length !== 48) {
+    throw new Error('HTTP3_SESSION_TICKET_KEYS_B64 must decode to exactly 48 bytes');
+  }
+
+  return key;
+}
+
 function safeMetrics(metrics) {
   if (!metrics) return null;
   return {
@@ -333,6 +345,7 @@ app.get('/events/stats', (c) => {
 
 async function main() {
   const tls = loadTlsOptionsFromAwsEnv();
+  const sessionTicketKeys = loadSessionTicketKeysFromEnv();
   const port = Number.parseInt(process.env.PORT ?? '443', 10);
   const host = process.env.HOST ?? '::';
   const healthPort = Number.parseInt(process.env.HEALTH_PORT ?? '8080', 10);
@@ -351,8 +364,9 @@ async function main() {
     port,
     host,
     ...tls,
-  // Keep h3/h2 preferred, but allow h1 fallback for broader browser compatibility.
-  allowHTTP1: true,
+    sessionTicketKeys,
+    // Keep h3/h2 preferred, but allow h1 fallback for broader browser compatibility.
+    allowHTTP1: true,
     disableRetry: process.env.HTTP3_DISABLE_RETRY === '1',
     quicLb,
     serverId,
@@ -384,6 +398,9 @@ async function main() {
   server.on('listening', () => {
     health.setReady(true);
     const address = server.address();
+    if (sessionTicketKeys) {
+      console.log('shared session ticket keys enabled from HTTP3_SESSION_TICKET_KEYS_B64');
+    }
     console.log(`http3 server listening on https://${address?.address ?? host}:${address?.port ?? port}`);
   });
   server.on('error', (err) => {
