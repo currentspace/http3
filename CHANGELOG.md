@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Republish the `0.1.1` release contents under a new npm version after `0.1.1` became unavailable for reuse on npm.
+
 ## 0.1.1
 
 - Documented how to share `sessionTicketKeys` across instances for resumption and 0-RTT continuity.
