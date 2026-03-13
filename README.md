@@ -50,5 +50,6 @@ const stream = session.request({
 - [HTTP/2 parity matrix](./docs/HTTP2_PARITY_MATRIX.md)
 - [ECS/Fargate deployment](./docs/ECS_FARGATE_DEPLOYMENT.md)
 - [AWS NLB QUIC passthrough](./docs/AWS_NLB_QUIC_PASSTHROUGH.md)
+- [Session ticket keys across instances](./docs/SESSION_TICKET_KEYS.md)
 - [Release runbook](./docs/RELEASE_RUNBOOK.md)
 

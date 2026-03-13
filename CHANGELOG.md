@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Documented how to share `sessionTicketKeys` across instances for resumption and 0-RTT continuity.
+- Added the shared `sessionTicketKeys` pattern to the Hono production example.
+- Included the docs and Hono example assets in the published npm package so downstream consumers can inspect them directly.
+
 ## 0.1.0
 
 - Initial production-oriented HTTP/3 package for Node.js 24+.

@@ -4,6 +4,7 @@
  * Features:
  * - Unified H3+H2 listener on the same port
  * - AWS TLS material loading from env/secret patterns
+ * - Optional shared session ticket keys for cross-instance resumption
  * - /healthz + /readyz HTTP health endpoints for ECS
  * - graceful SIGTERM/SIGINT drain for rolling updates
  */
@@ -88,6 +89,18 @@ function sleepAbortable(ms: number, signal: AbortSignal | null | undefined): Pro
     }
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+function loadSessionTicketKeysFromEnv(): Buffer | undefined {
+  const raw = process.env.HTTP3_SESSION_TICKET_KEYS_B64;
+  if (!raw) return undefined;
+
+  const key = Buffer.from(raw, 'base64');
+  if (key.length !== 48) {
+    throw new Error('HTTP3_SESSION_TICKET_KEYS_B64 must decode to exactly 48 bytes');
+  }
+
+  return key;
 }
 
 function safeMetrics(metrics: unknown): DemoSessionMetrics | null {
@@ -379,6 +392,7 @@ app.get('/events/stats', (c) => {
 
 async function main(): Promise<void> {
   const tls = loadTlsOptionsFromAwsEnv();
+  const sessionTicketKeys = loadSessionTicketKeysFromEnv();
   const port = Number.parseInt(process.env.PORT ?? '443', 10);
   const host = process.env.HOST ?? '::';
   const healthPort = Number.parseInt(process.env.HEALTH_PORT ?? '8080', 10);
@@ -397,6 +411,7 @@ async function main(): Promise<void> {
     port,
     host,
     ...tls,
+    sessionTicketKeys,
     // Keep h3/h2 preferred, but allow h1 fallback for broader browser compatibility.
     allowHTTP1: true,
     disableRetry: process.env.HTTP3_DISABLE_RETRY === '1',
@@ -431,6 +446,9 @@ async function main(): Promise<void> {
   server.on('listening', () => {
     health.setReady(true);
     const address = server.address();
+    if (sessionTicketKeys) {
+      console.log('shared session ticket keys enabled from HTTP3_SESSION_TICKET_KEYS_B64');
+    }
     console.log(`http3 server listening on https://${address?.address ?? host}:${address?.port ?? port}`);
   });
   server.on('error', (err) => {

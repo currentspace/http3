@@ -34,6 +34,7 @@ first production-ready release line.
 - stable server options additions:
   - `quicLb?: boolean`
   - `serverId?: Buffer | string` (8-byte ID, hex accepted)
+  - `sessionTicketKeys?: Buffer` (shared ticket key material for resumption / 0-RTT across instances)
 
 ## Stable Fetch/SSE API
 

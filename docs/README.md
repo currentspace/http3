@@ -9,6 +9,7 @@
 - Deployment examples: [DEPLOYMENT_EXAMPLES.md](./DEPLOYMENT_EXAMPLES.md)
 - ECS deployment: [ECS_FARGATE_DEPLOYMENT.md](./ECS_FARGATE_DEPLOYMENT.md)
 - AWS NLB QUIC passthrough: [AWS_NLB_QUIC_PASSTHROUGH.md](./AWS_NLB_QUIC_PASSTHROUGH.md)
+- Session ticket keys across instances: [SESSION_TICKET_KEYS.md](./SESSION_TICKET_KEYS.md)
 - AWS cert operations: [AWS_CERT_OPERATIONS.md](./AWS_CERT_OPERATIONS.md)
 - Cloudflare lockdown mode: [CLOUDFLARE_LOCKDOWN.md](./CLOUDFLARE_LOCKDOWN.md)
 - Observability runbook: [OBSERVABILITY_RUNBOOK.md](./OBSERVABILITY_RUNBOOK.md)
