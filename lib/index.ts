@@ -27,6 +27,14 @@ export type { AwsTlsEnv, AwsTlsSecretShape } from './aws-cert.js';
 export { createExpressAdapter } from './express-adapter.js';
 export type { ExpressLikeHandler, ExpressLikeRequest, ExpressLikeResponse } from './express-adapter.js';
 
+export { createQuicServer, QuicServer, QuicServerSession } from './quic-server.js';
+export type { QuicServerOptions } from './quic-server.js';
+
+export { connectQuic, connectQuicAsync, QuicClientSession } from './quic-client.js';
+export type { QuicConnectOptions } from './quic-client.js';
+
+export { QuicStream } from './quic-stream.js';
+
 export * as constants from './constants.js';
 export * as parity from './http2-parity.js';
 export * as h3 from './http3-extensions.js';
