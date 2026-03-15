@@ -576,6 +576,8 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.NativeQuicClient = nativeBinding.NativeQuicClient
+module.exports.NativeQuicServer = nativeBinding.NativeQuicServer
 module.exports.NativeWorkerClient = nativeBinding.NativeWorkerClient
 module.exports.NativeWorkerServer = nativeBinding.NativeWorkerServer
 module.exports.version = nativeBinding.version

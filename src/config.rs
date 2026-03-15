@@ -271,6 +271,199 @@ impl Http3Config {
     }
 }
 
+// ── QUIC-only config (no HTTP/3 ALPN) ──────────────────────────────
+
+#[napi(object)]
+pub struct JsQuicServerOptions {
+    pub key: napi::bindgen_prelude::Buffer,
+    pub cert: napi::bindgen_prelude::Buffer,
+    pub ca: Option<napi::bindgen_prelude::Buffer>,
+    pub alpn: Option<Vec<String>>,
+    pub max_idle_timeout_ms: Option<u32>,
+    pub max_udp_payload_size: Option<u32>,
+    pub initial_max_data: Option<u32>,
+    pub initial_max_stream_data_bidi_local: Option<u32>,
+    pub initial_max_streams_bidi: Option<u32>,
+    pub disable_active_migration: Option<bool>,
+    pub enable_datagrams: Option<bool>,
+    pub max_connections: Option<u32>,
+    pub disable_retry: Option<bool>,
+    pub qlog_dir: Option<String>,
+    pub qlog_level: Option<String>,
+    pub session_ticket_keys: Option<napi::bindgen_prelude::Buffer>,
+    pub keylog: Option<bool>,
+}
+
+#[napi(object)]
+pub struct JsQuicClientOptions {
+    pub ca: Option<napi::bindgen_prelude::Buffer>,
+    pub reject_unauthorized: Option<bool>,
+    pub alpn: Option<Vec<String>>,
+    pub max_idle_timeout_ms: Option<u32>,
+    pub max_udp_payload_size: Option<u32>,
+    pub initial_max_data: Option<u32>,
+    pub initial_max_stream_data_bidi_local: Option<u32>,
+    pub initial_max_streams_bidi: Option<u32>,
+    pub session_ticket: Option<napi::bindgen_prelude::Buffer>,
+    pub allow_0rtt: Option<bool>,
+    pub enable_datagrams: Option<bool>,
+    pub keylog: Option<bool>,
+    pub qlog_dir: Option<String>,
+    pub qlog_level: Option<String>,
+}
+
+fn alpn_to_bytes(protocols: &[String]) -> Vec<Vec<u8>> {
+    protocols.iter().map(|p| p.as_bytes().to_vec()).collect()
+}
+
+fn alpn_refs(protos: &[Vec<u8>]) -> Vec<&[u8]> {
+    protos.iter().map(Vec::as_slice).collect()
+}
+
+pub fn new_quic_server_config(
+    options: &JsQuicServerOptions,
+) -> Result<quiche::Config, Http3NativeError> {
+    let mut config =
+        quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(Http3NativeError::Quiche)?;
+
+    let cert_path = TempFileGuard::new(&options.cert, "_qcert.pem")?;
+    let key_path = TempFileGuard::new(&options.key, "_qkey.pem")?;
+    config
+        .load_cert_chain_from_pem_file(cert_path.as_str("cert")?)
+        .map_err(Http3NativeError::Quiche)?;
+    config
+        .load_priv_key_from_pem_file(key_path.as_str("key")?)
+        .map_err(Http3NativeError::Quiche)?;
+
+    if let Some(ca) = options.ca.as_ref() {
+        let ca_path = TempFileGuard::new(ca, "_qca.pem")?;
+        config
+            .load_verify_locations_from_file(ca_path.as_str("ca")?)
+            .map_err(Http3NativeError::Quiche)?;
+    }
+
+    let default_alpn = vec!["quic".to_string()];
+    let alpn_protos = options.alpn.as_deref().unwrap_or(&default_alpn);
+    let alpn_bytes = alpn_to_bytes(alpn_protos);
+    let alpn_slice = alpn_refs(&alpn_bytes);
+    config
+        .set_application_protos(&alpn_slice)
+        .map_err(Http3NativeError::Quiche)?;
+
+    config.set_max_idle_timeout(u64::from(options.max_idle_timeout_ms.unwrap_or(30_000)));
+    config.set_max_recv_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+    );
+    config.set_max_send_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+    );
+    config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
+    config.set_initial_max_stream_data_bidi_local(u64::from(
+        options
+            .initial_max_stream_data_bidi_local
+            .unwrap_or(2_000_000),
+    ));
+    config.set_initial_max_stream_data_bidi_remote(2_000_000);
+    config.set_initial_max_stream_data_uni(2_000_000);
+    config.set_initial_max_streams_bidi(u64::from(
+        options.initial_max_streams_bidi.unwrap_or(10_000),
+    ));
+    config.set_initial_max_streams_uni(1_000);
+    config.set_disable_active_migration(options.disable_active_migration.unwrap_or(true));
+
+    if let Some(keys) = options.session_ticket_keys.as_ref() {
+        config
+            .set_ticket_key(keys)
+            .map_err(Http3NativeError::Quiche)?;
+    }
+
+    config.set_send_capacity_factor(20.0);
+    config.set_initial_congestion_window_packets(1000);
+
+    if options.enable_datagrams.unwrap_or(false) {
+        config.enable_dgram(true, 1000, 1000);
+    }
+
+    if options.keylog.unwrap_or(false) {
+        config.log_keys();
+    }
+
+    Ok(config)
+}
+
+pub fn new_quic_client_config(
+    options: &JsQuicClientOptions,
+) -> Result<quiche::Config, Http3NativeError> {
+    let mut config =
+        quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(Http3NativeError::Quiche)?;
+
+    let default_alpn = vec!["quic".to_string()];
+    let alpn_protos = options.alpn.as_deref().unwrap_or(&default_alpn);
+    let alpn_bytes = alpn_to_bytes(alpn_protos);
+    let alpn_slice = alpn_refs(&alpn_bytes);
+    config
+        .set_application_protos(&alpn_slice)
+        .map_err(Http3NativeError::Quiche)?;
+
+    if options.reject_unauthorized.unwrap_or(true) {
+        config.verify_peer(true);
+    } else {
+        config.verify_peer(false);
+    }
+
+    if let Some(ca) = options.ca.as_ref() {
+        let ca_path = TempFileGuard::new(ca, "_qca.pem")?;
+        config
+            .load_verify_locations_from_file(ca_path.as_str("ca")?)
+            .map_err(Http3NativeError::Quiche)?;
+    }
+
+    config.set_max_idle_timeout(u64::from(options.max_idle_timeout_ms.unwrap_or(30_000)));
+    config.set_max_recv_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+    );
+    config.set_max_send_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+    );
+    config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
+    config.set_initial_max_stream_data_bidi_local(u64::from(
+        options
+            .initial_max_stream_data_bidi_local
+            .unwrap_or(2_000_000),
+    ));
+    config.set_initial_max_stream_data_bidi_remote(2_000_000);
+    config.set_initial_max_stream_data_uni(2_000_000);
+    config.set_initial_max_streams_bidi(u64::from(
+        options.initial_max_streams_bidi.unwrap_or(10_000),
+    ));
+    config.set_initial_max_streams_uni(1_000);
+
+    config.set_send_capacity_factor(20.0);
+    config.set_initial_congestion_window_packets(1000);
+
+    if options.allow_0rtt.unwrap_or(false) {
+        config.enable_early_data();
+    }
+
+    if options.enable_datagrams.unwrap_or(false) {
+        config.enable_dgram(true, 1000, 1000);
+    }
+
+    if options.keylog.unwrap_or(false) {
+        config.log_keys();
+    }
+
+    Ok(config)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
