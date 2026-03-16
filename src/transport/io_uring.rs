@@ -1,9 +1,8 @@
-//! IoUringDriver: uses the `io-uring` crate for real `recvmsg`/`sendmsg`
-//! completion-based I/O on Linux.
+//! IoUringDriver: uses the `io-uring` crate for completion-based `recvmsg` on
+//! Linux. TX uses synchronous `send_to` (same as kqueue) because UDP sendmsg
+//! is non-blocking and io_uring adds no benefit — it just complicates backpressure.
 //!
 //! This module is only compiled on Linux (`cfg(target_os = "linux")`).
-//! Pre-posted RX slots with stable-address buffers, slab-backed TX slots,
-//! eventfd waker integrated into the ring.
 
 #[cfg(target_os = "linux")]
 mod inner {
@@ -15,12 +14,11 @@ mod inner {
 
     use crate::transport::{Driver, DriverWaker, PollOutcome, RxDatagram, TxDatagram};
 
-    const RX_SLOTS: usize = 64;
+    const RX_SLOTS: usize = 256;
     const RX_BUF_SIZE: usize = 65535;
 
     // user_data encoding: high byte = op type, low bytes = slot index
     const OP_RECV: u64 = 1 << 56;
-    const OP_SEND: u64 = 2 << 56;
     const OP_WAKER: u64 = 3 << 56;
     const OP_MASK: u64 = 0xFF << 56;
     const IDX_MASK: u64 = (1 << 56) - 1;
@@ -35,32 +33,26 @@ mod inner {
         in_flight: bool,
     }
 
-    /// A single sendmsg operation slot. Owns data until CQE retirement.
-    struct TxSlot {
-        data: Vec<u8>,
-        addr: Box<libc::sockaddr_storage>,
-        addr_len: libc::socklen_t,
-        iov: Box<libc::iovec>,
-        msg: Box<libc::msghdr>,
-    }
-
     impl RxSlot {
         fn new() -> Self {
             let mut slot = Self {
                 buf: Box::new([0u8; RX_BUF_SIZE]),
+                // SAFETY: zeroed sockaddr_storage is valid (all-zeros family = AF_UNSPEC).
                 addr: Box::new(unsafe { std::mem::zeroed() }),
                 iov: Box::new(libc::iovec {
                     iov_base: std::ptr::null_mut(),
                     iov_len: 0,
                 }),
+                // SAFETY: zeroed msghdr is valid (null pointers, zero lengths).
                 msg: Box::new(unsafe { std::mem::zeroed() }),
                 in_flight: false,
             };
-            // Fix up pointers — safe because Box addresses are stable
+            // Fix up pointers — safe because Box addresses are stable.
             slot.iov.iov_base = slot.buf.as_mut_ptr().cast();
             slot.iov.iov_len = RX_BUF_SIZE;
             slot.msg.msg_name = (slot.addr.as_mut() as *mut libc::sockaddr_storage).cast();
-            slot.msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            slot.msg.msg_namelen =
+                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
             slot.msg.msg_iov = slot.iov.as_mut() as *mut libc::iovec;
             slot.msg.msg_iovlen = 1;
             slot
@@ -80,16 +72,19 @@ mod inner {
         socket: std::net::UdpSocket,
         eventfd: OwnedFd,
         rx_slots: Vec<RxSlot>,
-        tx_slots: slab::Slab<TxSlot>,
         waker_buf: Box<[u8; 8]>,
         rx_in_flight: usize,
-        tx_in_flight: usize,
+        /// Packets that couldn't be sent because the OS UDP buffer was full.
+        /// Retried at the start of each poll cycle via synchronous send_to.
+        unsent: Vec<TxDatagram>,
+        /// Scratch buffer for fallback recv_from after CQE drain.
+        recv_buf: Vec<u8>,
     }
 
     // SAFETY: IoUringDriver is created on the main thread and moved to the worker
-    // thread before any I/O occurs. The raw pointers inside RxSlot/TxSlot (msghdr,
-    // iovec) point to co-located Box allocations that move with the driver. The
-    // driver is single-threaded after the move — no concurrent access.
+    // thread before any I/O occurs. The raw pointers inside RxSlot (msghdr, iovec)
+    // point to co-located Box allocations that move with the driver. The driver is
+    // single-threaded after the move — no concurrent access.
     unsafe impl Send for IoUringDriver {}
 
     #[derive(Clone)]
@@ -101,7 +96,7 @@ mod inner {
         type Waker = IoUringWaker;
 
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
-            let ring = io_uring::IoUring::new(256)?;
+            let ring = io_uring::IoUring::new(512)?;
             let socket_fd = socket.as_raw_fd();
 
             // Create eventfd for wakeup
@@ -121,10 +116,10 @@ mod inner {
                 socket,
                 eventfd,
                 rx_slots,
-                tx_slots: slab::Slab::with_capacity(256),
                 waker_buf: Box::new([0u8; 8]),
                 rx_in_flight: 0,
-                tx_in_flight: 0,
+                unsent: Vec::new(),
+                recv_buf: vec![0u8; 65535],
             };
 
             // Submit initial recvmsg SQEs for all RX slots
@@ -133,11 +128,12 @@ mod inner {
             driver.submit_waker_read()?;
             driver.ring.submit()?;
 
-            // SAFETY: dup the eventfd for the waker (the driver keeps the original)
+            // SAFETY: dup the eventfd for the waker (the driver keeps the original).
             let waker_fd = unsafe { libc::dup(driver.eventfd.as_raw_fd()) };
             if waker_fd < 0 {
                 return Err(io::Error::last_os_error());
             }
+            // SAFETY: waker_fd is a valid fd from successful dup().
             let waker_eventfd = unsafe { OwnedFd::from_raw_fd(waker_fd) };
 
             let waker = IoUringWaker {
@@ -147,20 +143,20 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
-            // Submit pending and wait for at least 1 CQE with timeout
+            // Drain unsent queue at the top of each poll (socket buffer may have space now).
+            self.drain_unsent();
+
             let wait_dur = deadline.map_or(Duration::from_millis(100), |d| {
                 d.saturating_duration_since(Instant::now())
             });
 
-            // Use submit_and_wait with a manual timeout check
+            // Submit pending SQEs (replenished recvmsg + waker read).
             let _ = self.ring.submit();
 
-            // Wait with timeout using the submitter
+            // Wait for at least 1 CQE with timeout.
             let ts = io_uring::types::Timespec::new()
                 .sec(wait_dur.as_secs())
                 .nsec(wait_dur.subsec_nanos());
-            // submit_and_wait_with_timeout is not always available; use a simpler approach:
-            // submit, then wait with a timeout via the completion queue
             let args = io_uring::types::SubmitArgs::new().timespec(&ts);
             match self.ring.submitter().submit_with_args(1, &args) {
                 Ok(_) => {}
@@ -179,7 +175,7 @@ mod inner {
                 outcome.timer_expired = true;
             }
 
-            // Process all available CQEs
+            // Process all available CQEs.
             let cq = self.ring.completion();
             let cqes: Vec<io_uring::cqueue::Entry> = cq.collect();
 
@@ -212,15 +208,9 @@ mod inner {
                             }
                         }
                     }
-                    OP_SEND => {
-                        self.tx_in_flight -= 1;
-                        if self.tx_slots.contains(idx) {
-                            self.tx_slots.remove(idx);
-                        }
-                    }
                     OP_WAKER => {
                         outcome.woken = true;
-                        // Drain eventfd counter
+                        // Drain eventfd counter.
                         // SAFETY: reading 8 bytes from a valid eventfd.
                         unsafe {
                             libc::read(
@@ -229,14 +219,30 @@ mod inner {
                                 8,
                             );
                         }
-                        // Resubmit waker read
+                        // Resubmit waker read.
                         let _ = self.submit_waker_read();
                     }
                     _ => {}
                 }
             }
 
-            // Replenish RX depth
+            // Fallback: drain any packets that arrived after all recvmsg CQEs
+            // were consumed. Without this, packets sit in the kernel socket buffer
+            // until the next poll cycle, adding latency under burst traffic.
+            loop {
+                match self.socket.recv_from(&mut self.recv_buf) {
+                    Ok((len, peer)) => {
+                        outcome.rx.push(RxDatagram {
+                            data: self.recv_buf[..len].to_vec(),
+                            peer,
+                        });
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+            }
+
+            // Replenish RX depth — resubmit completed slots.
             self.replenish_rx()?;
             self.ring.submit()?;
 
@@ -244,50 +250,23 @@ mod inner {
         }
 
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            // Synchronous send_to, same as kqueue driver.
+            // io_uring sendmsg adds no benefit for non-blocking UDP — it just
+            // complicates EAGAIN backpressure handling.
             for pkt in packets {
-                let (addr, addr_len) = socketaddr_to_sockaddr_storage(&pkt.to);
-
-                let mut slot = TxSlot {
-                    data: pkt.data,
-                    addr: Box::new(addr),
-                    addr_len,
-                    iov: Box::new(unsafe { std::mem::zeroed() }),
-                    msg: Box::new(unsafe { std::mem::zeroed() }),
-                };
-
-                // Fix up pointers
-                slot.iov.iov_base = slot.data.as_ptr() as *mut _;
-                slot.iov.iov_len = slot.data.len();
-                slot.msg.msg_name = (slot.addr.as_ref() as *const _ as *mut _);
-                slot.msg.msg_namelen = slot.addr_len;
-                slot.msg.msg_iov = slot.iov.as_mut() as *mut _;
-                slot.msg.msg_iovlen = 1;
-
-                let slab_key = self.tx_slots.insert(slot);
-                let slot_ref = &self.tx_slots[slab_key];
-
-                let entry = io_uring::opcode::SendMsg::new(
-                    io_uring::types::Fd(self.socket_fd),
-                    slot_ref.msg.as_ref() as *const libc::msghdr,
-                )
-                .build()
-                .user_data(OP_SEND | slab_key as u64);
-
-                // SAFETY: TxSlot fields are heap-allocated. Pointers are stable
-                // until the CQE arrives and the slot is removed from the slab.
-                unsafe {
-                    self.ring.submission().push(&entry).map_err(|_| {
-                        io::Error::new(io::ErrorKind::Other, "SQ full")
-                    })?;
+                match self.socket.send_to(&pkt.data, pkt.to) {
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        self.unsent.push(pkt);
+                    }
+                    Err(_) => {} // drop unsendable
                 }
-                self.tx_in_flight += 1;
             }
-            self.ring.submit()?;
             Ok(())
         }
 
         fn pending_tx_count(&self) -> usize {
-            self.tx_in_flight
+            self.unsent.len()
         }
 
         fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -340,6 +319,18 @@ mod inner {
             }
             Ok(())
         }
+
+        /// Retry sending queued packets. Stops at the first WouldBlock.
+        fn drain_unsent(&mut self) {
+            while !self.unsent.is_empty() {
+                match self.socket.send_to(&self.unsent[0].data, self.unsent[0].to) {
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                    Ok(_) | Err(_) => {
+                        self.unsent.remove(0);
+                    }
+                }
+            }
+        }
     }
 
     impl DriverWaker for IoUringWaker {
@@ -384,30 +375,6 @@ mod inner {
         } else {
             None
         }
-    }
-
-    fn socketaddr_to_sockaddr_storage(addr: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
-        // SAFETY: zeroed sockaddr_storage is valid for all address families.
-        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-        let len = match addr {
-            SocketAddr::V4(v4) => {
-                // SAFETY: storage is large enough for sockaddr_in.
-                let sin: &mut libc::sockaddr_in = unsafe { &mut *(&mut storage as *mut _ as *mut _) };
-                sin.sin_family = libc::AF_INET as libc::sa_family_t;
-                sin.sin_port = v4.port().to_be();
-                sin.sin_addr.s_addr = u32::from(*v4.ip()).to_be();
-                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
-            }
-            SocketAddr::V6(v6) => {
-                // SAFETY: storage is large enough for sockaddr_in6.
-                let sin6: &mut libc::sockaddr_in6 = unsafe { &mut *(&mut storage as *mut _ as *mut _) };
-                sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-                sin6.sin6_port = v6.port().to_be();
-                sin6.sin6_addr.s6_addr = v6.ip().octets();
-                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
-            }
-        };
-        (storage, len)
     }
 }
 
