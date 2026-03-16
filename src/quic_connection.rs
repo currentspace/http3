@@ -167,6 +167,11 @@ impl QuicConnection {
     }
 
     /// Send raw data on a QUIC stream. Returns bytes written.
+    ///
+    /// For FIN-only sends (empty data + fin=true), quiche returns Ok(0) on
+    /// success. To distinguish that from `Err(Done)` (blocked), this method
+    /// returns `Ok(1)` when a FIN-only send is accepted by quiche — callers
+    /// can treat any non-zero return as "progress was made."
     pub fn stream_send(
         &mut self,
         stream_id: u64,
@@ -179,7 +184,14 @@ impl QuicConnection {
                     self.blocked_streams.insert(stream_id);
                 }
                 self.known_streams.insert(stream_id);
-                Ok(written)
+                // Signal progress for FIN-only sends (0 data bytes written
+                // but FIN was accepted). Without this, callers can't
+                // distinguish a successful FIN from a blocked one.
+                if data.is_empty() && fin && written == 0 {
+                    Ok(1)
+                } else {
+                    Ok(written)
+                }
             }
             Err(quiche::Error::Done) => {
                 self.blocked_streams.insert(stream_id);
@@ -201,6 +213,7 @@ impl QuicConnection {
             .stream_shutdown(stream_id, quiche::Shutdown::Write, error_code)
             .ok();
         self.blocked_streams.remove(&stream_id);
+        self.known_streams.remove(&stream_id);
         Ok(())
     }
 

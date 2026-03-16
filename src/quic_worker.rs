@@ -16,6 +16,7 @@ use ring::hmac;
 use ring::rand::SecureRandom;
 use slab::Slab;
 
+use crate::buffer_pool::BufferPool;
 use crate::cid::CidEncoding;
 use crate::error::Http3NativeError;
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
@@ -655,6 +656,7 @@ fn quic_server_loop(
     let mut conn_map =
         QuicConnectionMap::new(server_config.max_connections, server_config.cid_encoding.clone());
     let mut timer_heap = TimerHeap::new();
+    let mut buffer_pool = BufferPool::default();
     let mut events = Events::with_capacity(256);
     let mut recv_buf = vec![0u8; 65535];
     let mut pending_outbound: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
@@ -882,6 +884,7 @@ fn quic_server_loop(
                         &mut pending_outbound,
                         disable_retry,
                         &mut batch,
+                        &mut buffer_pool,
                     );
                     if batch.len() >= MAX_BATCH_SIZE
                         && !flush_batch(&mut batch, &tsfn, &mut events_dropped)
@@ -998,6 +1001,7 @@ fn process_quic_packet(
     pending_outbound: &mut Vec<(Vec<u8>, SocketAddr)>,
     disable_retry: bool,
     batch: &mut Vec<JsH3Event>,
+    buffer_pool: &mut BufferPool,
 ) {
     let Ok(hdr) = quiche::Header::from_slice(buf, SCID_LEN) else {
         return;
@@ -1071,7 +1075,7 @@ fn process_quic_packet(
             };
             let scid_ref = quiche::ConnectionId::from_ref(&scid);
             let token = conn_map.mint_token(&peer, hdr.dcid.as_ref());
-            let mut out = vec![0u8; SEND_BUF_SIZE];
+            let mut out = buffer_pool.checkout();
             if let Ok(len) = quiche::retry(
                 &hdr.scid,
                 &hdr.dcid,
@@ -1082,6 +1086,7 @@ fn process_quic_packet(
             ) {
                 pending_outbound.push((out[..len].to_vec(), peer));
             }
+            buffer_pool.checkin(out);
             return;
         }
     };
@@ -1189,7 +1194,11 @@ fn flush_quic_pending_writes(
             return false;
         };
         let written = conn.stream_send(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written >= pw.data.len() {
+        if written == 0 && pw.fin && pw.data.is_empty() {
+            // FIN-only write was blocked (stream_send returns 0 for
+            // Err(Done)). Keep in pending to retry next iteration.
+            true
+        } else if written >= pw.data.len() {
             flushed.push((conn_handle, stream_id));
             false
         } else {
@@ -1209,7 +1218,9 @@ fn flush_quic_client_pending_writes(
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
         let written = conn.stream_send(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written >= pw.data.len() {
+        if written == 0 && pw.fin && pw.data.is_empty() {
+            true
+        } else if written >= pw.data.len() {
             flushed.push(stream_id);
             false
         } else {

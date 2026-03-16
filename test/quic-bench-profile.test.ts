@@ -234,4 +234,61 @@ describe('QUIC two-process profiling', () => {
       server.kill();
     }
   });
+
+  it('profile: 50 conns × 5 streams × 4KB (high-conn diagnostic)', async () => {
+    const server = await startServer();
+    try {
+      const totalExpected = 50 * 5;
+      const result = await runClient({
+        port: server.port,
+        connections: 50,
+        streamsPerConnection: 5,
+        messageSize: 4096,
+        timeoutMs: 60_000,
+      });
+      printResult('50x5x4KB high-conn', result);
+
+      // Diagnostic breakdown
+      const errorRate = result.errors / totalExpected;
+      console.log(`  Error rate: ${(errorRate * 100).toFixed(1)}% (${result.errors}/${totalExpected})`);
+      if (result.errors > 0) {
+        console.log(`  Error categorization: check stderr output from client process`);
+      }
+
+      // Allow up to 5% error rate for OS-level packet loss at high conn counts
+      const maxErrors = Math.ceil(totalExpected * 0.05);
+      assert.ok(
+        result.errors <= maxErrors,
+        `error rate ${(errorRate * 100).toFixed(1)}% exceeds 5% tolerance (${result.errors} errors, max ${maxErrors})`,
+      );
+    } finally {
+      server.kill();
+    }
+  });
+
+  it('profile: 100 conns × 1 stream × 1KB (conn-establishment stress)', async () => {
+    const server = await startServer();
+    try {
+      const totalExpected = 100;
+      const result = await runClient({
+        port: server.port,
+        connections: 100,
+        streamsPerConnection: 1,
+        messageSize: 1024,
+        timeoutMs: 60_000,
+      });
+      printResult('100x1x1KB conn-stress', result);
+
+      const errorRate = result.errors / totalExpected;
+      console.log(`  Error rate: ${(errorRate * 100).toFixed(1)}% (${result.errors}/${totalExpected})`);
+
+      const maxErrors = Math.ceil(totalExpected * 0.05);
+      assert.ok(
+        result.errors <= maxErrors,
+        `error rate ${(errorRate * 100).toFixed(1)}% exceeds 5% tolerance (${result.errors} errors, max ${maxErrors})`,
+      );
+    } finally {
+      server.kill();
+    }
+  });
 });
