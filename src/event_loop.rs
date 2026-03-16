@@ -176,8 +176,13 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             let _ = driver.submit_sends(std::mem::take(&mut outbound));
         }
 
-        // 4. Process completed RX datagrams
-        for mut pkt in outcome.rx {
+        // 4. Process completed RX datagrams.
+        //    Every 64 packets, flush outbound sends so ACKs and echo data reach
+        //    peers promptly.  Without this, processing hundreds of inbound
+        //    packets before any sends causes congestion-window stalls under
+        //    fan-out (many connections sending concurrently).
+        let rx_count = outcome.rx.len();
+        for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
             pending_outbound.clear();
             handler.process_packet(
                 &mut pkt.data,
@@ -189,6 +194,13 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             // Submit retry / version-negotiation packets immediately
             if !pending_outbound.is_empty() {
                 let _ = driver.submit_sends(std::mem::take(&mut pending_outbound));
+            }
+            // Mid-RX flush: send accumulated outbound every 64 packets
+            if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
+                handler.flush_sends(&mut outbound);
+                if !outbound.is_empty() {
+                    let _ = driver.submit_sends(std::mem::take(&mut outbound));
+                }
             }
             // Mid-batch flush if needed
             if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {

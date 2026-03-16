@@ -936,17 +936,41 @@ impl ProtocolHandler for QuicServerHandler {
 
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>) {
         self.conn_map.fill_handles(&mut self.handles_buf);
-        for handle in &self.handles_buf.clone() {
-            let send_buf = self
-                .conn_send_buffers
-                .entry(*handle)
-                .or_insert_with(|| vec![0u8; SEND_BUF_SIZE]);
-            if let Some(conn) = self.conn_map.get_mut(*handle) {
-                while let Ok((len, send_info)) = conn.send(send_buf.as_mut_slice()) {
-                    outbound.push(TxDatagram {
-                        data: send_buf[..len].to_vec(),
-                        to: send_info.to,
-                    });
+        if self.handles_buf.is_empty() {
+            return;
+        }
+        // Round-robin: pull one packet from each connection in turn until all
+        // are drained.  This prevents a single busy connection from monopolizing
+        // the socket send buffer under fan-out.
+        let count = self.handles_buf.len();
+        let mut done = vec![false; count];
+        let mut active = count;
+        while active > 0 {
+            for i in 0..count {
+                if done[i] {
+                    continue;
+                }
+                let handle = self.handles_buf[i];
+                let send_buf = self
+                    .conn_send_buffers
+                    .entry(handle)
+                    .or_insert_with(|| vec![0u8; SEND_BUF_SIZE]);
+                let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
+                    if let Ok((len, send_info)) = conn.send(send_buf.as_mut_slice()) {
+                        outbound.push(TxDatagram {
+                            data: send_buf[..len].to_vec(),
+                            to: send_info.to,
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !sent {
+                    done[i] = true;
+                    active -= 1;
                 }
             }
         }
@@ -961,13 +985,14 @@ impl ProtocolHandler for QuicServerHandler {
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
         self.conn_map.fill_handles(&mut self.handles_buf);
-        for handle in &self.handles_buf.clone() {
-            if self.last_expired.contains(handle) {
+        for i in 0..self.handles_buf.len() {
+            let handle = self.handles_buf[i];
+            if self.last_expired.contains(&handle) {
                 continue;
             }
-            if let Some(conn) = self.conn_map.get_mut(*handle) {
+            if let Some(conn) = self.conn_map.get_mut(handle) {
                 if !conn.blocked_streams.is_empty() {
-                    conn.poll_drain_events(*handle as u32, batch);
+                    conn.poll_drain_events(handle as u32, batch);
                 }
             }
         }

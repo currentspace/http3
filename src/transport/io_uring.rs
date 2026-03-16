@@ -229,7 +229,8 @@ mod inner {
             // Fallback: drain any packets that arrived after all recvmsg CQEs
             // were consumed. Without this, packets sit in the kernel socket buffer
             // until the next poll cycle, adding latency under burst traffic.
-            loop {
+            // Cap at 256 to avoid starving the send path under fan-out.
+            for _ in 0..256 {
                 match self.socket.recv_from(&mut self.recv_buf) {
                     Ok((len, peer)) => {
                         outcome.rx.push(RxDatagram {
