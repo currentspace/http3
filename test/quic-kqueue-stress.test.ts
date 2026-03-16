@@ -4,6 +4,16 @@
  * Validates the kqueue-based event loop (macOS) under high concurrency,
  * backpressure, sustained rounds, and rapid connection churn — the same
  * pressure patterns that uncovered real bugs in the io_uring driver.
+ *
+ * Known limits (macOS loopback, discovered via escalation):
+ *   Connections (×10×64KB):   ~25-30 concurrent (UDP socket saturation)
+ *   Streams/conn (5×N×4KB):   ~12K per connection (quiche state)
+ *   Sustained (10×N×64KB):    ~7500 cumulative streams
+ *   Payload (2×5×N):          >128MB — no limit found
+ *   Churn (N×1×1KB):          >8000 — no limit found
+ *
+ * These tests run at moderate-to-heavy levels, well under the breaking
+ * points, to catch regressions without destabilizing the rest of the suite.
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -50,6 +60,7 @@ function reportLine(
   streams: number,
   errors: number,
   startSnap: ResourceSnapshot,
+  totalBytes?: number,
 ): void {
   const elapsed = Date.now() - startSnap.time;
   const cpuDelta = process.cpuUsage(startSnap.cpu);
@@ -57,14 +68,18 @@ function reportLine(
   const userMs = (cpuDelta.user / 1000).toFixed(0);
   const sysMs = (cpuDelta.system / 1000).toFixed(0);
   const memMB = (memDelta / 1024 / 1024).toFixed(1);
-  const streamsPerSec = (streams / (elapsed / 1000)).toFixed(0);
+  const streamsPerSec = elapsed > 0 ? (streams / (elapsed / 1000)).toFixed(0) : '∞';
+  let throughput = '';
+  if (totalBytes && elapsed > 0) {
+    const mbps = ((totalBytes * 8) / (elapsed / 1000) / 1_000_000).toFixed(1);
+    throughput = `, ${mbps} Mbps`;
+  }
   console.log(
-    `  ${label}: ${streams} streams, ${errors} errors, ${elapsed}ms, ${streamsPerSec} streams/s` +
-    `  CPU: user=${userMs}ms sys=${sysMs}ms  Mem: ${Number(memMB) >= 0 ? '+' : ''}${memMB}MB`,
+    `  ${label}: ${streams}/${streams + errors} ok, ${errors} err, ${elapsed}ms, ${streamsPerSec} s/s${throughput}` +
+    `  CPU: u=${userMs}ms s=${sysMs}ms  Mem: ${Number(memMB) >= 0 ? '+' : ''}${memMB}MB`,
   );
 }
 
-/** Open connections in batches to avoid fd exhaustion. */
 async function openConnectionsBatched(
   port: number,
   total: number,
@@ -94,16 +109,16 @@ async function openConnectionsBatched(
   return { clients, errors };
 }
 
-/** Run streams on a single client, returning success/error counts. */
 async function runStreamsOnClient(
   client: QuicClientSession,
   count: number,
   payload: Buffer,
   streamTimeoutMs: number,
   verifyData?: boolean,
-): Promise<{ ok: number; errors: number }> {
+): Promise<{ ok: number; errors: number; bytes: number }> {
   let ok = 0;
   let errors = 0;
+  let bytes = 0;
   const promises: Promise<void>[] = [];
   for (let i = 0; i < count; i++) {
     promises.push(
@@ -115,11 +130,13 @@ async function runStreamsOnClient(
           if (verifyData) {
             if (echoed.equals(payload)) {
               ok++;
+              bytes += echoed.length * 2;
             } else {
               errors++;
             }
           } else if (echoed.length === payload.length) {
             ok++;
+            bytes += echoed.length * 2;
           } else {
             errors++;
           }
@@ -130,7 +147,11 @@ async function runStreamsOnClient(
     );
   }
   await Promise.all(promises);
-  return { ok, errors };
+  return { ok, errors, bytes };
+}
+
+async function closeAll(clients: QuicClientSession[]): Promise<void> {
+  await Promise.all(clients.map((c) => c.close()));
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -147,7 +168,7 @@ describe('QUIC kqueue stress tests', () => {
       cert: certs.cert,
       disableRetry: true,
       maxConnections: 10_000,
-      initialMaxStreamsBidi: 50_000,
+      initialMaxStreamsBidi: 100_000,
     });
 
     server.on('session', (session: QuicServerSession) => {
@@ -165,35 +186,41 @@ describe('QUIC kqueue stress tests', () => {
   });
 
   // ── 1. Wide blast ──────────────────────────────────────────────────
+  // Exercises EVFILT_WRITE backpressure + round-robin send scheduling
+  // across many concurrent peers on the server's single UDP socket.
 
-  it('wide blast — 20 connections × 15 streams × 64KB', { timeout: 25_000 }, async () => {
+  it('wide blast — 15 connections × 10 streams × 64KB', { timeout: 25_000 }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(64 * 1024, 0xaa);
     const streamTimeout = 20_000;
 
-    const { clients, errors: connErrors } = await openConnectionsBatched(serverPort, 20, 10);
+    const { clients, errors: connErrors } = await openConnectionsBatched(serverPort, 15, 10);
 
     let totalStreams = 0;
     let totalErrors = connErrors;
+    let totalBytes = 0;
 
     const results = await Promise.all(
-      clients.map((c) => runStreamsOnClient(c, 15, payload, streamTimeout)),
+      clients.map((c) => runStreamsOnClient(c, 10, payload, streamTimeout)),
     );
     for (const r of results) {
       totalStreams += r.ok;
       totalErrors += r.errors;
+      totalBytes += r.bytes;
     }
 
-    await Promise.all(clients.map((c) => c.close()));
+    await closeAll(clients);
 
-    reportLine('20×15×64KB', totalStreams, totalErrors, snap);
+    reportLine('15×10×64KB', totalStreams, totalErrors, snap, totalBytes);
     assert.strictEqual(totalErrors, 0, `expected 0 errors, got ${totalErrors}`);
-    assert.strictEqual(totalStreams, 300, `expected 300 streams, got ${totalStreams}`);
+    assert.strictEqual(totalStreams, 150, `expected 150 streams, got ${totalStreams}`);
   });
 
   // ── 2. Deep pipeline ──────────────────────────────────────────────
+  // Floods the waker with rapid stream open + write + FIN.
+  // Tests EVFILT_USER NOTE_TRIGGER coalescing under high command rate.
 
-  it('deep pipeline — 5 connections × 200 streams × 4KB', { timeout: 20_000 }, async () => {
+  it('deep pipeline — 5 connections × 500 streams × 4KB', { timeout: 20_000 }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(4096, 0xbb);
     const streamTimeout = 15_000;
@@ -202,35 +229,40 @@ describe('QUIC kqueue stress tests', () => {
 
     let totalStreams = 0;
     let totalErrors = connErrors;
+    let totalBytes = 0;
 
     const results = await Promise.all(
-      clients.map((c) => runStreamsOnClient(c, 200, payload, streamTimeout)),
+      clients.map((c) => runStreamsOnClient(c, 500, payload, streamTimeout)),
     );
     for (const r of results) {
       totalStreams += r.ok;
       totalErrors += r.errors;
+      totalBytes += r.bytes;
     }
 
-    await Promise.all(clients.map((c) => c.close()));
+    await closeAll(clients);
 
-    reportLine('5×200×4KB', totalStreams, totalErrors, snap);
+    reportLine('5×500×4KB', totalStreams, totalErrors, snap, totalBytes);
     assert.strictEqual(totalErrors, 0, `expected 0 errors, got ${totalErrors}`);
-    assert.strictEqual(totalStreams, 1000, `expected 1000 streams, got ${totalStreams}`);
+    assert.strictEqual(totalStreams, 2500, `expected 2500 streams, got ${totalStreams}`);
   });
 
   // ── 3. Sustained rounds ───────────────────────────────────────────
+  // Long-lived connections with burst-idle-burst pattern.
+  // Exercises EV_CLEAR edge-triggered re-arm + throughput stability.
 
-  it('sustained rounds — 10 connections × 3 rounds × 20 streams × 64KB', { timeout: 45_000 }, async () => {
+  it('sustained rounds — 10 connections × 5 rounds × 50 streams × 64KB', { timeout: 45_000 }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(64 * 1024, 0xcc);
     const streamTimeout = 20_000;
-    const rounds = 3;
-    const streamsPerRound = 20;
+    const rounds = 5;
+    const streamsPerRound = 50;
 
     const { clients, errors: connErrors } = await openConnectionsBatched(serverPort, 10, 10);
 
     let totalStreams = 0;
     let totalErrors = connErrors;
+    let totalBytes = 0;
     const roundTimes: number[] = [];
 
     for (let round = 0; round < rounds; round++) {
@@ -242,25 +274,25 @@ describe('QUIC kqueue stress tests', () => {
       for (const r of results) {
         totalStreams += r.ok;
         totalErrors += r.errors;
+        totalBytes += r.bytes;
       }
 
       roundTimes.push(Date.now() - roundStart);
 
-      // Brief idle between rounds
       if (round < rounds - 1) {
         await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
       }
     }
 
-    await Promise.all(clients.map((c) => c.close()));
+    await closeAll(clients);
 
-    reportLine('10×3×20×64KB', totalStreams, totalErrors, snap);
+    reportLine('10×5r×50s×64KB', totalStreams, totalErrors, snap, totalBytes);
     for (let i = 0; i < roundTimes.length; i++) {
       console.log(`    round ${i + 1}: ${roundTimes[i]}ms`);
     }
 
     assert.strictEqual(totalErrors, 0, `expected 0 errors, got ${totalErrors}`);
-    assert.strictEqual(totalStreams, 600, `expected 600 streams, got ${totalStreams}`);
+    assert.strictEqual(totalStreams, 2500, `expected 2500 streams, got ${totalStreams}`);
 
     // No round should be >2× slower than round 1
     const baseline = roundTimes[0];
@@ -273,11 +305,12 @@ describe('QUIC kqueue stress tests', () => {
   });
 
   // ── 4. Backpressure probe ─────────────────────────────────────────
+  // Large payloads force repeated flow control stalls + drain resume.
+  // Data integrity verified via byte-pattern comparison.
 
-  it('backpressure probe — 2 connections × 5 streams × 512KB', { timeout: 20_000 }, async () => {
+  it('backpressure probe — 2 connections × 5 streams × 2MB', { timeout: 20_000 }, async () => {
     const snap = snapResources();
-    const payload = Buffer.alloc(512 * 1024);
-    // Fill with a recognizable pattern for data integrity check
+    const payload = Buffer.alloc(2 * 1024 * 1024);
     for (let i = 0; i < payload.length; i++) {
       payload[i] = i & 0xff;
     }
@@ -287,6 +320,7 @@ describe('QUIC kqueue stress tests', () => {
 
     let totalStreams = 0;
     let totalErrors = connErrors;
+    let totalBytes = 0;
 
     const results = await Promise.all(
       clients.map((c) => runStreamsOnClient(c, 5, payload, streamTimeout, true)),
@@ -294,23 +328,26 @@ describe('QUIC kqueue stress tests', () => {
     for (const r of results) {
       totalStreams += r.ok;
       totalErrors += r.errors;
+      totalBytes += r.bytes;
     }
 
-    await Promise.all(clients.map((c) => c.close()));
+    await closeAll(clients);
 
-    reportLine('2×5×512KB', totalStreams, totalErrors, snap);
+    reportLine('2×5×2MB', totalStreams, totalErrors, snap, totalBytes);
     assert.strictEqual(totalErrors, 0, `expected 0 errors, got ${totalErrors}`);
     assert.strictEqual(totalStreams, 10, `expected 10 streams, got ${totalStreams}`);
   });
 
   // ── 5. Connection churn ───────────────────────────────────────────
+  // Rapid create/traffic/destroy cycle.
+  // Tests kqueue instance creation + teardown at scale.
 
-  it('connection churn — 100 connections in batches of 20 × 1 stream × 1KB', { timeout: 25_000 }, async () => {
+  it('connection churn — 200 connections in batches of 40 × 1 stream × 1KB', { timeout: 25_000 }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(1024, 0xdd);
     const streamTimeout = 10_000;
-    const total = 100;
-    const batchSize = 20;
+    const total = 200;
+    const batchSize = 40;
     const latencies: number[] = [];
 
     let successes = 0;
@@ -349,9 +386,8 @@ describe('QUIC kqueue stress tests', () => {
       await Promise.all(batchPromises);
     }
 
-    reportLine('100×1×1KB churn', successes, errors, snap);
+    reportLine(`${total}×1×1KB churn`, successes, errors, snap);
 
-    // Report latency percentiles
     latencies.sort((a, b) => a - b);
     if (latencies.length > 0) {
       const p50 = latencies[Math.floor(latencies.length * 0.5)];
@@ -361,8 +397,8 @@ describe('QUIC kqueue stress tests', () => {
     }
 
     assert.ok(
-      successes >= 95,
-      `expected ≥95 successes, got ${successes} (${errors} errors)`,
+      successes >= 190,
+      `expected ≥190 successes, got ${successes} (${errors} errors)`,
     );
   });
 });
