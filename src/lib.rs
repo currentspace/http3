@@ -5,6 +5,7 @@ mod config;
 mod connection;
 mod connection_map;
 mod error;
+mod event_loop;
 mod h3_event;
 mod quic_client;
 mod quic_connection;
@@ -12,6 +13,7 @@ mod quic_server;
 mod quic_worker;
 mod server;
 mod timer_heap;
+mod transport;
 mod worker;
 
 use napi_derive::napi;

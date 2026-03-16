@@ -16,15 +16,21 @@ log = "0.4"
 slab = "0.4"
 bytes = "1"
 crossbeam-channel = "0.5"
-mio = { version = "1", features = ["os-poll", "net"] }
 libc = "0.2"
 socket2 = "0.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.29", features = ["event"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
 
 [build-dependencies]
 napi-build = "2"
 
 [dev-dependencies]
 rcgen = "0.13"
+mio = { version = "1", features = ["os-poll", "net"] }
 
 [lints.rust]
 unsafe_code = "warn"
