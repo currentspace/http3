@@ -86,6 +86,12 @@ mod inner {
         tx_in_flight: usize,
     }
 
+    // SAFETY: IoUringDriver is created on the main thread and moved to the worker
+    // thread before any I/O occurs. The raw pointers inside RxSlot/TxSlot (msghdr,
+    // iovec) point to co-located Box allocations that move with the driver. The
+    // driver is single-threaded after the move — no concurrent access.
+    unsafe impl Send for IoUringDriver {}
+
     #[derive(Clone)]
     pub struct IoUringWaker {
         eventfd: Arc<OwnedFd>,
