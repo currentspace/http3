@@ -6,11 +6,30 @@ use std::net::{SocketAddr, UdpSocket};
 
 use crate::error::Http3NativeError;
 
+/// Preferred buffer sizes, tried in order until one succeeds.
+/// macOS caps at kern.ipc.maxsockbuf (typically 8MB).
+const BUFFER_SIZES: &[usize] = &[
+    8 * 1024 * 1024, // 8 MB — ideal for fan-out (30+ connections)
+    4 * 1024 * 1024, // 4 MB
+    2 * 1024 * 1024, // 2 MB — minimum acceptable
+];
+
 /// Set OS-level send and receive buffer sizes on a UDP socket.
-pub(crate) fn set_socket_buffers(socket: &UdpSocket, size: usize) -> Result<(), std::io::Error> {
+/// Tries progressively smaller sizes until the OS accepts one.
+/// The `hint` parameter is used as a final fallback if none of the
+/// preferred sizes are accepted by the kernel.
+pub(crate) fn set_socket_buffers(socket: &UdpSocket, hint: usize) -> Result<(), std::io::Error> {
     let sock_ref = socket2::SockRef::from(socket);
-    sock_ref.set_send_buffer_size(size)?;
-    sock_ref.set_recv_buffer_size(size)?;
+    for &size in BUFFER_SIZES {
+        if sock_ref.set_send_buffer_size(size).is_ok()
+            && sock_ref.set_recv_buffer_size(size).is_ok()
+        {
+            return Ok(());
+        }
+    }
+    // Fallback: try the caller's hint
+    sock_ref.set_send_buffer_size(hint)?;
+    sock_ref.set_recv_buffer_size(hint)?;
     Ok(())
 }
 

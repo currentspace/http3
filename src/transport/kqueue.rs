@@ -5,6 +5,7 @@
 
 #[cfg(target_os = "macos")]
 mod inner {
+    use std::collections::VecDeque;
     use std::io;
     use std::net::SocketAddr;
     use std::os::unix::io::{AsFd, AsRawFd, RawFd};
@@ -16,11 +17,17 @@ mod inner {
 
     const WAKER_IDENT: usize = 0xCAFE;
 
+    /// Max datagrams to recv per poll iteration.  Prevents the recv loop from
+    /// starving the send path under fan-out: after this many packets the loop
+    /// yields so flush_sends() can push ACKs out, then the next poll() returns
+    /// immediately (EV_CLEAR edge-triggered re-arms after read).
+    const MAX_RX_PER_POLL: usize = 256;
+
     pub struct KqueueDriver {
         kq: Kqueue,
         socket: std::net::UdpSocket,
         socket_fd: RawFd,
-        unsent: Vec<TxDatagram>,
+        unsent: VecDeque<TxDatagram>,
         write_interest_registered: bool,
         event_buf: Vec<KEvent>,
         recv_buf: Vec<u8>,
@@ -74,7 +81,7 @@ mod inner {
                     kq,
                     socket,
                     socket_fd,
-                    unsent: Vec::new(),
+                    unsent: VecDeque::new(),
                     write_interest_registered: false,
                     event_buf: vec![
                         KEvent::new(
@@ -167,8 +174,12 @@ mod inner {
                 self.drain_unsent();
             }
 
-            // Drain socket: recv_from loop until WouldBlock
-            loop {
+            // Drain socket: recv_from loop, capped to avoid starving the send path.
+            // Under fan-out (many connections), an unbounded loop delays ACKs and
+            // causes congestion-window stalls.  The cap lets flush_sends() run
+            // between batches; the next poll() returns immediately because
+            // EV_CLEAR re-arms on any remaining data.
+            for _ in 0..MAX_RX_PER_POLL {
                 match self.socket.recv_from(&mut self.recv_buf) {
                     Ok((len, peer)) => {
                         outcome.rx.push(RxDatagram {
@@ -189,7 +200,7 @@ mod inner {
                 match self.socket.send_to(&pkt.data, pkt.to) {
                     Ok(_) => {}
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        self.unsent.push(pkt);
+                        self.unsent.push_back(pkt);
                     }
                     Err(_) => {} // drop unsendable
                 }
@@ -208,11 +219,11 @@ mod inner {
 
     impl KqueueDriver {
         fn drain_unsent(&mut self) {
-            while !self.unsent.is_empty() {
-                match self.socket.send_to(&self.unsent[0].data, self.unsent[0].to) {
+            while let Some(front) = self.unsent.front() {
+                match self.socket.send_to(&front.data, front.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
                     Ok(_) | Err(_) => {
-                        self.unsent.remove(0);
+                        self.unsent.pop_front();
                     }
                 }
             }
