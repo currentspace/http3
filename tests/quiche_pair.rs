@@ -525,3 +525,188 @@ fn test_trailers() {
     }
     assert!(!events.is_empty());
 }
+
+/// Raw QUIC connection-level flow control: 64KB through a 16KB window.
+/// Validates that MAX_DATA frames are generated and honoured correctly.
+#[test]
+fn test_connection_level_flow_control() {
+    let (cert_pem, key_pem) = generate_test_certs();
+    let id = std::thread::current().id();
+    let cert_path = std::env::temp_dir().join(format!("test_cert_fc_{id:?}.pem"));
+    let key_path = std::env::temp_dir().join(format!("test_key_fc_{id:?}.pem"));
+    std::fs::write(&cert_path, &cert_pem).unwrap();
+    std::fs::write(&key_path, &key_pem).unwrap();
+
+    let alpn: &[&[u8]] = &[b"quic"];
+
+    // Client config — default large window
+    let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    client_config.set_application_protos(alpn).unwrap();
+    client_config.verify_peer(false);
+    client_config.set_max_idle_timeout(5000);
+    client_config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+    client_config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+    client_config.set_initial_max_data(10_000_000);
+    client_config.set_initial_max_stream_data_bidi_local(1_000_000);
+    client_config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    client_config.set_initial_max_streams_bidi(100);
+
+    // Server config — tight 16KB connection window
+    let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    server_config
+        .load_cert_chain_from_pem_file(cert_path.to_str().unwrap())
+        .unwrap();
+    server_config
+        .load_priv_key_from_pem_file(key_path.to_str().unwrap())
+        .unwrap();
+    server_config.set_application_protos(alpn).unwrap();
+    server_config.set_max_idle_timeout(5000);
+    server_config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+    server_config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+    server_config.set_initial_max_data(16384); // Tight!
+    server_config.set_initial_max_stream_data_bidi_local(1_000_000);
+    server_config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    server_config.set_initial_max_streams_bidi(100);
+
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+
+    let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    let server_addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+
+    let scid = vec![0xba; quiche::MAX_CONN_ID_LEN];
+    let scid = quiche::ConnectionId::from_ref(&scid);
+
+    let mut client = quiche::connect(
+        Some("localhost"),
+        &scid,
+        client_addr,
+        server_addr,
+        &mut client_config,
+    )
+    .unwrap();
+
+    let mut server: Option<quiche::Connection> = None;
+    let mut buf = vec![0u8; 65535];
+
+    // Handshake
+    for _ in 0..100 {
+        let mut exchanged = false;
+        loop {
+            match client.send(&mut buf) {
+                Ok((len, info)) => {
+                    exchanged = true;
+                    if server.is_none() {
+                        let hdr = quiche::Header::from_slice(
+                            &mut buf[..len],
+                            quiche::MAX_CONN_ID_LEN,
+                        )
+                        .unwrap();
+                        let srv_scid = vec![0xab; quiche::MAX_CONN_ID_LEN];
+                        let srv_scid = quiche::ConnectionId::from_ref(&srv_scid);
+                        server = Some(
+                            quiche::accept(
+                                &srv_scid,
+                                Some(&hdr.dcid),
+                                server_addr,
+                                client_addr,
+                                &mut server_config,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    let recv_info = quiche::RecvInfo {
+                        from: client_addr,
+                        to: info.to,
+                    };
+                    server.as_mut().unwrap().recv(&mut buf[..len], recv_info).unwrap();
+                }
+                Err(quiche::Error::Done) => break,
+                Err(e) => panic!("client send: {e}"),
+            }
+        }
+        if let Some(srv) = server.as_mut() {
+            loop {
+                match srv.send(&mut buf) {
+                    Ok((len, info)) => {
+                        exchanged = true;
+                        let recv_info = quiche::RecvInfo {
+                            from: server_addr,
+                            to: info.to,
+                        };
+                        client.recv(&mut buf[..len], recv_info).unwrap();
+                    }
+                    Err(quiche::Error::Done) => break,
+                    Err(e) => panic!("server send: {e}"),
+                }
+            }
+        }
+        if !exchanged {
+            break;
+        }
+    }
+    assert!(client.is_established());
+
+    // Client sends 64KB on stream 0
+    let payload = vec![0xcd_u8; 64 * 1024];
+    let mut total_written = 0usize;
+    let mut total_read = 0usize;
+    let mut recv_buf = vec![0u8; 65535];
+
+    for round in 0..200 {
+        // Client: try to write remaining data
+        if total_written < payload.len() {
+            match client.stream_send(0, &payload[total_written..], true) {
+                Ok(n) => total_written += n,
+                Err(quiche::Error::Done) => {}
+                Err(e) => panic!("stream_send round {round}: {e}"),
+            }
+        }
+
+        // Exchange packets
+        let mut exchanged = false;
+        loop {
+            match client.send(&mut buf) {
+                Ok((len, info)) => {
+                    exchanged = true;
+                    let ri = quiche::RecvInfo { from: client_addr, to: info.to };
+                    server.as_mut().unwrap().recv(&mut buf[..len], ri).unwrap();
+                }
+                Err(quiche::Error::Done) => break,
+                Err(e) => panic!("client send round {round}: {e}"),
+            }
+        }
+
+        // Server: read available data
+        let srv = server.as_mut().unwrap();
+        loop {
+            match srv.stream_recv(0, &mut recv_buf) {
+                Ok((n, _fin)) => total_read += n,
+                Err(quiche::Error::Done) => break,
+                Err(quiche::Error::InvalidStreamState(..)) => break,
+                Err(e) => panic!("stream_recv round {round}: {e}"),
+            }
+        }
+
+        // Server → Client (sends MAX_DATA, ACKs)
+        loop {
+            match srv.send(&mut buf) {
+                Ok((len, info)) => {
+                    exchanged = true;
+                    let ri = quiche::RecvInfo { from: server_addr, to: info.to };
+                    client.recv(&mut buf[..len], ri).unwrap();
+                }
+                Err(quiche::Error::Done) => break,
+                Err(e) => panic!("server send round {round}: {e}"),
+            }
+        }
+
+        if total_read >= payload.len() {
+            break;
+        }
+        assert!(exchanged || round < 5, "deadlock at round {round}: written={total_written} read={total_read}");
+    }
+
+    assert_eq!(total_read, payload.len(), "server should read all 64KB");
+    assert_eq!(total_written, payload.len(), "client should write all 64KB");
+}
