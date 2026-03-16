@@ -115,7 +115,7 @@ async function main(): Promise<void> {
           try {
             const stream = client.openStream();
             stream.end(payload);
-            const echoed = await collectStream(stream, Math.min(config.timeoutMs, 15_000));
+            const echoed = await collectStream(stream, config.timeoutMs);
             const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
             if (echoed.length === payload.length) {
               totalStreams++;
@@ -123,9 +123,12 @@ async function main(): Promise<void> {
               streamLatency.add(streamMs);
             } else {
               errors++;
+              process.stderr.write(`Stream length mismatch: expected ${payload.length}, got ${echoed.length}\n`);
             }
-          } catch {
+          } catch (err) {
             errors++;
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`Stream error (conn ${clients.indexOf(client)}, stream ${s}): ${msg}\n`);
           }
         })(),
       );

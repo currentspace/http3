@@ -25,6 +25,7 @@ export class QuicStream extends Duplex {
   }
 
   close(code?: number): void {
+    if (this.destroyed) return;
     const errorCode = code ?? 0;
     if (this._serverLoop) {
       this._serverLoop.streamClose(this._connHandle, this._streamId, errorCode);
