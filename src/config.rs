@@ -156,9 +156,19 @@ impl Http3Config {
                 .map_err(Http3NativeError::Quiche)?;
         }
 
-        // Allow quiche to buffer well beyond the congestion window so that
-        // burst stream creation doesn't hit StreamBlocked before the event
-        // loop has a chance to flush packets and receive ACKs.
+        // Congestion tuning: allow quiche to buffer well beyond the congestion
+        // window so burst stream creation doesn't hit StreamBlocked before the
+        // event loop flushes packets and receives ACKs. These are intentional
+        // production tuning values, not workarounds. The large IW (1000 pkts)
+        // suits loopback and datacenter paths; for WAN deployments consider
+        // reducing to ~10.
+        //
+        // Caveat: with these aggressive values, quiche may overshoot
+        // connection-level flow control (initial_max_data) by ~1 MTU on
+        // the first burst, because stream_send accepts all data into the
+        // large send buffer and conn.send generates one extra packet before
+        // the flow control check kicks in. This only matters when
+        // initial_max_data is very small (< ~64KB).
         config.set_send_capacity_factor(20.0);
         config.set_initial_congestion_window_packets(1000);
 
@@ -223,6 +233,7 @@ impl Http3Config {
         ));
         config.set_initial_max_streams_uni(1_000);
 
+        // See server config for congestion tuning rationale.
         config.set_send_capacity_factor(20.0);
         config.set_initial_congestion_window_packets(1000);
 
@@ -381,6 +392,7 @@ pub fn new_quic_server_config(
             .map_err(Http3NativeError::Quiche)?;
     }
 
+    // See Http3Config::new_server_quiche_config for congestion tuning rationale.
     config.set_send_capacity_factor(20.0);
     config.set_initial_congestion_window_packets(1000);
 
@@ -446,6 +458,7 @@ pub fn new_quic_client_config(
     ));
     config.set_initial_max_streams_uni(1_000);
 
+    // See Http3Config::new_server_quiche_config for congestion tuning rationale.
     config.set_send_capacity_factor(20.0);
     config.set_initial_congestion_window_packets(1000);
 

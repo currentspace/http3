@@ -1195,8 +1195,11 @@ fn flush_quic_pending_writes(
         };
         let written = conn.stream_send(stream_id, &pw.data, pw.fin).unwrap_or(0);
         if written == 0 && pw.fin && pw.data.is_empty() {
-            // FIN-only write was blocked (stream_send returns 0 for
-            // Err(Done)). Keep in pending to retry next iteration.
+            // FIN-only write was blocked — quiche stream_send returns Ok(0)
+            // for both "FIN accepted on empty data" and Err(Done) (mapped to
+            // 0 by unwrap_or). This guard retries until the FIN is accepted.
+            // This is a quiche API ambiguity, not related to the MAX_DATA
+            // retransmission bug fixed in quiche PR #2354 (0.26.0).
             true
         } else if written >= pw.data.len() {
             flushed.push((conn_handle, stream_id));
@@ -1219,6 +1222,7 @@ fn flush_quic_client_pending_writes(
     pending.retain(|&stream_id, pw| {
         let written = conn.stream_send(stream_id, &pw.data, pw.fin).unwrap_or(0);
         if written == 0 && pw.fin && pw.data.is_empty() {
+            // FIN-only guard — see flush_quic_pending_writes for rationale.
             true
         } else if written >= pw.data.len() {
             flushed.push(stream_id);

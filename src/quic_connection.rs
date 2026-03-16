@@ -158,8 +158,14 @@ impl QuicConnection {
                     self.blocked_streams.remove(&stream_id);
                     events.push(JsH3Event::drain(conn_handle, stream_id));
                 }
-                Err(_) => {
+                Err(e) => {
                     self.blocked_streams.remove(&stream_id);
+                    events.push(JsH3Event::error(
+                        conn_handle,
+                        stream_id as i64,
+                        0,
+                        format!("stream_writable failed: {e}"),
+                    ));
                 }
                 Ok(false) => {}
             }
@@ -172,6 +178,11 @@ impl QuicConnection {
     /// success. To distinguish that from `Err(Done)` (blocked), this method
     /// returns `Ok(1)` when a FIN-only send is accepted by quiche — callers
     /// can treat any non-zero return as "progress was made."
+    ///
+    /// This sentinel is needed regardless of quiche version because the
+    /// quiche API uses Ok(0) for both "FIN accepted" and maps Err(Done)
+    /// to 0 in callers — there is no way to distinguish success from
+    /// flow-control block without it.
     pub fn stream_send(
         &mut self,
         stream_id: u64,
@@ -206,6 +217,9 @@ impl QuicConnection {
         stream_id: u64,
         error_code: u64,
     ) -> Result<(), Http3NativeError> {
+        // .ok() intentional: shutdown may fail with Done (already closed) or
+        // InvalidStreamState (peer reset). Either way we want to clean up
+        // our tracking state — the stream is going away.
         self.quiche_conn
             .stream_shutdown(stream_id, quiche::Shutdown::Read, error_code)
             .ok();

@@ -231,11 +231,17 @@ describe('QUIC protocol verification', () => {
     });
 
     it('connection-level flow control with initialMaxData', async () => {
-      // Use a connection window that exactly fits the total data (5×8KB = 40KB).
-      // This validates that connection-level flow control is active and correctly
-      // distributes credits across concurrent streams, without requiring MAX_DATA
-      // renewal (quiche 0.24 has a bug where it overshoots initial_max_data by
-      // ~1 MTU, triggering FLOW_CONTROL_ERROR on the peer when renewal is needed).
+      // Connection window exactly fits the data (5×8KB = 40KB). This validates
+      // that connection-level flow control is active and correctly distributes
+      // credits across concurrent streams.
+      //
+      // NOTE: Tight windows requiring MAX_DATA renewal (e.g. 16KB for 40KB
+      // data) cannot be tested end-to-end because our congestion tuning
+      // (IW=1000, send_capacity_factor=20) causes quiche to overshoot the
+      // connection window by ~1 MTU on the first burst, triggering
+      // FLOW_CONTROL_ERROR. MAX_DATA renewal is verified at the Rust level
+      // in tests/quiche_pair.rs::test_connection_level_flow_control where
+      // stream_send is called in small chunks with explicit packet exchange.
       const server = createQuicServer({
         key: certs.key, cert: certs.cert, disableRetry: true,
         initialMaxData: 40960,

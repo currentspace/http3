@@ -1,0 +1,39 @@
+{
+  "name": "@currentspace/http3-linux-arm64-gnu",
+  "version": "0.1.3",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "http3.linux-arm64-gnu.node",
+  "files": [
+    "http3.linux-arm64-gnu.node"
+  ],
+  "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
+  "keywords": [
+    "http3",
+    "quic",
+    "http2",
+    "nodejs",
+    "napi",
+    "quiche"
+  ],
+  "author": "brianathere <brian@current.space>",
+  "homepage": "https://github.com/currentspace/http3#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/currentspace/http3.git"
+  },
+  "bugs": {
+    "url": "https://github.com/currentspace/http3/issues"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}
