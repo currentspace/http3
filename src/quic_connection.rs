@@ -201,6 +201,7 @@ impl QuicConnection {
             .stream_shutdown(stream_id, quiche::Shutdown::Write, error_code)
             .ok();
         self.blocked_streams.remove(&stream_id);
+        self.known_streams.remove(&stream_id);
         Ok(())
     }
 

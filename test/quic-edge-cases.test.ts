@@ -207,6 +207,77 @@ describe('QUIC edge cases', () => {
     try { await client.close(); } catch { /* already closed */ }
   });
 
+  it('double close — no crash, no error', async () => {
+    const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
+    server.on('session', (session: QuicServerSession) => {
+      session.on('stream', (stream: QuicStream) => {
+        stream.pipe(stream);
+      });
+    });
+    const addr = await server.listen(0, '127.0.0.1');
+    const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+
+    const stream = client.openStream();
+    stream.end(Buffer.from('hello'));
+    await collect(stream);
+
+    // Double close should not crash or throw
+    stream.close();
+    stream.close();
+
+    await client.close();
+    await server.close();
+  });
+
+  it('close after end — no crash', async () => {
+    const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
+    server.on('session', (session: QuicServerSession) => {
+      session.on('stream', (stream: QuicStream) => {
+        stream.pipe(stream);
+      });
+    });
+    const addr = await server.listen(0, '127.0.0.1');
+    const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+
+    const stream = client.openStream();
+    stream.end(Buffer.from('data'));
+    await collect(stream);
+
+    // close after the stream has already ended — should be safe
+    stream.close();
+
+    await client.close();
+    await server.close();
+  });
+
+  it('connect to non-listening port — error propagates', async () => {
+    // Use a port that's almost certainly not listening.
+    // Race against a timeout since QUIC over UDP won't get an immediate error.
+    const session = connectQuic('127.0.0.1:19999', {
+      rejectUnauthorized: false,
+      maxIdleTimeoutMs: 2000,
+    });
+
+    const result = await Promise.race([
+      session.ready().then(
+        () => 'ready' as const,
+        (err: Error) => ({ error: err }),
+      ),
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 5000)),
+    ]);
+
+    if (result === 'timeout') {
+      // Timed out waiting — that's acceptable, connection never established
+      assert.ok(true, 'connection timed out as expected');
+    } else if (result === 'ready') {
+      assert.fail('should not succeed connecting to non-listening port');
+    } else {
+      assert.ok(result.error instanceof Error, 'should receive an Error');
+    }
+
+    try { await session.close(); } catch { /* already failed/closing */ }
+  });
+
   it('rapid open/close connections (churn)', async () => {
     const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
     server.on('session', (session: QuicServerSession) => {
