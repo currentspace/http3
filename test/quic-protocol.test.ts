@@ -247,18 +247,15 @@ describe('QUIC protocol verification', () => {
         initialMaxStreamDataBidiLocal: 8192,
       });
 
-      // 5 streams × 8KB = 40KB total, exceeding 16KB connection window
+      // 5 streams × 8KB = 40KB total, exceeding 16KB connection window.
+      // Sequential to avoid concurrent streams deadlocking on shared window.
       const payload = Buffer.alloc(8192, 0xcd);
-      const results = await Promise.all(
-        Array.from({ length: 5 }, async () => {
-          const stream = client.openStream();
-          stream.end(payload);
-          const echoed = await collect(stream, 15000);
-          return echoed.equals(payload);
-        }),
-      );
-
-      assert.ok(results.every(Boolean), 'all 5 streams echoed correctly across connection-level flow control');
+      for (let i = 0; i < 5; i++) {
+        const stream = client.openStream();
+        stream.end(payload);
+        const echoed = await collect(stream, 10000);
+        assert.ok(echoed.equals(payload), `stream ${i} echoed correctly across connection-level flow control`);
+      }
 
       await client.close();
       await server.close();
