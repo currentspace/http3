@@ -10,7 +10,6 @@ const SCRIPT_PATH = resolve(__dirname, '../../scripts/verify-prebuilds.mjs');
 const EXPECTED_FILES = [
   'http3.linux-x64-gnu.node',
   'http3.linux-arm64-gnu.node',
-  'http3.darwin-x64.node',
   'http3.darwin-arm64.node',
 ];
 

@@ -6,7 +6,6 @@ const prebuildDir = resolve(process.env.VERIFY_PREBUILDS_DIR ?? '.');
 const expected = [
   'http3.linux-x64-gnu.node',
   'http3.linux-arm64-gnu.node',
-  'http3.darwin-x64.node',
   'http3.darwin-arm64.node',
 ];
 
