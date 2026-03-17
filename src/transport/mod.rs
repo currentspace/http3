@@ -56,6 +56,10 @@ pub(crate) trait Driver: Sized {
     /// Number of TX operations still queued (unsent due to `WouldBlock`).
     fn pending_tx_count(&self) -> usize;
 
+    /// Drain recycled TX buffers from completed sends.
+    /// Returned buffers can be checked back into a `BufferPool`.
+    fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>>;
+
     /// Socket's bound local address.
     #[allow(dead_code)]
     fn local_addr(&self) -> io::Result<SocketAddr>;

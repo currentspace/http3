@@ -20,6 +20,10 @@ export class QuicStream extends Duplex {
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
   /** @internal */ _drainCallbacks: Array<() => void> = [];
 
+  constructor(opts?: { highWaterMark?: number }) {
+    super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
+  }
+
   get id(): number {
     return this._streamId;
   }

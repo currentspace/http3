@@ -31,6 +31,8 @@ mod inner {
         write_interest_registered: bool,
         event_buf: Vec<KEvent>,
         recv_buf: Vec<u8>,
+        /// Buffers from successfully sent packets, ready for pool recycling.
+        recycled_tx: Vec<Vec<u8>>,
     }
 
     #[derive(Clone)]
@@ -83,6 +85,7 @@ mod inner {
                     socket_fd,
                     unsent: VecDeque::new(),
                     write_interest_registered: false,
+                    recycled_tx: Vec::new(),
                     event_buf: vec![
                         KEvent::new(
                             0,
@@ -198,11 +201,12 @@ mod inner {
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
             for pkt in packets {
                 match self.socket.send_to(&pkt.data, pkt.to) {
-                    Ok(_) => {}
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                         self.unsent.push_back(pkt);
                     }
-                    Err(_) => {} // drop unsendable
+                    _ => {
+                        self.recycled_tx.push(pkt.data);
+                    }
                 }
             }
             Ok(())
@@ -210,6 +214,10 @@ mod inner {
 
         fn pending_tx_count(&self) -> usize {
             self.unsent.len()
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
         }
 
         fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -223,7 +231,9 @@ mod inner {
                 match self.socket.send_to(&front.data, front.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
                     Ok(_) | Err(_) => {
-                        self.unsent.pop_front();
+                        if let Some(pkt) = self.unsent.pop_front() {
+                            self.recycled_tx.push(pkt.data);
+                        }
                     }
                 }
             }

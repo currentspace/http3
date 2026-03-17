@@ -116,7 +116,8 @@ export class QuicServerSession extends EventEmitter {
   openStream(): QuicStream {
     const streamId = this._nextBidiStreamId;
     this._nextBidiStreamId += 4;
-    const stream = new QuicStream();
+    const hwm = this._streams.size < 100 ? 256 * 1024 : 16 * 1024;
+    const stream = new QuicStream({ highWaterMark: hwm });
     stream._connHandle = this.connHandle;
     stream._streamId = streamId;
     stream._serverLoop = this._eventLoop;
@@ -152,7 +153,8 @@ export class QuicServerSession extends EventEmitter {
   _getOrCreateStream(streamId: number): QuicStream {
     let stream = this._streams.get(streamId);
     if (!stream) {
-      stream = new QuicStream();
+      const hwm = this._streams.size < 100 ? 256 * 1024 : 16 * 1024;
+      stream = new QuicStream({ highWaterMark: hwm });
       stream._connHandle = this.connHandle;
       stream._streamId = streamId;
       stream._serverLoop = this._eventLoop;
@@ -293,6 +295,13 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (!session) return;
     const stream = session._getOrCreateStream(event.streamId);
+    // Coalesced first data from Rust: push inline to avoid extra TSFN event
+    if (event.data) {
+      stream.push(Buffer.from(event.data));
+    }
+    if (event.fin) {
+      stream.push(null);
+    }
     session.emit('stream', stream);
   }
 

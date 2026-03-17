@@ -398,13 +398,15 @@ impl Drop for ClientWorkerHandle {
 // ── Spawn functions ─────────────────────────────────────────────────
 
 /// Spawn a client worker thread that owns UDP I/O and QUIC/H3 processing.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_client_worker(
-    quiche_config: quiche::Config,
+    mut quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
+    user_set_mtu: bool,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -419,6 +421,13 @@ pub fn spawn_client_worker(
         .map_err(Http3NativeError::Io)?;
     let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
     let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+
+    // Loopback MTU auto-detection (check server address)
+    if !user_set_mtu {
+        let mtu = crate::config::effective_max_datagram_size(&server_addr);
+        quiche_config.set_max_recv_udp_payload_size(mtu);
+        quiche_config.set_max_send_udp_payload_size(mtu);
+    }
 
     let (driver, waker) =
         transport::PlatformDriver::new(std_socket).map_err(Http3NativeError::Io)?;
@@ -452,9 +461,10 @@ pub fn spawn_client_worker(
 /// Spawn a worker thread for the given server configuration.
 /// Events are delivered to JS via the provided `ThreadsafeFunction`.
 pub fn spawn_worker(
-    quiche_config: quiche::Config,
+    mut quiche_config: quiche::Config,
     http3_config: Http3Config,
     bind_addr: SocketAddr,
+    user_set_mtu: bool,
     tsfn: EventTsfn,
 ) -> Result<WorkerHandle, Http3NativeError> {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -465,6 +475,13 @@ pub fn spawn_worker(
         .map_err(Http3NativeError::Io)?;
     let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
     let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+
+    // Loopback MTU auto-detection
+    if !user_set_mtu {
+        let mtu = crate::config::effective_max_datagram_size(&local_addr);
+        quiche_config.set_max_recv_udp_payload_size(mtu);
+        quiche_config.set_max_send_udp_payload_size(mtu);
+    }
 
     let (driver, waker) =
         transport::PlatformDriver::new(std_socket).map_err(Http3NativeError::Io)?;
@@ -493,6 +510,7 @@ struct H3ServerHandler {
     conn_map: ConnectionMap,
     timer_heap: TimerHeap,
     buffer_pool: BufferPool,
+    tx_pool: BufferPool,
     pending_writes: HashMap<(u32, u64), PendingWrite>,
     pending_session_closes: HashMap<u32, (u32, String, Instant)>,
     conn_send_buffers: HashMap<usize, Vec<u8>>,
@@ -515,6 +533,7 @@ impl H3ServerHandler {
             ),
             timer_heap: TimerHeap::new(),
             buffer_pool: BufferPool::default(),
+            tx_pool: BufferPool::new(512, 1350),
             pending_writes: HashMap::new(),
             pending_session_closes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
@@ -530,6 +549,7 @@ impl H3ServerHandler {
 impl ProtocolHandler for H3ServerHandler {
     type Command = WorkerCommand;
 
+    #[allow(clippy::too_many_lines)]
     fn dispatch_command(&mut self, cmd: WorkerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             WorkerCommand::Shutdown => return true,
@@ -899,8 +919,14 @@ impl ProtocolHandler for H3ServerHandler {
                     .or_insert_with(|| vec![0u8; SEND_BUF_SIZE]);
                 let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
                     if let Ok((len, send_info)) = conn.send(send_buf.as_mut_slice()) {
+                        let mut tx_buf = self.tx_pool.checkout();
+                        if tx_buf.len() < len {
+                            tx_buf.resize(len, 0);
+                        }
+                        tx_buf[..len].copy_from_slice(&send_buf[..len]);
+                        tx_buf.truncate(len);
                         outbound.push(TxDatagram {
-                            data: send_buf[..len].to_vec(),
+                            data: tx_buf,
                             to: send_info.to,
                         });
                         true
@@ -933,10 +959,16 @@ impl ProtocolHandler for H3ServerHandler {
                 continue;
             }
             if let Some(conn) = self.conn_map.get_mut(handle) {
-                if !conn.blocked_streams.is_empty() {
+                if !conn.blocked_set.is_empty() {
                     conn.poll_drain_events(handle as u32, batch);
                 }
             }
+        }
+    }
+
+    fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+        for buf in buffers {
+            self.tx_pool.checkin(buf);
         }
     }
 
@@ -1188,7 +1220,7 @@ impl ProtocolHandler for H3ClientHandler {
     }
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
-        if !self.conn.blocked_streams.is_empty() {
+        if !self.conn.blocked_set.is_empty() {
             self.conn.poll_drain_events(0, batch);
         }
     }

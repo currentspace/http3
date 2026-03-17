@@ -110,6 +110,25 @@ impl JsH3Event {
         }
     }
 
+    /// NEW_STREAM with first data/fin coalesced — saves one TSFN event per new stream.
+    pub fn new_stream_with_data(
+        conn_handle: u32,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+    ) -> Self {
+        Self {
+            event_type: EVENT_NEW_STREAM,
+            conn_handle,
+            stream_id: stream_id as i64,
+            headers: None,
+            data: if data.is_empty() { None } else { Some(data.into()) },
+            fin: Some(fin),
+            meta: None,
+            metrics: None,
+        }
+    }
+
     pub fn headers(conn_handle: u32, stream_id: u64, headers: Vec<JsHeader>, fin: bool) -> Self {
         Self {
             event_type: EVENT_HEADERS,

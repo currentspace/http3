@@ -18,9 +18,11 @@ use crate::transport::{Driver, TxDatagram};
 /// Uses default const generics: `CalleeHandled=true`, `Weak=false`, `MaxQueueSize=0` (unbounded).
 pub type EventTsfn = ThreadsafeFunction<Vec<JsH3Event>>;
 
-/// Max events per TSFN call. Sized for high-concurrency workloads (1000+ streams)
-/// while keeping JS callbacks short enough to avoid blocking the event loop.
-pub(crate) const MAX_BATCH_SIZE: usize = 512;
+/// Max events per TSFN call. Sized for high-concurrency workloads (1000+ streams).
+/// At 2048 events × ~50 bytes ≈ 100KB per batch — well within comfort.
+/// Larger batches amortize TSFN (Rust→JS thread boundary) overhead: at 10K
+/// streams, ~30K events per cycle ÷ 2048 ≈ 15 calls vs 60 at 512.
+pub(crate) const MAX_BATCH_SIZE: usize = 2048;
 
 /// Per-connection QUIC packet scratch buffer size.
 pub(crate) const SEND_BUF_SIZE: usize = 65535;
@@ -68,6 +70,9 @@ pub(crate) trait ProtocolHandler {
 
     /// Soonest quiche timeout, or `None`.
     fn next_deadline(&mut self) -> Option<Instant>;
+
+    /// Recycle TX buffers back into the handler's pool.
+    fn recycle_tx_buffers(&mut self, _buffers: Vec<Vec<u8>>) {}
 
     /// Returns `true` when the handler's work is done and the loop should exit
     /// once all pending TX is flushed (used by client handlers after session close).
@@ -224,6 +229,12 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         handler.flush_sends(&mut outbound);
         if !outbound.is_empty() {
             let _ = driver.submit_sends(std::mem::take(&mut outbound));
+        }
+
+        // 7b. Recycle TX buffers accumulated during this iteration
+        let recycled = driver.drain_recycled_tx();
+        if !recycled.is_empty() {
+            handler.recycle_tx_buffers(recycled);
         }
 
         // 8. Cleanup closed connections

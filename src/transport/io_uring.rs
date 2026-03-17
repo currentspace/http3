@@ -79,6 +79,8 @@ mod inner {
         unsent: Vec<TxDatagram>,
         /// Scratch buffer for fallback recv_from after CQE drain.
         recv_buf: Vec<u8>,
+        /// Buffers from successfully sent packets, ready for pool recycling.
+        recycled_tx: Vec<Vec<u8>>,
     }
 
     // SAFETY: IoUringDriver is created on the main thread and moved to the worker
@@ -120,6 +122,7 @@ mod inner {
                 rx_in_flight: 0,
                 unsent: Vec::new(),
                 recv_buf: vec![0u8; 65535],
+                recycled_tx: Vec::new(),
             };
 
             // Submit initial recvmsg SQEs for all RX slots
@@ -256,11 +259,12 @@ mod inner {
             // complicates EAGAIN backpressure handling.
             for pkt in packets {
                 match self.socket.send_to(&pkt.data, pkt.to) {
-                    Ok(_) => {}
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                         self.unsent.push(pkt);
                     }
-                    Err(_) => {} // drop unsendable
+                    _ => {
+                        self.recycled_tx.push(pkt.data);
+                    }
                 }
             }
             Ok(())
@@ -268,6 +272,10 @@ mod inner {
 
         fn pending_tx_count(&self) -> usize {
             self.unsent.len()
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
         }
 
         fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -327,7 +335,8 @@ mod inner {
                 match self.socket.send_to(&self.unsent[0].data, self.unsent[0].to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
                     Ok(_) | Err(_) => {
-                        self.unsent.remove(0);
+                        let pkt = self.unsent.remove(0);
+                        self.recycled_tx.push(pkt.data);
                     }
                 }
             }
