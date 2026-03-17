@@ -105,6 +105,17 @@ function npmDistTags(name) {
   return JSON.parse(result.stdout.trim());
 }
 
+function npmWhoAmI() {
+  const result = run('npm', ['whoami'], {
+    capture: true,
+    allowFailure: true,
+  });
+  if (result.status === 0) {
+    return result.stdout.trim();
+  }
+  return null;
+}
+
 function discoverNativePackages() {
   const npmDir = join(ROOT_DIR, 'npm');
   if (!existsSync(npmDir)) {
@@ -202,8 +213,13 @@ async function dispatchAndWait(repoSlug, branch, headSha, distTag, dryRun) {
 async function main() {
   const { options, flags } = parseArgs(process.argv.slice(2));
   const distTag = options.get('--dist-tag') ?? 'latest';
+  const publishMode = options.get('--publish-mode') ?? 'auto';
   const commitStaged = flags.has('--commit-staged');
   const validateOnly = flags.has('--validate-only');
+
+  if (!['auto', 'workflow', 'local'].includes(publishMode)) {
+    throw new Error(`Unsupported --publish-mode ${publishMode}. Expected auto, workflow, or local.`);
+  }
 
   const rootManifest = readJson(join(ROOT_DIR, 'package.json'));
   const version = rootManifest.version;
@@ -215,10 +231,34 @@ async function main() {
   }
 
   run('gh', ['auth', 'status']);
+  let resolvedPublishMode = 'validate-only';
   if (!validateOnly) {
     const secretList = output('gh', ['secret', 'list', '--repo', repoSlug]);
-    if (!/^NPM_TOKEN\s/mu.test(secretList)) {
-      throw new Error(`GitHub repo secret NPM_TOKEN is not configured for ${repoSlug}`);
+    const hasNpmTokenSecret = /^NPM_TOKEN\s/mu.test(secretList);
+    const localNpmUser = npmWhoAmI();
+
+    if (publishMode === 'workflow') {
+      if (!hasNpmTokenSecret) {
+        throw new Error(`GitHub repo secret NPM_TOKEN is not configured for ${repoSlug}`);
+      }
+      resolvedPublishMode = 'workflow';
+    } else if (publishMode === 'local') {
+      if (!localNpmUser) {
+        throw new Error('Local npm publish auth is not configured; `npm whoami` failed.');
+      }
+      resolvedPublishMode = 'local';
+      console.log(`Using local npm publish auth as ${localNpmUser}.`);
+    } else if (hasNpmTokenSecret) {
+      resolvedPublishMode = 'workflow';
+    } else if (localNpmUser) {
+      resolvedPublishMode = 'local';
+      console.log(
+        `GitHub repo secret NPM_TOKEN is not configured for ${repoSlug}; falling back to local npm publish as ${localNpmUser}.`,
+      );
+    } else {
+      throw new Error(
+        `No publish credential path is available for ${repoSlug}: missing GitHub NPM_TOKEN secret and local npm auth.`,
+      );
     }
   }
 
@@ -282,8 +322,13 @@ async function main() {
 
   run('git', ['push', 'origin', `${targetSha}:refs/heads/main`]);
 
-  console.log(`Running publish workflow on main for ${targetSha}`);
-  await dispatchAndWait(repoSlug, 'main', targetSha, distTag, false);
+  if (resolvedPublishMode === 'workflow') {
+    console.log(`Running publish workflow on main for ${targetSha}`);
+    await dispatchAndWait(repoSlug, 'main', targetSha, distTag, false);
+  } else if (resolvedPublishMode === 'local') {
+    console.log(`Publishing npm packages locally for ${targetSha}`);
+    run(process.execPath, [join(ROOT_DIR, 'scripts', 'publish-npm-release.mjs'), '--dist-tag', distTag]);
+  }
 
   const tagName = `v${version}`;
   const remoteTag = run('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tagName}`], {
