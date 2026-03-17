@@ -28,17 +28,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-15-intel
+          - os: macos-26-intel
             target: x86_64-apple-darwin
-          - os: macos-latest
+          - os: macos-26
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: npm
@@ -51,7 +51,7 @@ jobs:
         run: npx napi build --release --platform --target ${{ matrix.target }}
 
       - name: Upload prebuild artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: prebuild-${{ matrix.target }}
           path: '*.node'
@@ -64,9 +64,9 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: npm
@@ -77,7 +77,7 @@ jobs:
       - run: npm ci
 
       - name: Download prebuild artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: prebuild-*
           merge-multiple: true
