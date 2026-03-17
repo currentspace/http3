@@ -28,8 +28,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-26-intel
-            target: x86_64-apple-darwin
           - os: macos-26
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -38,8 +36,10 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
           cache: npm
+
+      - run: npm install -g npm@latest
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -52,7 +52,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: prebuild-${{ matrix.target }}
-          path: '*.node'
+          path: "*.node"
           if-no-files-found: error
 
   publish:
@@ -66,9 +66,11 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
           cache: npm
-          registry-url: 'https://registry.npmjs.org'
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm install -g npm@latest
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -96,12 +98,11 @@ jobs:
         if: ${{ inputs.dry_run }}
         env:
           HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
-          HTTP3_DRY_RUN: '1'
+          HTTP3_DRY_RUN: "1"
         run: node scripts/publish-npm-release.mjs
 
       - name: Publish npm packages
         if: ${{ !inputs.dry_run }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
         run: node scripts/publish-npm-release.mjs
