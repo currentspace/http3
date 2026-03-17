@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Fixed the root npm package layout so published tarballs always include the built `dist/` JS/types surface referenced by `main`, `types`, and the export map.
+- Added the dedicated `@currentspace/http3-linux-x64-gnu` native sidecar package and wired it into automated release publishing for Linux x64 glibc installs.
+
 ## 0.3.0
 
 - Refreshed the published documentation set with configuration and error-handling guides, example READMEs, and contributor testing/release notes.
