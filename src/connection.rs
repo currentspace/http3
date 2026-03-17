@@ -1,3 +1,4 @@
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -15,8 +16,10 @@ pub struct H3Connection {
     pub is_established: bool,
     pub handshake_complete_emitted: bool,
     pub metrics: ConnectionMetrics,
-    /// Streams that are blocked on flow control, awaiting drain
-    pub blocked_streams: std::collections::HashSet<u64>,
+    /// Blocked-stream iteration queue (front-to-back, checked once per call).
+    pub blocked_queue: VecDeque<u64>,
+    /// Dedup set for blocked_queue — prevents duplicate entries.
+    pub blocked_set: HashSet<u64>,
     pub qlog_path: Option<String>,
     pub session_ticket: Option<Vec<u8>>,
     pub qpack_max_table_capacity: Option<u64>,
@@ -74,7 +77,8 @@ impl H3Connection {
             is_established: false,
             handshake_complete_emitted: false,
             metrics: ConnectionMetrics::new(),
-            blocked_streams: std::collections::HashSet::new(),
+            blocked_queue: VecDeque::new(),
+            blocked_set: HashSet::new(),
             qlog_path,
             session_ticket: None,
             qpack_max_table_capacity: init.qpack_max_table_capacity,
@@ -202,17 +206,23 @@ impl H3Connection {
 
     /// Check blocked streams for drain events without polling H3 events.
     pub fn poll_drain_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        let blocked: Vec<u64> = self.blocked_streams.iter().copied().collect();
-        for stream_id in blocked {
+        let len = self.blocked_queue.len();
+        for _ in 0..len {
+            let Some(stream_id) = self.blocked_queue.pop_front() else {
+                break;
+            };
             match self.quiche_conn.stream_writable(stream_id, 1) {
                 Ok(true) => {
-                    self.blocked_streams.remove(&stream_id);
+                    self.blocked_set.remove(&stream_id);
                     events.push(JsH3Event::drain(conn_handle, stream_id));
                 }
                 Err(_) => {
-                    self.blocked_streams.remove(&stream_id);
+                    self.blocked_set.remove(&stream_id);
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    // Still blocked — re-enqueue at back
+                    self.blocked_queue.push_back(stream_id);
+                }
             }
         }
     }
@@ -282,13 +292,15 @@ impl H3Connection {
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
         match h3.send_body(&mut self.quiche_conn, stream_id, data, fin) {
             Ok(written) => {
-                if written < data.len() {
-                    self.blocked_streams.insert(stream_id);
+                if written < data.len() && self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
                 }
                 Ok(written)
             }
             Err(quiche::h3::Error::Done) => {
-                self.blocked_streams.insert(stream_id);
+                if self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                }
                 Ok(0)
             }
             Err(e) => Err(Http3NativeError::H3(e)),
@@ -307,7 +319,9 @@ impl H3Connection {
         self.quiche_conn
             .stream_shutdown(stream_id, quiche::Shutdown::Write, error_code)
             .ok();
-        self.blocked_streams.remove(&stream_id);
+        if self.blocked_set.remove(&stream_id) {
+            self.blocked_queue.retain(|&id| id != stream_id);
+        }
         Ok(())
     }
 

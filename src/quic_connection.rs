@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -16,8 +16,10 @@ pub struct QuicConnection {
     pub is_established: bool,
     pub handshake_complete_emitted: bool,
     pub metrics: ConnectionMetrics,
-    /// Streams blocked on flow control.
-    pub blocked_streams: HashSet<u64>,
+    /// Blocked-stream iteration queue (front-to-back, checked once per call).
+    pub blocked_queue: VecDeque<u64>,
+    /// Dedup set for blocked_queue — prevents duplicate entries.
+    pub blocked_set: HashSet<u64>,
     /// Tracks which stream IDs we have already emitted NEW_STREAM for.
     pub known_streams: HashSet<u64>,
     pub qlog_path: Option<String>,
@@ -50,7 +52,8 @@ impl QuicConnection {
             is_established: false,
             handshake_complete_emitted: false,
             metrics: ConnectionMetrics::new(),
-            blocked_streams: HashSet::new(),
+            blocked_queue: VecDeque::new(),
+            blocked_set: HashSet::new(),
             known_streams: HashSet::new(),
             qlog_path,
             session_ticket: None,
@@ -99,14 +102,56 @@ impl QuicConnection {
     }
 
     /// Poll for readable QUIC streams and emit data / finished / new-stream events.
+    ///
+    /// For new streams, the first `stream_recv` is coalesced into the
+    /// NEW_STREAM event — saving one TSFN event per new stream (~33% fewer
+    /// events for the typical new-stream lifecycle).
     pub fn poll_quic_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
         let readable: Vec<u64> = self.quiche_conn.readable().collect();
 
         let mut recv_buf = [0u8; 65535];
         for stream_id in readable {
-            // Emit new-stream event for streams we haven't seen yet
-            if self.known_streams.insert(stream_id) {
-                events.push(JsH3Event::new_stream(conn_handle, stream_id));
+            let is_new = self.known_streams.insert(stream_id);
+
+            if is_new {
+                // Coalesce first recv into NEW_STREAM event.
+                match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
+                    Ok((len, fin)) => {
+                        events.push(JsH3Event::new_stream_with_data(
+                            conn_handle,
+                            stream_id,
+                            recv_buf[..len].to_vec(),
+                            fin,
+                        ));
+                        if fin {
+                            // Don't emit separate FINISHED — the NEW_STREAM event
+                            // carries fin=true and TS handler will push(null).
+                            self.known_streams.remove(&stream_id);
+                            // Proactive shutdown: tell quiche to release internal
+                            // per-stream state (ACK tracking, retransmit buffers).
+                            self.quiche_conn
+                                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .ok();
+                            continue;
+                        }
+                        // Fall through to drain remaining data on this stream.
+                    }
+                    Err(quiche::Error::Done) => {
+                        events.push(JsH3Event::new_stream(conn_handle, stream_id));
+                        continue;
+                    }
+                    Err(e) => {
+                        events.push(JsH3Event::new_stream(conn_handle, stream_id));
+                        events.push(JsH3Event::error(
+                            conn_handle,
+                            stream_id as i64,
+                            0,
+                            e.to_string(),
+                        ));
+                        self.known_streams.remove(&stream_id);
+                        continue;
+                    }
+                }
             }
 
             loop {
@@ -122,9 +167,11 @@ impl QuicConnection {
                         }
                         if fin {
                             events.push(JsH3Event::finished(conn_handle, stream_id));
-                            // Stream is done receiving — remove from tracking set
-                            // to bound memory on long-lived connections.
                             self.known_streams.remove(&stream_id);
+                            // Change 8: proactive stream_shutdown on FIN
+                            self.quiche_conn
+                                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .ok();
                             break;
                         }
                         if len == 0 {
@@ -151,15 +198,18 @@ impl QuicConnection {
     }
 
     pub fn poll_drain_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        let blocked: Vec<u64> = self.blocked_streams.iter().copied().collect();
-        for stream_id in blocked {
+        let len = self.blocked_queue.len();
+        for _ in 0..len {
+            let Some(stream_id) = self.blocked_queue.pop_front() else {
+                break;
+            };
             match self.quiche_conn.stream_writable(stream_id, 1) {
                 Ok(true) => {
-                    self.blocked_streams.remove(&stream_id);
+                    self.blocked_set.remove(&stream_id);
                     events.push(JsH3Event::drain(conn_handle, stream_id));
                 }
                 Err(e) => {
-                    self.blocked_streams.remove(&stream_id);
+                    self.blocked_set.remove(&stream_id);
                     events.push(JsH3Event::error(
                         conn_handle,
                         stream_id as i64,
@@ -167,7 +217,10 @@ impl QuicConnection {
                         format!("stream_writable failed: {e}"),
                     ));
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    // Still blocked — re-enqueue at back
+                    self.blocked_queue.push_back(stream_id);
+                }
             }
         }
     }
@@ -191,8 +244,8 @@ impl QuicConnection {
     ) -> Result<usize, Http3NativeError> {
         match self.quiche_conn.stream_send(stream_id, data, fin) {
             Ok(written) => {
-                if written < data.len() {
-                    self.blocked_streams.insert(stream_id);
+                if written < data.len() && self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
                 }
                 self.known_streams.insert(stream_id);
                 // Signal progress for FIN-only sends (0 data bytes written
@@ -205,7 +258,9 @@ impl QuicConnection {
                 }
             }
             Err(quiche::Error::Done) => {
-                self.blocked_streams.insert(stream_id);
+                if self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                }
                 Ok(0)
             }
             Err(e) => Err(Http3NativeError::Quiche(e)),
@@ -226,7 +281,9 @@ impl QuicConnection {
         self.quiche_conn
             .stream_shutdown(stream_id, quiche::Shutdown::Write, error_code)
             .ok();
-        self.blocked_streams.remove(&stream_id);
+        if self.blocked_set.remove(&stream_id) {
+            self.blocked_queue.retain(|&id| id != stream_id);
+        }
         self.known_streams.remove(&stream_id);
         Ok(())
     }

@@ -7,6 +7,21 @@ use napi_derive::napi;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
+/// Loopback-optimized datagram size. macOS loopback MTU is 16384; Linux is
+/// 65536. Using 8192-byte payloads reduces packet count ~6× vs 1350 on
+/// loopback, meaning fewer syscalls and higher throughput.
+const LOOPBACK_DATAGRAM_SIZE: usize = 8192;
+
+/// Return the effective max datagram size for `addr`.
+/// Loopback addresses get 8192; everything else gets the standard 1350.
+pub fn effective_max_datagram_size(addr: &std::net::SocketAddr) -> usize {
+    if addr.ip().is_loopback() {
+        LOOPBACK_DATAGRAM_SIZE
+    } else {
+        MAX_DATAGRAM_SIZE
+    }
+}
+
 /// Write bytes to a temp file and return the path.
 fn write_temp_file(data: &[u8], suffix: &str) -> Result<std::path::PathBuf, Http3NativeError> {
     let dir = std::env::temp_dir();

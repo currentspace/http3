@@ -62,6 +62,24 @@ pub(crate) fn bind_worker_socket(
     Ok(socket.into())
 }
 
+/// Create a connected UDP send socket for per-connection fan-out.
+///
+/// Binds an ephemeral port on `local_ip`, `connect()`s to `peer_addr`,
+/// sets nonblocking and a 2MB send buffer. `send()` (not `send_to()`)
+/// is used since the socket is connected — avoids per-packet address lookup.
+pub(crate) fn create_connected_send_socket(
+    local_ip: std::net::IpAddr,
+    peer_addr: SocketAddr,
+) -> Result<UdpSocket, std::io::Error> {
+    let bind_addr = SocketAddr::new(local_ip, 0);
+    let socket = UdpSocket::bind(bind_addr)?;
+    socket.connect(peer_addr)?;
+    socket.set_nonblocking(true)?;
+    let sock_ref = socket2::SockRef::from(&socket);
+    let _ = sock_ref.set_send_buffer_size(2 * 1024 * 1024);
+    Ok(socket)
+}
+
 #[cfg(unix)]
 fn set_unix_reuse_port(socket: &socket2::Socket) -> Result<(), std::io::Error> {
     use std::os::fd::AsRawFd;
