@@ -121,14 +121,14 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@napi-rs/cli": "^3.0.0",
-    "@types/node": "^25.3.3",
-    "eslint": "^10.0.2",
+    "@types/node": "^25.5.0",
+    "eslint": "^10.0.3",
     "playwright": "^1.55.1",
     "typescript": "^5.0.0",
-    "typescript-eslint": "^8.56.1"
+    "typescript-eslint": "^8.57.1"
   },
   "optionalDependencies": {
-    "@currentspace/http3-linux-arm64-gnu": "0.3.0",
-    "@currentspace/http3-darwin-arm64": "0.3.0"
+    "@currentspace/http3-darwin-arm64": "0.3.0",
+    "@currentspace/http3-linux-arm64-gnu": "0.3.0"
   }
 }
