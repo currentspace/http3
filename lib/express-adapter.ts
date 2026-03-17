@@ -98,7 +98,10 @@ export function createExpressAdapter(
       app(req, res);
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
-      if (!headersSent) {
+      const responseStarted = headersSent;
+      // Express-style handlers can synchronously send headers before throwing.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      if (!responseStarted) {
         headersSent = true;
         stream.respond({ ':status': '500' });
         stream.end();

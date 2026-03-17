@@ -258,6 +258,7 @@ export class QuicServer extends EventEmitter {
     const addr = native.listen(port, host ?? '127.0.0.1');
     this._address = addr;
     this.emit('listening');
+    await Promise.resolve();
     return addr;
   }
 
@@ -324,7 +325,7 @@ export class QuicServer extends EventEmitter {
       event.connHandle,
       event.meta?.remoteAddr ?? '',
       event.meta?.remotePort ?? 0,
-      this._eventLoop as QuicWorkerEventLoop,
+      this._eventLoop,
     );
     this._sessions.set(event.connHandle, session);
   }
@@ -426,7 +427,7 @@ function getNativeQuicServerConstructor(): typeof binding.NativeQuicServer {
       + '(`createQuicServer`) are unavailable. Reinstall a fixed package version or rebuild from source.',
     );
   }
-  return NativeQuicServer as typeof binding.NativeQuicServer;
+  return NativeQuicServer;
 }
 
 /**
