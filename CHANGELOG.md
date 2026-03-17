@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Refreshed the published documentation set with configuration and error-handling guides, example READMEs, and contributor testing/release notes.
+- Expanded automated coverage for adapters, EventSource/SSE behavior, keylog/error mapping, graceful shutdown, and raw QUIC prebuild validation.
+- Fixed fallback adapter regressions around synchronous handler throws and HTTP/1.1 POST response abortion.
+- Added release-time validation for native prebuild exports and clearer runtime errors when raw QUIC bindings are missing from a published artifact.
+
 ## 0.2.1
 
 - Added comprehensive raw QUIC guide (`docs/QUIC_GUIDE.md`).

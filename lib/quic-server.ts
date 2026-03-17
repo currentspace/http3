@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { binding } from './event-loop.js';
-import type { NativeEvent } from './event-loop.js';
+import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
 
@@ -15,40 +15,40 @@ const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
 
+/** Options for creating a raw QUIC server (no HTTP/3 framing). */
 export interface QuicServerOptions {
+  /** PEM-encoded private key. */
   key: Buffer | string;
+  /** PEM-encoded certificate chain. */
   cert: Buffer | string;
+  /** PEM-encoded CA certificate for client verification. */
   ca?: Buffer | string;
+  /** ALPN protocol strings. Default: `['quic']`. */
   alpn?: string[];
+  /** Idle timeout in milliseconds. Default: 30_000. */
   maxIdleTimeoutMs?: number;
+  /** Maximum UDP payload size. Default: 1350. */
   maxUdpPayloadSize?: number;
+  /** Connection-level flow control window. Default: 100_000_000 bytes. */
   initialMaxData?: number;
+  /** Per-stream bidi flow control window. Default: 2_000_000 bytes. */
   initialMaxStreamDataBidiLocal?: number;
+  /** Maximum concurrent bidirectional streams. Default: 10_000. */
   initialMaxStreamsBidi?: number;
+  /** Disable QUIC active connection migration. Default: `true`. */
   disableActiveMigration?: boolean;
+  /** Enable QUIC DATAGRAM extension (RFC 9221). Default: `false`. */
   enableDatagrams?: boolean;
+  /** Maximum concurrent QUIC connections. Default: 10_000. */
   maxConnections?: number;
+  /** Disable QUIC Retry token validation. Default: `true`. */
   disableRetry?: boolean;
+  /** Directory for qlog output. */
   qlogDir?: string;
+  /** qlog verbosity level. */
   qlogLevel?: string;
+  /** Enable TLS keylog. Default: `false`. */
   keylog?: boolean;
-}
-
-interface NativeQuicServerBinding {
-  listen(port: number, host: string): { address: string; family: string; port: number };
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
-  streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
-  closeSession(connHandle: number, errorCode: number, reason: string): boolean;
-  sendDatagram(connHandle: number, data: Buffer): boolean;
-  getSessionMetrics(connHandle: number): {
-    packetsIn: number; packetsOut: number;
-    bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
-  };
-  pingSession(connHandle: number): boolean;
-  getQlogPath(connHandle: number): string | null;
-  localAddress(): { address: string; family: string; port: number };
-  shutdown(): void;
 }
 
 class QuicWorkerEventLoop implements QuicServerEventLoopLike {
@@ -96,6 +96,21 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   }
 }
 
+/**
+ * Typed event declarations for {@link QuicServerSession}.
+ */
+export interface QuicServerSession {
+  on(event: 'stream', listener: (stream: QuicStream) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'datagram', listener: (data: Buffer) => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/**
+ * A server-side QUIC session representing a single accepted connection.
+ * Emits `'stream'` for each new peer-initiated stream.
+ */
 export class QuicServerSession extends EventEmitter {
   readonly connHandle: number;
   readonly remoteAddress: string;
@@ -113,6 +128,7 @@ export class QuicServerSession extends EventEmitter {
     this._eventLoop = eventLoop;
   }
 
+  /** Open a new server-initiated bidirectional stream. */
   openStream(): QuicStream {
     const streamId = this._nextBidiStreamId;
     this._nextBidiStreamId += 4;
@@ -125,14 +141,17 @@ export class QuicServerSession extends EventEmitter {
     return stream;
   }
 
+  /** Close the session with an optional application error code and reason. */
   close(errorCode?: number, reason?: string): void {
     this._eventLoop.closeSession(this.connHandle, errorCode ?? 0, reason ?? '');
   }
 
+  /** Send an unreliable DATAGRAM frame (RFC 9221). */
   sendDatagram(data: Buffer | Uint8Array): boolean {
     return this._eventLoop.sendDatagram(this.connHandle, Buffer.from(data));
   }
 
+  /** Return a transport metrics snapshot, or `null` on failure. */
   getMetrics(): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
@@ -145,6 +164,7 @@ export class QuicServerSession extends EventEmitter {
     }
   }
 
+  /** Send a PING frame. Returns `true` if the command was queued. */
   ping(): boolean {
     return this._eventLoop.pingSession(this.connHandle);
   }
@@ -172,6 +192,23 @@ export class QuicServerSession extends EventEmitter {
   }
 }
 
+/**
+ * Typed event declarations for {@link QuicServer}.
+ */
+export interface QuicServer {
+  on(event: 'listening', listener: () => void): this;
+  on(event: 'session', listener: (session: QuicServerSession) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/**
+ * A raw QUIC server (no HTTP/3 framing).
+ *
+ * Accepts QUIC connections and emits {@link QuicServerSession} instances
+ * via the `'session'` event.
+ */
 export class QuicServer extends EventEmitter {
   private _eventLoop: QuicWorkerEventLoop | null = null;
   private readonly _sessions = new Map<number, QuicServerSession>();
@@ -183,9 +220,15 @@ export class QuicServer extends EventEmitter {
     this._options = options;
   }
 
+  /**
+   * Bind the QUIC server to a port and start accepting connections.
+   * @param port - UDP port to bind.
+   * @param host - Bind address (default `'127.0.0.1'`).
+   */
   async listen(port: number, host?: string): Promise<{ address: string; family: string; port: number }> {
     const opts = this._options;
-    const native = new (binding as any).NativeQuicServer(
+    const NativeQuicServer = getNativeQuicServerConstructor();
+    const native = new NativeQuicServer(
       {
         key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
         cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
@@ -207,7 +250,7 @@ export class QuicServer extends EventEmitter {
       (_err: Error | null, events: NativeEvent[]) => {
         this._dispatchEvents(events);
       },
-    ) as NativeQuicServerBinding;
+    );
 
     const eventLoop = new QuicWorkerEventLoop(native);
     this._eventLoop = eventLoop;
@@ -218,10 +261,12 @@ export class QuicServer extends EventEmitter {
     return addr;
   }
 
+  /** Return the bound address, or `null` if not listening. */
   address(): { address: string; family: string; port: number } | null {
     return this._address;
   }
 
+  /** Gracefully shut down the server and destroy all sessions. */
   async close(): Promise<void> {
     for (const session of this._sessions.values()) {
       session._cleanup();
@@ -372,6 +417,37 @@ export class QuicServer extends EventEmitter {
   }
 }
 
+function getNativeQuicServerConstructor(): typeof binding.NativeQuicServer {
+  const NativeQuicServer = (binding as Partial<typeof binding>).NativeQuicServer;
+  if (typeof NativeQuicServer !== 'function') {
+    throw new Error(
+      'The loaded @currentspace/http3 native binding is missing `NativeQuicServer`. '
+      + 'This install appears to contain an incomplete prebuild, so raw QUIC server APIs '
+      + '(`createQuicServer`) are unavailable. Reinstall a fixed package version or rebuild from source.',
+    );
+  }
+  return NativeQuicServer as typeof binding.NativeQuicServer;
+}
+
+/**
+ * Create a new raw QUIC server (no HTTP/3 framing).
+ *
+ * @example
+ * ```ts
+ * import { createQuicServer } from '@currentspace/http3';
+ * import { readFileSync } from 'node:fs';
+ *
+ * const key = readFileSync('key.pem');
+ * const cert = readFileSync('cert.pem');
+ * const server = createQuicServer({ key, cert, alpn: ['myproto'] });
+ * server.on('session', (session) => {
+ *   session.on('stream', (stream) => {
+ *     stream.pipe(stream); // echo
+ *   });
+ * });
+ * await server.listen(4433);
+ * ```
+ */
 export function createQuicServer(options: QuicServerOptions): QuicServer {
   return new QuicServer(options);
 }

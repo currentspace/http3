@@ -1,3 +1,12 @@
+/**
+ * `@currentspace/http3` -- HTTP/3 and raw QUIC for Node.js.
+ *
+ * Provides a native QUIC transport (via quiche) with an API modelled
+ * after `node:http2`, plus higher-level adapters for Fetch, Express,
+ * Server-Sent Events, and operational tooling.
+ * @module
+ */
+
 export { createSecureServer, Http3SecureServer } from './server.js';
 export type { ServerOptions, TlsOptions, StreamListener, AddressInfo } from './server.js';
 

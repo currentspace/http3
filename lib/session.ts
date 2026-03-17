@@ -2,28 +2,65 @@ import { EventEmitter } from 'node:events';
 import type { Http2Session } from 'node:http2';
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
 
+/** QUIC transport tuning parameters shared by server and client. */
 export interface SessionOptions {
+  /** Idle timeout in milliseconds before the connection is closed. Default: 30 000. */
   maxIdleTimeoutMs?: number;
+  /** Maximum UDP payload size in bytes. Default: 1350. */
   maxUdpPayloadSize?: number;
+  /** Connection-level flow control window in bytes. Default: 10 MiB. */
   initialMaxData?: number;
+  /** Per-stream flow control window for locally-initiated bidi streams. Default: 1 MiB. */
   initialMaxStreamDataBidiLocal?: number;
+  /** Maximum concurrent bidirectional streams. Default: 100. */
   initialMaxStreamsBidi?: number;
+  /** Disable QUIC active connection migration. Default: true. */
   disableActiveMigration?: boolean;
+  /** Enable QUIC DATAGRAM extension (RFC 9221). Default: false. */
   enableDatagrams?: boolean;
+  /** QPACK dynamic table capacity. Default: 0 (disabled). */
   qpackMaxTableCapacity?: number;
+  /** Maximum QPACK blocked streams. Default: 0. */
   qpackBlockedStreams?: number;
 }
 
+/** Point-in-time snapshot of session-level transport metrics. */
 export interface SessionMetrics {
+  /** Total QUIC packets received. */
   packetsIn: number;
+  /** Total QUIC packets sent. */
   packetsOut: number;
+  /** Total bytes received (UDP payload). */
   bytesIn: number;
+  /** Total bytes sent (UDP payload). */
   bytesOut: number;
+  /** Time to complete the TLS handshake, in milliseconds. */
   handshakeTimeMs: number;
+  /** Smoothed round-trip time estimate in milliseconds. */
   rttMs: number;
+  /** Current congestion window in bytes. */
   cwnd: number;
 }
 
+/**
+ * Typed event declarations for {@link Http3Session}.
+ */
+export interface Http3Session {
+  on(event: 'close', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'goaway', listener: () => void): this;
+  on(event: 'metrics', listener: (metrics: SessionMetrics) => void): this;
+  on(event: 'keylog', listener: (line: Buffer) => void): this;
+  on(event: 'datagram', listener: (data: Buffer) => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/**
+ * Base class for HTTP/3 sessions (both server-side and client-side).
+ *
+ * Wraps a single QUIC connection and exposes transport metrics, keylog
+ * support, and lifecycle events.
+ */
 export class Http3Session extends EventEmitter {
   /** @internal */
   _alpnProtocol = 'h3';
@@ -45,9 +82,13 @@ export class Http3Session extends EventEmitter {
   /** @internal */
   _keylogUnsubscribe: (() => void) | null = null;
 
+  /** Negotiated ALPN protocol (`'h3'` or `'h2'`). */
   get alpnProtocol(): string { return this._alpnProtocol; }
+  /** Remote peer IP address. */
   get remoteAddress(): string { return this._remoteAddress; }
+  /** Remote peer UDP port. */
   get remotePort(): number { return this._remotePort; }
+  /** Whether the QUIC/TLS handshake has completed. */
   get handshakeComplete(): boolean { return this._handshakeComplete; }
 
   /** @internal */
@@ -60,19 +101,18 @@ export class Http3Session extends EventEmitter {
     this._metricsTimer = setInterval(() => {
       if (this._metricsPolling) return;
       this._metricsPolling = true;
-      void Promise.resolve()
-        .then(async () => pollMetrics())
-        .then((snapshot) => {
+      void (async () => {
+        try {
+          const snapshot = await pollMetrics();
           if (!snapshot) return;
           this._lastMetrics = snapshot;
           this.emit('metrics', snapshot);
-        })
-        .catch(() => {
+        } catch {
           // Metrics polling is best-effort and must not crash the session.
-        })
-        .finally(() => {
+        } finally {
           this._metricsPolling = false;
-        });
+        }
+      })();
     }, intervalMs);
     this._metricsTimer.unref();
   }
@@ -97,18 +137,22 @@ export class Http3Session extends EventEmitter {
     this._keylogUnsubscribe = null;
   }
 
+  /** Return the most recent transport metrics snapshot, or `null` if unavailable. */
   getMetrics(): SessionMetrics | null {
     return this._lastMetrics;
   }
 
+  /** Send a PING frame and return the last known RTT in milliseconds. */
   ping(): number {
     return this._lastMetrics?.rttMs ?? 0;
   }
 
+  /** Return the peer's advertised QUIC transport settings, or `null`. */
   getRemoteSettings(): Record<string, number | boolean> | null {
     return null;
   }
 
+  /** Return the filesystem path to the qlog file for this session, or `null`. */
   exportQlog(): string | null {
     return null;
   }
@@ -128,6 +172,11 @@ export class Http3Session extends EventEmitter {
   }
 }
 
+/**
+ * Server-side HTTP/3 session representing one accepted QUIC connection.
+ *
+ * Created automatically by {@link Http3SecureServer} when a new client connects.
+ */
 export class Http3ServerSession extends Http3Session {
   /** @internal */
   _serverName = '';
@@ -140,6 +189,7 @@ export class Http3ServerSession extends Http3Session {
   /** @internal */
   _qlogPath: string | null = null;
 
+  /** The SNI hostname presented by the client during TLS handshake. */
   get serverName(): string { return this._serverName; }
 
   /**
@@ -269,15 +319,17 @@ export class Http3ServerSession extends Http3Session {
     return this._qlogPath;
   }
 
+  /** Send an unreliable DATAGRAM frame (RFC 9221). Returns `false` if unsupported. */
   sendDatagram(data: Buffer | Uint8Array): boolean {
     if (this._h2Session || !this._eventLoop) return false;
-    const eventLoop = this._eventLoop as {
-      sendDatagram: (connHandle: number, payload: Buffer) => boolean;
-    };
-    return eventLoop.sendDatagram(this._connHandle, Buffer.from(data));
+    return this._eventLoop.sendDatagram(this._connHandle, Buffer.from(data));
   }
 }
 
+/**
+ * Adapter that wraps a `node:http2` server session to expose the same
+ * interface as {@link Http3ServerSession}, enabling transparent H2/H3 fallback.
+ */
 export class Http2ServerSessionAdapter extends Http3ServerSession {
   constructor(h2Session: Http2Session) {
     super();
@@ -319,12 +371,19 @@ export class Http2ServerSessionAdapter extends Http3ServerSession {
   }
 }
 
+/**
+ * Base class for client-side HTTP/3 sessions.
+ *
+ * Provides transport metric access, datagram support, and session lifecycle
+ * management over the client worker event loop.
+ */
 export class Http3ClientSessionBase extends Http3Session {
   /** @internal */
   _eventLoop: ClientEventLoop | null = null;
   /** @internal */
   _qlogPath: string | null = null;
 
+  /** Gracefully close the client session and release resources. */
   async close(_code?: number): Promise<void> {
     if (this._eventLoop) {
       await this._eventLoop.close();
@@ -335,6 +394,7 @@ export class Http3ClientSessionBase extends Http3Session {
     this.emit('close');
   }
 
+  /** Immediately destroy the session without waiting for draining. */
   async destroy(_err?: Error): Promise<void> {
     if (this._eventLoop) {
       await this._eventLoop.close();
@@ -401,11 +461,9 @@ export class Http3ClientSessionBase extends Http3Session {
     return this._qlogPath;
   }
 
+  /** Send an unreliable DATAGRAM frame (RFC 9221). Returns `false` if unsupported. */
   sendDatagram(data: Buffer | Uint8Array): boolean {
     if (!this._eventLoop) return false;
-    const eventLoop = this._eventLoop as {
-      sendDatagram: (payload: Buffer) => boolean;
-    };
-    return eventLoop.sendDatagram(Buffer.from(data));
+    return this._eventLoop.sendDatagram(Buffer.from(data));
   }
 }
