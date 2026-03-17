@@ -128,6 +128,61 @@ function assertVersionNotPublished(name, version) {
   }
 }
 
+function buildRootPackage() {
+  console.log('Building root dist/ output for publish');
+  run('npm', ['run', 'build:dist']);
+}
+
+function packMetadata(directory) {
+  const result = run('npm', ['pack', '--dry-run', '--json'], {
+    cwd: directory,
+    capture: true,
+  });
+  const parsed = JSON.parse(result.stdout.trim());
+  return Array.isArray(parsed) ? parsed[0] : parsed;
+}
+
+function packagedFiles(directory) {
+  const metadata = packMetadata(directory);
+  if (!Array.isArray(metadata.files)) {
+    throw new Error(`Could not determine packed files for ${directory}`);
+  }
+  return new Set(
+    metadata.files
+      .map((entry) => entry?.path)
+      .filter((value) => typeof value === 'string'),
+  );
+}
+
+function assertNativePackageLayout(pkg) {
+  const files = packagedFiles(pkg.directory);
+  if (!files.has(pkg.binaryName)) {
+    throw new Error(`Native package ${pkg.name} is missing ${pkg.binaryName} from its npm tarball.`);
+  }
+}
+
+function assertRootPackageLayout(rootManifest, nativePackages) {
+  const files = packagedFiles(ROOT_DIR);
+  const requiredFiles = [
+    'dist/index.js',
+    'dist/index.d.ts',
+    'dist/fetch-adapter.js',
+    'dist/fetch-adapter.d.ts',
+    'dist/sse.js',
+    'dist/eventsource.js',
+    'index.js',
+    'index.d.ts',
+    ...nativePackages.map((pkg) => pkg.binaryName),
+  ];
+  const missing = requiredFiles.filter((file) => !files.has(file));
+  if (missing.length > 0) {
+    throw new Error(
+      `Root package ${rootManifest.name}@${rootManifest.version} is missing required published files: `
+      + missing.join(', '),
+    );
+  }
+}
+
 function verifyDistTag(name, version, distTag) {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const tags = npmViewJson(name, 'dist-tags');
@@ -144,10 +199,13 @@ function verifyDistTag(name, version, distTag) {
   }
 }
 
-function publishPackage(directory, distTag, dryRun, provenance) {
+function publishPackage(directory, distTag, dryRun, provenance, ignoreScripts = false) {
   const args = ['publish', '--tag', distTag, '--access', 'public'];
   if (provenance) {
     args.push('--provenance');
+  }
+  if (ignoreScripts) {
+    args.push('--ignore-scripts');
   }
   if (dryRun) {
     args.push('--dry-run');
@@ -187,6 +245,14 @@ for (const pkg of nativePackages) {
   copyFileSync(sourceBinary, join(pkg.directory, pkg.binaryName));
 }
 
+buildRootPackage();
+
+for (const pkg of nativePackages) {
+  assertNativePackageLayout(pkg);
+}
+
+assertRootPackageLayout(rootManifest, nativePackages);
+
 const packagesToPublish = [
   ...nativePackages,
   {
@@ -206,7 +272,7 @@ for (const pkg of nativePackages) {
 }
 
 console.log(`${dryRun ? 'Dry-running' : 'Publishing'} root package ${rootManifest.name}@${rootManifest.version}`);
-publishPackage(ROOT_DIR, distTag, dryRun, provenance);
+publishPackage(ROOT_DIR, distTag, dryRun, provenance, true);
 
 if (!dryRun) {
   for (const pkg of packagesToPublish) {

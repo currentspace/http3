@@ -1,4 +1,4 @@
-# Release Runbook (canary -> rc -> stable)
+# Release Runbook
 
 ## Dist Tags
 
@@ -6,33 +6,32 @@
 - `rc`: pre-production candidate
 - `latest`: stable
 
-## Pre-Release Checklist
+## Standard Release Flow
 
-1. `npm run release:check`
-2. `npm run smoke:install`
-3. Verify docs updates for any API surface change
-4. Validate ECS staging deploy and protocol smoke checks (`bash scripts/verify-aws-http3.sh <host>`)
-5. For `rc` and `latest`, execute Safari runbook: [`SAFARI_VALIDATION_RUNBOOK.md`](./SAFARI_VALIDATION_RUNBOOK.md)
+1. Prepare the release commit on `main` with the target version and changelog entry.
+2. Run `npm run release:latest -- --validate-only --dist-tag <canary|rc|latest>` to execute the full local gate and a GitHub Actions dry-run publish on a candidate branch.
+3. Run `npm run release:latest -- --dist-tag <canary|rc|latest>` to push `main`, publish through `release.yml`, create the Git tag, and create the GitHub release.
+4. Confirm npm dist-tags for the root package and each native sidecar package.
 
-## Publish Commands
+## Local Gate
 
-- Canary:
-  - `npm publish --tag canary --provenance`
-- RC:
-  - `npm publish --tag rc --provenance`
-- Stable:
-  - `npm publish --tag latest --provenance`
+- `npm run release:local-gate`
+- This runs lint, typecheck, tests, browser checks, concurrency/load gates, and the packed-install smoke test locally before CI publish.
+
+## One-Time Bootstrap For A New Native Package
+
+- New native sidecar packages must exist on npm before Trusted Publisher can be configured for them.
+- Use a prerelease bootstrap version such as `0.3.1-bootstrap.0`, publish it with `npm run release:bootstrap:native -- --binary <downloaded-node-file> --version 0.3.1-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm.
+- After Trusted Publisher is saved for the new package, publish the real release version through `release.yml`.
 
 ## Post-Release Validation
 
-- Install package in clean project and run import smoke.
-- Run H3 and H2 requests against staged deployment.
-- Confirm SSE stream and EventSource reconnect behavior.
-- Confirm multi-platform prebuild binaries are present in publish artifact.
+- Install the published package in a clean project and verify `import "@currentspace/http3"` and `import "@currentspace/http3/fetch"` both resolve.
+- Confirm the published root tarball contains `dist/` plus the expected `.node` prebuilds.
+- Confirm npm dist-tags for `@currentspace/http3`, `@currentspace/http3-linux-x64-gnu`, `@currentspace/http3-linux-arm64-gnu`, and `@currentspace/http3-darwin-arm64`.
 
 ## Rollback
 
-- If bad release:
-  - Publish fixed patch quickly with same dist-tag
-  - Move consumers to known-good version via package manager pin
-  - Record incident and remediation in release notes
+- Publish a fixed patch quickly under the same dist-tag.
+- Pin downstream consumers to the last known-good version until the patch is available.
+- Record the incident and remediation in the changelog and release notes.
