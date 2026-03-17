@@ -3,6 +3,7 @@
 - API contract: [API_CONTRACT.md](./API_CONTRACT.md)
 - HTTP/2 parity matrix: [HTTP2_PARITY_MATRIX.md](./HTTP2_PARITY_MATRIX.md)
 - Support matrix: [SUPPORT_MATRIX.md](./SUPPORT_MATRIX.md)
+- QUIC guide: [QUIC_GUIDE.md](./QUIC_GUIDE.md)
 - Quickstart: [QUICKSTART.md](./QUICKSTART.md)
 - Test strategy: [TEST_STRATEGY.md](./TEST_STRATEGY.md)
 - Safari validation runbook: [SAFARI_VALIDATION_RUNBOOK.md](./SAFARI_VALIDATION_RUNBOOK.md)
