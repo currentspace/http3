@@ -233,32 +233,15 @@ async function main() {
   run('gh', ['auth', 'status']);
   let resolvedPublishMode = 'validate-only';
   if (!validateOnly) {
-    const secretList = output('gh', ['secret', 'list', '--repo', repoSlug]);
-    const hasNpmTokenSecret = /^NPM_TOKEN\s/mu.test(secretList);
-    const localNpmUser = npmWhoAmI();
-
-    if (publishMode === 'workflow') {
-      if (!hasNpmTokenSecret) {
-        throw new Error(`GitHub repo secret NPM_TOKEN is not configured for ${repoSlug}`);
-      }
-      resolvedPublishMode = 'workflow';
-    } else if (publishMode === 'local') {
+    if (publishMode === 'local') {
+      const localNpmUser = npmWhoAmI();
       if (!localNpmUser) {
         throw new Error('Local npm publish auth is not configured; `npm whoami` failed.');
       }
       resolvedPublishMode = 'local';
       console.log(`Using local npm publish auth as ${localNpmUser}.`);
-    } else if (hasNpmTokenSecret) {
-      resolvedPublishMode = 'workflow';
-    } else if (localNpmUser) {
-      resolvedPublishMode = 'local';
-      console.log(
-        `GitHub repo secret NPM_TOKEN is not configured for ${repoSlug}; falling back to local npm publish as ${localNpmUser}.`,
-      );
     } else {
-      throw new Error(
-        `No publish credential path is available for ${repoSlug}: missing GitHub NPM_TOKEN secret and local npm auth.`,
-      );
+      resolvedPublishMode = 'workflow';
     }
   }
 
