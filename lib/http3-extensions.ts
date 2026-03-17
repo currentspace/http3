@@ -1,3 +1,10 @@
+/**
+ * HTTP/3-specific extensions beyond the `node:http2` parity surface.
+ *
+ * Includes Server-Sent Events, EventSource, Fetch adapter, health checks,
+ * AWS TLS credential loading, and operational helpers.
+ * @module
+ */
 export { createSseStream, ServerSentEventStream, createSseReadableStream, encodeSseEvent, encodeSseComment, sseHeaders } from './sse.js';
 export type { SseEvent, SseStreamOptions } from './sse.js';
 

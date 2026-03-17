@@ -1,3 +1,12 @@
+/**
+ * HTTP/3 application error codes (RFC 9114 Section 8.1) and QUIC transport
+ * error codes (RFC 9000 Section 20.1).
+ *
+ * These constants match the wire values and can be passed to
+ * `stream.close(code)` or `session.close(code)`.
+ * @module
+ */
+
 // HTTP/3 error codes (RFC 9114 §8.1)
 export const H3_NO_ERROR = 0x0100;
 export const H3_GENERAL_PROTOCOL_ERROR = 0x0101;

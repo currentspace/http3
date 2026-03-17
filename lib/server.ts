@@ -33,49 +33,104 @@ const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
 
+/** TLS credential options accepted by the server. */
 export interface TlsOptions {
+  /** PEM-encoded private key. */
   key?: string | Buffer;
+  /** PEM-encoded certificate chain. */
   cert?: string | Buffer;
+  /** PEM-encoded CA certificate(s) for client verification. */
   ca?: string | Buffer | Array<string | Buffer>;
+  /** PKCS#12 bundle (alternative to key/cert). */
   pfx?: Buffer;
+  /** Passphrase for the PFX bundle. */
   passphrase?: string;
+  /** Override negotiated ALPN protocols. */
   alpnProtocols?: string[];
+  /** TLS 1.3 session ticket encryption keys. */
   sessionTicketKeys?: Buffer;
+  /** Enable TLS keylog; `true` for auto-path, or a string file path. */
   keylog?: boolean | string;
 }
 
+/** Combined TLS + QUIC transport options for the HTTP/3 server. */
 export interface ServerOptions extends TlsOptions {
+  /** Idle timeout in milliseconds. Default: 30 000. */
   maxIdleTimeoutMs?: number;
+  /** Maximum UDP payload size. Default: 1350. */
   maxUdpPayloadSize?: number;
+  /** Connection-level flow control window. Default: 100_000_000 bytes. */
   initialMaxData?: number;
+  /** Per-stream bidi flow control window. Default: 2_000_000 bytes. */
   initialMaxStreamDataBidiLocal?: number;
+  /** Maximum concurrent bidirectional streams. Default: 10_000. */
   initialMaxStreamsBidi?: number;
+  /** Disable QUIC active connection migration. Default: `true` (migration disabled). Set `false` to enable. */
   disableActiveMigration?: boolean;
+  /** Enable QUIC DATAGRAM extension (RFC 9221). Default: false. */
   enableDatagrams?: boolean;
+  /** QPACK dynamic table capacity. */
   qpackMaxTableCapacity?: number;
+  /** Maximum QPACK blocked streams. */
   qpackBlockedStreams?: number;
+  /** Number of UDP packets to receive per syscall. */
   recvBatchSize?: number;
+  /** Number of UDP packets to send per syscall. */
   sendBatchSize?: number;
+  /** Directory for qlog output files. */
   qlogDir?: string;
+  /** qlog verbosity level (e.g. `'trace'`). */
   qlogLevel?: string;
+  /** Interval in ms for emitting `'metrics'` events on sessions. Default: 1000. */
   metricsIntervalMs?: number;
+  /** Allow HTTP/1.1 fallback via the TLS ALPN h2 server. Default: `false`. */
   allowHTTP1?: boolean;
+  /** HTTP/2 settings passed to the fallback h2 server. */
   settings?: Record<string, number>;
+  /** Disable QUIC Retry token validation. Default: `false`. */
   disableRetry?: boolean;
+  /** Maximum number of concurrent QUIC connections. Default: 10_000. */
   maxConnections?: number;
+  /** Enable SO_REUSEPORT for the UDP socket. Default: `false`. */
   reusePort?: boolean;
+  /** Enable QUIC-LB connection-ID routing. Requires `serverId`. Default: `false`. */
   quicLb?: boolean;
+  /** 8-byte server identifier for QUIC-LB (hex string or Buffer). */
   serverId?: Buffer | string;
 }
 
+/** Callback invoked for each new HTTP/3 request stream. */
 export type StreamListener = (stream: ServerHttp3Stream, headers: IncomingHeaders, flags: StreamFlags) => void;
 
+/** Network address information returned by {@link Http3SecureServer.address}. */
 export interface AddressInfo {
+  /** Bound IP address. */
   address: string;
+  /** Address family (`'IPv4'` or `'IPv6'`). */
   family: string;
+  /** Bound UDP port number. */
   port: number;
 }
 
+/**
+ * Typed event declarations for {@link Http3SecureServer}.
+ */
+export interface Http3SecureServer {
+  on(event: 'listening', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'session', listener: (session: Http3ServerSession) => void): this;
+  on(event: 'stream', listener: StreamListener): this;
+  on(event: 'request', listener: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/**
+ * An HTTP/3 (+ HTTP/2 fallback) secure server.
+ *
+ * Binds a UDP socket for QUIC/H3 traffic and a TLS socket for H2 on the
+ * same port.  Streams are emitted as {@link ServerHttp3Stream} instances.
+ */
 export class Http3SecureServer extends EventEmitter {
   private readonly _options: ServerOptions;
   private _eventLoop: ServerEventLoopLike | null = null;
@@ -97,6 +152,11 @@ export class Http3SecureServer extends EventEmitter {
     }
   }
 
+  /**
+   * Start listening for QUIC and HTTP/2 connections.
+   * @param port - UDP/TCP port to bind.
+   * @param host - Bind address (default `'0.0.0.0'`).
+   */
   listen(port: number, host?: string): this {
     if (this._eventLoop || this._h2Server || this._starting) {
       throw new Http3Error('server is already listening', ERR_HTTP3_INVALID_STATE);
@@ -182,6 +242,7 @@ export class Http3SecureServer extends EventEmitter {
     return this;
   }
 
+  /** Gracefully shut down the server, closing all sessions and sockets. */
   async close(cb?: (err?: Error) => void): Promise<void> {
     try {
       this._starting = false;
@@ -209,6 +270,7 @@ export class Http3SecureServer extends EventEmitter {
     }
   }
 
+  /** Return the bound address, or `null` if not listening. */
   address(): AddressInfo | null {
     return this._address;
   }
@@ -659,6 +721,24 @@ export class Http3SecureServer extends EventEmitter {
   }
 }
 
+/**
+ * Create a new HTTP/3 secure server.
+ *
+ * @example
+ * ```ts
+ * import { createSecureServer } from '@currentspace/http3';
+ * import { readFileSync } from 'node:fs';
+ *
+ * const server = createSecureServer({
+ *   key: readFileSync('key.pem'),
+ *   cert: readFileSync('cert.pem'),
+ * }, (stream, headers) => {
+ *   stream.respond({ ':status': '200' });
+ *   stream.end('Hello, HTTP/3!');
+ * });
+ * server.listen(443);
+ * ```
+ */
 export function createSecureServer(options: ServerOptions, onStream?: StreamListener): Http3SecureServer {
   return new Http3SecureServer(options, onStream);
 }

@@ -5,8 +5,10 @@ import { createSecureServer, Http3SecureServer } from './server.js';
 import { createSseReadableStream, sseHeaders } from './sse.js';
 import type { SseEvent } from './sse.js';
 
+/** A Web Fetch API-compatible request handler. */
 export type FetchHandler = (req: Request) => Response | Promise<Response>;
 
+/** An object with a `fetch` method (e.g. a Hono app). */
 export interface FetchApp {
   fetch: FetchHandler;
 }
@@ -82,6 +84,11 @@ async function cancelReaderQuietly(reader: ReadableStreamDefaultReader<Uint8Arra
   }
 }
 
+/**
+ * Wrap a Fetch API handler (or {@link FetchApp}) as an HTTP/3 {@link StreamListener}.
+ * Converts each H3 stream into a `Request`, invokes the handler, and writes the
+ * `Response` back to the stream.
+ */
 export function createFetchHandler(appOrFetch: FetchApp | FetchHandler): StreamListener {
   const handler: FetchHandler = typeof appOrFetch === 'function'
     ? appOrFetch
@@ -120,14 +127,12 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
   const abortController = new AbortController();
   const abort = (): void => abortController.abort();
   req.once('aborted', abort);
-  req.once('close', abort);
   req.once('error', abort);
   res.once('close', abort);
   res.once('error', abort);
 
   const cleanupAbortHandlers = (): void => {
     req.removeListener('aborted', abort);
-    req.removeListener('close', abort);
     req.removeListener('error', abort);
     res.removeListener('close', abort);
     res.removeListener('error', abort);
@@ -325,6 +330,10 @@ async function handleStream(
   }
 }
 
+/**
+ * Create a `Response` that streams Server-Sent Events from an async iterable.
+ * Suitable for returning from a {@link FetchHandler}.
+ */
 export function createSseFetchResponse(events: AsyncIterable<SseEvent | string>, init?: ResponseInit): Response {
   const headers = new Headers(init?.headers);
   const defaults = sseHeaders();
@@ -342,12 +351,20 @@ export function createSseFetchResponse(events: AsyncIterable<SseEvent | string>,
   });
 }
 
+/** Options for the {@link serveFetch} convenience function. */
 export interface ServeFetchOptions extends ServerOptions {
+  /** UDP/TCP port to listen on. */
   port: number;
+  /** Bind address (default `'0.0.0.0'`). */
   host?: string;
+  /** The Fetch handler or app to serve. */
   fetch: FetchHandler | FetchApp;
 }
 
+/**
+ * One-liner to start an HTTP/3 server powered by a Fetch API handler.
+ * Creates the server, attaches the handler, and starts listening.
+ */
 export function serveFetch(options: ServeFetchOptions): Http3SecureServer {
   const { port, host, fetch: appOrFetch, ...serverOptions } = options;
   const fetchHandler: FetchHandler = typeof appOrFetch === 'function'

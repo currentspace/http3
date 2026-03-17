@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
+/** @internal */
 type KeylogListener = (line: Buffer) => void;
 
 interface TailState {
@@ -44,6 +45,10 @@ function pollFile(path: string, state: TailState): void {
   }
 }
 
+/**
+ * Resolve and prepare the SSLKEYLOGFILE path for TLS key logging.
+ * @internal
+ */
 export function prepareKeylogFile(value: boolean | string | undefined): string | null {
   if (!value) return null;
 
@@ -57,6 +62,11 @@ export function prepareKeylogFile(value: boolean | string | undefined): string |
   return filePath;
 }
 
+/**
+ * Subscribe to new lines appended to an SSLKEYLOGFILE via polling.
+ * Returns an unsubscribe function.
+ * @internal
+ */
 export function subscribeKeylog(path: string, listener: KeylogListener): () => void {
   const resolved = resolve(path);
   let state = tails.get(resolved);
