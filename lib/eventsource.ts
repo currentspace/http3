@@ -4,17 +4,27 @@ import type { ConnectOptions } from './client.js';
 import type { Http3ClientSession } from './client.js';
 import type { ClientHttp3Stream, IncomingHeaders } from './stream.js';
 
+/** Options for creating an {@link Http3EventSource}. Extends {@link ConnectOptions}. */
 export interface EventSourceInit extends ConnectOptions {
+  /** Extra request headers sent with the SSE GET request. */
   headers?: Record<string, string>;
+  /** Whether to automatically reconnect on disconnect. Default: `true`. */
   reconnect?: boolean;
+  /** Initial reconnection delay in milliseconds. Default: 1000. */
   initialRetryMs?: number;
+  /** Maximum reconnection delay in milliseconds. Default: 30 000. */
   maxRetryMs?: number;
 }
 
+/** A parsed SSE message delivered via the `'message'` or named event. */
 export interface EventSourceMessage {
+  /** Event type (`'message'` if unnamed). */
   type: string;
+  /** Concatenated `data:` field lines. */
   data: string;
+  /** The last `id:` field value received. */
   lastEventId: string;
+  /** The origin URL of the SSE endpoint. */
   origin: string;
 }
 
@@ -22,6 +32,23 @@ const CONNECTING = 0;
 const OPEN = 1;
 const CLOSED = 2;
 
+/**
+ * Typed event declarations for {@link Http3EventSource}.
+ */
+export interface Http3EventSource {
+  on(event: 'open', listener: (e: Event) => void): this;
+  on(event: 'message', listener: (msg: EventSourceMessage) => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/**
+ * An EventSource (SSE) client that connects over HTTP/3.
+ *
+ * Follows W3C EventSource semantics: automatic reconnection, `Last-Event-ID`
+ * tracking, and named event dispatch.
+ */
 export class Http3EventSource extends EventEmitter {
   static readonly CONNECTING = CONNECTING;
   static readonly OPEN = OPEN;
@@ -65,6 +92,7 @@ export class Http3EventSource extends EventEmitter {
     this.off(event, listener);
   }
 
+  /** Close the EventSource and stop reconnecting. */
   close(): void {
     if (this._closed) return;
     this._closed = true;
@@ -252,8 +280,11 @@ export class Http3EventSource extends EventEmitter {
   private async _closeSession(): Promise<void> {
     const stream = this._stream;
     this._stream = null;
-    if (stream && !stream.destroyed) {
-      stream.destroy();
+    if (stream) {
+      stream.removeAllListeners();
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
     }
 
     const session = this._session;
@@ -264,6 +295,7 @@ export class Http3EventSource extends EventEmitter {
   }
 }
 
+/** Create an {@link Http3EventSource} connected to the given SSE URL. */
 export function createEventSource(url: string, options?: EventSourceInit): Http3EventSource {
   return new Http3EventSource(url, options);
 }

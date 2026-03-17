@@ -1,6 +1,7 @@
 import { Readable, Writable } from 'node:stream';
 import type { IncomingHeaders, ServerHttp3Stream, StreamFlags } from './stream.js';
 
+/** Minimal Express-style request interface. */
 export interface ExpressLikeRequest extends Readable {
   method: string;
   url: string;
@@ -8,14 +9,20 @@ export interface ExpressLikeRequest extends Readable {
   httpVersion: string;
 }
 
+/** Minimal Express-style response interface. */
 export interface ExpressLikeResponse extends Writable {
   statusCode: number;
   writeHead(status: number, headers?: Record<string, string>): void;
   setHeader(name: string, value: string): void;
 }
 
+/** An Express-style `(req, res)` handler function. */
 export type ExpressLikeHandler = (req: ExpressLikeRequest, res: ExpressLikeResponse) => void;
 
+/**
+ * Wrap an Express-style handler as an HTTP/3 stream listener.
+ * Translates each H3 stream into Express-like `req`/`res` objects.
+ */
 export function createExpressAdapter(
   app: ExpressLikeHandler,
 ): (stream: ServerHttp3Stream, headers: IncomingHeaders, flags: StreamFlags) => void {
@@ -87,6 +94,17 @@ export function createExpressAdapter(
       });
     }
 
-    app(req, res);
+    try {
+      app(req, res);
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (!headersSent) {
+        headersSent = true;
+        stream.respond({ ':status': '500' });
+        stream.end();
+        return;
+      }
+      stream.destroy(error);
+    }
   };
 }

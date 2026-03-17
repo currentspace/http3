@@ -1,3 +1,13 @@
+/**
+ * Migration surface for users coming from `node:http2`.
+ *
+ * Re-exports core APIs under http2-style names. Behavioral differences:
+ * - Transport is QUIC/UDP instead of TCP/TLS.
+ * - Streams use HTTP/3 framing (QPACK headers, per-stream flow control).
+ * - `createServer` is an alias for `createSecureServer` (QUIC always requires TLS).
+ * - No push-promise support (HTTP/3 removed server push).
+ * @module
+ */
 import { createSecureServer, type AddressInfo, type ServerOptions, type StreamListener, type TlsOptions } from './server.js';
 import { connect, connectAsync, type ConnectOptions, type RequestOptions } from './client.js';
 import type { SessionMetrics } from './session.js';

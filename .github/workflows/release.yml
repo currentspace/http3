@@ -105,12 +105,16 @@ jobs:
       - name: Smoke install packed artifact
         run: npm run smoke:install
 
-      - name: Publish dry run
+      - name: Publish npm packages dry run
         if: ${{ inputs.dry_run }}
-        run: npm publish --tag ${{ inputs.dist_tag }} --provenance --dry-run
+        env:
+          HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
+          HTTP3_DRY_RUN: '1'
+        run: node scripts/publish-npm-release.mjs
 
-      - name: Publish package
+      - name: Publish npm packages
         if: ${{ !inputs.dry_run }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --tag ${{ inputs.dist_tag }} --provenance
+          HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
+        run: node scripts/publish-npm-release.mjs

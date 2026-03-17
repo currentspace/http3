@@ -8,6 +8,10 @@ import { join, resolve } from 'node:path';
 
 // ----- Native binding type definitions -----
 
+/**
+ * A single event delivered from the native Rust worker thread.
+ * @internal
+ */
 export interface NativeEvent {
   eventType: number;
   connHandle: number;
@@ -33,11 +37,16 @@ export interface NativeEvent {
   };
 }
 
+/** @internal */
 export interface NativeOutboundPacket {
   data: Buffer;
   addr: string;
 }
 
+/**
+ * N-API binding for the worker-mode HTTP/3 server.
+ * @internal
+ */
 export interface NativeWorkerServerBinding {
   listen(port: number, host: string): { address: string; family: string; port: number };
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): boolean;
@@ -62,6 +71,10 @@ export interface NativeWorkerServerBinding {
   shutdown(): void;
 }
 
+/**
+ * N-API binding for the worker-mode HTTP/3 client.
+ * @internal
+ */
 export interface NativeWorkerClientBinding {
   connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
   sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number;
@@ -78,6 +91,92 @@ export interface NativeWorkerClientBinding {
     cwnd: number;
   };
   getRemoteSettings(): Array<{ id: number; value: number }>;
+  ping(): boolean;
+  getQlogPath(): string | null;
+  close(errorCode: number, reason: string): boolean;
+  localAddress(): { address: string; family: string; port: number };
+  shutdown(): void;
+}
+
+/**
+ * Options passed to the native QUIC server constructor.
+ * @internal
+ */
+export interface NativeQuicServerOptions {
+  key: Buffer;
+  cert: Buffer;
+  ca?: Buffer;
+  alpn?: string[];
+  maxIdleTimeoutMs?: number;
+  maxUdpPayloadSize?: number;
+  initialMaxData?: number;
+  initialMaxStreamDataBidiLocal?: number;
+  initialMaxStreamsBidi?: number;
+  disableActiveMigration?: boolean;
+  enableDatagrams?: boolean;
+  maxConnections?: number;
+  disableRetry?: boolean;
+  qlogDir?: string;
+  qlogLevel?: string;
+  keylog?: boolean;
+}
+
+/**
+ * Options passed to the native QUIC client constructor.
+ * @internal
+ */
+export interface NativeQuicClientOptions {
+  ca?: Buffer;
+  rejectUnauthorized?: boolean;
+  alpn?: string[];
+  maxIdleTimeoutMs?: number;
+  maxUdpPayloadSize?: number;
+  initialMaxData?: number;
+  initialMaxStreamDataBidiLocal?: number;
+  initialMaxStreamsBidi?: number;
+  sessionTicket?: Buffer;
+  allow0Rtt?: boolean;
+  enableDatagrams?: boolean;
+  keylog?: boolean;
+  qlogDir?: string;
+  qlogLevel?: string;
+}
+
+/**
+ * N-API binding for the raw QUIC server (no HTTP/3 framing).
+ * @internal
+ */
+export interface NativeQuicServerBinding {
+  listen(port: number, host: string): { address: string; family: string; port: number };
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
+  streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
+  closeSession(connHandle: number, errorCode: number, reason: string): boolean;
+  sendDatagram(connHandle: number, data: Buffer): boolean;
+  getSessionMetrics(connHandle: number): {
+    packetsIn: number; packetsOut: number;
+    bytesIn: number; bytesOut: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number;
+  };
+  pingSession(connHandle: number): boolean;
+  getQlogPath(connHandle: number): string | null;
+  localAddress(): { address: string; family: string; port: number };
+  shutdown(): void;
+}
+
+/**
+ * N-API binding for the raw QUIC client (no HTTP/3 framing).
+ * @internal
+ */
+export interface NativeQuicClientBinding {
+  connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
+  streamSend(streamId: number, data: Buffer, fin: boolean): boolean;
+  streamClose(streamId: number, errorCode: number): boolean;
+  sendDatagram(data: Buffer): boolean;
+  getSessionMetrics(): {
+    packetsIn: number; packetsOut: number;
+    bytesIn: number; bytesOut: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number;
+  };
   ping(): boolean;
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
@@ -136,6 +235,14 @@ interface NativeBinding {
     options: NativeClientOptions,
     callback: (err: Error | null, events: NativeEvent[]) => void,
   ) => NativeWorkerClientBinding;
+  NativeQuicServer: new (
+    options: NativeQuicServerOptions,
+    callback: (err: Error | null, events: NativeEvent[]) => void,
+  ) => NativeQuicServerBinding;
+  NativeQuicClient: new (
+    options: NativeQuicClientOptions,
+    callback: (err: Error | null, events: NativeEvent[]) => void,
+  ) => NativeQuicClientBinding;
   version(): string;
 }
 
@@ -160,8 +267,10 @@ function findBinding(): string {
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
 const binding: NativeBinding = require(findBinding());
 
+/** @internal Loaded native N-API binding. */
 export { binding };
 
+/** Callback signature for receiving batches of native events. */
 export type EventCallback = (events: NativeEvent[]) => void;
 
 // ----- Common interface for server command adapters -----
@@ -264,6 +373,10 @@ export class WorkerEventLoop implements ServerEventLoopLike {
 
 // ----- Client Event Loop (worker mode) -----
 
+/**
+ * Event loop adapter for the HTTP/3 client in worker-thread mode.
+ * Mirrors {@link WorkerEventLoop} but for the client side.
+ */
 export class ClientEventLoop {
   private readonly worker: NativeWorkerClientBinding;
   private closed = false;

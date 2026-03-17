@@ -89,6 +89,19 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 - `@currentspace/http3/parity` - http2-style aliases for migrations.
 - `@currentspace/http3/h3` - HTTP/3-specific extension namespace.
 
+## Examples
+
+- [Raw API example](./examples/raw-api/README.md)
+- [Express adapter example](./examples/express-adapter/README.md)
+- [Hono `serveFetch()` example](./examples/hono/README.md)
+
+## Reference docs
+
+- [Configuration options reference](./docs/CONFIGURATION_OPTIONS.md)
+- [Error handling guide](./docs/ERROR_HANDLING.md)
+- [Test strategy](./docs/TEST_STRATEGY.md)
+- [Contributing guide](./CONTRIBUTING.md)
+
 ## Production docs
 
 - [QUIC guide](./docs/QUIC_GUIDE.md)

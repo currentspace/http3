@@ -26,30 +26,70 @@ function normalizeCaOption(ca?: string | Buffer | Array<string | Buffer>): Buffe
   return typeof first === 'string' ? Buffer.from(first) : first;
 }
 
+/** Options for connecting to an HTTP/3 server. */
 export interface ConnectOptions {
+  /** PEM-encoded CA certificate(s) to trust. */
   ca?: string | Buffer | Array<string | Buffer>;
+  /** If `false`, accept self-signed certificates. Default: `true`. */
   rejectUnauthorized?: boolean;
+  /** Override the SNI hostname sent during TLS handshake. */
   servername?: string;
+  /** Idle timeout in milliseconds. Default: 30 000. */
   maxIdleTimeoutMs?: number;
+  /** Maximum UDP payload size. Default: 1350. */
   maxUdpPayloadSize?: number;
+  /** Connection-level flow control window. Default: 100_000_000 bytes. */
   initialMaxData?: number;
+  /** Per-stream bidi flow control window. Default: 2_000_000 bytes. */
   initialMaxStreamDataBidiLocal?: number;
+  /** Maximum concurrent bidirectional streams. Default: 10_000. */
   initialMaxStreamsBidi?: number;
+  /** TLS 1.3 session ticket for 0-RTT resumption. */
   sessionTicket?: Buffer;
+  /** Enable 0-RTT early data. Default: `false`. */
   allow0RTT?: boolean;
+  /** Enable TLS keylog; `true` for auto-path, or a string file path. */
   keylog?: boolean | string;
+  /** Enable QUIC DATAGRAM extension (RFC 9221). Default: `false`. */
   enableDatagrams?: boolean;
+  /** Allow non-safe HTTP methods (POST, etc.) in 0-RTT. Default: `false`. */
   allowUnsafe0RTTMethods?: boolean;
+  /** Hook called before sending 0-RTT requests; return `true` to allow. */
   onEarlyData?: (headers: IncomingHeaders) => boolean;
+  /** Interval in ms for emitting `'metrics'` events. Default: 1000. */
   metricsIntervalMs?: number;
+  /** Directory for qlog output files. */
   qlogDir?: string;
+  /** qlog verbosity level. */
   qlogLevel?: string;
 }
 
+/** Options for creating a new HTTP/3 request stream. */
 export interface RequestOptions {
+  /** If `true`, send the request with FIN (no request body). */
   endStream?: boolean;
 }
 
+/**
+ * Typed event declarations for {@link Http3ClientSession}.
+ */
+export interface Http3ClientSession {
+  on(event: 'connect', listener: () => void): this;
+  on(event: 'goaway', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'sessionTicket', listener: (ticket: Buffer) => void): this;
+  on(event: 'datagram', listener: (data: Buffer) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: 'keylog', listener: (line: Buffer) => void): this;
+  on(event: 'metrics', listener: (metrics: import('./session.js').SessionMetrics) => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/**
+ * Client-side HTTP/3 session for sending requests to a remote server.
+ *
+ * Obtain an instance via {@link connect} or {@link connectAsync}.
+ */
 export class Http3ClientSession extends Http3ClientSessionBase {
   private readonly _authority: string;
   private readonly _streams = new Map<number, ClientHttp3Stream>();
@@ -75,14 +115,22 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     void this._readyPromise.catch(() => undefined);
   }
 
+  /** The authority (host:port) this session is connected to. */
   get authority(): string {
     return this._authority;
   }
 
+  /** Resolves when the QUIC handshake completes. Rejects on connection failure. */
   async ready(): Promise<void> {
     return this._readyPromise;
   }
 
+  /**
+   * Open a new HTTP/3 request stream.
+   * @param headers - Pseudo-headers (`:method`, `:path`, etc.) and regular headers.
+   * @param options - Stream options (e.g. `endStream` for body-less requests).
+   * @returns A {@link ClientHttp3Stream} duplex for reading the response.
+   */
   request(headers: IncomingHeaders, options?: RequestOptions): ClientHttp3Stream {
     if (!this._eventLoop) {
       throw new Http3Error('not connected', ERR_HTTP3_INVALID_STATE);
@@ -264,6 +312,27 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   }
 }
 
+/**
+ * Connect to an HTTP/3 server and return a session immediately.
+ *
+ * The session begins the QUIC handshake asynchronously. Wait for the
+ * `'connect'` event or call `session.ready()` before sending requests
+ * (unless 0-RTT is enabled).
+ *
+ * @example
+ * ```ts
+ * import { connect } from '@currentspace/http3';
+ *
+ * const session = connect('https://localhost:443', {
+ *   ca: readFileSync('ca.pem'),
+ * });
+ * session.on('connect', () => {
+ *   const stream = session.request({ ':method': 'GET', ':path': '/' });
+ *   stream.on('response', (headers) => console.log(headers[':status']));
+ *   stream.end();
+ * });
+ * ```
+ */
 export function connect(authority: string, options?: ConnectOptions): Http3ClientSession {
   // Parse authority: "https://host:port" or "host:port"
   let host: string;
@@ -335,6 +404,10 @@ export function connect(authority: string, options?: ConnectOptions): Http3Clien
   return session;
 }
 
+/**
+ * Connect to an HTTP/3 server and wait for the handshake to complete.
+ * Convenience wrapper around {@link connect} + `session.ready()`.
+ */
 export async function connectAsync(authority: string, options?: ConnectOptions): Promise<Http3ClientSession> {
   const session = connect(authority, options);
   await session.ready();

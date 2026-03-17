@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -66,7 +66,18 @@
   "files": [
     "dist",
     "docs",
+    "LICENSE",
+    "examples/certs/generate.sh",
+    "examples/raw-api/README.md",
+    "examples/raw-api/server.ts",
+    "examples/raw-api/client.ts",
+    "examples/express-adapter/README.md",
+    "examples/express-adapter/package.json",
+    "examples/express-adapter/adapter.ts",
+    "examples/express-adapter/server.ts",
+    "examples/hono/README.md",
     "examples/hono/package.json",
+    "examples/hono/server.ts",
     "examples/hono/production-server.mjs",
     "examples/hono/production-server.ts",
     "index.js",
@@ -86,7 +97,7 @@
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint lib/ test/",
-    "test": "npm run build:test && node --test dist-test/test/**/*.test.js",
+    "test": "npm run build:test && node --test --test-timeout=120000 dist-test/test/**/*.test.js",
     "test:interop": "npm run build:test && node --test dist-test/test/curl-interop.test.js",
     "test:browser:e2e": "npm run build:test && HTTP3_BROWSER_E2E=1 node --test dist-test/test/browser-e2e.test.js",
     "test:concurrency": "npm run build:test && node --test dist-test/test/worker-concurrency.test.js",
@@ -96,6 +107,8 @@
     "safari:checklist": "node scripts/safari-validation-checklist.mjs",
     "sbom": "npm sbom --omit=dev > sbom.spdx.json",
     "release:check": "npm run lint && npm run typecheck && npm test && npm run test:interop && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate",
+    "release:publish:npm": "node scripts/publish-npm-release.mjs",
+    "release:latest": "node scripts/release-latest.mjs",
     "prepublishOnly": "napi prepublish -t npm",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d",
@@ -115,7 +128,7 @@
     "typescript-eslint": "^8.56.1"
   },
   "optionalDependencies": {
-    "@currentspace/http3-linux-arm64-gnu": "0.2.1",
-    "@currentspace/http3-darwin-arm64": "0.2.1"
+    "@currentspace/http3-linux-arm64-gnu": "0.3.0",
+    "@currentspace/http3-darwin-arm64": "0.3.0"
   }
 }

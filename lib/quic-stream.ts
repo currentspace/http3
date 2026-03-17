@@ -1,18 +1,30 @@
 import { Duplex } from 'node:stream';
 
-/** Event loop interface for QUIC server-side stream commands. */
+/**
+ * Event loop interface for QUIC server-side stream commands.
+ * @internal
+ */
 export interface QuicServerEventLoopLike {
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number;
   streamClose(connHandle: number, streamId: number, errorCode: number): void;
 }
 
-/** Event loop interface for QUIC client-side stream commands. */
+/**
+ * Event loop interface for QUIC client-side stream commands.
+ * @internal
+ */
 export interface QuicClientEventLoopLike {
   streamSend(streamId: number, data: Buffer, fin: boolean): number;
   streamClose(streamId: number, errorCode: number): boolean;
 }
 
-/** A bidirectional QUIC stream exposed as a Node.js Duplex. */
+/**
+ * A bidirectional QUIC stream exposed as a Node.js {@link Duplex}.
+ *
+ * Data written to the writable side is sent over QUIC; data received
+ * from the peer is pushed to the readable side.  Flow control is
+ * handled transparently via native drain callbacks.
+ */
 export class QuicStream extends Duplex {
   /** @internal */ _connHandle = -1;
   /** @internal */ _streamId = -1;
@@ -24,10 +36,15 @@ export class QuicStream extends Duplex {
     super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
   }
 
+  /** The QUIC stream ID assigned by the protocol (0, 1, 4, 5, ...). */
   get id(): number {
     return this._streamId;
   }
 
+  /**
+   * Gracefully close this stream, optionally sending an application error code.
+   * @param code - QUIC application error code (default `0`).
+   */
   close(code?: number): void {
     if (this.destroyed) return;
     const errorCode = code ?? 0;

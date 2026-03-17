@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { binding } from './event-loop.js';
-import type { NativeEvent } from './event-loop.js';
+import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
 
@@ -15,39 +15,38 @@ const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_SESSION_TICKET = 12;
 const EVENT_DATAGRAM = 14;
 
+/** Options for connecting to a raw QUIC server. */
 export interface QuicConnectOptions {
+  /** PEM-encoded CA certificate to trust. */
   ca?: Buffer | string;
+  /** If `false`, accept self-signed certificates. Default: `true`. */
   rejectUnauthorized?: boolean;
+  /** ALPN protocol strings. Default: `['quic']`. */
   alpn?: string[];
+  /** Override the SNI hostname sent during TLS handshake. */
   servername?: string;
+  /** Idle timeout in milliseconds. Default: 30_000. */
   maxIdleTimeoutMs?: number;
+  /** Maximum UDP payload size. Default: 1350. */
   maxUdpPayloadSize?: number;
+  /** Connection-level flow control window. Default: 100_000_000 bytes. */
   initialMaxData?: number;
+  /** Per-stream bidi flow control window. Default: 2_000_000 bytes. */
   initialMaxStreamDataBidiLocal?: number;
+  /** Maximum concurrent bidirectional streams. Default: 10_000. */
   initialMaxStreamsBidi?: number;
+  /** TLS 1.3 session ticket for 0-RTT resumption. */
   sessionTicket?: Buffer;
+  /** Enable 0-RTT early data. Default: `false`. */
   allow0RTT?: boolean;
+  /** Enable QUIC DATAGRAM extension (RFC 9221). Default: `false`. */
   enableDatagrams?: boolean;
+  /** Enable TLS keylog. Default: `false`. */
   keylog?: boolean;
+  /** Directory for qlog output. */
   qlogDir?: string;
+  /** qlog verbosity level. */
   qlogLevel?: string;
-}
-
-interface NativeQuicClientBinding {
-  connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean;
-  streamClose(streamId: number, errorCode: number): boolean;
-  sendDatagram(data: Buffer): boolean;
-  getSessionMetrics(): {
-    packetsIn: number; packetsOut: number;
-    bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
-  };
-  ping(): boolean;
-  getQlogPath(): string | null;
-  close(errorCode: number, reason: string): boolean;
-  localAddress(): { address: string; family: string; port: number };
-  shutdown(): void;
 }
 
 class QuicClientEventLoop implements QuicClientEventLoopLike {
@@ -99,6 +98,24 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
   }
 }
 
+/**
+ * Typed event declarations for {@link QuicClientSession}.
+ */
+export interface QuicClientSession {
+  on(event: 'connect', listener: () => void): this;
+  on(event: 'stream', listener: (stream: QuicStream) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'sessionTicket', listener: (ticket: Buffer) => void): this;
+  on(event: 'datagram', listener: (data: Buffer) => void): this;
+  on(event: string, listener: (...args: any[]) => void): this;
+}
+
+/**
+ * Client-side raw QUIC session (no HTTP/3 framing).
+ *
+ * Obtain an instance via {@link connectQuic} or {@link connectQuicAsync}.
+ */
 export class QuicClientSession extends EventEmitter {
   private _eventLoop: QuicClientEventLoop | null = null;
   private readonly _streams = new Map<number, QuicStream>();
@@ -118,14 +135,17 @@ export class QuicClientSession extends EventEmitter {
     void this._readyPromise.catch(() => undefined);
   }
 
+  /** Whether the QUIC/TLS handshake has completed. */
   get handshakeComplete(): boolean {
     return this._handshakeComplete;
   }
 
+  /** Resolves when the QUIC handshake completes. Rejects on connection failure. */
   async ready(): Promise<void> {
     return this._readyPromise;
   }
 
+  /** Open a new client-initiated bidirectional stream. */
   openStream(): QuicStream {
     if (!this._handshakeComplete) {
       throw new Error('QUIC handshake not complete — await session.ready() first');
@@ -143,11 +163,13 @@ export class QuicClientSession extends EventEmitter {
     return stream;
   }
 
+  /** Send an unreliable DATAGRAM frame (RFC 9221). */
   sendDatagram(data: Buffer | Uint8Array): boolean {
     if (!this._eventLoop) return false;
     return this._eventLoop.sendDatagram(Buffer.from(data));
   }
 
+  /** Return a transport metrics snapshot, or `null` on failure. */
   getMetrics(): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
@@ -160,10 +182,12 @@ export class QuicClientSession extends EventEmitter {
     }
   }
 
+  /** Send a PING frame. Returns `true` if the command was queued. */
   ping(): boolean {
     return this._eventLoop?.ping() ?? false;
   }
 
+  /** Close the session and destroy all streams. */
   async close(): Promise<void> {
     this._cleanupStreams();
     if (this._eventLoop) {
@@ -322,6 +346,39 @@ function normalizeCa(ca?: string | Buffer): Buffer | undefined {
   return typeof ca === 'string' ? Buffer.from(ca) : ca;
 }
 
+function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
+  const NativeQuicClient = (binding as Partial<typeof binding>).NativeQuicClient;
+  if (typeof NativeQuicClient !== 'function') {
+    throw new Error(
+      'The loaded @currentspace/http3 native binding is missing `NativeQuicClient`. '
+      + 'This install appears to contain an incomplete prebuild, so raw QUIC client APIs '
+      + '(`connectQuic`, `connectQuicAsync`) are unavailable. Reinstall a fixed package version '
+      + 'or rebuild from source.',
+    );
+  }
+  return NativeQuicClient as typeof binding.NativeQuicClient;
+}
+
+/**
+ * Connect to a raw QUIC server and return a session immediately.
+ *
+ * The session begins the QUIC handshake asynchronously. Wait for the
+ * `'connect'` event or call `session.ready()` before opening streams.
+ *
+ * @example
+ * ```ts
+ * import { connectQuic } from '@currentspace/http3';
+ * import { readFileSync } from 'node:fs';
+ *
+ * const session = connectQuic('localhost:4433', {
+ *   ca: readFileSync('ca.pem'),
+ *   alpn: ['myproto'],
+ * });
+ * await session.ready();
+ * const stream = session.openStream();
+ * stream.end('hello');
+ * ```
+ */
 export function connectQuic(authority: string, options?: QuicConnectOptions): QuicClientSession {
   let host: string;
   let port: number;
@@ -340,8 +397,9 @@ export function connectQuic(authority: string, options?: QuicConnectOptions): Qu
   }
 
   const session = new QuicClientSession();
+  const NativeQuicClient = getNativeQuicClientConstructor();
 
-  const nativeClient = new (binding as any).NativeQuicClient(
+  const nativeClient = new NativeQuicClient(
     {
       ca: normalizeCa(options?.ca),
       rejectUnauthorized: options?.rejectUnauthorized,
@@ -361,7 +419,7 @@ export function connectQuic(authority: string, options?: QuicConnectOptions): Qu
     (_err: Error | null, events: NativeEvent[]) => {
       session._dispatchEvents(events);
     },
-  ) as NativeQuicClientBinding;
+  );
 
   const eventLoop = new QuicClientEventLoop(nativeClient);
   session._setEventLoop(eventLoop);
@@ -378,6 +436,10 @@ export function connectQuic(authority: string, options?: QuicConnectOptions): Qu
   return session;
 }
 
+/**
+ * Connect to a raw QUIC server and wait for the handshake to complete.
+ * Convenience wrapper around {@link connectQuic} + `session.ready()`.
+ */
 export async function connectQuicAsync(authority: string, options?: QuicConnectOptions): Promise<QuicClientSession> {
   const session = connectQuic(authority, options);
   await session.ready();

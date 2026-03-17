@@ -1,0 +1,42 @@
+FROM node:24-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ca-certificates \
+  curl \
+  build-essential \
+  pkg-config \
+  cmake \
+  clang \
+  perl \
+  git \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.85.0
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm install --ignore-scripts
+
+COPY build.rs Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY lib ./lib
+COPY test ./test
+COPY index.js index.d.ts tsconfig.json tsconfig.test.json ./
+
+RUN npm run build
+RUN npx tsc -p tsconfig.test.json
+
+# Run all stress + bench tests
+CMD ["sh", "-c", "\
+  echo '=== io_uring stress + bench tests ===' && \
+  echo '--- quic-stress.test.js ---' && \
+  node --test dist-test/test/quic-stress.test.js && \
+  echo '--- quic-kqueue-stress.test.js (io_uring on Linux) ---' && \
+  node --test dist-test/test/quic-kqueue-stress.test.js && \
+  echo '--- bench-compare.test.js ---' && \
+  node --test dist-test/test/bench-compare.test.js && \
+  echo '--- quic-bench-profile.test.js ---' && \
+  node --test dist-test/test/quic-bench-profile.test.js && \
+  echo '=== ALL TESTS PASSED ==='"]
