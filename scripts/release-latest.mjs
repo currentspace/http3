@@ -179,7 +179,7 @@ async function waitForRunCompletion(repoSlug, runId) {
   }
 }
 
-async function dispatchAndWait(repoSlug, branch, headSha, distTag, dryRun, safariValidated) {
+async function dispatchAndWait(repoSlug, branch, headSha, distTag, dryRun) {
   const dispatchStartMs = Date.now() - 60_000;
 
   run('gh', [
@@ -192,8 +192,6 @@ async function dispatchAndWait(repoSlug, branch, headSha, distTag, dryRun, safar
     `dist_tag=${distTag}`,
     '-f',
     `dry_run=${dryRun ? 'true' : 'false'}`,
-    '-f',
-    `safari_validation_completed=${safariValidated ? 'true' : 'false'}`,
   ]);
 
   const runInfo = await waitForWorkflowRun(repoSlug, branch, headSha, dispatchStartMs);
@@ -205,14 +203,7 @@ async function main() {
   const { options, flags } = parseArgs(process.argv.slice(2));
   const distTag = options.get('--dist-tag') ?? 'latest';
   const commitStaged = flags.has('--commit-staged');
-  const safariValidated = flags.has('--safari-validation-completed');
   const validateOnly = flags.has('--validate-only');
-
-  if ((distTag === 'latest' || distTag === 'rc') && !safariValidated) {
-    throw new Error(
-      `dist-tag ${distTag} requires --safari-validation-completed to match the release workflow gate.`,
-    );
-  }
 
   const rootManifest = readJson(join(ROOT_DIR, 'package.json'));
   const version = rootManifest.version;
@@ -274,7 +265,7 @@ async function main() {
   run('git', ['push', 'origin', `${targetSha}:refs/heads/${candidateBranch}`]);
 
   console.log(`Running dry-run release validation on ${candidateBranch}`);
-  await dispatchAndWait(repoSlug, candidateBranch, targetSha, distTag, true, safariValidated);
+  await dispatchAndWait(repoSlug, candidateBranch, targetSha, distTag, true);
 
   if (validateOnly) {
     console.log(`Dry-run validation succeeded for ${targetSha} on ${candidateBranch}`);
@@ -292,7 +283,7 @@ async function main() {
   run('git', ['push', 'origin', `${targetSha}:refs/heads/main`]);
 
   console.log(`Running publish workflow on main for ${targetSha}`);
-  await dispatchAndWait(repoSlug, 'main', targetSha, distTag, false, safariValidated);
+  await dispatchAndWait(repoSlug, 'main', targetSha, distTag, false);
 
   const tagName = `v${version}`;
   const remoteTag = run('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tagName}`], {

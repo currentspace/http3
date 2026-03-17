@@ -1,3 +1,6 @@
+//! Per-connection HTTP/3 state machine wrapping a `quiche::h3::Connection`,
+//! managing stream tracking, header/data dispatch, and send buffering.
+
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;

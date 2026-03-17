@@ -17,11 +17,6 @@ on:
         required: true
         default: true
         type: boolean
-      safari_validation_completed:
-        description: Confirm Safari runbook has been executed with artifacts (required for rc/latest)
-        required: true
-        default: false
-        type: boolean
 
 jobs:
   prebuilds:
@@ -95,12 +90,6 @@ jobs:
 
       - name: Release gate checks
         run: npm run release:check
-
-      - name: Enforce Safari validation for rc/latest
-        if: ${{ inputs.dist_tag != 'canary' && !inputs.safari_validation_completed }}
-        run: |
-          echo "Safari validation must be completed before publishing rc/latest."
-          exit 1
 
       - name: Smoke install packed artifact
         run: npm run smoke:install

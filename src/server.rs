@@ -1,3 +1,7 @@
+//! N-API bindings for the HTTP/3 server (`NativeWorkerServer`). The Rust
+//! worker thread owns UDP I/O, polling, and quiche processing; events are
+//! delivered to JS via a `ThreadsafeFunction`.
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 

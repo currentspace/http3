@@ -1,3 +1,6 @@
+//! Connection routing by CID, retry-token validation, and session lifecycle
+//! management for both HTTP/3 and raw QUIC servers.
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};

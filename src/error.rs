@@ -1,3 +1,6 @@
+//! Crate error types with conversions to `napi::Error` so Rust failures
+//! surface as proper JS exceptions.
+
 use napi::Status;
 
 #[derive(Debug)]

@@ -1,3 +1,6 @@
+//! N-API bindings for the HTTP/3 client (`NativeWorkerClient`). The Rust
+//! worker thread owns UDP I/O, polling, timers, and QUIC/H3 processing.
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
