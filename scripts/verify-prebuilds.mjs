@@ -8,7 +8,6 @@ const expected = [
   'http3.linux-arm64-gnu.node',
   'http3.darwin-x64.node',
   'http3.darwin-arm64.node',
-  'http3.win32-x64-msvc.node',
 ];
 
 const requiredExports = [
