@@ -1,3 +1,6 @@
+//! Per-connection raw QUIC state (no HTTP/3 framing), managing bidirectional
+//! streams, send buffering, and event generation for the worker loop.
+
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;

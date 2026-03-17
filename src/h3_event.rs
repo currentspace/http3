@@ -1,3 +1,6 @@
+//! Event types bridged from the Rust worker thread to the JS main thread
+//! via a napi `ThreadsafeFunction`.
+
 use napi_derive::napi;
 
 pub const EVENT_NEW_SESSION: u8 = 1;

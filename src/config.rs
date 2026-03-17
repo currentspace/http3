@@ -1,3 +1,6 @@
+//! QUIC/TLS configuration builder that translates JS option objects into
+//! `quiche::Config` instances for both server and client use.
+
 use std::io::Write;
 use std::path::PathBuf;
 

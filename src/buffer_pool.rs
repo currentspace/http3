@@ -1,3 +1,6 @@
+//! Reusable buffer pool to reduce allocation pressure in the hot
+//! packet-receive and send loops.
+
 const DEFAULT_BUF_SIZE: usize = 65535;
 const DEFAULT_POOL_SIZE: usize = 256;
 

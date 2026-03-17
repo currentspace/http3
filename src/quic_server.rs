@@ -1,3 +1,6 @@
+//! N-API bindings for the raw QUIC server (`NativeQuicServer`), providing
+//! bidirectional streams without HTTP/3 framing.
+
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 

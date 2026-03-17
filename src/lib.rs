@@ -1,3 +1,7 @@
+//! Native N-API addon providing QUIC and HTTP/3 for Node.js, powered by
+//! cloudflare/quiche. Exposes worker-thread servers/clients for both HTTP/3
+//! and raw QUIC to the TypeScript layer via napi-rs.
+
 mod buffer_pool;
 mod cid;
 mod client;
