@@ -44,7 +44,9 @@ mod inner {
     // SAFETY: kqueue fds are safe to use from any thread via kevent(). The kernel
     // serializes concurrent kevent() calls. KqueueWaker only triggers EVFILT_USER,
     // which is an atomic wakeup — no shared mutable state between threads.
+    #[allow(unsafe_code)]
     unsafe impl Send for KqueueWaker {}
+    #[allow(unsafe_code)]
     unsafe impl Sync for KqueueWaker {}
 
     impl Driver for KqueueDriver {
@@ -261,6 +263,7 @@ mod inner {
             // SAFETY: kq_fd is a valid kqueue fd. changelist is stack-allocated and
             // lives for the duration of the kevent() call. We pass 0 for nevents
             // (no output), so the eventlist pointer is irrelevant.
+            #[allow(unsafe_code)]
             let rc = unsafe {
                 libc::kevent(
                     self.kq_fd,

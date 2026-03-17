@@ -262,10 +262,6 @@ impl ConnectionMap {
         buf.extend(self.connections.iter().map(|(handle, _)| handle));
     }
 
-    pub fn connection_count(&self) -> usize {
-        self.connections.len()
-    }
-
     /// Remove all closed connections, returning their handles.
     pub fn drain_closed(&mut self) -> Vec<usize> {
         let closed: Vec<usize> = self
