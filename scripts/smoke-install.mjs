@@ -1,17 +1,9 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 const repoRoot = process.cwd();
-const tarballs = readdirSync(repoRoot)
-  .filter((name) => name.endsWith('.tgz'))
-  .sort();
-if (tarballs.length === 0) {
-  throw new Error('no package tarball found. Run `npm pack` first.');
-}
-const tarball = resolve(repoRoot, tarballs[tarballs.length - 1]);
-
 const tempDir = mkdtempSync(join(tmpdir(), 'http3-smoke-install-'));
 const run = (command, args) => {
   const result = spawnSync(command, args, { cwd: tempDir, stdio: 'inherit' });
@@ -20,7 +12,27 @@ const run = (command, args) => {
   }
 };
 
+let tarball;
 try {
+  const pack = spawnSync('npm', ['pack', '--silent'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (pack.status !== 0) {
+    throw new Error('npm pack --silent failed');
+  }
+
+  const tarballName = pack.stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!tarballName) {
+    throw new Error('npm pack --silent did not produce a tarball name');
+  }
+
+  tarball = resolve(repoRoot, tarballName);
   run('npm', ['init', '-y']);
   run('npm', ['install', tarball]);
   const check = spawnSync(
@@ -42,4 +54,7 @@ try {
   }
 } finally {
   rmSync(tempDir, { recursive: true, force: true });
+  if (tarball) {
+    rmSync(tarball, { force: true });
+  }
 }

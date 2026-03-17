@@ -134,6 +134,11 @@ function discoverNativePackages() {
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
+function runLocalReleaseGate() {
+  console.log('Running local release gate: npm run release:local-gate');
+  run('npm', ['run', 'release:local-gate']);
+}
+
 async function sleep(ms) {
   await new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -215,6 +220,7 @@ async function main() {
   const distTag = options.get('--dist-tag') ?? 'latest';
   const publishMode = options.get('--publish-mode') ?? 'auto';
   const commitStaged = flags.has('--commit-staged');
+  const skipLocalChecks = flags.has('--skip-local-checks');
   const validateOnly = flags.has('--validate-only');
 
   if (!['auto', 'workflow', 'local'].includes(publishMode)) {
@@ -279,6 +285,18 @@ async function main() {
     run('git', ['commit', '-m', `release ${version}`]);
   } else if (stagedFiles.length > 0) {
     throw new Error('Staged changes are present. Re-run with --commit-staged or commit them first.');
+  }
+
+  if (skipLocalChecks) {
+    console.log('Skipping local release gate (--skip-local-checks).');
+  } else {
+    if (unstagedFiles.length > 0 || untrackedFiles.length > 0) {
+      throw new Error(
+        'Local release checks require a clean worktree because they run against the checked-out files. '
+        + 'Commit or stash unrelated changes, or re-run with --skip-local-checks.',
+      );
+    }
+    runLocalReleaseGate();
   }
 
   const targetSha = output('git', ['rev-parse', 'HEAD']);
