@@ -70,8 +70,6 @@ jobs:
 
       - run: npm install -g npm@latest
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - run: npm ci
 
       - name: Download prebuild artifacts
