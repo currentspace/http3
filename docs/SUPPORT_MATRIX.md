@@ -12,6 +12,13 @@
 - HTTP/2: supported over TLS/TCP via Node `node:http2`
 - Unified listener: both protocols on the same host/port
 - QUIC-LB plaintext CID mode: supported via `quicLb + serverId`
+- Raw QUIC: bidirectional streams, datagrams, session resumption, custom ALPN
+
+## Transport Layer
+
+- macOS: kqueue (platform-native I/O)
+- Linux: io_uring (platform-native I/O)
+- QUIC engine: quiche 0.26.1
 
 ## Platform Targets (N-API prebuild intent)
 

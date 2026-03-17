@@ -50,6 +50,50 @@ first production-ready release line.
 - `connect(authority, options?)` (event-driven)
 - `connectAsync(authority, options?)` (awaitable handshake helper)
 
+## Stable QUIC Server API
+
+- `createQuicServer(options)` → `QuicServer`
+- `QuicServer#listen(port, host?)` → `Promise<{ address, family, port }>`
+- `QuicServer#close()` → `Promise<void>`
+- `QuicServer#address()` → `{ address, family, port } | null`
+- `QuicServer` events: `'session'`, `'listening'`, `'close'`
+- `QuicServerSession#openStream()` → `QuicStream`
+- `QuicServerSession#close(errorCode?, reason?)`
+- `QuicServerSession#sendDatagram(data)`
+- `QuicServerSession#getMetrics()` → `{ packetsIn, packetsOut, bytesIn, bytesOut, handshakeTimeMs, rttMs, cwnd } | null`
+- `QuicServerSession#ping()`
+- `QuicServerSession` events: `'stream'`, `'datagram'`, `'close'`, `'error'`
+
+## Stable QUIC Client API
+
+- `connectQuic(authority, options?)` → `QuicClientSession` (event-driven)
+- `connectQuicAsync(authority, options?)` → `Promise<QuicClientSession>` (awaitable handshake)
+- `QuicClientSession#ready()` → `Promise<void>`
+- `QuicClientSession#openStream()` → `QuicStream`
+- `QuicClientSession#close()` → `Promise<void>`
+- `QuicClientSession#sendDatagram(data)`
+- `QuicClientSession#getMetrics()` → `{ packetsIn, packetsOut, bytesIn, bytesOut, handshakeTimeMs, rttMs, cwnd } | null`
+- `QuicClientSession#ping()`
+- `QuicClientSession#handshakeComplete` (read-only boolean)
+- `QuicClientSession` events: `'connect'`, `'stream'`, `'datagram'`, `'sessionTicket'`, `'close'`, `'error'`
+
+## Stable QUIC Stream
+
+- `QuicStream` (extends `Duplex`)
+- `.id` — stream ID (read-only)
+- `.close(code?)` — reset the stream with error code (default 0)
+- Standard Duplex methods: `.write()`, `.end()`, `.pipe()`, `.destroy()`
+
+## Stable QUIC Options
+
+- `QuicServerOptions`: `key`, `cert`, `ca?`, `alpn?`, `maxIdleTimeoutMs?`, `maxUdpPayloadSize?`, `initialMaxData?`, `initialMaxStreamDataBidiLocal?`, `initialMaxStreamsBidi?`, `disableActiveMigration?`, `enableDatagrams?`, `maxConnections?`, `disableRetry?`, `qlogDir?`, `qlogLevel?`, `keylog?`
+- `QuicConnectOptions`: `ca?`, `rejectUnauthorized?`, `alpn?`, `servername?`, `maxIdleTimeoutMs?`, `maxUdpPayloadSize?`, `initialMaxData?`, `initialMaxStreamDataBidiLocal?`, `initialMaxStreamsBidi?`, `sessionTicket?`, `allow0RTT?`, `enableDatagrams?`, `keylog?`, `qlogDir?`, `qlogLevel?`
+
+## QUIC Error Constants
+
+- `QUIC_NO_ERROR` (0x00) through `QUIC_CRYPTO_ERROR` (0x0100)
+- See [QUIC_GUIDE.md](./QUIC_GUIDE.md) for the full list and usage.
+
 ## Stable Runtime Ops API
 
 - `createHealthController()`
