@@ -6,6 +6,7 @@
 
 #[cfg(target_os = "linux")]
 mod inner {
+    use std::collections::VecDeque;
     use std::io;
     use std::net::SocketAddr;
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -76,7 +77,7 @@ mod inner {
         rx_in_flight: usize,
         /// Packets that couldn't be sent because the OS UDP buffer was full.
         /// Retried at the start of each poll cycle via synchronous send_to.
-        unsent: Vec<TxDatagram>,
+        unsent: VecDeque<TxDatagram>,
         /// Scratch buffer for fallback recv_from after CQE drain.
         recv_buf: Vec<u8>,
         /// Buffers from successfully sent packets, ready for pool recycling.
@@ -120,7 +121,7 @@ mod inner {
                 rx_slots,
                 waker_buf: Box::new([0u8; 8]),
                 rx_in_flight: 0,
-                unsent: Vec::new(),
+                unsent: VecDeque::new(),
                 recv_buf: vec![0u8; 65535],
                 recycled_tx: Vec::new(),
             };
@@ -222,8 +223,10 @@ mod inner {
                                 8,
                             );
                         }
-                        // Resubmit waker read.
+                        // Resubmit waker read and submit immediately so it's
+                        // ready before the next submit_with_args blocks.
                         let _ = self.submit_waker_read();
+                        let _ = self.ring.submit();
                     }
                     _ => {}
                 }
@@ -260,7 +263,7 @@ mod inner {
             for pkt in packets {
                 match self.socket.send_to(&pkt.data, pkt.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        self.unsent.push(pkt);
+                        self.unsent.push_back(pkt);
                     }
                     _ => {
                         self.recycled_tx.push(pkt.data);
@@ -331,12 +334,13 @@ mod inner {
 
         /// Retry sending queued packets. Stops at the first WouldBlock.
         fn drain_unsent(&mut self) {
-            while !self.unsent.is_empty() {
-                match self.socket.send_to(&self.unsent[0].data, self.unsent[0].to) {
+            while let Some(front) = self.unsent.front() {
+                match self.socket.send_to(&front.data, front.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
                     Ok(_) | Err(_) => {
-                        let pkt = self.unsent.remove(0);
-                        self.recycled_tx.push(pkt.data);
+                        if let Some(pkt) = self.unsent.pop_front() {
+                            self.recycled_tx.push(pkt.data);
+                        }
                     }
                 }
             }
