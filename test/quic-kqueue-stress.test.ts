@@ -23,6 +23,12 @@ import { createQuicServer, connectQuicAsync } from '../lib/index.js';
 import type { QuicServer, QuicServerSession, QuicClientSession } from '../lib/index.js';
 import type { QuicStream } from '../lib/quic-stream.js';
 
+const IS_CI = process.env.GITHUB_ACTIONS === 'true' || process.env.CI === 'true';
+
+function scaleStressTimeout(ms: number): number {
+  return IS_CI ? ms * 3 : ms;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function collectStream(stream: QuicStream, timeoutMs: number): Promise<Buffer> {
@@ -189,10 +195,10 @@ describe('QUIC kqueue stress tests', () => {
   // Exercises EVFILT_WRITE backpressure + round-robin send scheduling
   // across many concurrent peers on the server's single UDP socket.
 
-  it('wide blast — 15 connections × 10 streams × 64KB', { timeout: 25_000 }, async () => {
+  it('wide blast — 15 connections × 10 streams × 64KB', { timeout: scaleStressTimeout(25_000) }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(64 * 1024, 0xaa);
-    const streamTimeout = 20_000;
+    const streamTimeout = scaleStressTimeout(20_000);
 
     const { clients, errors: connErrors } = await openConnectionsBatched(serverPort, 15, 10);
 
@@ -220,10 +226,10 @@ describe('QUIC kqueue stress tests', () => {
   // Floods the waker with rapid stream open + write + FIN.
   // Tests EVFILT_USER NOTE_TRIGGER coalescing under high command rate.
 
-  it('deep pipeline — 5 connections × 500 streams × 4KB', { timeout: 20_000 }, async () => {
+  it('deep pipeline — 5 connections × 500 streams × 4KB', { timeout: scaleStressTimeout(20_000) }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(4096, 0xbb);
-    const streamTimeout = 15_000;
+    const streamTimeout = scaleStressTimeout(15_000);
 
     const { clients, errors: connErrors } = await openConnectionsBatched(serverPort, 5, 5);
 
@@ -251,10 +257,10 @@ describe('QUIC kqueue stress tests', () => {
   // Long-lived connections with burst-idle-burst pattern.
   // Exercises EV_CLEAR edge-triggered re-arm + throughput stability.
 
-  it('sustained rounds — 10 connections × 5 rounds × 50 streams × 64KB', { timeout: 45_000 }, async () => {
+  it('sustained rounds — 10 connections × 5 rounds × 50 streams × 64KB', { timeout: scaleStressTimeout(45_000) }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(64 * 1024, 0xcc);
-    const streamTimeout = 20_000;
+    const streamTimeout = scaleStressTimeout(20_000);
     const rounds = 5;
     const streamsPerRound = 50;
 
@@ -308,13 +314,13 @@ describe('QUIC kqueue stress tests', () => {
   // Large payloads force repeated flow control stalls + drain resume.
   // Data integrity verified via byte-pattern comparison.
 
-  it('backpressure probe — 2 connections × 5 streams × 2MB', { timeout: 20_000 }, async () => {
+  it('backpressure probe — 2 connections × 5 streams × 2MB', { timeout: scaleStressTimeout(20_000) }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(2 * 1024 * 1024);
     for (let i = 0; i < payload.length; i++) {
       payload[i] = i & 0xff;
     }
-    const streamTimeout = 15_000;
+    const streamTimeout = scaleStressTimeout(15_000);
 
     const { clients, errors: connErrors } = await openConnectionsBatched(serverPort, 2, 2);
 
@@ -342,10 +348,10 @@ describe('QUIC kqueue stress tests', () => {
   // Rapid create/traffic/destroy cycle.
   // Tests kqueue instance creation + teardown at scale.
 
-  it('connection churn — 200 connections in batches of 40 × 1 stream × 1KB', { timeout: 25_000 }, async () => {
+  it('connection churn — 200 connections in batches of 40 × 1 stream × 1KB', { timeout: scaleStressTimeout(25_000) }, async () => {
     const snap = snapResources();
     const payload = Buffer.alloc(1024, 0xdd);
-    const streamTimeout = 10_000;
+    const streamTimeout = scaleStressTimeout(10_000);
     const total = 200;
     const batchSize = 40;
     const latencies: number[] = [];

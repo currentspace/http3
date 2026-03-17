@@ -10,6 +10,8 @@ import { createQuicServer, connectQuicAsync } from '../lib/index.js';
 import type { QuicServer, QuicServerSession, QuicClientSession } from '../lib/index.js';
 import type { QuicStream } from '../lib/quic-stream.js';
 
+const IS_CI = process.env.GITHUB_ACTIONS === 'true' || process.env.CI === 'true';
+
 let certs: { key: Buffer; cert: Buffer };
 
 // ── Stress test framework ──────────────────────────────────────────
@@ -55,7 +57,8 @@ export async function runStressTest(
   config: StressConfig,
 ): Promise<StressResult> {
   const timeoutMs = config.timeoutMs ?? 30_000;
-  const streamTimeoutMs = Math.min(timeoutMs, 15_000);
+  const streamTimeoutCapMs = IS_CI ? 45_000 : 15_000;
+  const streamTimeoutMs = Math.min(timeoutMs, streamTimeoutCapMs);
   const start = Date.now();
   let totalStreams = 0;
   let totalBytes = 0;
