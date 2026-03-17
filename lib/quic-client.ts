@@ -356,7 +356,7 @@ function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
       + 'or rebuild from source.',
     );
   }
-  return NativeQuicClient as typeof binding.NativeQuicClient;
+  return NativeQuicClient;
 }
 
 /**

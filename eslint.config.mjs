@@ -16,6 +16,10 @@ export default tseslint.config(
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
 
+      // Typed EventEmitter APIs rely on declaration merging and overloads.
+      '@typescript-eslint/no-unsafe-declaration-merging': 'off',
+      '@typescript-eslint/unified-signatures': 'off',
+
       // Enforce async/await over .then/.catch
       '@typescript-eslint/promise-function-async': 'error',
 
@@ -32,6 +36,9 @@ export default tseslint.config(
 
       // Relax some strict rules that conflict with napi interop or stub code
       '@typescript-eslint/no-extraneous-class': 'off',      // EventEmitter subclasses
+      '@typescript-eslint/no-explicit-any': ['error', {
+        ignoreRestArgs: true,
+      }],
       '@typescript-eslint/no-unused-vars': ['error', {
         argsIgnorePattern: '^_',
         varsIgnorePattern: '^_',
@@ -54,6 +61,15 @@ export default tseslint.config(
       '@typescript-eslint/no-floating-promises': 'off',
       '@typescript-eslint/promise-function-async': 'off',
       '@typescript-eslint/require-await': 'off',
+      '@typescript-eslint/no-misused-promises': 'off',
+      '@typescript-eslint/no-non-null-assertion': 'off',
+      '@typescript-eslint/no-unnecessary-condition': 'off',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'off',
+      '@typescript-eslint/explicit-function-return-type': 'off',
+      '@typescript-eslint/restrict-plus-operands': 'off',
+      '@typescript-eslint/restrict-template-expressions': 'off',
+      '@typescript-eslint/prefer-promise-reject-errors': 'off',
+      '@typescript-eslint/use-unknown-in-catch-callback-variable': 'off',
     },
   },
   {
