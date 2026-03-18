@@ -70,10 +70,15 @@ async function main(): Promise<void> {
     });
     session.on('stream', (stream: QuicStream) => {
       streamCount++;
+      const chunks: Buffer[] = [];
       stream.on('data', (chunk: Buffer) => {
         bytesEchoed += chunk.length;
+        chunks.push(chunk);
       });
-      stream.pipe(stream);
+      stream.on('end', () => {
+        const body = Buffer.concat(chunks);
+        stream.end(body);
+      });
     });
   });
 

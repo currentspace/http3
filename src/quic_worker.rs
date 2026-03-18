@@ -29,7 +29,7 @@ use crate::event_loop::{
 };
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
-use crate::reactor_metrics::{self, SessionKind, WorkerSpawnKind};
+use crate::reactor_metrics::{self, RawQuicClientCloseCause, SessionKind, WorkerSpawnKind};
 use crate::shared_client_reactor;
 use crate::timer_heap::TimerHeap;
 use crate::transport::{self, ErasedWaker, TxDatagram};
@@ -1080,7 +1080,15 @@ fn remove_shared_quic_client_session(
         return;
     }
     if let Some(session) = sessions.get(handle) {
+        reactor_metrics::record_raw_quic_client_reap(
+            session.handler.pending_writes.len(),
+            session.handler.conn.blocked_queue.len(),
+            session.handler.conn.known_streams.len(),
+        );
         if !session.handler.session_closed_emitted {
+            reactor_metrics::record_raw_quic_client_close_cause(
+                RawQuicClientCloseCause::Release,
+            );
             reactor_metrics::record_session_close(SessionKind::RawQuicClient);
         }
     }
@@ -1131,6 +1139,21 @@ fn flush_shared_quic_client_sends(
             )
         },
     );
+}
+
+fn refresh_shared_quic_client_timers_after_sends(
+    sessions: &mut Slab<SharedQuicClientSession>,
+    timer_heap: &mut TimerHeap,
+    handles_buf: &mut Vec<usize>,
+) {
+    handles_buf.clear();
+    handles_buf.extend(sessions.iter().map(|(handle, _)| handle));
+    for handle in handles_buf.iter().copied() {
+        if let Some(session) = sessions.get_mut(handle) {
+            session.handler.refresh_timeout_deadline();
+            sync_shared_quic_client_timer(timer_heap, handle, session);
+        }
+    }
 }
 
 fn run_shared_quic_client_event_loop<D: transport::Driver>(
@@ -1283,6 +1306,11 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
         }
 
         flush_shared_quic_client_sends(&mut sessions, &mut handles_buf, &mut tx_pool, &mut outbound);
+        refresh_shared_quic_client_timers_after_sends(
+            &mut sessions,
+            &mut timer_heap,
+            &mut handles_buf,
+        );
         if !outbound.is_empty() {
             if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
                 emit_shared_quic_client_runtime_error(
@@ -1335,6 +1363,11 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     &mut handles_buf,
                     &mut tx_pool,
                     &mut outbound,
+                );
+                refresh_shared_quic_client_timers_after_sends(
+                    &mut sessions,
+                    &mut timer_heap,
+                    &mut handles_buf,
                 );
                 if !outbound.is_empty() {
                     if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
@@ -1393,6 +1426,11 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
         }
 
         flush_shared_quic_client_sends(&mut sessions, &mut handles_buf, &mut tx_pool, &mut outbound);
+        refresh_shared_quic_client_timers_after_sends(
+            &mut sessions,
+            &mut timer_heap,
+            &mut handles_buf,
+        );
         if !outbound.is_empty() {
             if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
                 emit_shared_quic_client_runtime_error(
@@ -1809,6 +1847,7 @@ impl ProtocolHandler for QuicServerHandler {
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
         let flushed = flush_quic_pending_writes(&mut self.conn_map, &mut self.pending_writes);
         for (conn_handle, stream_id) in flushed {
+            reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(conn_handle, stream_id));
         }
     }
@@ -1937,6 +1976,10 @@ impl QuicClientHandler {
             .close(true, u64::from(error_code), reason.as_bytes());
     }
 
+    fn refresh_timeout_deadline(&mut self) {
+        self.timer_deadline = self.conn.timeout().map(|timeout| Instant::now() + timeout);
+    }
+
     fn queue_stream_send(&mut self, stream_id: u64, data: Vec<u8>, fin: bool) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
             pw.data.extend_from_slice(&data);
@@ -1953,6 +1996,7 @@ impl QuicClientHandler {
                     fin,
                 },
             );
+            reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
         } else if fin && written == 0 && data.is_empty() {
             self.pending_writes.insert(
                 stream_id,
@@ -1961,6 +2005,7 @@ impl QuicClientHandler {
                     fin: true,
                 },
             );
+            reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
         }
     }
 
@@ -1984,10 +2029,16 @@ impl QuicClientHandler {
         self.conn.qlog_path.clone()
     }
 
-    fn emit_session_close(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
+    fn emit_session_close(
+        &mut self,
+        batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
+        cause: RawQuicClientCloseCause,
+    ) {
         if self.session_closed_emitted {
             return;
         }
+        reactor_metrics::record_raw_quic_client_close_cause(cause);
         reactor_metrics::record_session_close(SessionKind::RawQuicClient);
         batch.push(JsH3Event::session_close(conn_handle));
         self.session_closed_emitted = true;
@@ -2022,7 +2073,7 @@ impl QuicClientHandler {
         self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
 
         if self.conn.is_closed() && !self.session_closed_emitted {
-            self.emit_session_close(batch, conn_handle);
+            self.emit_session_close(batch, conn_handle, RawQuicClientCloseCause::Packet);
         }
     }
 
@@ -2035,7 +2086,7 @@ impl QuicClientHandler {
         if self.timer_deadline.is_some_and(|deadline| deadline <= now) {
             self.conn.on_timeout();
             if self.conn.is_closed() && !self.session_closed_emitted {
-                self.emit_session_close(batch, conn_handle);
+                self.emit_session_close(batch, conn_handle, RawQuicClientCloseCause::Timeout);
             } else {
                 self.conn.poll_quic_events(conn_handle, batch);
                 if let Some(ticket) = self.conn.update_session_ticket() {
@@ -2081,6 +2132,7 @@ impl QuicClientHandler {
     ) {
         let flushed = flush_quic_client_pending_writes(&mut self.conn, &mut self.pending_writes);
         for stream_id in flushed {
+            reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(conn_handle, stream_id));
         }
     }
@@ -2114,6 +2166,9 @@ impl ProtocolHandler for QuicClientHandler {
         match cmd {
             QuicClientCommand::Shutdown => {
                 if !self.session_closed_emitted {
+                    reactor_metrics::record_raw_quic_client_close_cause(
+                        RawQuicClientCloseCause::Shutdown,
+                    );
                     reactor_metrics::record_session_close(SessionKind::RawQuicClient);
                     self.session_closed_emitted = true;
                 }
@@ -2170,6 +2225,7 @@ impl ProtocolHandler for QuicClientHandler {
         while let Some(packet) = self.try_send_next() {
             outbound.push(packet);
         }
+        self.refresh_timeout_deadline();
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {

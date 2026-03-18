@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   clang \
   perl \
   git \
+  linux-perf \
   strace \
   && rm -rf /var/lib/apt/lists/*
 

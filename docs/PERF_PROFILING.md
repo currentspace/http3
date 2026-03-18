@@ -156,6 +156,68 @@ signal that the benchmark ended while some server-side closes were still
 draining. In those cases, prefer `sessionCount`, `sessionsClosed`, and
 `activeSessions` over assuming the close count has fully settled.
 
+## Current bottleneck owners
+
+The current `quic-bottlenecks` artifact set produced a stable first-pass owner
+for each meaningful delta:
+
+- `setup-cost / fallback overhead`: `H3 ordinary auto fallback` versus
+  `H3 ordinary portable` in ordinary Docker. Both land on `portable/poll`, but
+  auto fallback doubles client setup work (`driverSetupAttemptsTotal=40` vs
+  `20`) and `strace -fc` shows more failed `io_uring_setup` probes (`34` vs
+  `13`) without any steady-state backlog signal.
+- `client topology cost`: Linux H3 portable client lanes remain the main
+  ownership-model outlier because they stay `dedicated-per-session`. The saved
+  groups show `driverSetupAttempts=20-40`, `h3ClientDedicatedWorkerSpawns=20`,
+  and much wider throughput and p95 spread than shared-per-port fast lanes.
+- `raw-QUIC correctness bug`: the pre-fix `QUIC unconfined server portable,
+  client fast` lane fell to `950/1000` streams with `50` timeouts,
+  `rawQuicClientReapsWithKnownStreams=1`, and second-round `p95=91.91ms`. After
+  the timer-deadline refresh fix, the same lane returns `1000/1000`, `0`
+  errors, `rawQuicClientReapsWithKnownStreams=0`, and `p95=15.53-18.63ms`.
+- `higher-layer H3 overhead`: the aligned H3 mixed lanes stay slower than
+  like-for-like QUIC controls even when backend counters stay clean.
+  `H3 server portable, client fast` reaches about `129.8 Mbps` versus QUIC's
+  `158.7 Mbps` in the same mixed shape, and `H3 server fast, client portable`
+  reaches about `146.3 Mbps` versus QUIC's `167.6 Mbps`. That points at H3
+  request/session/header work above raw transport, not at `io_uring` queue
+  pressure.
+- `server topology cost`: no separate server-topology owner emerged in this
+  campaign. QUIC and H3 servers already share the
+  `one-worker-per-bound-port` shape, and the `QUIC server fast` control lane
+  stayed stable enough to act as the transport baseline.
+- `macOS note`: both public modes still land on `kqueue`, and the quick
+  `sample` plus follow-up `xctrace` passes did not show a sustained `kqueue`
+  backlog hotspot. Treat the remaining macOS H3 delta as the same
+  higher-layer-H3 bucket unless a longer trace shows otherwise.
+
+## Owner-specific recipes
+
+Use these focused runs when one bottleneck class regresses:
+
+`client topology cost` is analyzer-driven rather than tied to one profiler
+capture. Re-run `npm run perf:analyze -- --results-dir perf-results/quic-bottlenecks`
+and compare the Linux H3 client groups with `topology=dedicated-per-session`
+against the ones with `topology=shared-per-port`.
+
+```bash
+# setup-cost / fallback overhead
+npm run perf:linux:h3 -- --docker --docker-lane "ordinary auto fallback" --strace --perf-stat --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label h3-ordinary-auto-fallback
+npm run perf:linux:h3 -- --docker --docker-lane "ordinary portable" --strace --perf-stat --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label h3-ordinary-portable
+
+# raw-QUIC correctness regression check
+npm run bench:quic:docker -- --lane "unconfined server portable, client fast" --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label quic-client-fast-regression
+
+# higher-layer H3 overhead versus QUIC transport control
+npm run perf:linux:h3 -- --docker --docker-lane "unconfined server portable, client fast" --perf-record --perf-stat --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label h3-client-fast
+npm run perf:linux:h3 -- --docker --docker-lane "unconfined server fast, client portable" --perf-record --perf-stat --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label h3-server-fast
+npm run perf:linux:quic -- --docker --docker-lane "unconfined server fast, client portable" --perf-record --perf-stat --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label quic-server-fast
+
+# macOS same-backend check
+npm run perf:macos:h3 -- --sample --xctrace --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label h3-macos
+npm run perf:macos:quic -- --sample --profile balanced --rounds 2 --results-dir perf-results/quic-bottlenecks --label quic-macos
+```
+
 ## Backend-specific counters
 
 Generic reactor counters remain useful for setup counts, worker spawns, shared
