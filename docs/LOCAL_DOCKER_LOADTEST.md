@@ -10,6 +10,34 @@ use [`RUNTIME_MODES.md`](./RUNTIME_MODES.md) plus:
 npm run test:docker:runtime
 ```
 
+For raw QUIC runtime/driver benchmarking inside Linux containers, use:
+
+```bash
+npm run bench:quic:docker
+```
+
+This runs the QUIC benchmark in Docker across:
+
+- ordinary container `portable`
+- ordinary container `auto` fallback
+- ordinary container `fast` failure diagnostic
+- `cap_add: SYS_ADMIN` fast failure diagnostic
+- `seccomp=unconfined` `portable`
+- `seccomp=unconfined` `fast`
+- mixed `portable`/`fast` client-server lanes
+
+To also compare the broader `privileged: true` fast lane:
+
+```bash
+npm run bench:quic:docker:privileged
+```
+
+Forward additional benchmark knobs after `--`, for example:
+
+```bash
+npm run bench:quic:docker -- --profile balanced --rounds 3
+```
+
 ## 1) Generate local TLS certs
 
 ```bash

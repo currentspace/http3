@@ -10,7 +10,31 @@ import { generateTestCerts } from './generate-certs.js';
 import type { QuicServerSession } from '../lib/index.js';
 import type { QuicStream } from '../lib/quic-stream.js';
 
+interface BenchServerConfig {
+  host?: string;
+  port?: number;
+  runtimeMode?: 'auto' | 'fast' | 'portable';
+  fallbackPolicy?: 'error' | 'warn-and-fallback';
+  statsIntervalMs?: number;
+}
+
+function loadConfig(): BenchServerConfig {
+  const configStr = process.argv[2];
+  if (!configStr) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(configStr) as BenchServerConfig;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Invalid quic bench server config: ${message}\n`);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
+  const config = loadConfig();
   const certs = generateTestCerts();
 
   const server = createQuicServer({
@@ -19,6 +43,8 @@ async function main(): Promise<void> {
     disableRetry: true,
     maxConnections: 10_000,
     initialMaxStreamsBidi: 50_000,
+    runtimeMode: config.runtimeMode,
+    fallbackPolicy: config.fallbackPolicy,
   });
 
   let sessionCount = 0;
@@ -36,34 +62,58 @@ async function main(): Promise<void> {
     });
   });
 
-  const addr = await server.listen(0, '127.0.0.1');
+  const emitJson = (message: Record<string, unknown>): void => {
+    process.stdout.write(`${JSON.stringify(message)}\n`);
+  };
 
-  const readyMsg = JSON.stringify({
-    type: 'ready',
-    port: addr.port,
-    address: addr.address,
-  });
-  process.stdout.write(readyMsg + '\n');
-
-  const statsInterval = setInterval(() => {
-    const msg = JSON.stringify({
-      type: 'stats',
+  const snapshot = (type: 'stats' | 'summary'): Record<string, unknown> => {
+    const cpu = process.cpuUsage();
+    const memory = process.memoryUsage();
+    return {
+      type,
+      timestamp: Date.now(),
       sessionCount,
       streamCount,
       bytesEchoed,
-      heapUsed: process.memoryUsage().heapUsed,
-      rss: process.memoryUsage().rss,
-      cpuUser: process.cpuUsage().user,
-      cpuSystem: process.cpuUsage().system,
-    });
-    process.stdout.write(msg + '\n');
-  }, 1000);
+      heapUsed: memory.heapUsed,
+      rss: memory.rss,
+      cpuUser: cpu.user,
+      cpuSystem: cpu.system,
+      runtimeInfo: server.runtimeInfo,
+    };
+  };
+
+  const addr = await server.listen(config.port ?? 0, config.host ?? '127.0.0.1');
+
+  emitJson({
+    type: 'ready',
+    port: addr.port,
+    address: addr.address,
+    runtimeInfo: server.runtimeInfo,
+  });
+
+  const statsInterval = setInterval(() => {
+    emitJson(snapshot('stats'));
+  }, config.statsIntervalMs ?? 1000);
   statsInterval.unref();
 
-  process.on('SIGTERM', async () => {
+  let shuttingDown = false;
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
     clearInterval(statsInterval);
+    emitJson(snapshot('summary'));
     await server.close();
     process.exit(0);
+  };
+
+  process.on('SIGTERM', () => {
+    void shutdown();
+  });
+  process.on('SIGINT', () => {
+    void shutdown();
   });
 
   process.stdin.resume();

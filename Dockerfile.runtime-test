@@ -23,6 +23,7 @@ RUN npm install --ignore-scripts
 COPY build.rs Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY lib ./lib
+COPY scripts ./scripts
 COPY test ./test
 COPY index.js index.d.ts tsconfig.json tsconfig.test.json ./
 
