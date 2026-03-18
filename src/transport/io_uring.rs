@@ -13,6 +13,7 @@ mod inner {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use crate::reactor_metrics;
     use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
 
     const RX_SLOTS: usize = 256;
@@ -282,7 +283,9 @@ mod inner {
                         } else {
                             let errno = -result;
                             if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR {
+                                reactor_metrics::record_io_uring_retryable_send_completion();
                                 self.pending_tx.push_back(slot.take_packet());
+                                reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
                             } else {
                                 self.recycled_tx.push(slot.recycle_buffer());
                             }
@@ -319,6 +322,7 @@ mod inner {
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
             for pkt in packets {
                 self.pending_tx.push_back(pkt);
+                reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
             }
             self.submit_pending_tx()?;
             let _ = self.ring.submit();
@@ -366,6 +370,7 @@ mod inner {
                     })?;
                 }
                 self.rx_in_flight += 1;
+                reactor_metrics::record_io_uring_rx_in_flight(self.rx_in_flight);
             }
             Ok(())
         }
@@ -392,6 +397,7 @@ mod inner {
             while let Some(packet) = self.pending_tx.pop_front() {
                 let Some(idx) = self.tx_slots.iter().position(|slot| !slot.in_flight) else {
                     self.pending_tx.push_front(packet);
+                    reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
                     break;
                 };
 
@@ -413,6 +419,7 @@ mod inner {
                 }
 
                 self.tx_in_flight += 1;
+                reactor_metrics::record_io_uring_tx_in_flight(self.tx_in_flight);
             }
 
             Ok(())

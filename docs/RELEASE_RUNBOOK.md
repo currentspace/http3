@@ -18,6 +18,26 @@
 - `npm run release:local-gate`
 - This runs lint, typecheck, tests, browser checks, concurrency/load gates, and the packed-install smoke test locally before CI publish.
 
+## Manual Perf Campaign
+
+Before promoting transport-topology or runtime-selection changes, capture a
+small artifact set and review it with the analyzer:
+
+```bash
+npm run bench:quic -- --profile smoke --results-dir perf-results --label release-quic-smoke
+npm run bench:h3 -- --profile smoke --results-dir perf-results --label release-h3-smoke
+npm run bench:quic:docker -- --results-dir perf-results --label release-quic-docker
+npm run bench:h3:docker -- --results-dir perf-results --label release-h3-docker
+npm run perf:analyze -- --results-dir perf-results
+```
+
+When deeper Linux or macOS diagnosis is needed, add profiler wrapper runs from
+[`PERF_PROFILING.md`](./PERF_PROFILING.md) and keep the generated profiler
+artifacts next to the benchmark JSON.
+
+Do not hard-wire new benchmark gates into CI until the baseline criteria in
+`PERF_PROFILING.md` are stable.
+
 ## One-Time Bootstrap For A New Native Package
 
 - New native sidecar packages must exist on npm before Trusted Publisher can be configured for them.

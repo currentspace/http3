@@ -196,6 +196,13 @@ export interface JsReactorTelemetrySnapshot {
   h3ClientSessionsClosed: number
   h3ServerSessionsOpened: number
   h3ServerSessionsClosed: number
+  ioUringRxInFlightHighWatermark: number
+  ioUringTxInFlightHighWatermark: number
+  ioUringPendingTxHighWatermark: number
+  ioUringRetryableSendCompletions: number
+  kqueueUnsentHighWatermark: number
+  kqueueWouldBlockSends: number
+  kqueueWriteWakeups: number
   txBuffersRecycled: number
 }
 
