@@ -11,14 +11,14 @@ use crossbeam_channel::Sender;
 use ring::rand::SecureRandom;
 
 use crate::buffer_pool::BufferPool;
-use crate::config::Http3Config;
+use crate::config::{Http3Config, TransportRuntimeMode};
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::connection_map::ConnectionMap;
 use crate::error::Http3NativeError;
 use crate::event_loop::{self, ProtocolHandler, SEND_BUF_SIZE};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::timer_heap::TimerHeap;
-use crate::transport::{self, Driver, ErasedWaker, TxDatagram};
+use crate::transport::{self, ErasedWaker, TxDatagram};
 
 // Re-export for backward compatibility with server.rs / client.rs / quic_server.rs / quic_client.rs
 pub use crate::event_loop::EventTsfn;
@@ -407,6 +407,7 @@ pub fn spawn_client_worker(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -429,8 +430,7 @@ pub fn spawn_client_worker(
         quiche_config.set_max_send_udp_payload_size(mtu);
     }
 
-    let (driver, waker) =
-        transport::PlatformDriver::new(std_socket).map_err(Http3NativeError::Io)?;
+    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
@@ -484,7 +484,7 @@ pub fn spawn_worker(
     }
 
     let (driver, waker) =
-        transport::PlatformDriver::new(std_socket).map_err(Http3NativeError::Io)?;
+        transport::create_platform_driver(std_socket, http3_config.runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 

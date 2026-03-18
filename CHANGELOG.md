@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Added explicit QUIC runtime selection with `runtimeMode: 'auto' | 'fast' | 'portable'`, structured fallback reporting, and runtime metadata on client/server objects.
+- Fixed hostname/service-name endpoint support for HTTP/3 and raw QUIC clients, including clean `connect*Async()` rejection without early unhandled session errors.
+- Added a portable Linux QUIC driver for ordinary containers while preserving the `io_uring` fast path, plus Linux Docker runtime-matrix coverage and documentation for capability/seccomp requirements.
+
 ## 0.3.1
 
 - Fixed the root npm package layout so published tarballs always include the built `dist/` JS/types surface referenced by `main`, `types`, and the export map.

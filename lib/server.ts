@@ -19,6 +19,8 @@ import {
 } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
+import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
+import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
 
 // Event type constants (must match Rust EventType enum)
 const EVENT_NEW_SESSION = 1;
@@ -55,6 +57,12 @@ export interface TlsOptions {
 
 /** Combined TLS + QUIC transport options for the HTTP/3 server. */
 export interface ServerOptions extends TlsOptions {
+  /** Runtime selection mode. Default: `'auto'`. */
+  runtimeMode?: RuntimeOptions['runtimeMode'];
+  /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
+  fallbackPolicy?: RuntimeOptions['fallbackPolicy'];
+  /** Callback invoked when runtime selection resolves or falls back. */
+  onRuntimeEvent?: RuntimeOptions['onRuntimeEvent'];
   /** Idle timeout in milliseconds. Default: 30 000. */
   maxIdleTimeoutMs?: number;
   /** Maximum UDP payload size. Default: 1350. */
@@ -118,6 +126,7 @@ export interface AddressInfo {
 export interface Http3SecureServer {
   on(event: 'listening', listener: () => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: 'session', listener: (session: Http3ServerSession) => void): this;
   on(event: 'stream', listener: StreamListener): this;
   on(event: 'request', listener: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void): this;
@@ -139,6 +148,8 @@ export class Http3SecureServer extends EventEmitter {
   private _address: AddressInfo | null = null;
   private _starting = false;
   private _keylogPath: string | null = null;
+  /** @internal */
+  _runtimeInfo: RuntimeInfo | null = null;
   private readonly _sessions = new Map<number, Http3ServerSession>();
   private readonly _h2Sessions = new Map<Http2Session, Http2ServerSessionAdapter>();
   private readonly _h2SessionStreams = new Map<Http2Session, Set<ServerHttp3Stream>>();
@@ -147,9 +158,15 @@ export class Http3SecureServer extends EventEmitter {
   constructor(options: ServerOptions, onStream?: StreamListener) {
     super();
     this._options = options;
+    setPendingRuntimeInfo(this, options);
     if (onStream) {
       this.on('stream', onStream);
     }
+  }
+
+  /** Runtime mode/driver information for this server, when available. */
+  get runtimeInfo(): RuntimeInfo | null {
+    return this._runtimeInfo;
   }
 
   /**
@@ -173,37 +190,58 @@ export class Http3SecureServer extends EventEmitter {
       throw new TypeError('serverId requires quicLb=true');
     }
     this._keylogPath = prepareKeylogFile(this._options.keylog);
+    let quicStart: {
+      workerServer: NativeWorkerServerBinding;
+      eventLoop: WorkerEventLoop;
+      addrInfo: { address: string; family: string; port: number };
+    };
+    try {
+      quicStart = runWithRuntimeSelectionSync(this, this._options, (runtimeMode) => {
+        const workerServer = new binding.NativeWorkerServer({
+          key,
+          cert,
+          ca,
+          runtimeMode,
+          quicLb: this._options.quicLb,
+          serverId,
+          keylog: Boolean(this._keylogPath),
+          maxIdleTimeoutMs: this._options.maxIdleTimeoutMs,
+          maxUdpPayloadSize: this._options.maxUdpPayloadSize,
+          initialMaxData: this._options.initialMaxData,
+          initialMaxStreamDataBidiLocal: this._options.initialMaxStreamDataBidiLocal,
+          initialMaxStreamsBidi: this._options.initialMaxStreamsBidi,
+          disableActiveMigration: this._options.disableActiveMigration,
+          enableDatagrams: this._options.enableDatagrams,
+          qpackMaxTableCapacity: this._options.qpackMaxTableCapacity,
+          qpackBlockedStreams: this._options.qpackBlockedStreams,
+          recvBatchSize: this._options.recvBatchSize,
+          sendBatchSize: this._options.sendBatchSize,
+          qlogDir: this._options.qlogDir,
+          qlogLevel: this._options.qlogLevel,
+          sessionTicketKeys: this._options.sessionTicketKeys,
+          maxConnections: this._options.maxConnections,
+          disableRetry: this._options.disableRetry,
+          reusePort: this._options.reusePort,
+        }, (_err: Error | null, events: NativeEvent[]) => {
+          this._dispatchEvents(events);
+        });
 
-    const workerServer = new binding.NativeWorkerServer({
-      key,
-      cert,
-      ca,
-      quicLb: this._options.quicLb,
-      serverId,
-      keylog: Boolean(this._keylogPath),
-      maxIdleTimeoutMs: this._options.maxIdleTimeoutMs,
-      maxUdpPayloadSize: this._options.maxUdpPayloadSize,
-      initialMaxData: this._options.initialMaxData,
-      initialMaxStreamDataBidiLocal: this._options.initialMaxStreamDataBidiLocal,
-      initialMaxStreamsBidi: this._options.initialMaxStreamsBidi,
-      disableActiveMigration: this._options.disableActiveMigration,
-      enableDatagrams: this._options.enableDatagrams,
-      qpackMaxTableCapacity: this._options.qpackMaxTableCapacity,
-      qpackBlockedStreams: this._options.qpackBlockedStreams,
-      recvBatchSize: this._options.recvBatchSize,
-      sendBatchSize: this._options.sendBatchSize,
-      qlogDir: this._options.qlogDir,
-      qlogLevel: this._options.qlogLevel,
-      sessionTicketKeys: this._options.sessionTicketKeys,
-      maxConnections: this._options.maxConnections,
-      disableRetry: this._options.disableRetry,
-      reusePort: this._options.reusePort,
-    }, (_err: Error | null, events: NativeEvent[]) => {
-      this._dispatchEvents(events);
-    });
+        const eventLoop = new WorkerEventLoop(workerServer);
+        const addrInfo = workerServer.listen(port, listenHost);
+        return { workerServer, eventLoop, addrInfo };
+      });
+    } catch (err: unknown) {
+      this._keylogPath = null;
+      throw err;
+    }
 
-    this._workerServer = workerServer;
-    this._eventLoop = new WorkerEventLoop(workerServer);
+    this._workerServer = quicStart.workerServer;
+    this._eventLoop = quicStart.eventLoop;
+    this._address = {
+      address: quicStart.addrInfo.address,
+      family: quicStart.addrInfo.family,
+      port: quicStart.addrInfo.port,
+    };
     this._starting = true;
 
     let h2Server: Http2SecureServer;
@@ -216,24 +254,11 @@ export class Http3SecureServer extends EventEmitter {
     this._h2Server = h2Server;
     this._attachH2ServerListeners(h2Server);
 
-    let addrInfo: { address: string; family: string; port: number };
-    try {
-      addrInfo = workerServer.listen(port, listenHost);
-      this._address = {
-        address: addrInfo.address,
-        family: addrInfo.family,
-        port: addrInfo.port,
-      };
-    } catch (err: unknown) {
-      void this._abortStartup(err);
-      return this;
-    }
-
     const onH2BindError = (err: Error): void => {
       void this._abortStartup(err);
     };
     h2Server.once('error', onH2BindError);
-    h2Server.listen(addrInfo.port, listenHost, () => {
+    h2Server.listen(quicStart.addrInfo.port, listenHost, () => {
       h2Server.off('error', onH2BindError);
       this._starting = false;
       process.nextTick(() => this.emit('listening'));
@@ -708,7 +733,9 @@ export class Http3SecureServer extends EventEmitter {
       const session = this._sessions.get(event.connHandle);
       if (session) {
         session.emit('error', toSessionError(event));
+        return;
       }
+      this.emit('error', toSessionError(event));
     }
   }
 

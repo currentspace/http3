@@ -76,6 +76,7 @@ export interface JsAddressInfo {
 export interface JsClientOptions {
   ca?: Buffer
   rejectUnauthorized?: boolean
+  runtimeMode?: string
   maxIdleTimeoutMs?: number
   maxUdpPayloadSize?: number
   initialMaxData?: number
@@ -96,9 +97,17 @@ export interface JsClientOptions {
 export interface JsEventMeta {
   errorCode?: number
   errorReason?: string
+  errorCategory?: string
   remoteAddr?: string
   remotePort?: number
   serverName?: string
+  reasonCode?: string
+  runtimeDriver?: string
+  runtimeMode?: string
+  requestedRuntimeMode?: string
+  fallbackOccurred?: boolean
+  errno?: number
+  syscall?: string
 }
 
 export interface JsH3Event {
@@ -121,6 +130,7 @@ export interface JsQuicClientOptions {
   ca?: Buffer
   rejectUnauthorized?: boolean
   alpn?: Array<string>
+  runtimeMode?: string
   maxIdleTimeoutMs?: number
   maxUdpPayloadSize?: number
   initialMaxData?: number
@@ -139,6 +149,7 @@ export interface JsQuicServerOptions {
   cert: Buffer
   ca?: Buffer
   alpn?: Array<string>
+  runtimeMode?: string
   maxIdleTimeoutMs?: number
   maxUdpPayloadSize?: number
   initialMaxData?: number
@@ -158,6 +169,7 @@ export interface JsServerOptions {
   key: Buffer
   cert: Buffer
   ca?: Buffer
+  runtimeMode?: string
   maxIdleTimeoutMs?: number
   maxUdpPayloadSize?: number
   initialMaxData?: number

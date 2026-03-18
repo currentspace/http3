@@ -15,6 +15,30 @@ const MAX_DATAGRAM_SIZE: usize = 1350;
 /// loopback, meaning fewer syscalls and higher throughput.
 const LOOPBACK_DATAGRAM_SIZE: usize = 8192;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransportRuntimeMode {
+    Fast,
+    Portable,
+}
+
+impl Default for TransportRuntimeMode {
+    fn default() -> Self {
+        Self::Fast
+    }
+}
+
+impl TransportRuntimeMode {
+    pub fn parse(value: Option<&str>) -> Result<Self, Http3NativeError> {
+        match value.unwrap_or("fast") {
+            "fast" => Ok(Self::Fast),
+            "portable" => Ok(Self::Portable),
+            other => Err(Http3NativeError::Config(format!(
+                "invalid runtimeMode: {other} (expected 'fast' or 'portable')",
+            ))),
+        }
+    }
+}
+
 /// Return the effective max datagram size for `addr`.
 /// Loopback addresses get 8192; everything else gets the standard 1350.
 pub fn effective_max_datagram_size(addr: &std::net::SocketAddr) -> usize {
@@ -63,6 +87,7 @@ pub struct JsServerOptions {
     pub key: napi::bindgen_prelude::Buffer,
     pub cert: napi::bindgen_prelude::Buffer,
     pub ca: Option<napi::bindgen_prelude::Buffer>,
+    pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
     pub max_udp_payload_size: Option<u32>,
     pub initial_max_data: Option<u32>,
@@ -89,6 +114,7 @@ pub struct JsServerOptions {
 pub struct JsClientOptions {
     pub ca: Option<napi::bindgen_prelude::Buffer>,
     pub reject_unauthorized: Option<bool>,
+    pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
     pub max_udp_payload_size: Option<u32>,
     pub initial_max_data: Option<u32>,
@@ -111,6 +137,7 @@ pub struct Http3Config {
     pub disable_retry: bool,
     pub reuse_port: bool,
     pub cid_encoding: CidEncoding,
+    pub runtime_mode: TransportRuntimeMode,
 }
 
 impl Http3Config {
@@ -296,6 +323,7 @@ impl Http3Config {
             disable_retry: options.disable_retry.unwrap_or(false),
             reuse_port: options.reuse_port.unwrap_or(false),
             cid_encoding,
+            runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())?,
         })
     }
 }
@@ -308,6 +336,7 @@ pub struct JsQuicServerOptions {
     pub cert: napi::bindgen_prelude::Buffer,
     pub ca: Option<napi::bindgen_prelude::Buffer>,
     pub alpn: Option<Vec<String>>,
+    pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
     pub max_udp_payload_size: Option<u32>,
     pub initial_max_data: Option<u32>,
@@ -328,6 +357,7 @@ pub struct JsQuicClientOptions {
     pub ca: Option<napi::bindgen_prelude::Buffer>,
     pub reject_unauthorized: Option<bool>,
     pub alpn: Option<Vec<String>>,
+    pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
     pub max_udp_payload_size: Option<u32>,
     pub initial_max_data: Option<u32>,
@@ -506,6 +536,7 @@ mod tests {
             key: vec![1u8].into(),
             cert: vec![2u8].into(),
             ca: None,
+            runtime_mode: None,
             max_idle_timeout_ms: None,
             max_udp_payload_size: None,
             initial_max_data: None,

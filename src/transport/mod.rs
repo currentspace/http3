@@ -8,6 +8,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use crate::config::TransportRuntimeMode;
+use crate::error::Http3NativeError;
+
 /// A completed received UDP datagram. Owned by the caller.
 pub(crate) struct RxDatagram {
     pub data: Vec<u8>,
@@ -63,6 +66,9 @@ pub(crate) trait Driver: Sized {
     /// Socket's bound local address.
     #[allow(dead_code)]
     fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Concrete runtime driver backing this instance.
+    fn driver_kind(&self) -> RuntimeDriverKind;
 }
 
 /// Cross-thread wake handle. Clone + Send + Sync.
@@ -81,6 +87,24 @@ impl<W: DriverWaker> ErasedWaker for W {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeDriverKind {
+    Kqueue,
+    IoUring,
+    Poll,
+}
+
+impl RuntimeDriverKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Kqueue => "kqueue",
+            Self::IoUring => "io_uring",
+            Self::Poll => "poll",
+        }
+    }
+}
+
 pub(crate) mod socket;
 
 // ── Platform driver selection ───────────────────────────────────────
@@ -91,11 +115,131 @@ mod kqueue;
 #[cfg(target_os = "linux")]
 mod io_uring;
 
+#[cfg(target_os = "linux")]
+mod poll;
+
 #[cfg(target_os = "macos")]
 pub(crate) type PlatformDriver = kqueue::KqueueDriver;
 
+#[cfg(target_os = "macos")]
+pub(crate) type PlatformWaker = kqueue::KqueueWaker;
+
 #[cfg(target_os = "linux")]
-pub(crate) type PlatformDriver = io_uring::IoUringDriver;
+pub(crate) enum PlatformDriver {
+    IoUring(io_uring::IoUringDriver),
+    Poll(poll::PollDriver),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) enum PlatformWaker {
+    IoUring(io_uring::IoUringWaker),
+    Poll(poll::PollWaker),
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn create_platform_driver(
+    socket: std::net::UdpSocket,
+    _runtime_mode: TransportRuntimeMode,
+) -> Result<(PlatformDriver, PlatformWaker), Http3NativeError> {
+    kqueue::KqueueDriver::new(socket).map_err(Http3NativeError::Io)
+}
+
+#[cfg(target_os = "linux")]
+fn transport_error_to_io(err: Http3NativeError) -> io::Error {
+    match err {
+        Http3NativeError::Io(error) => error,
+        Http3NativeError::FastPathUnavailable { source, .. } => source,
+        Http3NativeError::RuntimeIo { source, .. } => source,
+        other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create_platform_driver(
+    socket: std::net::UdpSocket,
+    runtime_mode: TransportRuntimeMode,
+) -> Result<(PlatformDriver, PlatformWaker), Http3NativeError> {
+    match runtime_mode {
+        TransportRuntimeMode::Fast => io_uring::IoUringDriver::new(socket)
+            .map(|(driver, waker)| {
+                (
+                    PlatformDriver::IoUring(driver),
+                    PlatformWaker::IoUring(waker),
+                )
+            })
+            .map_err(|error| match error.raw_os_error() {
+                Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::ENOSYS) => {
+                    Http3NativeError::fast_path_unavailable("io_uring", "io_uring_setup", error)
+                }
+                _ => Http3NativeError::Io(error),
+            }),
+        TransportRuntimeMode::Portable => poll::PollDriver::new(socket)
+            .map(|(driver, waker)| (PlatformDriver::Poll(driver), PlatformWaker::Poll(waker)))
+            .map_err(Http3NativeError::Io),
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Driver for PlatformDriver {
+    type Waker = PlatformWaker;
+
+    fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
+        create_platform_driver(socket, TransportRuntimeMode::Fast).map_err(transport_error_to_io)
+    }
+
+    fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+        match self {
+            Self::IoUring(driver) => driver.poll(deadline),
+            Self::Poll(driver) => driver.poll(deadline),
+        }
+    }
+
+    fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+        match self {
+            Self::IoUring(driver) => driver.submit_sends(packets),
+            Self::Poll(driver) => driver.submit_sends(packets),
+        }
+    }
+
+    fn pending_tx_count(&self) -> usize {
+        match self {
+            Self::IoUring(driver) => driver.pending_tx_count(),
+            Self::Poll(driver) => driver.pending_tx_count(),
+        }
+    }
+
+    fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+        match self {
+            Self::IoUring(driver) => driver.drain_recycled_tx(),
+            Self::Poll(driver) => driver.drain_recycled_tx(),
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Self::IoUring(driver) => driver.local_addr(),
+            Self::Poll(driver) => driver.local_addr(),
+        }
+    }
+
+    fn driver_kind(&self) -> RuntimeDriverKind {
+        match self {
+            Self::IoUring(driver) => driver.driver_kind(),
+            Self::Poll(driver) => driver.driver_kind(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl DriverWaker for PlatformWaker {
+    fn wake(&self) -> io::Result<()> {
+        match self {
+            Self::IoUring(waker) => DriverWaker::wake(waker),
+            Self::Poll(waker) => DriverWaker::wake(waker),
+        }
+    }
+}
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("Only macOS (kqueue) and Linux (io_uring) are supported");

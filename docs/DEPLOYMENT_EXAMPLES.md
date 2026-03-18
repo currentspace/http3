@@ -6,6 +6,8 @@
 - Use `deploy/ecs/nlb-dual-443.template.yaml` for UDP/TCP 443.
 - Run readiness endpoint on port `8080`.
 - Build/push container image: `bash scripts/build-push-ecr.sh <region> <account-id> <tag>`.
+- Prefer `runtimeMode: 'portable'` unless your environment explicitly allows the
+  Linux fast path.
 
 ## AWS EC2 QUIC-LB mode
 
@@ -14,6 +16,15 @@
   - `quicLb: true`
   - `serverId: <8-byte-id>`
 - Register each target with matching `QuicServerId`.
+- `runtimeMode: 'fast'` is appropriate when the host/kernel policy allows
+  `io_uring`.
+
+## Container runtime recommendations
+
+- Ordinary Docker/Kubernetes container: `runtimeMode: 'portable'`
+- Native Linux or seccomp-unconfined container: `runtimeMode: 'fast'` or `auto`
+- Mixed fleets: `runtimeMode: 'auto'` with `fallbackPolicy: 'warn-and-fallback'`
+- Explicit compatibility-first services: `runtimeMode: 'portable'` with `fallbackPolicy: 'error'`
 
 ## Post-deploy checks
 

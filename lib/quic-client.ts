@@ -1,8 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
+import type { ConnectionEndpoint } from './endpoint.js';
+import { resolveConnectionEndpoint } from './endpoint.js';
+import { toSessionError } from './error-map.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
+import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
+import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
 
 const EVENT_NEW_STREAM = 2;
 const EVENT_DATA = 4;
@@ -17,6 +22,12 @@ const EVENT_DATAGRAM = 14;
 
 /** Options for connecting to a raw QUIC server. */
 export interface QuicConnectOptions {
+  /** Runtime selection mode. Default: `'auto'`. */
+  runtimeMode?: RuntimeOptions['runtimeMode'];
+  /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
+  fallbackPolicy?: RuntimeOptions['fallbackPolicy'];
+  /** Callback invoked when runtime selection resolves or falls back. */
+  onRuntimeEvent?: RuntimeOptions['onRuntimeEvent'];
   /** PEM-encoded CA certificate to trust. */
   ca?: Buffer | string;
   /** If `false`, accept self-signed certificates. Default: `true`. */
@@ -106,6 +117,7 @@ export interface QuicClientSession {
   on(event: 'stream', listener: (stream: QuicStream) => void): this;
   on(event: 'close', listener: () => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: 'sessionTicket', listener: (ticket: Buffer) => void): this;
   on(event: 'datagram', listener: (data: Buffer) => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
@@ -120,6 +132,10 @@ export class QuicClientSession extends EventEmitter {
   private _eventLoop: QuicClientEventLoop | null = null;
   private readonly _streams = new Map<number, QuicStream>();
   private _handshakeComplete = false;
+  /** @internal */
+  _runtimeInfo: RuntimeInfo | null = null;
+  /** @internal */
+  _closeRequested = false;
   private _readySettled = false;
   private readonly _readyPromise: Promise<void>;
   private _resolveReady: (() => void) | null = null;
@@ -138,6 +154,10 @@ export class QuicClientSession extends EventEmitter {
   /** Whether the QUIC/TLS handshake has completed. */
   get handshakeComplete(): boolean {
     return this._handshakeComplete;
+  }
+  /** Runtime mode/driver information for this session, when available. */
+  get runtimeInfo(): RuntimeInfo | null {
+    return this._runtimeInfo;
   }
 
   /** Resolves when the QUIC handshake completes. Rejects on connection failure. */
@@ -189,6 +209,10 @@ export class QuicClientSession extends EventEmitter {
 
   /** Close the session and destroy all streams. */
   async close(): Promise<void> {
+    this._closeRequested = true;
+    if (!this._handshakeComplete) {
+      this._markReadyError(new Error('session closed before handshake'));
+    }
     this._cleanupStreams();
     if (this._eventLoop) {
       await this._eventLoop.close();
@@ -197,7 +221,7 @@ export class QuicClientSession extends EventEmitter {
   }
 
   /** @internal */
-  _setEventLoop(loop_: QuicClientEventLoop): void {
+  _setEventLoop(loop_: QuicClientEventLoop | null): void {
     this._eventLoop = loop_;
   }
 
@@ -298,11 +322,25 @@ export class QuicClientSession extends EventEmitter {
         stream.destroy(new Error(event.meta?.errorReason ?? 'stream error'));
       }
     } else {
-      this.emit('error', new Error(event.meta?.errorReason ?? 'session error'));
+      this._emitSessionError(toSessionError(event));
       if (!this._handshakeComplete) {
-        this._markReadyError(new Error(event.meta?.errorReason ?? 'session error'));
+        this._markReadyError(toSessionError(event));
       }
     }
+  }
+
+  /** @internal */
+  _emitSessionError(err: Error): void {
+    if (!this._handshakeComplete && this.listenerCount('error') === 0) {
+      process.nextTick(() => {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', err);
+        }
+      });
+      return;
+    }
+
+    this.emit('error', err);
   }
 
   private _getOrCreateStream(streamId: number): QuicStream {
@@ -332,7 +370,8 @@ export class QuicClientSession extends EventEmitter {
     this._rejectReady = null;
   }
 
-  private _markReadyError(err: Error): void {
+  /** @internal */
+  _markReadyError(err: Error): void {
     if (this._readySettled) return;
     this._readySettled = true;
     this._rejectReady?.(err);
@@ -379,57 +418,72 @@ function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
  * stream.end('hello');
  * ```
  */
-export function connectQuic(authority: string, options?: QuicConnectOptions): QuicClientSession {
-  let host: string;
-  let port: number;
-  let servername: string;
-
-  try {
-    const url = new URL(authority.includes('://') ? authority : `quic://${authority}`);
-    host = url.hostname;
-    port = parseInt(url.port || '4433', 10);
-    servername = options?.servername ?? host;
-  } catch {
-    const parts = authority.split(':');
-    host = parts[0];
-    port = parseInt(parts[1] ?? '4433', 10);
-    servername = options?.servername ?? host;
-  }
-
+export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnectOptions): QuicClientSession {
   const session = new QuicClientSession();
+  setPendingRuntimeInfo(session, options);
   const NativeQuicClient = getNativeQuicClientConstructor();
-
-  const nativeClient = new NativeQuicClient(
-    {
-      ca: normalizeCa(options?.ca),
-      rejectUnauthorized: options?.rejectUnauthorized,
-      alpn: options?.alpn,
-      maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
-      maxUdpPayloadSize: options?.maxUdpPayloadSize,
-      initialMaxData: options?.initialMaxData,
-      initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
-      initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
-      sessionTicket: options?.sessionTicket,
-      allow0Rtt: options?.allow0RTT,
-      enableDatagrams: options?.enableDatagrams,
-      keylog: options?.keylog,
-      qlogDir: options?.qlogDir,
-      qlogLevel: options?.qlogLevel,
-    },
-    (_err: Error | null, events: NativeEvent[]) => {
-      session._dispatchEvents(events);
-    },
-  );
-
-  const eventLoop = new QuicClientEventLoop(nativeClient);
-  session._setEventLoop(eventLoop);
+  const shouldAbortConnect = (): boolean => session._closeRequested;
 
   void (async (): Promise<void> => {
     try {
-      await eventLoop.connect(`${host}:${port}`, servername);
+      const resolved = await resolveConnectionEndpoint(authority, {
+        defaultScheme: 'quic',
+        defaultPort: 4433,
+      });
+      if (shouldAbortConnect()) {
+        return;
+      }
+
+      await runWithRuntimeSelection(session, options, async (runtimeMode) => {
+        const nativeClient = new NativeQuicClient(
+          {
+            ca: normalizeCa(options?.ca),
+            rejectUnauthorized: options?.rejectUnauthorized,
+            alpn: options?.alpn,
+            runtimeMode,
+            maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+            maxUdpPayloadSize: options?.maxUdpPayloadSize,
+            initialMaxData: options?.initialMaxData,
+            initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+            initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+            sessionTicket: options?.sessionTicket,
+            allow0Rtt: options?.allow0RTT,
+            enableDatagrams: options?.enableDatagrams,
+            keylog: options?.keylog,
+            qlogDir: options?.qlogDir,
+            qlogLevel: options?.qlogLevel,
+          },
+          (_err: Error | null, events: NativeEvent[]) => {
+            session._dispatchEvents(events);
+          },
+        );
+
+        const eventLoop = new QuicClientEventLoop(nativeClient);
+        session._setEventLoop(eventLoop);
+        if (shouldAbortConnect()) {
+          await eventLoop.close();
+          session._setEventLoop(null);
+          return;
+        }
+        try {
+          await eventLoop.connect(resolved.socketAddress, options?.servername ?? resolved.servername);
+        } catch (error: unknown) {
+          session._setEventLoop(null);
+          throw error;
+        }
+        if (shouldAbortConnect()) {
+          await eventLoop.close();
+          session._setEventLoop(null);
+          return;
+        }
+      });
     } catch (err: unknown) {
+      if (shouldAbortConnect()) {
+        return;
+      }
       const error = err instanceof Error ? err : new Error(String(err));
-      session.emit('error', error);
+      session._markReadyError(error);
+      session._emitSessionError(error);
     }
   })();
 
@@ -440,7 +494,7 @@ export function connectQuic(authority: string, options?: QuicConnectOptions): Qu
  * Connect to a raw QUIC server and wait for the handshake to complete.
  * Convenience wrapper around {@link connectQuic} + `session.ready()`.
  */
-export async function connectQuicAsync(authority: string, options?: QuicConnectOptions): Promise<QuicClientSession> {
+export async function connectQuicAsync(authority: ConnectionEndpoint, options?: QuicConnectOptions): Promise<QuicClientSession> {
   const session = connectQuic(authority, options);
   await session.ready();
   return session;

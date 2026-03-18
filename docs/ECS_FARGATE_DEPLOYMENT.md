@@ -3,6 +3,9 @@
 This package is designed to run as an application-terminated TLS origin with
 both HTTP/3 and HTTP/2 exposed on port 443.
 
+For runtime-mode semantics and the broader Linux capability matrix, see
+[`RUNTIME_MODES.md`](./RUNTIME_MODES.md).
+
 ## Topology
 
 - Optional Global Accelerator in front of the NLB for anycast ingress.
@@ -33,6 +36,9 @@ When using NLB QUIC passthrough with server-ID CID routing:
   `QuicServerId` registration.
 - **Fargate path:** keep the legacy dual UDP/TCP listener template unless your
   region/account supports your desired QUIC target registration model.
+- **Runtime recommendation:** default Fargate/container deployments to
+  `runtimeMode: 'portable'` unless you have explicitly validated a seccomp
+  policy that allows `io_uring_*`.
 
 ## Required Network Settings
 
@@ -53,7 +59,7 @@ When using NLB QUIC passthrough with server-ID CID routing:
 
 1. Load TLS key/cert (and optional CA) from secret material.
 2. Start health server (`/healthz`, `/readyz`) as not ready.
-3. Start unified H3/H2 server on 443.
+3. Start unified H3/H2 server on 443 with an explicit runtime mode.
 4. If `HTTP3_QUIC_LB=1`, ensure `HTTP3_SERVER_ID` is set to an 8-byte value.
 5. Mark ready after `listening`.
 

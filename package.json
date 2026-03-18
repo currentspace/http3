@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -100,6 +100,8 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint lib/ test/",
     "test": "npm run build:test && node --test --test-timeout=120000 dist-test/test/**/*.test.js",
+    "test:docker:runtime": "node scripts/docker-runtime-matrix.mjs",
+    "test:docker:runtime:privileged": "HTTP3_RUNTIME_TEST_PRIVILEGED=1 node scripts/docker-runtime-matrix.mjs",
     "test:interop": "npm run build:test && node --test dist-test/test/curl-interop.test.js",
     "test:browser:e2e": "npm run build:test && HTTP3_BROWSER_E2E=1 node --test dist-test/test/browser-e2e.test.js",
     "test:concurrency": "npm run build:test && node --test dist-test/test/worker-concurrency.test.js",
@@ -132,8 +134,11 @@
     "typescript-eslint": "^8.57.1"
   },
   "optionalDependencies": {
-    "@currentspace/http3-linux-x64-gnu": "0.3.1",
-    "@currentspace/http3-linux-arm64-gnu": "0.3.1",
-    "@currentspace/http3-darwin-arm64": "0.3.1"
+    "@currentspace/http3-darwin-arm64": "0.4.0",
+    "@currentspace/http3-linux-arm64-gnu": "0.4.0",
+    "@currentspace/http3-linux-x64-gnu": "0.4.0"
+  },
+  "overrides": {
+    "flatted": "^3.4.2"
   }
 }

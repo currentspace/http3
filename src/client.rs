@@ -4,7 +4,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::config::{Http3Config, JsClientOptions};
+use crate::config::{Http3Config, JsClientOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsHeader, JsSessionMetrics, JsSetting};
 
 use std::net::SocketAddr;
@@ -20,6 +20,7 @@ pub struct NativeWorkerClient {
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
 }
 
 #[napi]
@@ -42,6 +43,8 @@ impl NativeWorkerClient {
             qlog_dir: options.qlog_dir,
             qlog_level: options.qlog_level,
             user_set_mtu,
+            runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
+                .map_err(napi::Error::from)?,
         })
     }
 
@@ -72,6 +75,7 @@ impl NativeWorkerClient {
             self.qlog_dir.clone(),
             self.qlog_level.clone(),
             self.user_set_mtu,
+            self.runtime_mode,
             tsfn,
         )
         .map_err(napi::Error::from)?;
