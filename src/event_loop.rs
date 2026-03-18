@@ -5,11 +5,18 @@
 //! lives in the [`ProtocolHandler`] implementations; platform I/O lives in the
 //! [`Driver`](crate::transport::Driver) implementations.
 
-use std::net::SocketAddr;
 use std::io;
+use std::net::SocketAddr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 use std::time::Instant;
 
 use crossbeam_channel::Receiver;
+use serde::Serialize;
+
+#[cfg(feature = "node-api")]
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
 use crate::h3_event::JsH3Event;
@@ -17,7 +24,77 @@ use crate::transport::{Driver, TxDatagram};
 
 /// TSFN type for delivering event batches to the JS main thread.
 /// Uses default const generics: `CalleeHandled=true`, `Weak=false`, `MaxQueueSize=0` (unbounded).
+#[cfg(feature = "node-api")]
 pub type EventTsfn = ThreadsafeFunction<Vec<JsH3Event>>;
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct EventBatcherStatsSnapshot {
+    pub sink_kind: &'static str,
+    pub flush_count: u64,
+    pub attempted_events: u64,
+    pub delivered_events: u64,
+    pub dropped_events: u64,
+    pub sink_errors: u64,
+    pub max_batch_size: usize,
+}
+
+#[derive(Default)]
+struct EventBatcherStatsInner {
+    flush_count: AtomicU64,
+    attempted_events: AtomicU64,
+    dropped_events: AtomicU64,
+    sink_errors: AtomicU64,
+    max_batch_size: AtomicUsize,
+}
+
+#[derive(Clone)]
+pub(crate) struct EventBatcherStatsHandle {
+    sink_kind: &'static str,
+    inner: Arc<EventBatcherStatsInner>,
+}
+
+impl EventBatcherStatsHandle {
+    fn new(sink_kind: &'static str) -> Self {
+        Self {
+            sink_kind,
+            inner: Arc::new(EventBatcherStatsInner::default()),
+        }
+    }
+
+    fn record_flush(&self, count: usize) {
+        self.inner.flush_count.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .attempted_events
+            .fetch_add(count as u64, Ordering::Relaxed);
+        self.inner
+            .max_batch_size
+            .fetch_max(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_drop(&self, count: usize) {
+        self.inner
+            .dropped_events
+            .fetch_add(count as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_sink_error(&self) {
+        self.inner.sink_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> EventBatcherStatsSnapshot {
+        let attempted_events = self.inner.attempted_events.load(Ordering::Relaxed);
+        let dropped_events = self.inner.dropped_events.load(Ordering::Relaxed);
+        EventBatcherStatsSnapshot {
+            sink_kind: self.sink_kind,
+            flush_count: self.inner.flush_count.load(Ordering::Relaxed),
+            attempted_events,
+            delivered_events: attempted_events.saturating_sub(dropped_events),
+            dropped_events,
+            sink_errors: self.inner.sink_errors.load(Ordering::Relaxed),
+            max_batch_size: self.inner.max_batch_size.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Max events per TSFN call. Sized for high-concurrency workloads (1000+ streams).
 /// At 2048 events × ~50 bytes ≈ 100KB per batch — well within comfort.
@@ -84,10 +161,58 @@ pub(crate) trait ProtocolHandler {
 
 // ── Event batcher ───────────────────────────────────────────────────
 
+pub(crate) trait EventSink: Send {
+    fn kind(&self) -> &'static str;
+    fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool;
+}
+
+#[cfg(feature = "node-api")]
+pub(crate) struct TsfnEventSink {
+    tsfn: EventTsfn,
+}
+
+#[cfg(feature = "node-api")]
+impl TsfnEventSink {
+    pub(crate) fn new(tsfn: EventTsfn) -> Self {
+        Self { tsfn }
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl EventSink for TsfnEventSink {
+    fn kind(&self) -> &'static str {
+        "tsfn"
+    }
+
+    fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool {
+        let count = events.len();
+        match self
+            .tsfn
+            .call(Ok(events), ThreadsafeFunctionCallMode::NonBlocking)
+        {
+            napi::Status::Ok => true,
+            napi::Status::Closing => {
+                stats.record_drop(count);
+                log::debug!("TSFN closing, dropped {count} events");
+                false
+            }
+            status => {
+                stats.record_sink_error();
+                stats.record_drop(count);
+                log::warn!(
+                    "TSFN call failed ({status:?}), dropped {count} events (total dropped: {})",
+                    stats.snapshot().dropped_events
+                );
+                true
+            }
+        }
+    }
+}
+
 pub(crate) struct EventBatcher {
     pub batch: Vec<JsH3Event>,
-    tsfn: EventTsfn,
-    events_dropped: u64,
+    sink: Box<dyn EventSink>,
+    stats: EventBatcherStatsHandle,
 }
 
 fn flush_runtime_error<D: Driver>(
@@ -108,11 +233,17 @@ fn flush_runtime_error<D: Driver>(
 }
 
 impl EventBatcher {
-    pub fn new(tsfn: EventTsfn) -> Self {
+    #[cfg(feature = "node-api")]
+    pub fn new_tsfn(tsfn: EventTsfn) -> Self {
+        Self::with_sink(TsfnEventSink::new(tsfn))
+    }
+
+    pub fn with_sink<S: EventSink + 'static>(sink: S) -> Self {
+        let stats = EventBatcherStatsHandle::new(sink.kind());
         Self {
             batch: Vec::with_capacity(MAX_BATCH_SIZE),
-            tsfn,
-            events_dropped: 0,
+            sink: Box::new(sink),
+            stats,
         }
     }
 
@@ -120,32 +251,19 @@ impl EventBatcher {
         self.batch.len()
     }
 
-    /// Flush events to JS.  Returns `false` if TSFN is closing → shut down.
+    pub fn stats_handle(&self) -> EventBatcherStatsHandle {
+        self.stats.clone()
+    }
+
+    /// Flush events to the configured sink. Returns `false` when the sink asks
+    /// the worker loop to stop.
     pub fn flush(&mut self) -> bool {
         if self.batch.is_empty() {
             return true;
         }
         let to_send = std::mem::take(&mut self.batch);
-        let count = to_send.len();
-        match self
-            .tsfn
-            .call(Ok(to_send), ThreadsafeFunctionCallMode::NonBlocking)
-        {
-            napi::Status::Ok => true,
-            napi::Status::Closing => {
-                self.events_dropped += count as u64;
-                log::debug!("TSFN closing, dropped {count} events");
-                false
-            }
-            status => {
-                self.events_dropped += count as u64;
-                log::warn!(
-                    "TSFN call failed ({status:?}), dropped {count} events (total dropped: {})",
-                    self.events_dropped
-                );
-                true
-            }
-        }
+        self.stats.record_flush(to_send.len());
+        self.sink.emit(to_send, &self.stats)
     }
 }
 
@@ -158,10 +276,9 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     driver: &mut D,
     cmd_rx: Receiver<P::Command>,
     handler: &mut P,
-    tsfn: EventTsfn,
+    mut batcher: EventBatcher,
     local_addr: SocketAddr,
 ) {
-    let mut batcher = EventBatcher::new(tsfn);
     let mut outbound: Vec<TxDatagram> = Vec::new();
     let mut pending_outbound: Vec<TxDatagram> = Vec::new();
 

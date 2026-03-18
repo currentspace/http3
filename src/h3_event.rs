@@ -1,7 +1,13 @@
 //! Event types bridged from the Rust worker thread to the JS main thread
 //! via a napi `ThreadsafeFunction`.
 
+#[cfg(feature = "node-api")]
 use napi_derive::napi;
+
+#[cfg(feature = "node-api")]
+type ByteBuf = napi::bindgen_prelude::Buffer;
+#[cfg(not(feature = "node-api"))]
+type ByteBuf = Vec<u8>;
 
 pub const EVENT_NEW_SESSION: u8 = 1;
 pub const EVENT_NEW_STREAM: u8 = 2;
@@ -18,7 +24,7 @@ pub const EVENT_SESSION_TICKET: u8 = 12;
 pub const EVENT_METRICS: u8 = 13;
 pub const EVENT_DATAGRAM: u8 = 14;
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
 pub struct JsHeader {
     pub name: String,
@@ -27,7 +33,7 @@ pub struct JsHeader {
 
 /// Metadata for rare events (new_session, error, reset).
 /// Packed into a sub-object to avoid 5 null napi properties on every hot-path event.
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 pub struct JsEventMeta {
     pub error_code: Option<u32>,
     pub error_reason: Option<String>,
@@ -44,19 +50,19 @@ pub struct JsEventMeta {
     pub syscall: Option<String>,
 }
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 pub struct JsH3Event {
     pub event_type: u8,
     pub conn_handle: u32,
     pub stream_id: i64,
     pub headers: Option<Vec<JsHeader>>,
-    pub data: Option<napi::bindgen_prelude::Buffer>,
+    pub data: Option<ByteBuf>,
     pub fin: Option<bool>,
     pub meta: Option<JsEventMeta>,
     pub metrics: Option<JsSessionMetrics>,
 }
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
 pub struct JsSessionMetrics {
     pub packets_in: u32,
@@ -68,14 +74,14 @@ pub struct JsSessionMetrics {
     pub cwnd: i64,
 }
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
 pub struct JsSetting {
     pub id: i64,
     pub value: i64,
 }
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
 pub struct JsAddressInfo {
     pub address: String,

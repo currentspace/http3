@@ -29,9 +29,16 @@ Current artifact types:
   success/failure lane plus the embedded benchmark summaries from successful runs
 - `profiler-manifest`: Linux/macOS wrapper output describing the profiler tool,
   command, and profiler artifact paths written alongside the benchmark JSON
+- `quic-loopback-profile`: native Rust QUIC loopback artifact with separate
+  client/server summaries, sink stats, and reactor telemetry
+- `quic-direct-profile`: direct `quiche` floor artifact with no worker/reactor
+  wrapper
+- `quic-mock-profile`: Node mock-transport artifact with Rust summary plus JS
+  callback counters
 
 The analyzer consumes the persisted `benchmark-summary` and
-`docker-benchmark-matrix` artifacts:
+`docker-benchmark-matrix` artifacts, plus the Rust loopback, quiche-direct, and
+Node mock-transport profiling artifacts:
 
 ```bash
 npm run perf:analyze -- --results-dir perf-results
@@ -67,6 +74,11 @@ Use these when you want benchmark JSON and profiler artifacts produced together.
 ```bash
 npm run perf:linux:quic -- --perf-stat --profile throughput --results-dir perf-results --label quic-linux
 npm run perf:linux:h3 -- --perf-record --strace --profile stress --results-dir perf-results --label h3-linux
+npm run perf:linux:quic:loopback -- --runtime-mode fast --results-dir perf-results --label quic-loopback
+npm run perf:linux:quic:direct -- --results-dir perf-results --label quic-direct
+npm run perf:node:quic:mock -- --sink-mode counting --callback-mode noop --results-dir perf-results --label quic-mock-counting
+npm run perf:node:quic:mock -- --sink-mode tsfn --callback-mode noop --results-dir perf-results --label quic-mock-tsfn
+npm run perf:node:quic:mock -- --sink-mode tsfn --callback-mode touch-data --results-dir perf-results --label quic-mock-js
 ```
 
 Notes:
@@ -137,6 +149,9 @@ comparisons, not as backend comparisons.
 3. Use `npm run perf:analyze` to group artifacts by:
    - protocol
    - role
+   - harness kind
+   - sink kind
+   - transport kind
    - OS
    - target (`host` vs `docker`)
    - Docker policy
@@ -238,10 +253,44 @@ Interpretation:
 - Rising `ioUringPendingTxHighWatermark` or `ioUringRetryableSendCompletions`
   means the fast path is spending time retrying or queueing sends even though it
   is still on `io_uring`.
+- Rising `ioUringSubmitCalls` with low `ioUringSubmittedSqesTotal` per call means
+  the ring is not batching effectively.
+- Rising `ioUringCompletionBatchHighWatermark` without matching throughput gains
+  means completion draining may be dominating wakeups.
+- Rising `ioUringWakeCompletions` or `ioUringWakeWrites` with flat traffic volume
+  suggests avoidable wake churn.
+- Non-zero `ioUringSqFullEvents` means the SQ is saturating and batching or queue
+  sizing should be reviewed before assuming protocol cost.
 - Rising `kqueueUnsentHighWatermark` with high `kqueueWouldBlockSends` indicates
   the readiness path is building a backlog and retry loop pressure.
 - `kqueueWriteWakeups` helps distinguish genuine write-side pressure from a run
   that is mostly receive/timer bound.
+
+## Attribution harnesses
+
+Use the three profiling harness families together when you need cost ownership:
+
+- `quiche-direct`: protocol floor with minimal wrapper overhead
+- `quic-loopback`: real Rust worker/reactor/transport path over loopback UDP
+- `quic-mock`: Rust protocol path plus optional TSFN and JS listener work with
+  no kernel UDP noise
+
+Recommended mock sink / listener combinations:
+
+- `counting`: Rust batching cost without TSFN or JS listener work
+- `tsfn-noop-js`: TSFN and N-API dispatch cost with a minimal JS callback
+- `tsfn-real-js`: TSFN plus realistic JS object/event handling cost
+
+Interpretation rules:
+
+- If `quiche-direct` and `quic-loopback` are close, `io_uring` is probably not
+  the first owner.
+- If `quic-loopback` is much slower than `quiche-direct`, optimize Rust
+  reactor/driver batching and wake behavior.
+- If `quic-mock` `counting` is fast but `tsfn-noop-js` is slow, optimize Rust
+  batch delivery and TSFN pressure.
+- If `tsfn-noop-js` is fine but `tsfn-real-js` is slow, optimize JS event shape,
+  callback behavior, or listener allocation patterns.
 
 ## Baseline criteria before new gates
 

@@ -94,6 +94,7 @@ pub(crate) enum RuntimeDriverKind {
     Kqueue,
     IoUring,
     Poll,
+    Mock,
 }
 
 impl RuntimeDriverKind {
@@ -102,11 +103,13 @@ impl RuntimeDriverKind {
             Self::Kqueue => "kqueue",
             Self::IoUring => "io_uring",
             Self::Poll => "poll",
+            Self::Mock => "mock",
         }
     }
 }
 
 pub(crate) mod socket;
+pub(crate) mod mock;
 
 // ── Platform driver selection ───────────────────────────────────────
 
@@ -208,6 +211,18 @@ pub(crate) fn create_platform_driver(
             }
         }
     }
+}
+
+pub(crate) fn prepare_client_platform_driver(
+    bind_addr: SocketAddr,
+    runtime_mode: TransportRuntimeMode,
+) -> Result<(PlatformDriver, PlatformWaker, SocketAddr), Http3NativeError> {
+    let socket = std::net::UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
+    socket.set_nonblocking(true).map_err(Http3NativeError::Io)?;
+    let _ = socket::set_socket_buffers(&socket, 2 * 1024 * 1024);
+    let local_addr = socket.local_addr().map_err(Http3NativeError::Io)?;
+    let (driver, waker) = create_platform_driver(socket, runtime_mode)?;
+    Ok((driver, waker, local_addr))
 }
 
 #[cfg(target_os = "linux")]

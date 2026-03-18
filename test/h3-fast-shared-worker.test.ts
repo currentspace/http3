@@ -136,12 +136,7 @@ describe('H3 shared worker topology', () => {
     }
   });
 
-  it('reuses one local UDP port across concurrent portable sessions on macOS', { timeout: 20_000 }, async (t) => {
-    if (process.platform !== 'darwin') {
-      t.skip('kqueue topology alignment is only asserted in this test on macOS');
-      return;
-    }
-
+  it('reuses one local UDP port across concurrent portable sessions', { timeout: 20_000 }, async () => {
     const certs = generateTestCerts();
     let server: Http3SecureServer | null = null;
     let clients: Http3ClientSession[] = [];

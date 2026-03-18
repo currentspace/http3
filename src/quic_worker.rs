@@ -11,7 +11,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use ring::hmac;
 use ring::rand::SecureRandom;
 use slab::Slab;
@@ -19,14 +19,14 @@ use slab::Slab;
 use crate::buffer_pool::BufferPool;
 use crate::cid::CidEncoding;
 use crate::client_topology::{
-    default_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
+    default_quic_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
     ClientSocketStrategy, SharedClientWorkerKey as SharedQuicClientWorkerKey,
 };
 use crate::config::TransportRuntimeMode;
 use crate::error::Http3NativeError;
-use crate::event_loop::{
-    self, EventBatcher, EventTsfn, ProtocolHandler, MAX_BATCH_SIZE, SEND_BUF_SIZE,
-};
+use crate::event_loop::{self, EventBatcher, ProtocolHandler, MAX_BATCH_SIZE, SEND_BUF_SIZE};
+#[cfg(feature = "node-api")]
+use crate::event_loop::EventTsfn;
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{self, RawQuicClientCloseCause, SessionKind, WorkerSpawnKind};
@@ -216,7 +216,7 @@ enum SharedQuicClientCommand {
         session_ticket: Option<Vec<u8>>,
         qlog_dir: Option<String>,
         qlog_level: Option<String>,
-        tsfn: EventTsfn,
+        batcher: EventBatcher,
         resp_tx: Sender<Result<u32, Http3NativeError>>,
     },
     StreamSend {
@@ -823,30 +823,20 @@ pub struct QuicServerConfig {
     pub runtime_mode: TransportRuntimeMode,
 }
 
-pub fn spawn_quic_server(
-    mut quiche_config: quiche::Config,
+pub(crate) fn spawn_dedicated_quic_server_on_driver<D>(
+    quiche_config: quiche::Config,
     server_config: QuicServerConfig,
-    bind_addr: SocketAddr,
-    user_set_mtu: bool,
-    tsfn: EventTsfn,
-) -> Result<QuicServerHandle, Http3NativeError> {
-    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
-    std_socket
-        .set_nonblocking(true)
-        .map_err(Http3NativeError::Io)?;
-    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
-    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
-
-    // Loopback MTU auto-detection
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&local_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
-
-    let (driver, waker) =
-        transport::create_platform_driver(std_socket, server_config.runtime_mode)?;
+    driver: D,
+    waker: D::Waker,
+    local_addr: SocketAddr,
+    cmd_tx: Sender<QuicServerCommand>,
+    cmd_rx: Receiver<QuicServerCommand>,
+    batcher: EventBatcher,
+) -> Result<QuicServerHandle, Http3NativeError>
+where
+    D: transport::Driver + Send + 'static,
+    D::Waker: Send + Sync + Clone + 'static,
+{
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
@@ -854,7 +844,7 @@ pub fn spawn_quic_server(
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
         let mut handler = QuicServerHandler::new(quiche_config, server_config);
-        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, tsfn, local_addr);
+        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
     });
 
     Ok(QuicServerHandle {
@@ -866,48 +856,24 @@ pub fn spawn_quic_server(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_quic_client(
-    mut quiche_config: quiche::Config,
+pub(crate) fn spawn_dedicated_quic_client_on_driver<D>(
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
-    runtime_mode: TransportRuntimeMode,
-    tsfn: EventTsfn,
-) -> Result<QuicClientHandle, Http3NativeError> {
-    if default_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
-        return spawn_shared_quic_client(
-            quiche_config,
-            server_addr,
-            server_name,
-            session_ticket,
-            qlog_dir,
-            qlog_level,
-            user_set_mtu,
-            runtime_mode,
-            tsfn,
-        );
-    }
-
-    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-    let bind_addr = shared_client_bind_addr(server_addr);
-    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
-    std_socket
-        .set_nonblocking(true)
-        .map_err(Http3NativeError::Io)?;
-    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
-    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
-
-    // Loopback MTU auto-detection (check server address)
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&server_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
-
-    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
+    driver: D,
+    waker: D::Waker,
+    local_addr: SocketAddr,
+    cmd_tx: Sender<QuicClientCommand>,
+    cmd_rx: Receiver<QuicClientCommand>,
+    batcher: EventBatcher,
+) -> Result<QuicClientHandle, Http3NativeError>
+where
+    D: transport::Driver + Send + 'static,
+    D::Waker: Send + Sync + Clone + 'static,
+{
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
@@ -925,7 +891,7 @@ pub fn spawn_quic_client(
             &mut quiche_config,
         );
         let Some(mut handler) = handler else { return };
-        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, tsfn, local_addr);
+        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
     });
 
     Ok(QuicClientHandle {
@@ -936,6 +902,137 @@ pub fn spawn_quic_client(
         }),
         local_addr,
     })
+}
+
+#[cfg(feature = "node-api")]
+pub fn spawn_quic_server(
+    quiche_config: quiche::Config,
+    server_config: QuicServerConfig,
+    bind_addr: SocketAddr,
+    user_set_mtu: bool,
+    tsfn: EventTsfn,
+) -> Result<QuicServerHandle, Http3NativeError> {
+    spawn_quic_server_with_batcher(
+        quiche_config,
+        server_config,
+        bind_addr,
+        user_set_mtu,
+        EventBatcher::new_tsfn(tsfn),
+    )
+}
+
+pub(crate) fn spawn_quic_server_with_batcher(
+    mut quiche_config: quiche::Config,
+    server_config: QuicServerConfig,
+    bind_addr: SocketAddr,
+    user_set_mtu: bool,
+    batcher: EventBatcher,
+) -> Result<QuicServerHandle, Http3NativeError> {
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
+    std_socket
+        .set_nonblocking(true)
+        .map_err(Http3NativeError::Io)?;
+    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
+    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+
+    // Loopback MTU auto-detection
+    if !user_set_mtu {
+        let mtu = crate::config::effective_max_datagram_size(&local_addr);
+        quiche_config.set_max_recv_udp_payload_size(mtu);
+        quiche_config.set_max_send_udp_payload_size(mtu);
+    }
+
+    let (driver, waker) = transport::create_platform_driver(std_socket, server_config.runtime_mode)?;
+    spawn_dedicated_quic_server_on_driver(
+        quiche_config,
+        server_config,
+        driver,
+        waker,
+        local_addr,
+        cmd_tx,
+        cmd_rx,
+        batcher,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "node-api")]
+pub fn spawn_quic_client(
+    quiche_config: quiche::Config,
+    server_addr: SocketAddr,
+    server_name: String,
+    session_ticket: Option<Vec<u8>>,
+    qlog_dir: Option<String>,
+    qlog_level: Option<String>,
+    user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
+    tsfn: EventTsfn,
+) -> Result<QuicClientHandle, Http3NativeError> {
+    spawn_quic_client_with_batcher(
+        quiche_config,
+        server_addr,
+        server_name,
+        session_ticket,
+        qlog_dir,
+        qlog_level,
+        user_set_mtu,
+        runtime_mode,
+        EventBatcher::new_tsfn(tsfn),
+    )
+}
+
+pub(crate) fn spawn_quic_client_with_batcher(
+    mut quiche_config: quiche::Config,
+    server_addr: SocketAddr,
+    server_name: String,
+    session_ticket: Option<Vec<u8>>,
+    qlog_dir: Option<String>,
+    qlog_level: Option<String>,
+    user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
+    batcher: EventBatcher,
+) -> Result<QuicClientHandle, Http3NativeError> {
+    if default_quic_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
+        return spawn_shared_quic_client(
+            quiche_config,
+            server_addr,
+            server_name,
+            session_ticket,
+            qlog_dir,
+            qlog_level,
+            user_set_mtu,
+            runtime_mode,
+            batcher,
+        );
+    }
+
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+    let bind_addr = shared_client_bind_addr(server_addr);
+    let (driver, waker, local_addr) =
+        transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
+
+    // Loopback MTU auto-detection (check server address)
+    if !user_set_mtu {
+        let mtu = crate::config::effective_max_datagram_size(&server_addr);
+        quiche_config.set_max_recv_udp_payload_size(mtu);
+        quiche_config.set_max_send_udp_payload_size(mtu);
+    }
+
+    spawn_dedicated_quic_client_on_driver(
+        quiche_config,
+        server_addr,
+        server_name,
+        session_ticket,
+        qlog_dir,
+        qlog_level,
+        driver,
+        waker,
+        local_addr,
+        cmd_tx,
+        cmd_rx,
+        batcher,
+    )
 }
 
 struct SharedQuicClientSession {
@@ -956,7 +1053,7 @@ fn acquire_shared_quic_client_worker(
     server_addr: SocketAddr,
     runtime_mode: TransportRuntimeMode,
 ) -> Result<Arc<SharedQuicClientWorkerControl>, Http3NativeError> {
-    let key = shared_client_worker_key(server_addr);
+    let key = shared_client_worker_key(server_addr, runtime_mode);
     let mut registry = shared_quic_client_worker_registry()
         .lock()
         .map_err(|_| Http3NativeError::InvalidState("shared quic client registry poisoned".into()))?;
@@ -969,14 +1066,8 @@ fn acquire_shared_quic_client_worker(
 
     let bind_addr = shared_client_bind_addr(server_addr);
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
-    std_socket
-        .set_nonblocking(true)
-        .map_err(Http3NativeError::Io)?;
-    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
-    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
-
-    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
+    let (driver, waker, local_addr) =
+        transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let control = Arc::new(SharedQuicClientWorkerControl {
         cmd_tx,
@@ -1011,7 +1102,7 @@ fn spawn_shared_quic_client(
     qlog_level: Option<String>,
     user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
-    tsfn: EventTsfn,
+    batcher: EventBatcher,
 ) -> Result<QuicClientHandle, Http3NativeError> {
     let worker = acquire_shared_quic_client_worker(server_addr, runtime_mode)?;
 
@@ -1031,7 +1122,7 @@ fn spawn_shared_quic_client(
             session_ticket,
             qlog_dir,
             qlog_level,
-            tsfn,
+            batcher,
             resp_tx,
         })
         .map_err(|_| Http3NativeError::InvalidState("shared quic client worker not running".into()))?;
@@ -1195,7 +1286,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     session_ticket,
                     qlog_dir,
                     qlog_level,
-                    tsfn,
+                    batcher,
                     resp_tx,
                 } => {
                     let handler = QuicClientHandler::new(
@@ -1217,7 +1308,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                             let dcid = handler.current_dcid();
                             let handle = sessions.insert(SharedQuicClientSession {
                                 handler,
-                                batcher: EventBatcher::new(tsfn),
+                                batcher,
                                 server_addr,
                             });
                             route_by_dcid.insert(dcid, handle);

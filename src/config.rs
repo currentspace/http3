@@ -6,7 +6,13 @@ use std::path::PathBuf;
 
 use crate::cid::{CidEncoding, parse_server_id_bytes};
 use crate::error::Http3NativeError;
+#[cfg(feature = "node-api")]
 use napi_derive::napi;
+
+#[cfg(feature = "node-api")]
+type ByteBuf = napi::bindgen_prelude::Buffer;
+#[cfg(not(feature = "node-api"))]
+type ByteBuf = Vec<u8>;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -15,7 +21,7 @@ const MAX_DATAGRAM_SIZE: usize = 1350;
 /// loopback, meaning fewer syscalls and higher throughput.
 const LOOPBACK_DATAGRAM_SIZE: usize = 8192;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportRuntimeMode {
     Fast,
     Portable,
@@ -82,11 +88,11 @@ impl Drop for TempFileGuard {
     }
 }
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 pub struct JsServerOptions {
-    pub key: napi::bindgen_prelude::Buffer,
-    pub cert: napi::bindgen_prelude::Buffer,
-    pub ca: Option<napi::bindgen_prelude::Buffer>,
+    pub key: ByteBuf,
+    pub cert: ByteBuf,
+    pub ca: Option<ByteBuf>,
     pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
     pub max_udp_payload_size: Option<u32>,
@@ -101,18 +107,18 @@ pub struct JsServerOptions {
     pub send_batch_size: Option<u32>,
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
-    pub session_ticket_keys: Option<napi::bindgen_prelude::Buffer>,
+    pub session_ticket_keys: Option<ByteBuf>,
     pub max_connections: Option<u32>,
     pub disable_retry: Option<bool>,
     pub reuse_port: Option<bool>,
     pub keylog: Option<bool>,
     pub quic_lb: Option<bool>,
-    pub server_id: Option<napi::bindgen_prelude::Buffer>,
+    pub server_id: Option<ByteBuf>,
 }
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 pub struct JsClientOptions {
-    pub ca: Option<napi::bindgen_prelude::Buffer>,
+    pub ca: Option<ByteBuf>,
     pub reject_unauthorized: Option<bool>,
     pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
@@ -120,7 +126,7 @@ pub struct JsClientOptions {
     pub initial_max_data: Option<u32>,
     pub initial_max_stream_data_bidi_local: Option<u32>,
     pub initial_max_streams_bidi: Option<u32>,
-    pub session_ticket: Option<napi::bindgen_prelude::Buffer>,
+    pub session_ticket: Option<ByteBuf>,
     pub allow_0rtt: Option<bool>,
     pub enable_datagrams: Option<bool>,
     pub keylog: Option<bool>,
@@ -330,11 +336,11 @@ impl Http3Config {
 
 // ── QUIC-only config (no HTTP/3 ALPN) ──────────────────────────────
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 pub struct JsQuicServerOptions {
-    pub key: napi::bindgen_prelude::Buffer,
-    pub cert: napi::bindgen_prelude::Buffer,
-    pub ca: Option<napi::bindgen_prelude::Buffer>,
+    pub key: ByteBuf,
+    pub cert: ByteBuf,
+    pub ca: Option<ByteBuf>,
     pub alpn: Option<Vec<String>>,
     pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
@@ -348,13 +354,13 @@ pub struct JsQuicServerOptions {
     pub disable_retry: Option<bool>,
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
-    pub session_ticket_keys: Option<napi::bindgen_prelude::Buffer>,
+    pub session_ticket_keys: Option<ByteBuf>,
     pub keylog: Option<bool>,
 }
 
-#[napi(object)]
+#[cfg_attr(feature = "node-api", napi(object))]
 pub struct JsQuicClientOptions {
-    pub ca: Option<napi::bindgen_prelude::Buffer>,
+    pub ca: Option<ByteBuf>,
     pub reject_unauthorized: Option<bool>,
     pub alpn: Option<Vec<String>>,
     pub runtime_mode: Option<String>,
@@ -363,7 +369,7 @@ pub struct JsQuicClientOptions {
     pub initial_max_data: Option<u32>,
     pub initial_max_stream_data_bidi_local: Option<u32>,
     pub initial_max_streams_bidi: Option<u32>,
-    pub session_ticket: Option<napi::bindgen_prelude::Buffer>,
+    pub session_ticket: Option<ByteBuf>,
     pub allow_0rtt: Option<bool>,
     pub enable_datagrams: Option<bool>,
     pub keylog: Option<bool>,

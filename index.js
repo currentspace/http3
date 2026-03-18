@@ -576,6 +576,7 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.NativeMockQuicProfiler = nativeBinding.NativeMockQuicProfiler
 module.exports.NativeQuicClient = nativeBinding.NativeQuicClient
 module.exports.NativeQuicServer = nativeBinding.NativeQuicServer
 module.exports.NativeWorkerClient = nativeBinding.NativeWorkerClient
