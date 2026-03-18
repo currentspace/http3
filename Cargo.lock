@@ -226,6 +226,8 @@ dependencies = [
  "quiche",
  "rcgen",
  "ring",
+ "serde",
+ "serde_json",
  "slab",
  "socket2",
 ]

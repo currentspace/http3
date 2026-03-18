@@ -2,7 +2,7 @@
 //! delivering batched events to the JS main thread via ThreadsafeFunction.
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock, Weak,
@@ -16,7 +16,7 @@ use slab::Slab;
 
 use crate::buffer_pool::BufferPool;
 use crate::client_topology::{
-    default_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
+    default_h3_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
     ClientSocketStrategy, SharedClientWorkerKey as SharedH3ClientWorkerKey,
 };
 use crate::config::{Http3Config, TransportRuntimeMode};
@@ -740,7 +740,7 @@ pub fn spawn_client_worker(
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
-    if default_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
+    if default_h3_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
         return spawn_shared_client_worker(
             quiche_config,
             server_addr,
@@ -757,12 +757,8 @@ pub fn spawn_client_worker(
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
 
     let bind_addr = shared_client_bind_addr(server_addr);
-    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
-    std_socket
-        .set_nonblocking(true)
-        .map_err(Http3NativeError::Io)?;
-    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
-    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+    let (driver, waker, local_addr) =
+        transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
 
     // Loopback MTU auto-detection (check server address)
     if !user_set_mtu {
@@ -771,7 +767,6 @@ pub fn spawn_client_worker(
         quiche_config.set_max_send_udp_payload_size(mtu);
     }
 
-    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
@@ -789,7 +784,13 @@ pub fn spawn_client_worker(
             &mut quiche_config,
         );
         let Some(mut handler) = handler else { return };
-        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, tsfn, local_addr);
+        event_loop::run_event_loop(
+            &mut driver,
+            cmd_rx,
+            &mut handler,
+            EventBatcher::new_tsfn(tsfn),
+            local_addr,
+        );
     });
 
     Ok(ClientWorkerHandle {
@@ -820,7 +821,7 @@ fn acquire_shared_client_worker(
     server_addr: SocketAddr,
     runtime_mode: TransportRuntimeMode,
 ) -> Result<Arc<SharedClientWorkerControl>, Http3NativeError> {
-    let key = shared_client_worker_key(server_addr);
+    let key = shared_client_worker_key(server_addr, runtime_mode);
     let mut registry = shared_client_worker_registry()
         .lock()
         .map_err(|_| Http3NativeError::InvalidState("shared client registry poisoned".into()))?;
@@ -833,14 +834,8 @@ fn acquire_shared_client_worker(
 
     let bind_addr = shared_client_bind_addr(server_addr);
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
-    std_socket
-        .set_nonblocking(true)
-        .map_err(Http3NativeError::Io)?;
-    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
-    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
-
-    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
+    let (driver, waker, local_addr) =
+        transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let control = Arc::new(SharedClientWorkerControl {
         cmd_tx,
@@ -1052,7 +1047,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                             let dcid = handler.current_dcid();
                             let handle = sessions.insert(SharedClientSession {
                                 handler,
-                                batcher: EventBatcher::new(tsfn),
+                                batcher: EventBatcher::new_tsfn(tsfn),
                                 server_addr,
                             });
                             route_by_dcid.insert(dcid, handle);
@@ -1352,7 +1347,13 @@ pub fn spawn_worker(
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
         let mut handler = H3ServerHandler::new(quiche_config, http3_config);
-        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, tsfn, local_addr);
+        event_loop::run_event_loop(
+            &mut driver,
+            cmd_rx,
+            &mut handler,
+            EventBatcher::new_tsfn(tsfn),
+            local_addr,
+        );
     });
 
     let handle = WorkerHandle {

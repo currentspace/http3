@@ -1,0 +1,46 @@
+{
+  "trace_type": "mock-replay-trace",
+  "harness": "fixture",
+  "protocol": "quic",
+  "server_name": "localhost",
+  "payload_bytes": 128,
+  "requested_streams": 4,
+  "commands": [
+    {
+      "at_ms": 0,
+      "stream_id": 0,
+      "bytes": 128,
+      "fin": true
+    },
+    {
+      "at_ms": 1,
+      "stream_id": 4,
+      "bytes": 128,
+      "fin": true
+    },
+    {
+      "at_ms": 2,
+      "stream_id": 8,
+      "bytes": 128,
+      "fin": true
+    },
+    {
+      "at_ms": 3,
+      "stream_id": 12,
+      "bytes": 128,
+      "fin": true
+    }
+  ],
+  "event_batches": [
+    {
+      "at_ms": 0,
+      "event_count": 1,
+      "stream_bytes": 0
+    },
+    {
+      "at_ms": 4,
+      "event_count": 4,
+      "stream_bytes": 512
+    }
+  ]
+}

@@ -37,8 +37,9 @@ Usage:
 
 What it does:
   - reads host benchmark summaries and Docker benchmark matrices
+  - reads Rust loopback, quiche-direct floor, and Node mock transport profiles
   - flattens them into comparable client/server role records
-  - groups by protocol, role, OS, backend, runtime mode, topology policy, and container policy
+  - groups by protocol, role, harness, sink kind, backend, runtime mode, topology policy, and container policy
   - prints ranges for throughput, latency, CPU, and driver setup counts
 `);
 }
@@ -192,12 +193,84 @@ function deriveServerTopology(telemetry) {
   return workers > 0 ? 'one-worker-per-bound-port' : 'unknown';
 }
 
+function inferDriverFromTelemetry(telemetry) {
+  if ((telemetry?.ioUringDriverSetupSuccesses ?? 0) > 0) {
+    return 'io_uring';
+  }
+  if ((telemetry?.kqueueDriverSetupSuccesses ?? 0) > 0) {
+    return 'kqueue';
+  }
+  if ((telemetry?.pollDriverSetupSuccesses ?? 0) > 0) {
+    return 'poll';
+  }
+  if ((telemetry?.workerThreadSpawnsTotal ?? 0) > 0) {
+    return 'mock';
+  }
+  return 'unknown';
+}
+
+function buildBackendSignals(telemetry, extra = {}) {
+  return {
+    ioUringPendingTxHighWatermark: telemetry?.ioUringPendingTxHighWatermark ?? 0,
+    ioUringRetryableSendCompletions: telemetry?.ioUringRetryableSendCompletions ?? 0,
+    ioUringSubmitCalls: telemetry?.ioUringSubmitCalls ?? 0,
+    ioUringSubmitWithArgsCalls: telemetry?.ioUringSubmitWithArgsCalls ?? 0,
+    ioUringSubmittedSqesTotal: telemetry?.ioUringSubmittedSqesTotal ?? 0,
+    ioUringCompletionTotal: telemetry?.ioUringCompletionTotal ?? 0,
+    ioUringCompletionBatchHighWatermark: telemetry?.ioUringCompletionBatchHighWatermark ?? 0,
+    ioUringWakeCompletions: telemetry?.ioUringWakeCompletions ?? 0,
+    ioUringWakeWrites: telemetry?.ioUringWakeWrites ?? 0,
+    ioUringTimeoutPolls: telemetry?.ioUringTimeoutPolls ?? 0,
+    ioUringRxDatagramsTotal: telemetry?.ioUringRxDatagramsTotal ?? 0,
+    ioUringTxDatagramsSubmittedTotal: telemetry?.ioUringTxDatagramsSubmittedTotal ?? 0,
+    ioUringTxDatagramsCompletedTotal: telemetry?.ioUringTxDatagramsCompletedTotal ?? 0,
+    ioUringSqFullEvents: telemetry?.ioUringSqFullEvents ?? 0,
+    rawQuicFinObservations: telemetry?.rawQuicFinObservations ?? 0,
+    rawQuicFinishedEventEmits: telemetry?.rawQuicFinishedEventEmits ?? 0,
+    rawQuicClientPendingWriteHighWatermark: telemetry?.rawQuicClientPendingWriteHighWatermark ?? 0,
+    rawQuicClientReapsWithKnownStreams: telemetry?.rawQuicClientReapsWithKnownStreams ?? 0,
+    rawQuicClientCloseByTimeout: telemetry?.rawQuicClientCloseByTimeout ?? 0,
+    rawQuicClientCloseByRelease: telemetry?.rawQuicClientCloseByRelease ?? 0,
+    kqueueUnsentHighWatermark: telemetry?.kqueueUnsentHighWatermark ?? 0,
+    kqueueWouldBlockSends: telemetry?.kqueueWouldBlockSends ?? 0,
+    kqueueWriteWakeups: telemetry?.kqueueWriteWakeups ?? 0,
+    ...extra,
+  };
+}
+
+function summarizeSinkKinds(sinks) {
+  const kinds = Array.from(
+    new Set(
+      (sinks ?? [])
+        .map(sink => sink?.stats?.sink_kind ?? null)
+        .filter(Boolean),
+    ),
+  );
+  return kinds.length > 0 ? kinds.join(',') : 'n/a';
+}
+
+function normalizeMockSinkKind(payload) {
+  if (payload?.sinkMode === 'counting') {
+    return 'counting';
+  }
+  if (payload?.sinkMode === 'tsfn' && payload?.callbackMode === 'noop') {
+    return 'tsfn-noop-js';
+  }
+  if (payload?.sinkMode === 'tsfn' && payload?.callbackMode === 'touch-data') {
+    return 'tsfn-real-js';
+  }
+  return payload?.summary?.sink_type ?? 'unknown';
+}
+
 function flattenSummary(summary, sourcePath, context = {}) {
   const common = {
     sourcePath,
     generatedAt: summary.generatedAt ?? null,
     protocol: summary.protocol ?? context.protocol ?? 'unknown',
     profile: summary.settings?.profileName ?? 'unknown',
+    harnessKind: context.harnessKind ?? 'benchmark',
+    sinkKind: context.sinkKind ?? 'n/a',
+    transportKind: context.transportKind ?? 'real-udp',
     label: summary.settings?.label ?? summary.environment?.label ?? context.label ?? null,
     platform: summary.environment?.host?.platform ?? 'unknown',
     arch: summary.environment?.host?.arch ?? 'unknown',
@@ -224,19 +297,7 @@ function flattenSummary(summary, sourcePath, context = {}) {
     driverSetupAttempts: clientTelemetry.driverSetupAttemptsTotal ?? 0,
     sharedWorkerReuses: (clientTelemetry.rawQuicClientSharedWorkerReuses ?? 0) + (clientTelemetry.h3ClientSharedWorkerReuses ?? 0),
     localPortReuseHits: clientTelemetry.clientLocalPortReuseHits ?? 0,
-    backendSignals: {
-      ioUringPendingTxHighWatermark: clientTelemetry.ioUringPendingTxHighWatermark ?? 0,
-      ioUringRetryableSendCompletions: clientTelemetry.ioUringRetryableSendCompletions ?? 0,
-      rawQuicFinObservations: clientTelemetry.rawQuicFinObservations ?? 0,
-      rawQuicFinishedEventEmits: clientTelemetry.rawQuicFinishedEventEmits ?? 0,
-      rawQuicClientPendingWriteHighWatermark: clientTelemetry.rawQuicClientPendingWriteHighWatermark ?? 0,
-      rawQuicClientReapsWithKnownStreams: clientTelemetry.rawQuicClientReapsWithKnownStreams ?? 0,
-      rawQuicClientCloseByTimeout: clientTelemetry.rawQuicClientCloseByTimeout ?? 0,
-      rawQuicClientCloseByRelease: clientTelemetry.rawQuicClientCloseByRelease ?? 0,
-      kqueueUnsentHighWatermark: clientTelemetry.kqueueUnsentHighWatermark ?? 0,
-      kqueueWouldBlockSends: clientTelemetry.kqueueWouldBlockSends ?? 0,
-      kqueueWriteWakeups: clientTelemetry.kqueueWriteWakeups ?? 0,
-    },
+    backendSignals: buildBackendSignals(clientTelemetry),
   }];
 
   if (summary.serverStats) {
@@ -260,23 +321,140 @@ function flattenSummary(summary, sourcePath, context = {}) {
       activeSessions: summary.serverStats.final?.activeSessions ?? null,
       maxSessions: summary.serverStats.maxSessions ?? 0,
       maxStreams: summary.serverStats.maxStreams ?? 0,
-      backendSignals: {
-        ioUringPendingTxHighWatermark: serverTelemetry.ioUringPendingTxHighWatermark ?? 0,
-        ioUringRetryableSendCompletions: serverTelemetry.ioUringRetryableSendCompletions ?? 0,
-        rawQuicFinObservations: serverTelemetry.rawQuicFinObservations ?? 0,
-        rawQuicFinishedEventEmits: serverTelemetry.rawQuicFinishedEventEmits ?? 0,
-        rawQuicClientPendingWriteHighWatermark: serverTelemetry.rawQuicClientPendingWriteHighWatermark ?? 0,
-        rawQuicClientReapsWithKnownStreams: serverTelemetry.rawQuicClientReapsWithKnownStreams ?? 0,
-        rawQuicClientCloseByTimeout: serverTelemetry.rawQuicClientCloseByTimeout ?? 0,
-        rawQuicClientCloseByRelease: serverTelemetry.rawQuicClientCloseByRelease ?? 0,
-        kqueueUnsentHighWatermark: serverTelemetry.kqueueUnsentHighWatermark ?? 0,
-        kqueueWouldBlockSends: serverTelemetry.kqueueWouldBlockSends ?? 0,
-        kqueueWriteWakeups: serverTelemetry.kqueueWriteWakeups ?? 0,
-      },
+      backendSignals: buildBackendSignals(serverTelemetry),
     });
   }
 
   return records;
+}
+
+function flattenHarnessArtifact(payload, sourcePath) {
+  const harness = payload.environment?.harness ?? payload.environment?.extra?.harness ?? payload.harness ?? null;
+  const common = {
+    sourcePath,
+    generatedAt: payload.environment?.collectedAt ?? null,
+    protocol: payload.environment?.protocol ?? 'quic',
+    profile: 'harness',
+    label: payload.environment?.label ?? null,
+    platform: payload.environment?.host?.platform ?? 'unknown',
+    arch: payload.environment?.host?.arch ?? 'unknown',
+    dockerLane: null,
+    dockerPolicy: 'host',
+  };
+
+  if (harness === 'quic-loopback' && payload.client && payload.server) {
+    const clientTelemetry = payload.client.runtime_telemetry ?? {};
+    const serverTelemetry = payload.server.runtime_telemetry ?? {};
+    return [
+      {
+        ...common,
+        role: 'client',
+        harnessKind: 'real-loopback',
+        sinkKind: summarizeSinkKinds(payload.client.sinks),
+        transportKind: 'real-udp',
+        target: 'rust-loopback',
+        wallElapsedMs: payload.client.elapsed_ms ?? 0,
+        throughputMbps: payload.client.throughput_mbps ?? 0,
+        requestedMode: payload.client.runtime_mode ?? 'unknown',
+        selectedMode: payload.client.runtime_mode ?? 'unknown',
+        driver: inferDriverFromTelemetry(clientTelemetry),
+        fallbackOccurred: false,
+        topology: deriveClientTopology(clientTelemetry),
+        latencyP95Ms: payload.client.latency_ms?.p95_ms ?? null,
+        latencyP99Ms: payload.client.latency_ms?.p99_ms ?? null,
+        cpuUtilizationPct: 0,
+        driverSetupAttempts: clientTelemetry.driverSetupAttemptsTotal ?? 0,
+        sharedWorkerReuses: (clientTelemetry.rawQuicClientSharedWorkerReuses ?? 0) + (clientTelemetry.h3ClientSharedWorkerReuses ?? 0),
+        localPortReuseHits: clientTelemetry.clientLocalPortReuseHits ?? 0,
+        backendSignals: buildBackendSignals(clientTelemetry),
+      },
+      {
+        ...common,
+        role: 'server',
+        harnessKind: 'real-loopback',
+        sinkKind: summarizeSinkKinds([payload.server.sink]),
+        transportKind: 'real-udp',
+        target: 'rust-loopback',
+        wallElapsedMs: payload.server.elapsed_ms ?? 0,
+        throughputMbps: payload.client.throughput_mbps ?? 0,
+        requestedMode: payload.server.runtime_mode ?? 'unknown',
+        selectedMode: payload.server.runtime_mode ?? 'unknown',
+        driver: inferDriverFromTelemetry(serverTelemetry),
+        fallbackOccurred: false,
+        topology: deriveServerTopology(serverTelemetry),
+        latencyP95Ms: null,
+        latencyP99Ms: null,
+        cpuUtilizationPct: 0,
+        driverSetupAttempts: serverTelemetry.driverSetupAttemptsTotal ?? 0,
+        sharedWorkerReuses: 0,
+        localPortReuseHits: 0,
+        sessionsObserved: payload.server.sessions_opened ?? null,
+        sessionsClosed: payload.server.sessions_closed ?? null,
+        activeSessions: null,
+        maxSessions: null,
+        maxStreams: payload.server.echoed_streams ?? null,
+        backendSignals: buildBackendSignals(serverTelemetry),
+      },
+    ];
+  }
+
+  if (harness === 'quiche-direct-floor' && payload.result) {
+    return [{
+      ...common,
+      role: 'pair',
+      harnessKind: 'quiche-direct',
+      sinkKind: 'none',
+      transportKind: 'in-process',
+      target: 'quiche-direct-floor',
+      wallElapsedMs: payload.result.elapsed_ms ?? 0,
+      throughputMbps: payload.result.throughput_mbps ?? 0,
+      requestedMode: 'direct',
+      selectedMode: 'direct',
+      driver: 'quiche-direct',
+      fallbackOccurred: false,
+      topology: 'inline',
+      latencyP95Ms: payload.result.latency_ms?.p95_ms ?? null,
+      latencyP99Ms: payload.result.latency_ms?.p99_ms ?? null,
+      cpuUtilizationPct: 0,
+      driverSetupAttempts: 0,
+      sharedWorkerReuses: 0,
+      localPortReuseHits: 0,
+      backendSignals: buildBackendSignals({}, {
+        completedStreams: payload.result.completed_streams ?? 0,
+      }),
+    }];
+  }
+
+  if ((payload.harness ?? harness) === 'quic-mock' && payload.summary) {
+    return [{
+      ...common,
+      role: 'pair',
+      harnessKind: 'mock-transport',
+      sinkKind: normalizeMockSinkKind(payload),
+      transportKind: 'mock',
+      target: 'node-mock-transport',
+      wallElapsedMs: payload.summary.elapsed_ms ?? 0,
+      throughputMbps: payload.summary.throughput_mbps ?? 0,
+      requestedMode: 'mock',
+      selectedMode: 'mock',
+      driver: payload.summary.transport_driver ?? 'mock',
+      fallbackOccurred: false,
+      topology: 'mock-pair',
+      latencyP95Ms: payload.summary.latency_ms?.p95_ms ?? null,
+      latencyP99Ms: payload.summary.latency_ms?.p99_ms ?? null,
+      cpuUtilizationPct: 0,
+      driverSetupAttempts: payload.summary.runtime_telemetry?.driverSetupAttemptsTotal ?? 0,
+      sharedWorkerReuses: 0,
+      localPortReuseHits: 0,
+      backendSignals: buildBackendSignals(payload.summary.runtime_telemetry ?? {}, {
+        jsCallbackBatches: payload.jsCallback?.batches ?? 0,
+        jsCallbackEvents: payload.jsCallback?.events ?? 0,
+        jsCallbackBytesTouched: payload.jsCallback?.bytesTouched ?? 0,
+      }),
+    }];
+  }
+
+  return [];
 }
 
 function collectRecords(resultsDir) {
@@ -305,6 +483,18 @@ function collectRecords(resultsDir) {
           label: payload.environment?.label ?? null,
         }));
       }
+    } else if (
+      payload.environment?.harness === 'quic-loopback' ||
+      payload.environment?.harness === 'quiche-direct-floor' ||
+      payload.environment?.extra?.harness === 'quic-loopback' ||
+      payload.environment?.extra?.harness === 'quiche-direct-floor' ||
+      payload.harness === 'quic-mock'
+    ) {
+      sources.push({
+        path,
+        artifactType: payload.harness ?? payload.environment?.extra?.harness ?? 'harness-profile',
+      });
+      records.push(...flattenHarnessArtifact(payload, path));
     }
   }
 
@@ -319,6 +509,9 @@ function groupRecords(records) {
       record.protocol,
       record.role,
       record.profile,
+      record.harnessKind,
+      record.sinkKind,
+      record.transportKind,
       record.platform,
       record.target,
       record.dockerPolicy,
@@ -333,12 +526,28 @@ function groupRecords(records) {
 
   return Array.from(groups.entries())
     .map(([key, recordsForKey]) => {
-      const [protocol, role, profile, platform, target, dockerPolicy, selectedMode, driver, topology] = key.split('|');
+      const [
+        protocol,
+        role,
+        profile,
+        harnessKind,
+        sinkKind,
+        transportKind,
+        platform,
+        target,
+        dockerPolicy,
+        selectedMode,
+        driver,
+        topology,
+      ] = key.split('|');
       return {
         key,
         protocol,
         role,
         profile,
+        harnessKind,
+        sinkKind,
+        transportKind,
         platform,
         target,
         dockerPolicy,
@@ -357,6 +566,13 @@ function groupRecords(records) {
         backendSignals: {
           ioUringPendingTxHighWatermark: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringPendingTxHighWatermark), 0, ''),
           ioUringRetryableSendCompletions: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringRetryableSendCompletions), 0, ''),
+          ioUringSubmitCalls: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringSubmitCalls), 0, ''),
+          ioUringSubmittedSqesTotal: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringSubmittedSqesTotal), 0, ''),
+          ioUringCompletionTotal: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringCompletionTotal), 0, ''),
+          ioUringCompletionBatchHighWatermark: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringCompletionBatchHighWatermark), 0, ''),
+          ioUringWakeCompletions: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringWakeCompletions), 0, ''),
+          ioUringWakeWrites: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringWakeWrites), 0, ''),
+          ioUringSqFullEvents: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringSqFullEvents), 0, ''),
           rawQuicFinObservations: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicFinObservations), 0, ''),
           rawQuicFinishedEventEmits: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicFinishedEventEmits), 0, ''),
           rawQuicClientPendingWriteHighWatermark: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicClientPendingWriteHighWatermark), 0, ''),
@@ -366,6 +582,9 @@ function groupRecords(records) {
           kqueueUnsentHighWatermark: rangeText(recordsForKey.map((record) => record.backendSignals.kqueueUnsentHighWatermark), 0, ''),
           kqueueWouldBlockSends: rangeText(recordsForKey.map((record) => record.backendSignals.kqueueWouldBlockSends), 0, ''),
           kqueueWriteWakeups: rangeText(recordsForKey.map((record) => record.backendSignals.kqueueWriteWakeups), 0, ''),
+          jsCallbackBatches: rangeText(recordsForKey.map((record) => record.backendSignals.jsCallbackBatches ?? 0), 0, ''),
+          jsCallbackEvents: rangeText(recordsForKey.map((record) => record.backendSignals.jsCallbackEvents ?? 0), 0, ''),
+          jsCallbackBytesTouched: rangeText(recordsForKey.map((record) => record.backendSignals.jsCallbackBytesTouched ?? 0), 0, ''),
         },
       };
     })
@@ -382,7 +601,7 @@ function printGroups(groups) {
   for (const group of groups) {
     console.log(
       `- ${group.protocol} ${group.role} on ${group.platform} ` +
-      `[profile=${group.profile}, target=${group.target}, docker=${group.dockerPolicy}, mode=${group.selectedMode}, driver=${group.driver}, topology=${group.topology}]`,
+      `[profile=${group.profile}, harness=${group.harnessKind}, sink=${group.sinkKind}, transport=${group.transportKind}, target=${group.target}, docker=${group.dockerPolicy}, mode=${group.selectedMode}, driver=${group.driver}, topology=${group.topology}]`,
     );
     console.log(`  samples=${group.count}`);
     console.log(`  throughput=${group.throughputMbps}, p95=${group.latencyP95Ms}, cpu=${group.cpuUtilizationPct}`);
@@ -393,6 +612,13 @@ function printGroups(groups) {
     console.log(
       `  backend: io_uring pending=${group.backendSignals.ioUringPendingTxHighWatermark},` +
       ` io_uring retries=${group.backendSignals.ioUringRetryableSendCompletions},` +
+      ` io_uring submitCalls=${group.backendSignals.ioUringSubmitCalls},` +
+      ` io_uring sqes=${group.backendSignals.ioUringSubmittedSqesTotal},` +
+      ` io_uring completions=${group.backendSignals.ioUringCompletionTotal},` +
+      ` io_uring cqBatchHw=${group.backendSignals.ioUringCompletionBatchHighWatermark},` +
+      ` io_uring wakeRx=${group.backendSignals.ioUringWakeCompletions},` +
+      ` io_uring wakeTx=${group.backendSignals.ioUringWakeWrites},` +
+      ` io_uring sqFull=${group.backendSignals.ioUringSqFullEvents},` +
       ` raw fin=${group.backendSignals.rawQuicFinObservations},` +
       ` raw finished=${group.backendSignals.rawQuicFinishedEventEmits},` +
       ` raw pendingHw=${group.backendSignals.rawQuicClientPendingWriteHighWatermark},` +
@@ -401,7 +627,10 @@ function printGroups(groups) {
       ` raw releaseClose=${group.backendSignals.rawQuicClientCloseByRelease},` +
       ` kqueue backlog=${group.backendSignals.kqueueUnsentHighWatermark},` +
       ` kqueue wouldBlock=${group.backendSignals.kqueueWouldBlockSends},` +
-      ` kqueue writeWakeups=${group.backendSignals.kqueueWriteWakeups}`,
+      ` kqueue writeWakeups=${group.backendSignals.kqueueWriteWakeups},` +
+      ` js batches=${group.backendSignals.jsCallbackBatches},` +
+      ` js events=${group.backendSignals.jsCallbackEvents},` +
+      ` js bytes=${group.backendSignals.jsCallbackBytesTouched}`,
     );
   }
 }

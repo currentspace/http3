@@ -2,12 +2,14 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "node-api")]
 use napi_derive::napi;
+use serde::Serialize;
 
 use crate::transport::RuntimeDriverKind;
 
-#[napi(object)]
-#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "node-api", napi(object))]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct JsReactorTelemetrySnapshot {
     pub driverSetupAttemptsTotal: i64,
     pub driverSetupSuccessTotal: i64,
@@ -55,6 +57,18 @@ pub struct JsReactorTelemetrySnapshot {
     pub ioUringTxInFlightHighWatermark: i64,
     pub ioUringPendingTxHighWatermark: i64,
     pub ioUringRetryableSendCompletions: i64,
+    pub ioUringSubmitCalls: i64,
+    pub ioUringSubmitWithArgsCalls: i64,
+    pub ioUringSubmittedSqesTotal: i64,
+    pub ioUringCompletionTotal: i64,
+    pub ioUringCompletionBatchHighWatermark: i64,
+    pub ioUringWakeCompletions: i64,
+    pub ioUringWakeWrites: i64,
+    pub ioUringTimeoutPolls: i64,
+    pub ioUringRxDatagramsTotal: i64,
+    pub ioUringTxDatagramsSubmittedTotal: i64,
+    pub ioUringTxDatagramsCompletedTotal: i64,
+    pub ioUringSqFullEvents: i64,
     pub kqueueUnsentHighWatermark: i64,
     pub kqueueWouldBlockSends: i64,
     pub kqueueWriteWakeups: i64,
@@ -139,6 +153,18 @@ static IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static IO_URING_PENDING_TX_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static IO_URING_RETRYABLE_SEND_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_SUBMIT_CALLS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_SUBMIT_WITH_ARGS_CALLS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_SUBMITTED_SQES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static IO_URING_COMPLETION_TOTAL: AtomicU64 = AtomicU64::new(0);
+static IO_URING_COMPLETION_BATCH_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static IO_URING_WAKE_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_WAKE_WRITES: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIMEOUT_POLLS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_RX_DATAGRAMS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TX_DATAGRAMS_SUBMITTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TX_DATAGRAMS_COMPLETED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static IO_URING_SQ_FULL_EVENTS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_UNSENT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WOULD_BLOCK_SENDS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WRITE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
@@ -167,6 +193,7 @@ pub(crate) fn record_driver_setup_attempt(kind: RuntimeDriverKind) {
         RuntimeDriverKind::IoUring => bump(&IO_URING_DRIVER_SETUP_ATTEMPTS),
         RuntimeDriverKind::Poll => bump(&POLL_DRIVER_SETUP_ATTEMPTS),
         RuntimeDriverKind::Kqueue => bump(&KQUEUE_DRIVER_SETUP_ATTEMPTS),
+        RuntimeDriverKind::Mock => {}
     }
 }
 
@@ -176,6 +203,7 @@ pub(crate) fn record_driver_setup_success(kind: RuntimeDriverKind) {
         RuntimeDriverKind::IoUring => bump(&IO_URING_DRIVER_SETUP_SUCCESSES),
         RuntimeDriverKind::Poll => bump(&POLL_DRIVER_SETUP_SUCCESSES),
         RuntimeDriverKind::Kqueue => bump(&KQUEUE_DRIVER_SETUP_SUCCESSES),
+        RuntimeDriverKind::Mock => {}
     }
 }
 
@@ -185,6 +213,7 @@ pub(crate) fn record_driver_setup_failure(kind: RuntimeDriverKind) {
         RuntimeDriverKind::IoUring => bump(&IO_URING_DRIVER_SETUP_FAILURES),
         RuntimeDriverKind::Poll => bump(&POLL_DRIVER_SETUP_FAILURES),
         RuntimeDriverKind::Kqueue => bump(&KQUEUE_DRIVER_SETUP_FAILURES),
+        RuntimeDriverKind::Mock => {}
     }
 }
 
@@ -294,6 +323,62 @@ pub(crate) fn record_io_uring_retryable_send_completion() {
     bump(&IO_URING_RETRYABLE_SEND_COMPLETIONS);
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_submit_call() {
+    bump(&IO_URING_SUBMIT_CALLS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_submit_with_args_call() {
+    bump(&IO_URING_SUBMIT_WITH_ARGS_CALLS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_submitted_sqes(count: usize) {
+    IO_URING_SUBMITTED_SQES_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_completions(count: usize) {
+    IO_URING_COMPLETION_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+    observe_max(&IO_URING_COMPLETION_BATCH_HIGH_WATERMARK, count);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_wake_completion() {
+    bump(&IO_URING_WAKE_COMPLETIONS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_wake_write() {
+    bump(&IO_URING_WAKE_WRITES);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_timeout_poll() {
+    bump(&IO_URING_TIMEOUT_POLLS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_rx_datagrams(count: usize) {
+    IO_URING_RX_DATAGRAMS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tx_datagrams_submitted(count: usize) {
+    IO_URING_TX_DATAGRAMS_SUBMITTED_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tx_datagrams_completed(count: usize) {
+    IO_URING_TX_DATAGRAMS_COMPLETED_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_sq_full_event() {
+    bump(&IO_URING_SQ_FULL_EVENTS);
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn record_kqueue_unsent_depth(count: usize) {
     observe_max(&KQUEUE_UNSENT_HIGH_WATERMARK, count);
@@ -363,6 +448,18 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         ioUringTxInFlightHighWatermark: load(&IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK),
         ioUringPendingTxHighWatermark: load(&IO_URING_PENDING_TX_HIGH_WATERMARK),
         ioUringRetryableSendCompletions: load(&IO_URING_RETRYABLE_SEND_COMPLETIONS),
+        ioUringSubmitCalls: load(&IO_URING_SUBMIT_CALLS),
+        ioUringSubmitWithArgsCalls: load(&IO_URING_SUBMIT_WITH_ARGS_CALLS),
+        ioUringSubmittedSqesTotal: load(&IO_URING_SUBMITTED_SQES_TOTAL),
+        ioUringCompletionTotal: load(&IO_URING_COMPLETION_TOTAL),
+        ioUringCompletionBatchHighWatermark: load(&IO_URING_COMPLETION_BATCH_HIGH_WATERMARK),
+        ioUringWakeCompletions: load(&IO_URING_WAKE_COMPLETIONS),
+        ioUringWakeWrites: load(&IO_URING_WAKE_WRITES),
+        ioUringTimeoutPolls: load(&IO_URING_TIMEOUT_POLLS),
+        ioUringRxDatagramsTotal: load(&IO_URING_RX_DATAGRAMS_TOTAL),
+        ioUringTxDatagramsSubmittedTotal: load(&IO_URING_TX_DATAGRAMS_SUBMITTED_TOTAL),
+        ioUringTxDatagramsCompletedTotal: load(&IO_URING_TX_DATAGRAMS_COMPLETED_TOTAL),
+        ioUringSqFullEvents: load(&IO_URING_SQ_FULL_EVENTS),
         kqueueUnsentHighWatermark: load(&KQUEUE_UNSENT_HIGH_WATERMARK),
         kqueueWouldBlockSends: load(&KQUEUE_WOULD_BLOCK_SENDS),
         kqueueWriteWakeups: load(&KQUEUE_WRITE_WAKEUPS),
@@ -418,6 +515,18 @@ pub fn reset() {
         &IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK,
         &IO_URING_PENDING_TX_HIGH_WATERMARK,
         &IO_URING_RETRYABLE_SEND_COMPLETIONS,
+        &IO_URING_SUBMIT_CALLS,
+        &IO_URING_SUBMIT_WITH_ARGS_CALLS,
+        &IO_URING_SUBMITTED_SQES_TOTAL,
+        &IO_URING_COMPLETION_TOTAL,
+        &IO_URING_COMPLETION_BATCH_HIGH_WATERMARK,
+        &IO_URING_WAKE_COMPLETIONS,
+        &IO_URING_WAKE_WRITES,
+        &IO_URING_TIMEOUT_POLLS,
+        &IO_URING_RX_DATAGRAMS_TOTAL,
+        &IO_URING_TX_DATAGRAMS_SUBMITTED_TOTAL,
+        &IO_URING_TX_DATAGRAMS_COMPLETED_TOTAL,
+        &IO_URING_SQ_FULL_EVENTS,
         &KQUEUE_UNSENT_HIGH_WATERMARK,
         &KQUEUE_WOULD_BLOCK_SENDS,
         &KQUEUE_WRITE_WAKEUPS,
