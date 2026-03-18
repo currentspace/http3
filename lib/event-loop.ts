@@ -263,6 +263,18 @@ export interface ReactorTelemetrySnapshot {
   clientLocalPortReuseHits: number;
   rawQuicClientSessionsOpened: number;
   rawQuicClientSessionsClosed: number;
+  rawQuicFinObservations: number;
+  rawQuicFinishedEventEmits: number;
+  rawQuicDrainEventEmits: number;
+  rawQuicBlockedStreamHighWatermark: number;
+  rawQuicClientPendingWriteHighWatermark: number;
+  rawQuicClientReapsWithPendingWrites: number;
+  rawQuicClientReapsWithBlockedStreams: number;
+  rawQuicClientReapsWithKnownStreams: number;
+  rawQuicClientCloseByPacket: number;
+  rawQuicClientCloseByTimeout: number;
+  rawQuicClientCloseByShutdown: number;
+  rawQuicClientCloseByRelease: number;
   rawQuicServerSessionsOpened: number;
   rawQuicServerSessionsClosed: number;
   h3ClientSessionsOpened: number;

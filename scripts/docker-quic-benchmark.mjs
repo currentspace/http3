@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { createDockerLaneMatrix } from './docker-benchmark-lanes.mjs';
 import { captureEnvironmentMetadata, writeJsonArtifact } from './perf-artifacts.mjs';
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -14,12 +15,18 @@ function parseArgs(argv) {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--help' || arg === '--include-privileged' || arg === '--no-build' || arg === '--json') {
+    if (
+      arg === '--help' ||
+      arg === '--include-privileged' ||
+      arg === '--no-build' ||
+      arg === '--json' ||
+      arg === '--list-lanes'
+    ) {
       flags.add(arg);
       continue;
     }
 
-    if (arg === '--platform' || arg === '--results-dir' || arg === '--label') {
+    if (arg === '--platform' || arg === '--results-dir' || arg === '--label' || arg === '--lane') {
       const value = argv[index + 1];
       if (!value || value.startsWith('--')) {
         throw new Error(`${arg} requires a value`);
@@ -51,6 +58,8 @@ Runner options:
   --platform VALUE         Docker platform override (defaults to DOCKER_RUNTIME_PLATFORM or host default)
   --include-privileged     Also benchmark a privileged fast-path lane
   --no-build               Reuse the existing runtime-test image
+  --lane NAME              Run only one named matrix lane
+  --list-lanes             Print lane names and exit
   --results-dir DIR        Write a timestamped matrix artifact under DIR
   --label TEXT             Optional artifact label suffix
   --json                   Print the full matrix as JSON
@@ -343,74 +352,36 @@ function printAnalysis(results) {
   }
 }
 
-function createLaneMatrix(includePrivileged) {
-  const lanes = [
-    {
-      name: 'ordinary portable',
-      benchmarkArgs: ['--runtime-mode', 'portable', '--fallback-policy', 'error'],
-    },
-    {
-      name: 'ordinary auto fallback',
-      benchmarkArgs: ['--runtime-mode', 'auto', '--fallback-policy', 'warn-and-fallback'],
-    },
-    {
-      name: 'ordinary fast unavailable (expected)',
-      benchmarkArgs: ['--runtime-mode', 'fast', '--fallback-policy', 'error'],
-      expectFailure: true,
-    },
-    {
-      name: 'cap-add fast unavailable (expected)',
-      dockerFlags: ['--cap-add', 'SYS_ADMIN'],
-      benchmarkArgs: ['--runtime-mode', 'fast', '--fallback-policy', 'error'],
-      expectFailure: true,
-    },
-    {
-      name: 'unconfined portable',
-      dockerFlags: ['--security-opt', 'seccomp=unconfined'],
-      benchmarkArgs: ['--runtime-mode', 'portable', '--fallback-policy', 'error'],
-    },
-    {
-      name: 'unconfined fast',
-      dockerFlags: ['--security-opt', 'seccomp=unconfined'],
-      benchmarkArgs: ['--runtime-mode', 'fast', '--fallback-policy', 'error'],
-    },
-    {
-      name: 'unconfined server fast, client portable',
-      dockerFlags: ['--security-opt', 'seccomp=unconfined'],
-      benchmarkArgs: [
-        '--server-runtime-mode', 'fast',
-        '--server-fallback-policy', 'error',
-        '--client-runtime-mode', 'portable',
-        '--client-fallback-policy', 'error',
-      ],
-    },
-    {
-      name: 'unconfined server portable, client fast',
-      dockerFlags: ['--security-opt', 'seccomp=unconfined'],
-      benchmarkArgs: [
-        '--server-runtime-mode', 'portable',
-        '--server-fallback-policy', 'error',
-        '--client-runtime-mode', 'fast',
-        '--client-fallback-policy', 'error',
-      ],
-    },
-  ];
-
-  if (includePrivileged) {
-    lanes.push({
-      name: 'privileged fast',
-      dockerFlags: ['--privileged'],
-      benchmarkArgs: ['--runtime-mode', 'fast', '--fallback-policy', 'error'],
-    });
+function printLaneNames(includePrivileged) {
+  for (const lane of createDockerLaneMatrix(includePrivileged)) {
+    console.log(lane.name);
   }
+}
 
-  return lanes;
+function selectLanes(lanes, laneName) {
+  if (!laneName) {
+    return lanes;
+  }
+  const selected = lanes.filter((lane) => lane.name === laneName);
+  if (selected.length > 0) {
+    return selected;
+  }
+  throw new Error(
+    `Unknown --lane value "${laneName}". Available lanes:\n${lanes.map((lane) => `- ${lane.name}`).join('\n')}`,
+  );
 }
 
 function main() {
   const { options, flags, forwardedArgs } = parseArgs(process.argv.slice(2));
   if (flags.has('--help')) {
     printHelp();
+    return;
+  }
+
+  const laneName = options.get('--lane') ?? null;
+  const includePrivileged = flags.has('--include-privileged') || laneName === 'privileged fast';
+  if (flags.has('--list-lanes')) {
+    printLaneNames(includePrivileged);
     return;
   }
 
@@ -424,7 +395,8 @@ function main() {
   }
 
   const results = [];
-  for (const lane of createLaneMatrix(flags.has('--include-privileged'))) {
+  const lanes = selectLanes(createDockerLaneMatrix(includePrivileged), laneName);
+  for (const lane of lanes) {
     results.push(runLane(lane, platform, workloadArgs, label));
   }
 
@@ -446,6 +418,7 @@ function main() {
     }),
     image: IMAGE_TAG,
     platform: platform ?? null,
+    lane: laneName,
     workloadArgs,
     results,
   };

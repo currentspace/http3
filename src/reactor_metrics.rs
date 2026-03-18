@@ -33,6 +33,18 @@ pub struct JsReactorTelemetrySnapshot {
     pub clientLocalPortReuseHits: i64,
     pub rawQuicClientSessionsOpened: i64,
     pub rawQuicClientSessionsClosed: i64,
+    pub rawQuicFinObservations: i64,
+    pub rawQuicFinishedEventEmits: i64,
+    pub rawQuicDrainEventEmits: i64,
+    pub rawQuicBlockedStreamHighWatermark: i64,
+    pub rawQuicClientPendingWriteHighWatermark: i64,
+    pub rawQuicClientReapsWithPendingWrites: i64,
+    pub rawQuicClientReapsWithBlockedStreams: i64,
+    pub rawQuicClientReapsWithKnownStreams: i64,
+    pub rawQuicClientCloseByPacket: i64,
+    pub rawQuicClientCloseByTimeout: i64,
+    pub rawQuicClientCloseByShutdown: i64,
+    pub rawQuicClientCloseByRelease: i64,
     pub rawQuicServerSessionsOpened: i64,
     pub rawQuicServerSessionsClosed: i64,
     pub h3ClientSessionsOpened: i64,
@@ -67,6 +79,14 @@ pub(crate) enum SessionKind {
     H3Server,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RawQuicClientCloseCause {
+    Packet,
+    Timeout,
+    Shutdown,
+    Release,
+}
+
 static DRIVER_SETUP_ATTEMPTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DRIVER_SETUP_SUCCESS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DRIVER_SETUP_FAILURE_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -96,6 +116,18 @@ static CLIENT_LOCAL_PORT_REUSE_HITS: AtomicU64 = AtomicU64::new(0);
 
 static RAW_QUIC_CLIENT_SESSIONS_OPENED: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_SESSIONS_CLOSED: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_FIN_OBSERVATIONS: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_FINISHED_EVENT_EMITS: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_DRAIN_EVENT_EMITS: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_BLOCKED_STREAM_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_REAPS_WITH_PENDING_WRITES: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_REAPS_WITH_BLOCKED_STREAMS: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_REAPS_WITH_KNOWN_STREAMS: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_CLOSE_BY_PACKET: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_CLOSE_BY_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_CLOSE_BY_SHUTDOWN: AtomicU64 = AtomicU64::new(0);
+static RAW_QUIC_CLIENT_CLOSE_BY_RELEASE: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_SERVER_SESSIONS_OPENED: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_SERVER_SESSIONS_CLOSED: AtomicU64 = AtomicU64::new(0);
 static H3_CLIENT_SESSIONS_OPENED: AtomicU64 = AtomicU64::new(0);
@@ -197,6 +229,51 @@ pub(crate) fn record_session_close(kind: SessionKind) {
     }
 }
 
+pub(crate) fn record_raw_quic_fin_observed() {
+    bump(&RAW_QUIC_FIN_OBSERVATIONS);
+}
+
+pub(crate) fn record_raw_quic_finished_event() {
+    bump(&RAW_QUIC_FINISHED_EVENT_EMITS);
+}
+
+pub(crate) fn record_raw_quic_drain_event() {
+    bump(&RAW_QUIC_DRAIN_EVENT_EMITS);
+}
+
+pub(crate) fn record_raw_quic_blocked_streams(count: usize) {
+    observe_max(&RAW_QUIC_BLOCKED_STREAM_HIGH_WATERMARK, count);
+}
+
+pub(crate) fn record_raw_quic_client_pending_writes(count: usize) {
+    observe_max(&RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK, count);
+}
+
+pub(crate) fn record_raw_quic_client_reap(
+    pending_writes: usize,
+    blocked_streams: usize,
+    known_streams: usize,
+) {
+    if pending_writes > 0 {
+        bump(&RAW_QUIC_CLIENT_REAPS_WITH_PENDING_WRITES);
+    }
+    if blocked_streams > 0 {
+        bump(&RAW_QUIC_CLIENT_REAPS_WITH_BLOCKED_STREAMS);
+    }
+    if known_streams > 0 {
+        bump(&RAW_QUIC_CLIENT_REAPS_WITH_KNOWN_STREAMS);
+    }
+}
+
+pub(crate) fn record_raw_quic_client_close_cause(cause: RawQuicClientCloseCause) {
+    match cause {
+        RawQuicClientCloseCause::Packet => bump(&RAW_QUIC_CLIENT_CLOSE_BY_PACKET),
+        RawQuicClientCloseCause::Timeout => bump(&RAW_QUIC_CLIENT_CLOSE_BY_TIMEOUT),
+        RawQuicClientCloseCause::Shutdown => bump(&RAW_QUIC_CLIENT_CLOSE_BY_SHUTDOWN),
+        RawQuicClientCloseCause::Release => bump(&RAW_QUIC_CLIENT_CLOSE_BY_RELEASE),
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn record_io_uring_rx_in_flight(count: usize) {
     observe_max(&IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK, count);
@@ -262,6 +339,20 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         clientLocalPortReuseHits: load(&CLIENT_LOCAL_PORT_REUSE_HITS),
         rawQuicClientSessionsOpened: load(&RAW_QUIC_CLIENT_SESSIONS_OPENED),
         rawQuicClientSessionsClosed: load(&RAW_QUIC_CLIENT_SESSIONS_CLOSED),
+        rawQuicFinObservations: load(&RAW_QUIC_FIN_OBSERVATIONS),
+        rawQuicFinishedEventEmits: load(&RAW_QUIC_FINISHED_EVENT_EMITS),
+        rawQuicDrainEventEmits: load(&RAW_QUIC_DRAIN_EVENT_EMITS),
+        rawQuicBlockedStreamHighWatermark: load(&RAW_QUIC_BLOCKED_STREAM_HIGH_WATERMARK),
+        rawQuicClientPendingWriteHighWatermark: load(
+            &RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK,
+        ),
+        rawQuicClientReapsWithPendingWrites: load(&RAW_QUIC_CLIENT_REAPS_WITH_PENDING_WRITES),
+        rawQuicClientReapsWithBlockedStreams: load(&RAW_QUIC_CLIENT_REAPS_WITH_BLOCKED_STREAMS),
+        rawQuicClientReapsWithKnownStreams: load(&RAW_QUIC_CLIENT_REAPS_WITH_KNOWN_STREAMS),
+        rawQuicClientCloseByPacket: load(&RAW_QUIC_CLIENT_CLOSE_BY_PACKET),
+        rawQuicClientCloseByTimeout: load(&RAW_QUIC_CLIENT_CLOSE_BY_TIMEOUT),
+        rawQuicClientCloseByShutdown: load(&RAW_QUIC_CLIENT_CLOSE_BY_SHUTDOWN),
+        rawQuicClientCloseByRelease: load(&RAW_QUIC_CLIENT_CLOSE_BY_RELEASE),
         rawQuicServerSessionsOpened: load(&RAW_QUIC_SERVER_SESSIONS_OPENED),
         rawQuicServerSessionsClosed: load(&RAW_QUIC_SERVER_SESSIONS_CLOSED),
         h3ClientSessionsOpened: load(&H3_CLIENT_SESSIONS_OPENED),
@@ -305,6 +396,18 @@ pub fn reset() {
         &CLIENT_LOCAL_PORT_REUSE_HITS,
         &RAW_QUIC_CLIENT_SESSIONS_OPENED,
         &RAW_QUIC_CLIENT_SESSIONS_CLOSED,
+        &RAW_QUIC_FIN_OBSERVATIONS,
+        &RAW_QUIC_FINISHED_EVENT_EMITS,
+        &RAW_QUIC_DRAIN_EVENT_EMITS,
+        &RAW_QUIC_BLOCKED_STREAM_HIGH_WATERMARK,
+        &RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK,
+        &RAW_QUIC_CLIENT_REAPS_WITH_PENDING_WRITES,
+        &RAW_QUIC_CLIENT_REAPS_WITH_BLOCKED_STREAMS,
+        &RAW_QUIC_CLIENT_REAPS_WITH_KNOWN_STREAMS,
+        &RAW_QUIC_CLIENT_CLOSE_BY_PACKET,
+        &RAW_QUIC_CLIENT_CLOSE_BY_TIMEOUT,
+        &RAW_QUIC_CLIENT_CLOSE_BY_SHUTDOWN,
+        &RAW_QUIC_CLIENT_CLOSE_BY_RELEASE,
         &RAW_QUIC_SERVER_SESSIONS_OPENED,
         &RAW_QUIC_SERVER_SESSIONS_CLOSED,
         &H3_CLIENT_SESSIONS_OPENED,
