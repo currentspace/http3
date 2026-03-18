@@ -7,8 +7,8 @@ import { captureEnvironmentMetadata, writeJsonArtifact } from './perf-artifacts.
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST_TEST_DIR = join(ROOT_DIR, 'dist-test', 'test');
-const BENCH_SERVER_PATH = join(DIST_TEST_DIR, 'h3-bench-server.js');
-const BENCH_CLIENT_PATH = join(DIST_TEST_DIR, 'h3-bench-client.js');
+const BENCH_SERVER_PATH = join(DIST_TEST_DIR, 'support', 'bench', 'h3-bench-server.js');
+const BENCH_CLIENT_PATH = join(DIST_TEST_DIR, 'support', 'bench', 'h3-bench-client.js');
 
 const PROFILES = {
   smoke: {

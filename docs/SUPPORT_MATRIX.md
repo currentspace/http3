@@ -4,7 +4,7 @@
 
 - Node.js: `>=24.0.0`
 - Module target: Node ESM/CJS-compatible package output
-- Browser validation: Chromium + Firefox automated in CI, Safari validated via release runbook
+- Browser compatibility smoke: Chromium + Firefox automated in CI over the HTTPS entrypoint, Safari validated manually via the release runbook
 
 ## Protocol Support
 

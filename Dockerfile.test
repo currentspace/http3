@@ -32,11 +32,11 @@ RUN npx tsc -p tsconfig.test.json
 CMD ["sh", "-c", "\
   echo '=== io_uring stress + bench tests ===' && \
   echo '--- quic-stress.test.js ---' && \
-  node --test dist-test/test/quic-stress.test.js && \
-  echo '--- quic-kqueue-stress.test.js (io_uring on Linux) ---' && \
-  node --test dist-test/test/quic-kqueue-stress.test.js && \
+  node --test dist-test/test/interop/quic-stress.test.js && \
+  echo '--- quic-driver-pressure.test.js ---' && \
+  node --test dist-test/test/runtime/quic-driver-pressure.test.js && \
   echo '--- bench-compare.test.js ---' && \
-  node --test dist-test/test/bench-compare.test.js && \
+  node --test dist-test/test/perf-gates/bench-compare.test.js && \
   echo '--- quic-bench-profile.test.js ---' && \
-  node --test dist-test/test/quic-bench-profile.test.js && \
+  node --test dist-test/test/perf-gates/quic-bench-profile.test.js && \
   echo '=== ALL TESTS PASSED ==='"]

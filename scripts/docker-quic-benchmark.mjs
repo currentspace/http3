@@ -78,9 +78,9 @@ function ensureDefaultWorkloadArgs(args) {
 
   if (!hasProfile) {
     finalArgs.push('--profile', 'balanced');
-  }
-  if (!hasRounds) {
-    finalArgs.push('--rounds', '2');
+    if (!hasRounds) {
+      finalArgs.push('--rounds', '2');
+    }
   }
 
   return finalArgs;

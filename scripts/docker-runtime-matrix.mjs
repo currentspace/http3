@@ -1,12 +1,24 @@
 import { execFileSync } from 'node:child_process';
 
 const composeArgs = ['compose', '-f', 'docker-compose.runtime-tests.yml'];
+const defaultRuntimePlatform = process.env.DOCKER_RUNTIME_PLATFORM ?? inferDockerRuntimePlatform();
+
+function inferDockerRuntimePlatform() {
+  if (process.arch === 'arm64') {
+    return 'linux/arm64';
+  }
+  if (process.arch === 'x64') {
+    return 'linux/amd64';
+  }
+  return null;
+}
 
 function runDocker(args, env = {}) {
   execFileSync('docker', [...composeArgs, ...args], {
     stdio: 'inherit',
     env: {
       ...process.env,
+      ...(defaultRuntimePlatform ? { DOCKER_RUNTIME_PLATFORM: defaultRuntimePlatform } : {}),
       ...env,
     },
   });
@@ -28,6 +40,10 @@ function runLane(name, args, env = {}) {
   } finally {
     down();
   }
+}
+
+if (defaultRuntimePlatform) {
+  console.log(`Using Docker runtime test platform: ${defaultRuntimePlatform}`);
 }
 
 runDocker(['build', 'sfu']);

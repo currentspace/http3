@@ -18,6 +18,10 @@ HTTP/3, HTTP/2, and raw QUIC server/client package for Node.js 24+, powered by R
 npm install @currentspace/http3
 ```
 
+Prebuilt native binaries are currently published for Linux x64/arm64 (glibc)
+and macOS arm64. Other platforms may fall back to local native compilation; see
+[`docs/SUPPORT_MATRIX.md`](./docs/SUPPORT_MATRIX.md).
+
 ## Quick server example
 
 ```ts
@@ -92,6 +96,16 @@ npm run bench:quic -- --profile smoke
 npm run bench:h3 -- --profile smoke
 ```
 
+## New In 0.5.0
+
+- Fast raw-QUIC and H3 client lanes now share the same per-port worker and UDP socket ownership model.
+- `runtimeMode: 'auto'` now caches fast-path unavailability for the life of the process so restricted Linux environments stop re-probing `io_uring`.
+- Cross-platform perf work is now documented and artifact-driven, including host/Docker benchmark summaries plus loopback, quiche-direct, and mock-transport attribution harnesses.
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for the 0.5.0 release notes and
+[`docs/RELEASE_EVIDENCE.md`](./docs/RELEASE_EVIDENCE.md) for the supporting
+audit ledger and caveats behind this release.
+
 ## Quick QUIC server
 
 ```ts
@@ -140,15 +154,16 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 - [Express adapter example](./examples/express-adapter/README.md)
 - [Hono `serveFetch()` example](./examples/hono/README.md)
 
-## Reference docs
+## Start Here
 
-- [Configuration options reference](./docs/CONFIGURATION_OPTIONS.md)
+- [Quickstart](./docs/QUICKSTART.md)
 - [Runtime modes and deployment matrix](./docs/RUNTIME_MODES.md)
+- [Support matrix](./docs/SUPPORT_MATRIX.md)
+- [Configuration options reference](./docs/CONFIGURATION_OPTIONS.md)
 - [Error handling guide](./docs/ERROR_HANDLING.md)
-- [Test strategy](./docs/TEST_STRATEGY.md)
-- [Contributing guide](./CONTRIBUTING.md)
+- [Changelog](./CHANGELOG.md)
 
-## Production docs
+## Deployment and Operations
 
 - [QUIC guide](./docs/QUIC_GUIDE.md)
 - [Production docs index](./docs/README.md)
@@ -156,5 +171,11 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 - [ECS/Fargate deployment](./docs/ECS_FARGATE_DEPLOYMENT.md)
 - [AWS NLB QUIC passthrough](./docs/AWS_NLB_QUIC_PASSTHROUGH.md)
 - [Session ticket keys across instances](./docs/SESSION_TICKET_KEYS.md)
+
+## Contributors and Maintainers
+
+- [Test strategy](./docs/TEST_STRATEGY.md)
+- [Contributing guide](./CONTRIBUTING.md)
+- [Release evidence ledger](./docs/RELEASE_EVIDENCE.md)
 - [Release runbook](./docs/RELEASE_RUNBOOK.md)
 

@@ -74,6 +74,8 @@ The same object is emitted on the `'runtime'` event and passed to
 - Tries `fast` first.
 - If the fast path is unavailable and `fallbackPolicy` is `warn-and-fallback`,
   retries with `portable`.
+- After one `ERR_HTTP3_FAST_PATH_UNAVAILABLE` result, the process caches that
+  failure and skips repeated fast-path probes until restart.
 - Emits a structured `'runtime'` event, populates `runtimeInfo`, and emits a
   process warning with code `WARN_HTTP3_RUNTIME_FALLBACK`.
 - If fallback is forbidden, fails with `ERR_HTTP3_FAST_PATH_UNAVAILABLE`.
@@ -97,6 +99,8 @@ Observable surfaces:
 - `session.runtimeInfo` / `server.runtimeInfo` tells you the selected mode and driver.
 - `session._eventLoop.worker.localAddress()` remains the easiest way to confirm
   client-port reuse in focused tests.
+- `test/runtime/runtime-selection.test.ts` and the shared-worker lane tests show
+  the expected fallback and reuse behavior in the repo.
 - `npm run bench:quic` and `npm run bench:h3` now include internal reactor telemetry:
   driver setup attempts/successes, worker spawns, shared-worker reuse, session
   open/close counts, and TX buffer recycling.
@@ -132,7 +136,7 @@ The fast Linux path is gated by syscall policy first, not by broad capabilities.
 | `privileged: true` | enabled | Broad workaround; not the preferred recommendation. |
 | Host `io_uring` disabled by kernel policy/sysctl | unavailable | `fast` still fails precisely; use `portable`. |
 
-In the tested Linux arm64 Docker Desktop matrix for 0.4.0:
+In the tested Linux arm64 Docker Desktop matrix for 0.5.0:
 
 - ordinary containers worked in `portable`
 - ordinary containers failed precisely in `fast`
@@ -250,6 +254,9 @@ Run it locally with:
 ```bash
 npm run test:docker:runtime
 ```
+
+That command defaults to the host CPU architecture on contributor machines. To
+match the CI arm64 lane explicitly, set `DOCKER_RUNTIME_PLATFORM=linux/arm64`.
 
 To include the optional privileged confirmation lane:
 

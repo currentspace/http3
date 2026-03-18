@@ -56,15 +56,15 @@ npm run bench:h3 -- --profile smoke --results-dir perf-results --label h3-smoke
 ### Docker matrix artifacts
 
 ```bash
-npm run bench:quic:docker -- --results-dir perf-results --label quic-docker
-npm run bench:h3:docker -- --results-dir perf-results --label h3-docker
+npm run bench:quic:docker -- --profile smoke --results-dir perf-results --label quic-docker
+npm run bench:h3:docker -- --profile smoke --results-dir perf-results --label h3-docker
 ```
 
 Add `--include-privileged` when you want the broader privileged confirmation lane:
 
 ```bash
-npm run bench:quic:docker -- --results-dir perf-results --label quic-docker --include-privileged
-npm run bench:h3:docker -- --results-dir perf-results --label h3-docker --include-privileged
+npm run bench:quic:docker -- --profile smoke --results-dir perf-results --label quic-docker --include-privileged
+npm run bench:h3:docker -- --profile smoke --results-dir perf-results --label h3-docker --include-privileged
 ```
 
 ### Linux profiler wrappers
@@ -87,8 +87,9 @@ Notes:
 - `--perf-record` is for sampled CPU profiles.
 - `--strace` uses `strace -fc` and is meant for setup-cost and syscall-mix
   validation, not as the primary throughput metric.
-- `--docker` can wrap the Docker matrix runner when you want the same artifact
-  layout for container campaigns.
+- `--docker` with profiler flags requires `--docker-lane` so the capture runs
+  inside one specific container lane. Use the bare `bench:*:docker` commands
+  when you want the whole unprofiled matrix artifact.
 
 ### macOS profiler wrappers
 

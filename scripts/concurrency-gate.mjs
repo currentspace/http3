@@ -5,7 +5,7 @@ const started = Date.now();
 
 const child = spawn(
   process.execPath,
-  ['--test', 'dist-test/test/worker-concurrency.test.js'],
+  ['--test', 'dist-test/test/perf-gates/worker-concurrency.test.js'],
   { stdio: 'inherit' },
 );
 
