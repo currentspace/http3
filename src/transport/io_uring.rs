@@ -193,6 +193,7 @@ mod inner {
             driver.replenish_rx()?;
             // Submit eventfd read for waker
             driver.submit_waker_read()?;
+            reactor_metrics::record_io_uring_submit_call();
             driver.ring.submit()?;
 
             // SAFETY: dup the eventfd for the waker (the driver keeps the original).
@@ -218,6 +219,7 @@ mod inner {
             });
 
             // Submit pending SQEs (replenished recvmsg + waker read).
+            reactor_metrics::record_io_uring_submit_call();
             self.ring.submit()?;
 
             // Wait for at least 1 CQE with timeout.
@@ -225,6 +227,7 @@ mod inner {
                 .sec(wait_dur.as_secs())
                 .nsec(wait_dur.subsec_nanos());
             let args = io_uring::types::SubmitArgs::new().timespec(&ts);
+            reactor_metrics::record_io_uring_submit_with_args_call();
             match self.ring.submitter().submit_with_args(1, &args) {
                 Ok(_) => {}
                 Err(ref e) if e.raw_os_error() == Some(libc::ETIME) => {}
@@ -245,8 +248,10 @@ mod inner {
             // Process all available CQEs.
             let cq = self.ring.completion();
             let cqes: Vec<io_uring::cqueue::Entry> = cq.collect();
+            reactor_metrics::record_io_uring_completions(cqes.len());
 
             if cqes.is_empty() {
+                reactor_metrics::record_io_uring_timeout_poll();
                 outcome.timer_expired = true;
             }
 
@@ -272,6 +277,7 @@ mod inner {
                                 let mut data = vec![0u8; len];
                                 data.copy_from_slice(&slot.buf[..len]);
                                 outcome.rx.push(RxDatagram { data, peer });
+                                reactor_metrics::record_io_uring_rx_datagrams(1);
                             }
                         }
                     }
@@ -280,6 +286,7 @@ mod inner {
                         let slot = &mut self.tx_slots[idx];
                         if result >= 0 {
                             self.recycled_tx.push(slot.recycle_buffer());
+                            reactor_metrics::record_io_uring_tx_datagrams_completed(1);
                         } else {
                             let errno = -result;
                             if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR {
@@ -293,6 +300,7 @@ mod inner {
                     }
                     OP_WAKER => {
                         outcome.woken = true;
+                        reactor_metrics::record_io_uring_wake_completion();
                         // Drain eventfd counter.
                         // SAFETY: reading 8 bytes from a valid eventfd.
                         unsafe {
@@ -305,6 +313,7 @@ mod inner {
                         // Resubmit waker read and submit immediately so it's
                         // ready before the next submit_with_args blocks.
                         let _ = self.submit_waker_read();
+                        reactor_metrics::record_io_uring_submit_call();
                         let _ = self.ring.submit();
                     }
                     _ => {}
@@ -314,6 +323,7 @@ mod inner {
             // Replenish RX depth — resubmit completed slots.
             self.replenish_rx()?;
             self.submit_pending_tx()?;
+            reactor_metrics::record_io_uring_submit_call();
             self.ring.submit()?;
 
             Ok(outcome)
@@ -325,6 +335,7 @@ mod inner {
                 reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
             }
             self.submit_pending_tx()?;
+            reactor_metrics::record_io_uring_submit_call();
             let _ = self.ring.submit();
             Ok(())
         }
@@ -348,6 +359,7 @@ mod inner {
 
     impl IoUringDriver {
         fn replenish_rx(&mut self) -> io::Result<()> {
+            let mut submitted = 0usize;
             for i in 0..self.rx_slots.len() {
                 if self.rx_slots[i].in_flight {
                     continue;
@@ -366,11 +378,16 @@ mod inner {
                 // SAFETY: slot buffers have stable Box addresses. in_flight prevents reuse.
                 unsafe {
                     self.ring.submission().push(&entry).map_err(|_| {
+                        reactor_metrics::record_io_uring_sq_full_event();
                         io::Error::new(io::ErrorKind::Other, "SQ full")
                     })?;
                 }
+                submitted += 1;
                 self.rx_in_flight += 1;
                 reactor_metrics::record_io_uring_rx_in_flight(self.rx_in_flight);
+            }
+            if submitted > 0 {
+                reactor_metrics::record_io_uring_submitted_sqes(submitted);
             }
             Ok(())
         }
@@ -387,13 +404,16 @@ mod inner {
             // SAFETY: waker_buf is a stable Box address. Only one read is in flight at a time.
             unsafe {
                 self.ring.submission().push(&entry).map_err(|_| {
+                    reactor_metrics::record_io_uring_sq_full_event();
                     io::Error::new(io::ErrorKind::Other, "SQ full")
                 })?;
             }
+            reactor_metrics::record_io_uring_submitted_sqes(1);
             Ok(())
         }
 
         fn submit_pending_tx(&mut self) -> io::Result<()> {
+            let mut submitted = 0usize;
             while let Some(packet) = self.pending_tx.pop_front() {
                 let Some(idx) = self.tx_slots.iter().position(|slot| !slot.in_flight) else {
                     self.pending_tx.push_front(packet);
@@ -415,13 +435,19 @@ mod inner {
                 if push_result.is_err() {
                     let packet = self.tx_slots[idx].take_packet();
                     self.pending_tx.push_front(packet);
+                    reactor_metrics::record_io_uring_sq_full_event();
                     break;
                 }
 
+                submitted += 1;
                 self.tx_in_flight += 1;
                 reactor_metrics::record_io_uring_tx_in_flight(self.tx_in_flight);
             }
 
+            if submitted > 0 {
+                reactor_metrics::record_io_uring_submitted_sqes(submitted);
+                reactor_metrics::record_io_uring_tx_datagrams_submitted(submitted);
+            }
             Ok(())
         }
     }
@@ -440,6 +466,7 @@ mod inner {
             if rc < 0 {
                 Err(io::Error::last_os_error())
             } else {
+                reactor_metrics::record_io_uring_wake_write();
                 Ok(())
             }
         }

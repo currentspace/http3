@@ -285,6 +285,18 @@ export interface ReactorTelemetrySnapshot {
   ioUringTxInFlightHighWatermark: number;
   ioUringPendingTxHighWatermark: number;
   ioUringRetryableSendCompletions: number;
+  ioUringSubmitCalls: number;
+  ioUringSubmitWithArgsCalls: number;
+  ioUringSubmittedSqesTotal: number;
+  ioUringCompletionTotal: number;
+  ioUringCompletionBatchHighWatermark: number;
+  ioUringWakeCompletions: number;
+  ioUringWakeWrites: number;
+  ioUringTimeoutPolls: number;
+  ioUringRxDatagramsTotal: number;
+  ioUringTxDatagramsSubmittedTotal: number;
+  ioUringTxDatagramsCompletedTotal: number;
+  ioUringSqFullEvents: number;
   kqueueUnsentHighWatermark: number;
   kqueueWouldBlockSends: number;
   kqueueWriteWakeups: number;

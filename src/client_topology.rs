@@ -11,19 +11,37 @@ pub(crate) enum ClientSocketStrategy {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SharedClientWorkerKey {
-    DefaultV4,
-    DefaultV6,
+    V4 {
+        runtime_mode: TransportRuntimeMode,
+    },
+    V6 {
+        runtime_mode: TransportRuntimeMode,
+    },
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn default_client_socket_strategy(
+pub(crate) fn default_h3_client_socket_strategy(
     _runtime_mode: TransportRuntimeMode,
 ) -> ClientSocketStrategy {
     ClientSocketStrategy::SharedPerFamily
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn default_client_socket_strategy(
+pub(crate) fn default_h3_client_socket_strategy(
+    _runtime_mode: TransportRuntimeMode,
+) -> ClientSocketStrategy {
+    ClientSocketStrategy::SharedPerFamily
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn default_quic_client_socket_strategy(
+    _runtime_mode: TransportRuntimeMode,
+) -> ClientSocketStrategy {
+    ClientSocketStrategy::SharedPerFamily
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn default_quic_client_socket_strategy(
     runtime_mode: TransportRuntimeMode,
 ) -> ClientSocketStrategy {
     match runtime_mode {
@@ -32,10 +50,13 @@ pub(crate) fn default_client_socket_strategy(
     }
 }
 
-pub(crate) fn shared_client_worker_key(server_addr: SocketAddr) -> SharedClientWorkerKey {
+pub(crate) fn shared_client_worker_key(
+    server_addr: SocketAddr,
+    runtime_mode: TransportRuntimeMode,
+) -> SharedClientWorkerKey {
     match server_addr {
-        SocketAddr::V4(_) => SharedClientWorkerKey::DefaultV4,
-        SocketAddr::V6(_) => SharedClientWorkerKey::DefaultV6,
+        SocketAddr::V4(_) => SharedClientWorkerKey::V4 { runtime_mode },
+        SocketAddr::V6(_) => SharedClientWorkerKey::V6 { runtime_mode },
     }
 }
 

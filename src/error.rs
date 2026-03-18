@@ -1,6 +1,7 @@
 //! Crate error types with conversions to `napi::Error` so Rust failures
 //! surface as proper JS exceptions.
 
+#[cfg(feature = "node-api")]
 use napi::Status;
 
 #[derive(Debug)]
@@ -112,6 +113,7 @@ impl From<std::io::Error> for Http3NativeError {
     }
 }
 
+#[cfg(feature = "node-api")]
 impl From<Http3NativeError> for napi::Error {
     fn from(err: Http3NativeError) -> napi::Error {
         let status = match &err {

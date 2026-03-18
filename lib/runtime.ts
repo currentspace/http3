@@ -57,6 +57,10 @@ type NativeRuntimeErrorCode =
   | typeof ERR_HTTP3_FAST_PATH_UNAVAILABLE
   | typeof ERR_HTTP3_RUNTIME_UNSUPPORTED;
 
+type CachedFastPathFailure = RuntimeAttemptFailure & {
+  code: typeof ERR_HTTP3_FAST_PATH_UNAVAILABLE;
+};
+
 export interface ParsedNativeRuntimeError {
   code: NativeRuntimeErrorCode;
   message: string;
@@ -67,6 +71,7 @@ export interface ParsedNativeRuntimeError {
 }
 
 const NATIVE_RUNTIME_ERROR_PREFIX = /^(ERR_HTTP3_[A-Z_]+)\s+([^:]+):\s+(.*)$/u;
+let cachedFastPathFailure: CachedFastPathFailure | null = null;
 
 function parseMetadataSegment(segment: string): Record<string, string> {
   const meta: Record<string, string> = {};
@@ -209,6 +214,71 @@ export function toRuntimeAttemptFailure(err: unknown): RuntimeAttemptFailure {
     code: ERR_HTTP3_RUNTIME_UNSUPPORTED,
     message: String(err),
   };
+}
+
+function cacheFastPathFailure(failure: RuntimeAttemptFailure): void {
+  if (failure.code !== ERR_HTTP3_FAST_PATH_UNAVAILABLE) return;
+  cachedFastPathFailure = {
+    ...failure,
+    code: ERR_HTTP3_FAST_PATH_UNAVAILABLE,
+  };
+}
+
+function getCachedFastPathFailure(): CachedFastPathFailure | null {
+  if (!cachedFastPathFailure) return null;
+  return { ...cachedFastPathFailure };
+}
+
+function createAutoFallbackInfo(
+  fallbackPolicy: FallbackPolicy,
+  fastAttempt: RuntimeAttemptFailure,
+): RuntimeInfo {
+  return createSelectedRuntimeInfo('auto', fallbackPolicy, 'portable', 'fast-path-unavailable', {
+    fallbackOccurred: true,
+    message: fastAttempt.message,
+    errno: fastAttempt.errno,
+    syscall: fastAttempt.syscall,
+    fastAttempt,
+  });
+}
+
+function createCachedFastPathFailureInfo(
+  fallbackPolicy: FallbackPolicy,
+  fastAttempt: CachedFastPathFailure,
+): RuntimeInfo {
+  return {
+    requestedMode: 'auto',
+    fallbackPolicy,
+    selectedMode: null,
+    driver: fastAttempt.driver ?? driverForMode('fast'),
+    fallbackOccurred: false,
+    reasonCode: 'fast-path-unavailable',
+    message: fastAttempt.message,
+    errno: fastAttempt.errno,
+    syscall: fastAttempt.syscall,
+    fastAttempt,
+  };
+}
+
+function createCachedFastPathError(
+  info: RuntimeInfo,
+  fastAttempt: CachedFastPathFailure,
+): Http3Error {
+  return new Http3Error(fastAttempt.message, ERR_HTTP3_FAST_PATH_UNAVAILABLE, {
+    requestedMode: info.requestedMode,
+    selectedMode: info.selectedMode ?? undefined,
+    driver: fastAttempt.driver ?? info.driver ?? undefined,
+    reasonCode: 'fast-path-unavailable',
+    errno: fastAttempt.errno ?? info.errno,
+    syscall: fastAttempt.syscall ?? info.syscall,
+    fallbackOccurred: info.fallbackOccurred,
+    runtimeInfo: info,
+  });
+}
+
+/** @internal test hook */
+export function resetRuntimeSelectionCacheForTests(): void {
+  cachedFastPathFailure = null;
 }
 
 export function createSelectedRuntimeInfo(
@@ -354,11 +424,47 @@ export function runWithRuntimeSelectionSync<T>(
     return run('fast', 'requested-fast');
   }
 
+  const cachedFailure = getCachedFastPathFailure();
+  if (cachedFailure) {
+    if (runtime.fallbackPolicy === 'error') {
+      const failure = createCachedFastPathFailureInfo(runtime.fallbackPolicy, cachedFailure);
+      target._runtimeInfo = failure;
+      throw createCachedFastPathError(failure, cachedFailure);
+    }
+
+    try {
+      const result = attempt('portable');
+      updateRuntimeInfo(
+        target,
+        createAutoFallbackInfo(runtime.fallbackPolicy, cachedFailure),
+        runtime.onRuntimeEvent,
+      );
+      return result;
+    } catch (portableError: unknown) {
+      const failure = buildFailureInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'portable', portableError, {
+        fallbackOccurred: true,
+        fastAttempt: cachedFailure,
+      });
+      target._runtimeInfo = failure;
+      throw enrichRuntimeError(portableError, failure);
+    }
+  }
+
   try {
     return run('fast', 'auto-selected-fast');
   } catch (error: unknown) {
     const fastAttempt = toRuntimeAttemptFailure(error);
-    if (!isFastPathUnavailableError(error) || runtime.fallbackPolicy === 'error') {
+    if (!isFastPathUnavailableError(error)) {
+      const failure = buildFailureInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'fast', error, {
+        fastAttempt,
+      });
+      target._runtimeInfo = failure;
+      throw enrichRuntimeError(error, failure);
+    }
+
+    cacheFastPathFailure(fastAttempt);
+
+    if (runtime.fallbackPolicy === 'error') {
       const failure = buildFailureInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'fast', error, {
         fastAttempt,
       });
@@ -370,13 +476,7 @@ export function runWithRuntimeSelectionSync<T>(
       const result = attempt('portable');
       updateRuntimeInfo(
         target,
-        createSelectedRuntimeInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'portable', 'fast-path-unavailable', {
-          fallbackOccurred: true,
-          message: fastAttempt.message,
-          errno: fastAttempt.errno,
-          syscall: fastAttempt.syscall,
-          fastAttempt,
-        }),
+        createAutoFallbackInfo(runtime.fallbackPolicy, fastAttempt),
         runtime.onRuntimeEvent,
       );
       return result;
@@ -422,11 +522,47 @@ export async function runWithRuntimeSelection<T>(
     return await run('fast', 'requested-fast');
   }
 
+  const cachedFailure = getCachedFastPathFailure();
+  if (cachedFailure) {
+    if (runtime.fallbackPolicy === 'error') {
+      const failure = createCachedFastPathFailureInfo(runtime.fallbackPolicy, cachedFailure);
+      target._runtimeInfo = failure;
+      throw createCachedFastPathError(failure, cachedFailure);
+    }
+
+    try {
+      const result = await attempt('portable');
+      updateRuntimeInfo(
+        target,
+        createAutoFallbackInfo(runtime.fallbackPolicy, cachedFailure),
+        runtime.onRuntimeEvent,
+      );
+      return result;
+    } catch (portableError: unknown) {
+      const failure = buildFailureInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'portable', portableError, {
+        fallbackOccurred: true,
+        fastAttempt: cachedFailure,
+      });
+      target._runtimeInfo = failure;
+      throw enrichRuntimeError(portableError, failure);
+    }
+  }
+
   try {
     return await run('fast', 'auto-selected-fast');
   } catch (error: unknown) {
     const fastAttempt = toRuntimeAttemptFailure(error);
-    if (!isFastPathUnavailableError(error) || runtime.fallbackPolicy === 'error') {
+    if (!isFastPathUnavailableError(error)) {
+      const failure = buildFailureInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'fast', error, {
+        fastAttempt,
+      });
+      target._runtimeInfo = failure;
+      throw enrichRuntimeError(error, failure);
+    }
+
+    cacheFastPathFailure(fastAttempt);
+
+    if (runtime.fallbackPolicy === 'error') {
       const failure = buildFailureInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'fast', error, {
         fastAttempt,
       });
@@ -438,13 +574,7 @@ export async function runWithRuntimeSelection<T>(
       const result = await attempt('portable');
       updateRuntimeInfo(
         target,
-        createSelectedRuntimeInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'portable', 'fast-path-unavailable', {
-          fallbackOccurred: true,
-          message: fastAttempt.message,
-          errno: fastAttempt.errno,
-          syscall: fastAttempt.syscall,
-          fastAttempt,
-        }),
+        createAutoFallbackInfo(runtime.fallbackPolicy, fastAttempt),
         runtime.onRuntimeEvent,
       );
       return result;
