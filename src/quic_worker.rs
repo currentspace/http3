@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock, Weak,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,7 +20,9 @@ use crate::buffer_pool::BufferPool;
 use crate::cid::CidEncoding;
 use crate::config::TransportRuntimeMode;
 use crate::error::Http3NativeError;
-use crate::event_loop::{self, EventTsfn, ProtocolHandler, SEND_BUF_SIZE};
+use crate::event_loop::{
+    self, EventBatcher, EventTsfn, ProtocolHandler, MAX_BATCH_SIZE, SEND_BUF_SIZE,
+};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::timer_heap::TimerHeap;
@@ -197,53 +202,206 @@ pub enum QuicClientCommand {
     Shutdown,
 }
 
-pub struct QuicClientHandle {
-    cmd_tx: Sender<QuicClientCommand>,
-    join_handle: Option<thread::JoinHandle<()>>,
-    local_addr: SocketAddr,
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum SharedQuicClientWorkerKey {
+    DefaultV4,
+    DefaultV6,
+}
+
+enum SharedQuicClientCommand {
+    OpenSession {
+        quiche_config: quiche::Config,
+        server_addr: SocketAddr,
+        server_name: String,
+        session_ticket: Option<Vec<u8>>,
+        qlog_dir: Option<String>,
+        qlog_level: Option<String>,
+        tsfn: EventTsfn,
+        resp_tx: Sender<Result<u32, Http3NativeError>>,
+    },
+    StreamSend {
+        session_handle: u32,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+    },
+    StreamClose {
+        session_handle: u32,
+        stream_id: u64,
+        error_code: u32,
+    },
+    SendDatagram {
+        session_handle: u32,
+        data: Vec<u8>,
+        resp_tx: Sender<bool>,
+    },
+    GetSessionMetrics {
+        session_handle: u32,
+        resp_tx: Sender<Option<JsSessionMetrics>>,
+    },
+    Ping {
+        session_handle: u32,
+        resp_tx: Sender<bool>,
+    },
+    GetQlogPath {
+        session_handle: u32,
+        resp_tx: Sender<Option<String>>,
+    },
+    Close {
+        session_handle: u32,
+        error_code: u32,
+        reason: String,
+    },
+    ReleaseSession {
+        session_handle: u32,
+    },
+}
+
+struct SharedQuicClientWorkerControl {
+    cmd_tx: Sender<SharedQuicClientCommand>,
     waker: Arc<dyn ErasedWaker>,
+    local_addr: SocketAddr,
+    join_handle: Mutex<Option<thread::JoinHandle<()>>>,
+    running: AtomicBool,
+    session_count: AtomicUsize,
+    key: SharedQuicClientWorkerKey,
+}
+
+impl SharedQuicClientWorkerControl {
+    fn wake(&self) {
+        let _ = self.waker.wake();
+    }
+}
+
+enum QuicClientHandleKind {
+    Dedicated {
+        cmd_tx: Sender<QuicClientCommand>,
+        join_handle: Option<thread::JoinHandle<()>>,
+        waker: Arc<dyn ErasedWaker>,
+    },
+    Shared {
+        session_handle: u32,
+        worker: Arc<SharedQuicClientWorkerControl>,
+    },
+}
+
+pub struct QuicClientHandle {
+    kind: Option<QuicClientHandleKind>,
+    local_addr: SocketAddr,
 }
 
 impl QuicClientHandle {
     pub fn stream_send(&self, stream_id: u64, data: Vec<u8>, fin: bool) -> bool {
-        if self
-            .cmd_tx
-            .send(QuicClientCommand::StreamSend {
-                stream_id,
-                data,
-                fin,
-            })
-            .is_ok()
-        {
-            let _ = self.waker.wake();
-            true
-        } else {
-            false
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                if cmd_tx
+                    .send(QuicClientCommand::StreamSend {
+                        stream_id,
+                        data,
+                        fin,
+                    })
+                    .is_ok()
+                {
+                    let _ = waker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                if worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::StreamSend {
+                        session_handle: *session_handle,
+                        stream_id,
+                        data,
+                        fin,
+                    })
+                    .is_ok()
+                {
+                    worker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         }
     }
 
     pub fn stream_close(&self, stream_id: u64, error_code: u32) -> bool {
-        if self
-            .cmd_tx
-            .send(QuicClientCommand::StreamClose {
-                stream_id,
-                error_code,
-            })
-            .is_ok()
-        {
-            let _ = self.waker.wake();
-            true
-        } else {
-            false
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                if cmd_tx
+                    .send(QuicClientCommand::StreamClose {
+                        stream_id,
+                        error_code,
+                    })
+                    .is_ok()
+                {
+                    let _ = waker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                if worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::StreamClose {
+                        session_handle: *session_handle,
+                        stream_id,
+                        error_code,
+                    })
+                    .is_ok()
+                {
+                    worker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         }
     }
 
     pub fn send_datagram(&self, data: Vec<u8>) -> Result<bool, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(QuicClientCommand::SendDatagram { data, resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("quic client not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(QuicClientCommand::SendDatagram { data, resp_tx })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("quic client not running".into())
+                    })?;
+                let _ = waker.wake();
+            }
+            Some(QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::SendDatagram {
+                        session_handle: *session_handle,
+                        data,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState(
+                            "shared quic client worker not running".into(),
+                        )
+                    })?;
+                worker.wake();
+            }
+            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+        }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for datagram".into()))
@@ -251,10 +409,34 @@ impl QuicClientHandle {
 
     pub fn get_session_metrics(&self) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(QuicClientCommand::GetSessionMetrics { resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("quic client not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(QuicClientCommand::GetSessionMetrics { resp_tx })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("quic client not running".into())
+                    })?;
+                let _ = waker.wake();
+            }
+            Some(QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::GetSessionMetrics {
+                        session_handle: *session_handle,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState(
+                            "shared quic client worker not running".into(),
+                        )
+                    })?;
+                worker.wake();
+            }
+            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+        }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for metrics".into()))
@@ -262,10 +444,34 @@ impl QuicClientHandle {
 
     pub fn ping(&self) -> Result<bool, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(QuicClientCommand::Ping { resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("quic client not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(QuicClientCommand::Ping { resp_tx })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("quic client not running".into())
+                    })?;
+                let _ = waker.wake();
+            }
+            Some(QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::Ping {
+                        session_handle: *session_handle,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState(
+                            "shared quic client worker not running".into(),
+                        )
+                    })?;
+                worker.wake();
+            }
+            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+        }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for ping".into()))
@@ -273,25 +479,72 @@ impl QuicClientHandle {
 
     pub fn get_qlog_path(&self) -> Result<Option<String>, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(QuicClientCommand::GetQlogPath { resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("quic client not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(QuicClientCommand::GetQlogPath { resp_tx })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("quic client not running".into())
+                    })?;
+                let _ = waker.wake();
+            }
+            Some(QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::GetQlogPath {
+                        session_handle: *session_handle,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState(
+                            "shared quic client worker not running".into(),
+                        )
+                    })?;
+                worker.wake();
+            }
+            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+        }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for qlog path".into()))
     }
 
     pub fn close(&self, error_code: u32, reason: String) -> bool {
-        if self
-            .cmd_tx
-            .send(QuicClientCommand::Close { error_code, reason })
-            .is_ok()
-        {
-            let _ = self.waker.wake();
-            true
-        } else {
-            false
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                if cmd_tx
+                    .send(QuicClientCommand::Close { error_code, reason })
+                    .is_ok()
+                {
+                    let _ = waker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                if worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::Close {
+                        session_handle: *session_handle,
+                        error_code,
+                        reason,
+                    })
+                    .is_ok()
+                {
+                    worker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         }
     }
 
@@ -300,10 +553,40 @@ impl QuicClientHandle {
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.cmd_tx.send(QuicClientCommand::Shutdown);
-        let _ = self.waker.wake();
-        if let Some(handle) = self.join_handle.take() {
-            let _ = handle.join();
+        let Some(kind) = self.kind.take() else {
+            return;
+        };
+        match kind {
+            QuicClientHandleKind::Dedicated {
+                cmd_tx,
+                mut join_handle,
+                waker,
+            } => {
+                let _ = cmd_tx.send(QuicClientCommand::Shutdown);
+                let _ = waker.wake();
+                if let Some(handle) = join_handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            QuicClientHandleKind::Shared {
+                session_handle,
+                worker,
+            } => {
+                let _ = worker
+                    .cmd_tx
+                    .send(SharedQuicClientCommand::ReleaseSession { session_handle });
+                worker.wake();
+                if worker.session_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    if let Ok(mut join_handle) = worker.join_handle.lock() {
+                        if let Some(handle) = join_handle.take() {
+                            let _ = handle.join();
+                        }
+                    }
+                    if let Ok(mut registry) = shared_quic_client_worker_registry().lock() {
+                        registry.remove(&worker.key);
+                    }
+                }
+            }
         }
     }
 }
@@ -593,6 +876,20 @@ pub fn spawn_quic_client(
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<QuicClientHandle, Http3NativeError> {
+    if runtime_mode == TransportRuntimeMode::Fast {
+        return spawn_shared_quic_client(
+            quiche_config,
+            server_addr,
+            server_name,
+            session_ticket,
+            qlog_dir,
+            qlog_level,
+            user_set_mtu,
+            runtime_mode,
+            tsfn,
+        );
+    }
+
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
     let bind_addr = match server_addr {
         SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -633,11 +930,490 @@ pub fn spawn_quic_client(
     });
 
     Ok(QuicClientHandle {
-        cmd_tx,
-        join_handle: Some(join_handle),
+        kind: Some(QuicClientHandleKind::Dedicated {
+            cmd_tx,
+            join_handle: Some(join_handle),
+            waker: waker_clone,
+        }),
         local_addr,
-        waker: waker_clone,
     })
+}
+
+struct SharedQuicClientSession {
+    handler: QuicClientHandler,
+    batcher: EventBatcher,
+    server_addr: SocketAddr,
+}
+
+fn shared_quic_client_worker_registry(
+) -> &'static Mutex<HashMap<SharedQuicClientWorkerKey, Weak<SharedQuicClientWorkerControl>>> {
+    static REGISTRY: OnceLock<
+        Mutex<HashMap<SharedQuicClientWorkerKey, Weak<SharedQuicClientWorkerControl>>>,
+    > = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn shared_quic_client_worker_key(server_addr: SocketAddr) -> SharedQuicClientWorkerKey {
+    match server_addr {
+        SocketAddr::V4(_) => SharedQuicClientWorkerKey::DefaultV4,
+        SocketAddr::V6(_) => SharedQuicClientWorkerKey::DefaultV6,
+    }
+}
+
+fn shared_quic_client_bind_addr(server_addr: SocketAddr) -> SocketAddr {
+    match server_addr {
+        SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
+        SocketAddr::V6(_) => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)),
+    }
+}
+
+fn acquire_shared_quic_client_worker(
+    server_addr: SocketAddr,
+    runtime_mode: TransportRuntimeMode,
+) -> Result<Arc<SharedQuicClientWorkerControl>, Http3NativeError> {
+    let key = shared_quic_client_worker_key(server_addr);
+    let mut registry = shared_quic_client_worker_registry()
+        .lock()
+        .map_err(|_| Http3NativeError::InvalidState("shared quic client registry poisoned".into()))?;
+    if let Some(worker) = registry.get(&key).and_then(Weak::upgrade) {
+        if worker.running.load(Ordering::Acquire) {
+            return Ok(worker);
+        }
+    }
+
+    let bind_addr = shared_quic_client_bind_addr(server_addr);
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
+    std_socket
+        .set_nonblocking(true)
+        .map_err(Http3NativeError::Io)?;
+    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
+    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+
+    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
+    let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+    let control = Arc::new(SharedQuicClientWorkerControl {
+        cmd_tx,
+        waker: waker_arc.clone(),
+        local_addr,
+        join_handle: Mutex::new(None),
+        running: AtomicBool::new(true),
+        session_count: AtomicUsize::new(0),
+        key: key.clone(),
+    });
+    let control_for_thread = Arc::clone(&control);
+    let join_handle = thread::spawn(move || {
+        let mut driver = driver;
+        run_shared_quic_client_event_loop(&mut driver, cmd_rx, local_addr);
+        control_for_thread.running.store(false, Ordering::Release);
+    });
+    if let Ok(mut slot) = control.join_handle.lock() {
+        *slot = Some(join_handle);
+    }
+    registry.insert(key, Arc::downgrade(&control));
+    Ok(control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_shared_quic_client(
+    mut quiche_config: quiche::Config,
+    server_addr: SocketAddr,
+    server_name: String,
+    session_ticket: Option<Vec<u8>>,
+    qlog_dir: Option<String>,
+    qlog_level: Option<String>,
+    user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
+    tsfn: EventTsfn,
+) -> Result<QuicClientHandle, Http3NativeError> {
+    let worker = acquire_shared_quic_client_worker(server_addr, runtime_mode)?;
+
+    if !user_set_mtu {
+        let mtu = crate::config::effective_max_datagram_size(&server_addr);
+        quiche_config.set_max_recv_udp_payload_size(mtu);
+        quiche_config.set_max_send_udp_payload_size(mtu);
+    }
+
+    let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
+    worker
+        .cmd_tx
+        .send(SharedQuicClientCommand::OpenSession {
+            quiche_config,
+            server_addr,
+            server_name,
+            session_ticket,
+            qlog_dir,
+            qlog_level,
+            tsfn,
+            resp_tx,
+        })
+        .map_err(|_| Http3NativeError::InvalidState("shared quic client worker not running".into()))?;
+    worker.wake();
+
+    let session_handle = resp_rx
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| {
+            Http3NativeError::InvalidState("timed out waiting for shared quic session".into())
+        })??;
+    worker.session_count.fetch_add(1, Ordering::AcqRel);
+
+    Ok(QuicClientHandle {
+        kind: Some(QuicClientHandleKind::Shared {
+            session_handle,
+            worker: Arc::clone(&worker),
+        }),
+        local_addr: worker.local_addr,
+    })
+}
+
+fn emit_shared_quic_client_runtime_error<D: transport::Driver>(
+    sessions: &mut Slab<SharedQuicClientSession>,
+    driver: &D,
+    syscall: &str,
+    reason_code: &str,
+    err: &std::io::Error,
+) {
+    for (handle, session) in sessions.iter_mut() {
+        session.batcher.batch.push(JsH3Event::runtime_error(
+            handle as u32,
+            driver.driver_kind().as_str(),
+            syscall,
+            reason_code,
+            err,
+        ));
+        if !session.batcher.flush() {
+            break;
+        }
+    }
+}
+
+fn remove_shared_quic_client_session(
+    sessions: &mut Slab<SharedQuicClientSession>,
+    route_by_dcid: &mut HashMap<Vec<u8>, usize>,
+    handle: usize,
+) {
+    if !sessions.contains(handle) {
+        return;
+    }
+    let _ = sessions.remove(handle);
+    route_by_dcid.retain(|_, mapped_handle| *mapped_handle != handle);
+}
+
+fn refresh_shared_quic_client_dcid(
+    route_by_dcid: &mut HashMap<Vec<u8>, usize>,
+    handle: usize,
+    session: &mut SharedQuicClientSession,
+) {
+    let (current_dcid, needs_update, retired_dcids) = session.handler.take_dcid_updates();
+    if needs_update {
+        route_by_dcid.insert(current_dcid, handle);
+    }
+    for retired in retired_dcids {
+        route_by_dcid.remove(&retired);
+    }
+}
+
+fn flush_shared_quic_client_sends(
+    sessions: &mut Slab<SharedQuicClientSession>,
+    handles_buf: &mut Vec<usize>,
+    outbound: &mut Vec<TxDatagram>,
+) {
+    handles_buf.clear();
+    handles_buf.extend(sessions.iter().map(|(handle, _)| handle));
+    if handles_buf.is_empty() {
+        return;
+    }
+
+    let count = handles_buf.len();
+    let mut done = vec![false; count];
+    let mut active = count;
+    while active > 0 {
+        for idx in 0..count {
+            if done[idx] {
+                continue;
+            }
+            let handle = handles_buf[idx];
+            let sent = sessions
+                .get_mut(handle)
+                .and_then(|session| session.handler.try_send_next())
+                .map(|packet| {
+                    outbound.push(packet);
+                    true
+                })
+                .unwrap_or(false);
+            if !sent {
+                done[idx] = true;
+                active -= 1;
+            }
+        }
+    }
+}
+
+fn run_shared_quic_client_event_loop<D: transport::Driver>(
+    driver: &mut D,
+    cmd_rx: crossbeam_channel::Receiver<SharedQuicClientCommand>,
+    local_addr: SocketAddr,
+) {
+    let mut sessions: Slab<SharedQuicClientSession> = Slab::new();
+    let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut handles_buf = Vec::new();
+    let mut outbound = Vec::new();
+    let mut closed_sessions = Vec::new();
+
+    loop {
+        let deadline = sessions
+            .iter()
+            .filter_map(|(_, session)| session.handler.timer_deadline)
+            .min();
+
+        let outcome = match driver.poll(deadline) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                emit_shared_quic_client_runtime_error(
+                    &mut sessions,
+                    driver,
+                    "poll",
+                    "driver-poll-failed",
+                    &err,
+                );
+                return;
+            }
+        };
+
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                SharedQuicClientCommand::OpenSession {
+                    mut quiche_config,
+                    server_addr,
+                    server_name,
+                    session_ticket,
+                    qlog_dir,
+                    qlog_level,
+                    tsfn,
+                    resp_tx,
+                } => {
+                    let handler = QuicClientHandler::new(
+                        local_addr,
+                        server_addr,
+                        &server_name,
+                        session_ticket.as_deref(),
+                        qlog_dir.as_deref(),
+                        qlog_level.as_deref(),
+                        &mut quiche_config,
+                    );
+                    let result = handler.map_or_else(
+                        || {
+                            Err(Http3NativeError::Config(
+                                "failed to create quic client session".into(),
+                            ))
+                        },
+                        |handler| {
+                            let dcid = handler.current_dcid();
+                            let handle = sessions.insert(SharedQuicClientSession {
+                                handler,
+                                batcher: EventBatcher::new(tsfn),
+                                server_addr,
+                            });
+                            route_by_dcid.insert(dcid, handle);
+                            Ok(handle as u32)
+                        },
+                    );
+                    let _ = resp_tx.send(result);
+                }
+                SharedQuicClientCommand::StreamSend {
+                    session_handle,
+                    stream_id,
+                    data,
+                    fin,
+                } => {
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.handler.queue_stream_send(stream_id, data, fin);
+                    }
+                }
+                SharedQuicClientCommand::StreamClose {
+                    session_handle,
+                    stream_id,
+                    error_code,
+                } => {
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.handler.close_stream(stream_id, error_code);
+                    }
+                }
+                SharedQuicClientCommand::SendDatagram {
+                    session_handle,
+                    data,
+                    resp_tx,
+                } => {
+                    let ok = sessions
+                        .get_mut(session_handle as usize)
+                        .is_some_and(|session| session.handler.send_datagram(&data));
+                    let _ = resp_tx.send(ok);
+                }
+                SharedQuicClientCommand::GetSessionMetrics {
+                    session_handle,
+                    resp_tx,
+                } => {
+                    let metrics = sessions
+                        .get(session_handle as usize)
+                        .map(|session| session.handler.metrics_snapshot());
+                    let _ = resp_tx.send(metrics);
+                }
+                SharedQuicClientCommand::Ping {
+                    session_handle,
+                    resp_tx,
+                } => {
+                    let ok = sessions
+                        .get_mut(session_handle as usize)
+                        .is_some_and(|session| session.handler.ping());
+                    let _ = resp_tx.send(ok);
+                }
+                SharedQuicClientCommand::GetQlogPath {
+                    session_handle,
+                    resp_tx,
+                } => {
+                    let path = sessions
+                        .get(session_handle as usize)
+                        .and_then(|session| session.handler.qlog_path());
+                    let _ = resp_tx.send(path);
+                }
+                SharedQuicClientCommand::Close {
+                    session_handle,
+                    error_code,
+                    reason,
+                } => {
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.handler.close_session(error_code, &reason);
+                    }
+                }
+                SharedQuicClientCommand::ReleaseSession { session_handle } => {
+                    remove_shared_quic_client_session(
+                        &mut sessions,
+                        &mut route_by_dcid,
+                        session_handle as usize,
+                    );
+                }
+            }
+        }
+
+        flush_shared_quic_client_sends(&mut sessions, &mut handles_buf, &mut outbound);
+        if !outbound.is_empty() {
+            if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                emit_shared_quic_client_runtime_error(
+                    &mut sessions,
+                    driver,
+                    "submit_sends",
+                    "driver-submit-sends-failed",
+                    &err,
+                );
+                return;
+            }
+        }
+
+        let rx_count = outcome.rx.len();
+        for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
+            let Ok(header) = quiche::Header::from_slice(pkt.data.as_mut_slice(), SCID_LEN) else {
+                continue;
+            };
+            let Some(handle) = route_by_dcid.get(header.dcid.as_ref()).copied() else {
+                continue;
+            };
+            let mut should_remove = false;
+            if let Some(session) = sessions.get_mut(handle) {
+                if pkt.peer == session.server_addr {
+                    session.handler.process_packet_for_handle(
+                        pkt.data.as_mut_slice(),
+                        pkt.peer,
+                        local_addr,
+                        &mut session.batcher.batch,
+                        handle as u32,
+                    );
+                    refresh_shared_quic_client_dcid(&mut route_by_dcid, handle, session);
+                    if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                        should_remove = true;
+                    }
+                }
+            }
+            if should_remove {
+                remove_shared_quic_client_session(&mut sessions, &mut route_by_dcid, handle);
+            }
+            if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
+                flush_shared_quic_client_sends(&mut sessions, &mut handles_buf, &mut outbound);
+                if !outbound.is_empty() {
+                    if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                        emit_shared_quic_client_runtime_error(
+                            &mut sessions,
+                            driver,
+                            "submit_sends",
+                            "driver-submit-sends-failed",
+                            &err,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        let now = Instant::now();
+        closed_sessions.clear();
+        handles_buf.clear();
+        handles_buf.extend(sessions.iter().map(|(handle, _)| handle));
+        for handle in handles_buf.iter().copied() {
+            if let Some(session) = sessions.get_mut(handle) {
+                session.handler.process_timers_for_handle(
+                    now,
+                    &mut session.batcher.batch,
+                    handle as u32,
+                );
+                session
+                    .handler
+                    .poll_drain_events_for_handle(&mut session.batcher.batch, handle as u32);
+                session.handler.flush_pending_writes_for_handle(
+                    &mut session.batcher.batch,
+                    handle as u32,
+                );
+                refresh_shared_quic_client_dcid(&mut route_by_dcid, handle, session);
+                if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                    closed_sessions.push(handle);
+                }
+            }
+        }
+        for handle in closed_sessions.drain(..) {
+            remove_shared_quic_client_session(&mut sessions, &mut route_by_dcid, handle);
+        }
+
+        flush_shared_quic_client_sends(&mut sessions, &mut handles_buf, &mut outbound);
+        if !outbound.is_empty() {
+            if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                emit_shared_quic_client_runtime_error(
+                    &mut sessions,
+                    driver,
+                    "submit_sends",
+                    "driver-submit-sends-failed",
+                    &err,
+                );
+                return;
+            }
+        }
+        let _ = driver.drain_recycled_tx();
+
+        closed_sessions.clear();
+        handles_buf.clear();
+        handles_buf.extend(sessions.iter().map(|(handle, _)| handle));
+        for handle in handles_buf.iter().copied() {
+            if let Some(session) = sessions.get_mut(handle) {
+                if !session.batcher.flush() {
+                    closed_sessions.push(handle);
+                }
+            }
+        }
+        for handle in closed_sessions.drain(..) {
+            remove_shared_quic_client_session(&mut sessions, &mut route_by_dcid, handle);
+        }
+
+        if sessions.is_empty() && driver.pending_tx_count() == 0 {
+            return;
+        }
+    }
 }
 
 // ── QUIC Server Protocol Handler ────────────────────────────────────
@@ -1104,82 +1880,85 @@ impl QuicClientHandler {
             session_closed_emitted: false,
         })
     }
-}
 
-impl ProtocolHandler for QuicClientHandler {
-    type Command = QuicClientCommand;
-
-    fn dispatch_command(
-        &mut self,
-        cmd: QuicClientCommand,
-        _batch: &mut Vec<JsH3Event>,
-    ) -> bool {
-        match cmd {
-            QuicClientCommand::Shutdown => return true,
-            QuicClientCommand::Close { error_code, reason } => {
-                let _ = self
-                    .conn
-                    .quiche_conn
-                    .close(true, u64::from(error_code), reason.as_bytes());
-            }
-            QuicClientCommand::StreamSend {
-                stream_id,
-                data,
-                fin,
-            } => {
-                if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
-                    pw.data.extend_from_slice(&data);
-                    pw.fin = pw.fin || fin;
-                } else {
-                    let written = self.conn.stream_send(stream_id, &data, fin).unwrap_or(0);
-                    if written < data.len() {
-                        self.pending_writes.insert(
-                            stream_id,
-                            PendingWrite {
-                                data: data[written..].to_vec(),
-                                fin,
-                            },
-                        );
-                    } else if fin && written == 0 && data.is_empty() {
-                        self.pending_writes.insert(
-                            stream_id,
-                            PendingWrite {
-                                data: Vec::new(),
-                                fin: true,
-                            },
-                        );
-                    }
-                }
-            }
-            QuicClientCommand::StreamClose {
-                stream_id,
-                error_code,
-            } => {
-                let _ = self.conn.stream_close(stream_id, u64::from(error_code));
-            }
-            QuicClientCommand::SendDatagram { data, resp_tx } => {
-                let _ = resp_tx.send(self.conn.send_datagram(&data).is_ok());
-            }
-            QuicClientCommand::GetSessionMetrics { resp_tx } => {
-                let _ = resp_tx.send(Some(snapshot_quic_metrics(&self.conn)));
-            }
-            QuicClientCommand::Ping { resp_tx } => {
-                let _ = resp_tx.send(self.conn.quiche_conn.send_ack_eliciting().is_ok());
-            }
-            QuicClientCommand::GetQlogPath { resp_tx } => {
-                let _ = resp_tx.send(self.conn.qlog_path.clone());
-            }
-        }
-        false
+    fn current_dcid(&self) -> Vec<u8> {
+        self.conn.quiche_conn.source_id().into_owned().to_vec()
     }
 
-    fn process_packet(
+    fn take_dcid_updates(&mut self) -> (Vec<u8>, bool, Vec<Vec<u8>>) {
+        let current_dcid = self.current_dcid();
+        let needs_update = current_dcid.as_slice() != self.conn.conn_id.as_slice();
+        if needs_update {
+            self.conn.conn_id = current_dcid.clone();
+        }
+        let mut retired_dcids = Vec::new();
+        while let Some(retired) = self.conn.quiche_conn.retired_scid_next() {
+            retired_dcids.push(retired.into_owned().to_vec());
+        }
+        (current_dcid, needs_update, retired_dcids)
+    }
+
+    fn close_session(&mut self, error_code: u32, reason: &str) {
+        let _ = self
+            .conn
+            .quiche_conn
+            .close(true, u64::from(error_code), reason.as_bytes());
+    }
+
+    fn queue_stream_send(&mut self, stream_id: u64, data: Vec<u8>, fin: bool) {
+        if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
+            pw.data.extend_from_slice(&data);
+            pw.fin = pw.fin || fin;
+            return;
+        }
+
+        let written = self.conn.stream_send(stream_id, &data, fin).unwrap_or(0);
+        if written < data.len() {
+            self.pending_writes.insert(
+                stream_id,
+                PendingWrite {
+                    data: data[written..].to_vec(),
+                    fin,
+                },
+            );
+        } else if fin && written == 0 && data.is_empty() {
+            self.pending_writes.insert(
+                stream_id,
+                PendingWrite {
+                    data: Vec::new(),
+                    fin: true,
+                },
+            );
+        }
+    }
+
+    fn close_stream(&mut self, stream_id: u64, error_code: u32) {
+        let _ = self.conn.stream_close(stream_id, u64::from(error_code));
+    }
+
+    fn send_datagram(&mut self, data: &[u8]) -> bool {
+        self.conn.send_datagram(data).is_ok()
+    }
+
+    fn metrics_snapshot(&self) -> JsSessionMetrics {
+        snapshot_quic_metrics(&self.conn)
+    }
+
+    fn ping(&mut self) -> bool {
+        self.conn.quiche_conn.send_ack_eliciting().is_ok()
+    }
+
+    fn qlog_path(&self) -> Option<String> {
+        self.conn.qlog_path.clone()
+    }
+
+    fn process_packet_for_handle(
         &mut self,
         buf: &mut [u8],
         peer: SocketAddr,
         local: SocketAddr,
-        _pending_outbound: &mut Vec<TxDatagram>,
         batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
     ) {
         let recv_info = quiche::RecvInfo {
             from: peer,
@@ -1193,57 +1972,138 @@ impl ProtocolHandler for QuicClientHandler {
         }
         if self.conn.quiche_conn.is_established() && !self.conn.handshake_complete_emitted {
             self.conn.handshake_complete_emitted = true;
-            batch.push(JsH3Event::handshake_complete(0));
+            batch.push(JsH3Event::handshake_complete(conn_handle));
         }
-        self.conn.poll_quic_events(0, batch);
+        self.conn.poll_quic_events(conn_handle, batch);
         if let Some(ticket) = self.conn.update_session_ticket() {
-            batch.push(JsH3Event::session_ticket(0, ticket));
+            batch.push(JsH3Event::session_ticket(conn_handle, ticket));
         }
         self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
 
         if self.conn.is_closed() && !self.session_closed_emitted {
-            batch.push(JsH3Event::session_close(0));
+            batch.push(JsH3Event::session_close(conn_handle));
             self.session_closed_emitted = true;
         }
     }
 
-    fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
-        if self.timer_deadline.is_some_and(|d| d <= now) {
+    fn process_timers_for_handle(
+        &mut self,
+        now: Instant,
+        batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
+    ) {
+        if self.timer_deadline.is_some_and(|deadline| deadline <= now) {
             self.conn.on_timeout();
             if self.conn.is_closed() && !self.session_closed_emitted {
-                batch.push(JsH3Event::session_close(0));
+                batch.push(JsH3Event::session_close(conn_handle));
                 self.session_closed_emitted = true;
             } else {
-                self.conn.poll_quic_events(0, batch);
+                self.conn.poll_quic_events(conn_handle, batch);
                 if let Some(ticket) = self.conn.update_session_ticket() {
-                    batch.push(JsH3Event::session_ticket(0, ticket));
+                    batch.push(JsH3Event::session_ticket(conn_handle, ticket));
                 }
                 self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
             }
         }
     }
 
+    fn try_send_next(&mut self) -> Option<TxDatagram> {
+        let Ok((len, send_info)) = self.conn.send(self.send_buf.as_mut_slice()) else {
+            return None;
+        };
+        Some(TxDatagram {
+            data: self.send_buf[..len].to_vec(),
+            to: send_info.to,
+        })
+    }
+
+    fn flush_pending_writes_for_handle(
+        &mut self,
+        batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
+    ) {
+        let flushed = flush_quic_client_pending_writes(&mut self.conn, &mut self.pending_writes);
+        for stream_id in flushed {
+            batch.push(JsH3Event::drain(conn_handle, stream_id));
+        }
+    }
+
+    fn poll_drain_events_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
+        if !self.conn.blocked_set.is_empty() {
+            self.conn.poll_drain_events(conn_handle, batch);
+        }
+    }
+}
+
+impl ProtocolHandler for QuicClientHandler {
+    type Command = QuicClientCommand;
+
+    fn dispatch_command(
+        &mut self,
+        cmd: QuicClientCommand,
+        _batch: &mut Vec<JsH3Event>,
+    ) -> bool {
+        match cmd {
+            QuicClientCommand::Shutdown => return true,
+            QuicClientCommand::Close { error_code, reason } => {
+                self.close_session(error_code, &reason);
+            }
+            QuicClientCommand::StreamSend {
+                stream_id,
+                data,
+                fin,
+            } => {
+                self.queue_stream_send(stream_id, data, fin);
+            }
+            QuicClientCommand::StreamClose {
+                stream_id,
+                error_code,
+            } => {
+                self.close_stream(stream_id, error_code);
+            }
+            QuicClientCommand::SendDatagram { data, resp_tx } => {
+                let _ = resp_tx.send(self.send_datagram(&data));
+            }
+            QuicClientCommand::GetSessionMetrics { resp_tx } => {
+                let _ = resp_tx.send(Some(self.metrics_snapshot()));
+            }
+            QuicClientCommand::Ping { resp_tx } => {
+                let _ = resp_tx.send(self.ping());
+            }
+            QuicClientCommand::GetQlogPath { resp_tx } => {
+                let _ = resp_tx.send(self.qlog_path());
+            }
+        }
+        false
+    }
+
+    fn process_packet(
+        &mut self,
+        buf: &mut [u8],
+        peer: SocketAddr,
+        local: SocketAddr,
+        _pending_outbound: &mut Vec<TxDatagram>,
+        batch: &mut Vec<JsH3Event>,
+    ) {
+        self.process_packet_for_handle(buf, peer, local, batch, 0);
+    }
+
+    fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
+        self.process_timers_for_handle(now, batch, 0);
+    }
+
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>) {
-        while let Ok((len, send_info)) = self.conn.send(self.send_buf.as_mut_slice()) {
-            outbound.push(TxDatagram {
-                data: self.send_buf[..len].to_vec(),
-                to: send_info.to,
-            });
+        while let Some(packet) = self.try_send_next() {
+            outbound.push(packet);
         }
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
-        let flushed =
-            flush_quic_client_pending_writes(&mut self.conn, &mut self.pending_writes);
-        for stream_id in flushed {
-            batch.push(JsH3Event::drain(0, stream_id));
-        }
+        self.flush_pending_writes_for_handle(batch, 0);
     }
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
-        if !self.conn.blocked_set.is_empty() {
-            self.conn.poll_drain_events(0, batch);
-        }
+        self.poll_drain_events_for_handle(batch, 0);
     }
 
     fn cleanup_closed(&mut self, _batch: &mut Vec<JsH3Event>) {
