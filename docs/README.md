@@ -22,6 +22,7 @@
 - AWS cert operations: [AWS_CERT_OPERATIONS.md](./AWS_CERT_OPERATIONS.md)
 - Cloudflare lockdown mode: [CLOUDFLARE_LOCKDOWN.md](./CLOUDFLARE_LOCKDOWN.md)
 - Observability runbook: [OBSERVABILITY_RUNBOOK.md](./OBSERVABILITY_RUNBOOK.md)
+- Cross-platform perf campaign: [PERF_PROFILING.md](./PERF_PROFILING.md)
 - Security/supply chain: [SECURITY_SUPPLY_CHAIN.md](./SECURITY_SUPPLY_CHAIN.md)
 - Release process: [RELEASE_RUNBOOK.md](./RELEASE_RUNBOOK.md)
 - Local Docker load test: [LOCAL_DOCKER_LOADTEST.md](./LOCAL_DOCKER_LOADTEST.md)

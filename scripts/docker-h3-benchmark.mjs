@@ -36,16 +36,16 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Docker QUIC benchmark matrix
+  console.log(`Docker HTTP/3 benchmark matrix
 
 Usage:
-  npm run bench:quic:docker -- [options passed through to quic-benchmark]
+  npm run bench:h3:docker -- [options passed through to h3-benchmark]
 
 Examples:
-  npm run bench:quic:docker
-  npm run bench:quic:docker -- --profile balanced --rounds 3
-  npm run bench:quic:docker -- --connections 25 --streams-per-connection 30 --message-size 16KB
-  npm run bench:quic:docker -- --include-privileged
+  npm run bench:h3:docker
+  npm run bench:h3:docker -- --profile balanced --rounds 3
+  npm run bench:h3:docker -- --connections 25 --streams-per-connection 30 --message-size 16KB
+  npm run bench:h3:docker -- --include-privileged
 
 Runner options:
   --platform VALUE         Docker platform override (defaults to DOCKER_RUNTIME_PLATFORM or host default)
@@ -57,7 +57,7 @@ Runner options:
   --help                   Show this help text
 
 Forwarded benchmark options:
-  Any remaining args are forwarded to \`scripts/quic-benchmark.mjs\`.
+  Any remaining args are forwarded to \`scripts/h3-benchmark.mjs\`.
   If no explicit \`--profile\` is provided, this runner defaults to \`--profile balanced --rounds 2\`.
 `);
 }
@@ -190,7 +190,7 @@ function runLane({ name, dockerFlags = [], benchmarkArgs = [], expectFailure = f
   if (platform) {
     args.push('--platform', platform);
   }
-  args.push(...dockerFlags, IMAGE_TAG, 'node', 'scripts/quic-benchmark.mjs', '--json');
+  args.push(...dockerFlags, IMAGE_TAG, 'node', 'scripts/h3-benchmark.mjs', '--json');
   if (label) {
     args.push('--label', label);
   }
@@ -205,7 +205,7 @@ function runLane({ name, dockerFlags = [], benchmarkArgs = [], expectFailure = f
       throw new Error(`${name} completed without JSON output`);
     }
     console.log(
-      `ok: ${summary.throughputMbps.toFixed(1)} Mbps, ${summary.streamsPerSecond.toFixed(0)} streams/s,` +
+      `ok: ${summary.throughputMbps.toFixed(1)} Mbps, ${summary.streamsPerSecond.toFixed(0)} requests/s,` +
       ` client=${formatCountSummary(summary.clientStats.runtimeSelections)},` +
       ` server=${formatRuntimeInfo(summary.serverStats?.runtimeInfo)}`,
     );
@@ -252,7 +252,7 @@ function printPerformanceTable(results) {
     'Lane'.padEnd(36),
     'Throughput'.padStart(12),
     'Delta'.padStart(10),
-    'Streams/s'.padStart(10),
+    'Requests/s'.padStart(10),
     'P95'.padStart(12),
   ].join(' ');
 
@@ -431,12 +431,12 @@ function main() {
   const matrix = {
     artifactType: 'docker-benchmark-matrix',
     schemaVersion: 1,
-    protocol: 'quic',
+    protocol: 'h3',
     target: 'docker',
     generatedAt: new Date().toISOString(),
     environment: captureEnvironmentMetadata({
-      runner: 'scripts/docker-quic-benchmark.mjs',
-      protocol: 'quic',
+      runner: 'scripts/docker-h3-benchmark.mjs',
+      protocol: 'h3',
       target: 'docker',
       label,
       extra: {
@@ -453,7 +453,7 @@ function main() {
   const artifact = writeJsonArtifact({
     rootDir: ROOT_DIR,
     resultsDir,
-    prefix: 'benchmark-quic-docker-matrix',
+    prefix: 'benchmark-h3-docker-matrix',
     label,
     payload: matrix,
   });

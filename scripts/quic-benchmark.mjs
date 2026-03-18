@@ -3,6 +3,8 @@ import { spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { captureEnvironmentMetadata, writeJsonArtifact } from './perf-artifacts.mjs';
+
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST_TEST_DIR = join(ROOT_DIR, 'dist-test', 'test');
 const BENCH_SERVER_PATH = join(DIST_TEST_DIR, 'quic-bench-server.js');
@@ -237,6 +239,8 @@ Options:
   --server-fallback-policy POLICY             Override server fallback policy
   --client-fallback-policy POLICY             Override client fallback policy
   --stats-interval-ms N                       Server stats emission interval
+  --results-dir DIR                           Write a timestamped JSON artifact under DIR
+  --label TEXT                                Optional artifact label suffix
   --allow-errors                              Exit 0 even if the benchmark sees stream errors
   --json                                      Print machine-readable JSON summary
   --help                                      Show this help text
@@ -312,6 +316,8 @@ function resolveSettings(argv) {
     clientRuntimeMode,
     serverFallbackPolicy,
     clientFallbackPolicy,
+    resultsDir: options.get('--results-dir'),
+    label: options.get('--label') ?? null,
     allowErrors: flags.has('--allow-errors'),
     json: flags.has('--json'),
   };
@@ -679,6 +685,8 @@ function printSummary(summary) {
     console.log(`  Server runtime selected: ${formatRuntimeInfo(serverStats.runtimeInfo)}`);
     console.log(
       `  Server observed: sessions=${serverStats.final.sessionCount} (peak ${serverStats.maxSessions}),` +
+      ` closed=${serverStats.final.sessionsClosed ?? 'n/a'},` +
+      ` active=${serverStats.final.activeSessions ?? 'n/a'},` +
       ` streams=${serverStats.final.streamCount} (peak ${serverStats.maxStreams}),` +
       ` echoed=${formatBytes(serverStats.final.bytesEchoed)}`,
     );
@@ -767,6 +775,21 @@ async function main() {
   const serverRuntimeInfo = finalServerSnapshot?.runtimeInfo ?? server.telemetry.runtimeInfo ?? null;
 
   const summary = {
+    artifactType: 'benchmark-summary',
+    schemaVersion: 1,
+    protocol: 'quic',
+    target: 'host',
+    generatedAt: new Date().toISOString(),
+    environment: captureEnvironmentMetadata({
+      runner: 'scripts/quic-benchmark.mjs',
+      protocol: 'quic',
+      target: 'host',
+      label: settings.label,
+      extra: {
+        argv: process.argv.slice(2),
+        resultsDir: settings.resultsDir ?? null,
+      },
+    }),
     settings,
     requestedStreams,
     totalStreams: clientStats.totalStreams,
@@ -775,6 +798,7 @@ async function main() {
     throughputMbps: clientStats.throughputMbps,
     streamsPerSecond: clientStats.streamsPerSecond,
     clientStats,
+    processResults: allResults,
     rounds: roundSummaries,
     serverStats: finalServerSnapshot
       ? {
@@ -795,10 +819,21 @@ async function main() {
       : null,
   };
 
+  const artifact = writeJsonArtifact({
+    rootDir: ROOT_DIR,
+    resultsDir: settings.resultsDir,
+    prefix: 'benchmark-quic-host',
+    label: settings.label ?? settings.profileName,
+    payload: summary,
+  });
+
   if (settings.json) {
     process.stdout.write(`${JSON.stringify(summary)}\n`);
   } else {
     printSummary(summary);
+    if (artifact?.relativePath) {
+      console.log(`  Artifact: ${artifact.relativePath}`);
+    }
   }
 
   if (!settings.allowErrors && summary.errors > 0) {

@@ -1740,7 +1740,9 @@ impl ProtocolHandler for QuicServerHandler {
 
     fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
         self.last_expired = self.timer_heap.pop_expired(now);
-        for &handle in &self.last_expired.clone() {
+        self.last_expired.sort_unstable();
+        self.last_expired.dedup();
+        for &handle in &self.last_expired {
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 conn.on_timeout();
                 if conn.is_closed() {

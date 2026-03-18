@@ -16,7 +16,21 @@ For raw QUIC runtime/driver benchmarking inside Linux containers, use:
 npm run bench:quic:docker
 ```
 
-This runs the QUIC benchmark in Docker across:
+For the matching HTTP/3 matrix, use:
+
+```bash
+npm run bench:h3:docker
+```
+
+Both Docker runners execute the same runtime lanes and can persist a matrix
+artifact with embedded per-lane benchmark summaries:
+
+```bash
+npm run bench:quic:docker -- --results-dir perf-results --label quic-docker
+npm run bench:h3:docker -- --results-dir perf-results --label h3-docker
+```
+
+These run the benchmark in Docker across:
 
 - ordinary container `portable`
 - ordinary container `auto` fallback
@@ -30,6 +44,7 @@ To also compare the broader `privileged: true` fast lane:
 
 ```bash
 npm run bench:quic:docker:privileged
+npm run bench:h3:docker:privileged
 ```
 
 Forward additional benchmark knobs after `--`, for example:
@@ -42,8 +57,8 @@ For host-side shared-reactor benchmarks with the same internal telemetry surface
 use:
 
 ```bash
-npm run bench:quic -- --profile smoke
-npm run bench:h3 -- --profile smoke
+npm run bench:quic -- --profile smoke --results-dir perf-results --label quic-host
+npm run bench:h3 -- --profile smoke --results-dir perf-results --label h3-host
 ```
 
 Those summaries now include:
@@ -53,7 +68,11 @@ Those summaries now include:
 - worker spawn counts
 - shared-worker creation/reuse counts
 - session open/close counts
+- backend-specific queue/backlog counters for `io_uring` and `kqueue`
 - TX buffer recycle counts
+
+For the profiler workflow, comparison matrix, and baseline criteria, see
+[`PERF_PROFILING.md`](./PERF_PROFILING.md).
 
 ## 1) Generate local TLS certs
 
