@@ -3,6 +3,7 @@
 //! and raw QUIC to the TypeScript layer via napi-rs.
 
 mod buffer_pool;
+mod client_topology;
 mod cid;
 mod client;
 mod config;
@@ -15,6 +16,8 @@ mod quic_client;
 mod quic_connection;
 mod quic_server;
 mod quic_worker;
+mod reactor_metrics;
+mod shared_client_reactor;
 mod server;
 mod timer_heap;
 mod transport;
@@ -25,4 +28,14 @@ use napi_derive::napi;
 #[napi]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[napi]
+pub fn runtime_telemetry() -> reactor_metrics::JsReactorTelemetrySnapshot {
+    reactor_metrics::snapshot()
+}
+
+#[napi]
+pub fn reset_runtime_telemetry() {
+    reactor_metrics::reset();
 }

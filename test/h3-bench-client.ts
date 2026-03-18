@@ -4,14 +4,32 @@
  */
 
 import { connectAsync } from '../lib/index.js';
+import { binding } from '../lib/event-loop.js';
 import type { Http3ClientSession } from '../lib/index.js';
 
 interface BenchConfig {
+  host?: string;
   port: number;
   connections: number;
   streamsPerConnection: number;
   messageSize: number;
   timeoutMs: number;
+  runtimeMode?: 'auto' | 'fast' | 'portable';
+  fallbackPolicy?: 'error' | 'warn-and-fallback';
+  clientId?: number;
+}
+
+function formatRuntimeSelection(runtimeInfo: {
+  selectedMode?: string | null;
+  driver?: string | null;
+  fallbackOccurred?: boolean;
+  requestedMode?: string | null;
+} | null | undefined): string {
+  const selectedMode = runtimeInfo?.selectedMode ?? 'unknown';
+  const driver = runtimeInfo?.driver ?? 'unknown';
+  const fallback = runtimeInfo?.fallbackOccurred === true ? 'fallback' : 'direct';
+  const requestedMode = runtimeInfo?.requestedMode ?? 'unknown';
+  return `${requestedMode}->${selectedMode}/${driver}/${fallback}`;
 }
 
 interface LatencyTracker {
@@ -86,31 +104,38 @@ async function main(): Promise<void> {
   }
 
   const config: BenchConfig = JSON.parse(configStr);
+  binding.resetRuntimeTelemetry();
   const cpuStart = process.cpuUsage();
   const memStart = process.memoryUsage();
   const hrStart = process.hrtime.bigint();
 
   const streamLatency = createLatencyTracker();
   const connLatency = createLatencyTracker();
+  const runtimeSelections = new Map<string, number>();
 
   let totalStreams = 0;
   let totalBytes = 0;
   let errors = 0;
 
   const payload = Buffer.alloc(config.messageSize, 0xcc);
+  const host = config.host ?? '127.0.0.1';
 
   // Phase 1: Open connections
   const clients: Http3ClientSession[] = [];
   for (let c = 0; c < config.connections; c++) {
     const connStart = process.hrtime.bigint();
     try {
-      const client = await connectAsync(`127.0.0.1:${config.port}`, {
+      const client = await connectAsync(`${host}:${config.port}`, {
         rejectUnauthorized: false,
         initialMaxStreamsBidi: 50_000,
+        runtimeMode: config.runtimeMode,
+        fallbackPolicy: config.fallbackPolicy,
       });
       const connMs = Number(process.hrtime.bigint() - connStart) / 1e6;
       connLatency.add(connMs);
       clients.push(client);
+      const runtimeKey = formatRuntimeSelection(client.runtimeInfo);
+      runtimeSelections.set(runtimeKey, (runtimeSelections.get(runtimeKey) ?? 0) + 1);
     } catch (err) {
       errors++;
       process.stderr.write(`H3 connection ${c} failed: ${err}\n`);
@@ -163,7 +188,12 @@ async function main(): Promise<void> {
 
   const result = {
     type: 'result',
+    clientId: config.clientId ?? null,
     config,
+    connectionsOpened: clients.length,
+    runtimeSelections: Object.fromEntries(
+      Array.from(runtimeSelections.entries()).sort((left, right) => left[0].localeCompare(right[0])),
+    ),
     totalStreams,
     totalBytes,
     errors,
@@ -200,6 +230,7 @@ async function main(): Promise<void> {
       rssEnd: memEnd.rss,
       rssMB: Number((memEnd.rss / 1e6).toFixed(1)),
     },
+    reactorTelemetry: binding.runtimeTelemetry(),
   };
 
   process.stdout.write(JSON.stringify(result) + '\n');

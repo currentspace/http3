@@ -38,6 +38,23 @@ Forward additional benchmark knobs after `--`, for example:
 npm run bench:quic:docker -- --profile balanced --rounds 3
 ```
 
+For host-side shared-reactor benchmarks with the same internal telemetry surface,
+use:
+
+```bash
+npm run bench:quic -- --profile smoke
+npm run bench:h3 -- --profile smoke
+```
+
+Those summaries now include:
+
+- selected runtime/driver
+- driver setup attempts/successes
+- worker spawn counts
+- shared-worker creation/reuse counts
+- session open/close counts
+- TX buffer recycle counts
+
 ## 1) Generate local TLS certs
 
 ```bash
@@ -142,3 +159,5 @@ npm run docker:down
   ports from `8443` to `443` for both TCP and UDP.
 - Ordinary Linux containers usually need `runtimeMode: 'portable'`; Linux
   `fast` mode typically requires a seccomp policy that allows `io_uring_*`.
+- On macOS, both `fast` and `portable` use `kqueue`; the benchmarks still show
+  shared client-worker reuse so you can separate backend choice from topology.
