@@ -10,11 +10,28 @@ import type { QuicClientSession } from '../lib/index.js';
 import type { QuicStream } from '../lib/quic-stream.js';
 
 interface BenchConfig {
+  host?: string;
   port: number;
   connections: number;
   streamsPerConnection: number;
   messageSize: number;
   timeoutMs: number;
+  runtimeMode?: 'auto' | 'fast' | 'portable';
+  fallbackPolicy?: 'error' | 'warn-and-fallback';
+  clientId?: number;
+}
+
+function formatRuntimeSelection(runtimeInfo: {
+  selectedMode?: string | null;
+  driver?: string | null;
+  fallbackOccurred?: boolean;
+  requestedMode?: string | null;
+} | null | undefined): string {
+  const selectedMode = runtimeInfo?.selectedMode ?? 'unknown';
+  const driver = runtimeInfo?.driver ?? 'unknown';
+  const fallback = runtimeInfo?.fallbackOccurred === true ? 'fallback' : 'direct';
+  const requestedMode = runtimeInfo?.requestedMode ?? 'unknown';
+  return `${requestedMode}->${selectedMode}/${driver}/${fallback}`;
 }
 
 interface LatencyTracker {
@@ -80,25 +97,31 @@ async function main(): Promise<void> {
 
   const streamLatency = createLatencyTracker();
   const connLatency = createLatencyTracker();
+  const runtimeSelections = new Map<string, number>();
 
   let totalStreams = 0;
   let totalBytes = 0;
   let errors = 0;
 
   const payload = Buffer.alloc(config.messageSize, 0xcc);
+  const host = config.host ?? '127.0.0.1';
 
   // Phase 1: Open connections
   const clients: QuicClientSession[] = [];
   for (let c = 0; c < config.connections; c++) {
     const connStart = process.hrtime.bigint();
     try {
-      const client = await connectQuicAsync(`127.0.0.1:${config.port}`, {
+      const client = await connectQuicAsync(`${host}:${config.port}`, {
         rejectUnauthorized: false,
         initialMaxStreamsBidi: 50_000,
+        runtimeMode: config.runtimeMode,
+        fallbackPolicy: config.fallbackPolicy,
       });
       const connMs = Number(process.hrtime.bigint() - connStart) / 1e6;
       connLatency.add(connMs);
       clients.push(client);
+      const runtimeKey = formatRuntimeSelection(client.runtimeInfo);
+      runtimeSelections.set(runtimeKey, (runtimeSelections.get(runtimeKey) ?? 0) + 1);
     } catch (err) {
       errors++;
       process.stderr.write(`Connection ${c} failed: ${err}\n`);
@@ -107,7 +130,7 @@ async function main(): Promise<void> {
 
   // Phase 2: Run streams
   const allStreams: Promise<void>[] = [];
-  for (const client of clients) {
+  for (const [clientIndex, client] of clients.entries()) {
     for (let s = 0; s < config.streamsPerConnection; s++) {
       allStreams.push(
         (async () => {
@@ -128,7 +151,7 @@ async function main(): Promise<void> {
           } catch (err) {
             errors++;
             const msg = err instanceof Error ? err.message : String(err);
-            process.stderr.write(`Stream error (conn ${clients.indexOf(client)}, stream ${s}): ${msg}\n`);
+            process.stderr.write(`Stream error (conn ${clientIndex}, stream ${s}): ${msg}\n`);
           }
         })(),
       );
@@ -147,7 +170,12 @@ async function main(): Promise<void> {
 
   const result = {
     type: 'result',
+    clientId: config.clientId ?? null,
     config,
+    connectionsOpened: clients.length,
+    runtimeSelections: Object.fromEntries(
+      Array.from(runtimeSelections.entries()).sort((left, right) => left[0].localeCompare(right[0])),
+    ),
     totalStreams,
     totalBytes,
     errors,

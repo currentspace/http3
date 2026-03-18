@@ -1,6 +1,6 @@
-//! IoUringDriver: uses the `io-uring` crate for completion-based `recvmsg` on
-//! Linux. TX uses synchronous `send_to` (same as kqueue) because UDP sendmsg
-//! is non-blocking and io_uring adds no benefit — it just complicates backpressure.
+//! IoUringDriver: uses the `io-uring` crate for completion-based UDP I/O on
+//! Linux. Both RX and TX stay on `io_uring` so the fast path does not fall
+//! back to readiness or synchronous socket syscalls once the driver is active.
 //!
 //! This module is only compiled on Linux (`cfg(target_os = "linux")`).
 
@@ -17,9 +17,11 @@ mod inner {
 
     const RX_SLOTS: usize = 256;
     const RX_BUF_SIZE: usize = 65535;
+    const TX_SLOTS: usize = 256;
 
     // user_data encoding: high byte = op type, low bytes = slot index
     const OP_RECV: u64 = 1 << 56;
+    const OP_SEND: u64 = 2 << 56;
     const OP_WAKER: u64 = 3 << 56;
     const OP_MASK: u64 = 0xFF << 56;
     const IDX_MASK: u64 = (1 << 56) - 1;
@@ -67,19 +69,77 @@ mod inner {
         }
     }
 
+    /// A single sendmsg operation slot. Like [`RxSlot`], all kernel-visible
+    /// pointers live behind `Box` so they remain stable while an SQE is in
+    /// flight.
+    struct TxSlot {
+        data: Vec<u8>,
+        peer: SocketAddr,
+        addr: Box<libc::sockaddr_storage>,
+        iov: Box<libc::iovec>,
+        msg: Box<libc::msghdr>,
+        in_flight: bool,
+    }
+
+    impl TxSlot {
+        fn new() -> Self {
+            let mut slot = Self {
+                data: Vec::new(),
+                peer: SocketAddr::from(([0, 0, 0, 0], 0)),
+                // SAFETY: zeroed sockaddr_storage is valid (all-zeros family = AF_UNSPEC).
+                addr: Box::new(unsafe { std::mem::zeroed() }),
+                iov: Box::new(libc::iovec {
+                    iov_base: std::ptr::null_mut(),
+                    iov_len: 0,
+                }),
+                // SAFETY: zeroed msghdr is valid (null pointers, zero lengths).
+                msg: Box::new(unsafe { std::mem::zeroed() }),
+                in_flight: false,
+            };
+            slot.msg.msg_name = (slot.addr.as_mut() as *mut libc::sockaddr_storage).cast();
+            slot.msg.msg_iov = slot.iov.as_mut() as *mut libc::iovec;
+            slot.msg.msg_iovlen = 1;
+            slot
+        }
+
+        fn prepare(&mut self, packet: TxDatagram) {
+            self.data = packet.data;
+            self.peer = packet.to;
+            self.iov.iov_base = self.data.as_mut_ptr().cast();
+            self.iov.iov_len = self.data.len();
+            self.msg.msg_namelen = socketaddr_to_sockaddr(self.peer, self.addr.as_mut());
+            self.msg.msg_control = std::ptr::null_mut();
+            self.msg.msg_controllen = 0;
+            self.msg.msg_flags = 0;
+            self.in_flight = true;
+        }
+
+        fn take_packet(&mut self) -> TxDatagram {
+            self.in_flight = false;
+            TxDatagram {
+                data: std::mem::take(&mut self.data),
+                to: self.peer,
+            }
+        }
+
+        fn recycle_buffer(&mut self) -> Vec<u8> {
+            self.in_flight = false;
+            std::mem::take(&mut self.data)
+        }
+    }
+
     pub struct IoUringDriver {
         ring: io_uring::IoUring,
         socket_fd: RawFd,
         socket: std::net::UdpSocket,
         eventfd: OwnedFd,
         rx_slots: Vec<RxSlot>,
+        tx_slots: Vec<TxSlot>,
         waker_buf: Box<[u8; 8]>,
         rx_in_flight: usize,
-        /// Packets that couldn't be sent because the OS UDP buffer was full.
-        /// Retried at the start of each poll cycle via synchronous send_to.
-        unsent: VecDeque<TxDatagram>,
-        /// Scratch buffer for fallback recv_from after CQE drain.
-        recv_buf: Vec<u8>,
+        tx_in_flight: usize,
+        /// Packets waiting for an available TX slot or a retryable completion.
+        pending_tx: VecDeque<TxDatagram>,
         /// Buffers from successfully sent packets, ready for pool recycling.
         recycled_tx: Vec<Vec<u8>>,
     }
@@ -112,6 +172,7 @@ mod inner {
             let eventfd = unsafe { OwnedFd::from_raw_fd(efd) };
 
             let rx_slots: Vec<RxSlot> = (0..RX_SLOTS).map(|_| RxSlot::new()).collect();
+            let tx_slots: Vec<TxSlot> = (0..TX_SLOTS).map(|_| TxSlot::new()).collect();
 
             let mut driver = Self {
                 ring,
@@ -119,10 +180,11 @@ mod inner {
                 socket,
                 eventfd,
                 rx_slots,
+                tx_slots,
                 waker_buf: Box::new([0u8; 8]),
                 rx_in_flight: 0,
-                unsent: VecDeque::new(),
-                recv_buf: vec![0u8; 65535],
+                tx_in_flight: 0,
+                pending_tx: VecDeque::new(),
                 recycled_tx: Vec::new(),
             };
 
@@ -147,15 +209,15 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
-            // Drain unsent queue at the top of each poll (socket buffer may have space now).
-            self.drain_unsent();
+            // Submit any queued TX before blocking so send completions can wake the loop.
+            self.submit_pending_tx()?;
 
             let wait_dur = deadline.map_or(Duration::from_millis(100), |d| {
                 d.saturating_duration_since(Instant::now())
             });
 
             // Submit pending SQEs (replenished recvmsg + waker read).
-            let _ = self.ring.submit();
+            self.ring.submit()?;
 
             // Wait for at least 1 CQE with timeout.
             let ts = io_uring::types::Timespec::new()
@@ -212,6 +274,20 @@ mod inner {
                             }
                         }
                     }
+                    OP_SEND => {
+                        self.tx_in_flight -= 1;
+                        let slot = &mut self.tx_slots[idx];
+                        if result >= 0 {
+                            self.recycled_tx.push(slot.recycle_buffer());
+                        } else {
+                            let errno = -result;
+                            if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR {
+                                self.pending_tx.push_back(slot.take_packet());
+                            } else {
+                                self.recycled_tx.push(slot.recycle_buffer());
+                            }
+                        }
+                    }
                     OP_WAKER => {
                         outcome.woken = true;
                         // Drain eventfd counter.
@@ -232,49 +308,25 @@ mod inner {
                 }
             }
 
-            // Fallback: drain any packets that arrived after all recvmsg CQEs
-            // were consumed. Without this, packets sit in the kernel socket buffer
-            // until the next poll cycle, adding latency under burst traffic.
-            // Cap at 256 to avoid starving the send path under fan-out.
-            for _ in 0..256 {
-                match self.socket.recv_from(&mut self.recv_buf) {
-                    Ok((len, peer)) => {
-                        outcome.rx.push(RxDatagram {
-                            data: self.recv_buf[..len].to_vec(),
-                            peer,
-                        });
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
-            }
-
             // Replenish RX depth — resubmit completed slots.
             self.replenish_rx()?;
+            self.submit_pending_tx()?;
             self.ring.submit()?;
 
             Ok(outcome)
         }
 
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
-            // Synchronous send_to, same as kqueue driver.
-            // io_uring sendmsg adds no benefit for non-blocking UDP — it just
-            // complicates EAGAIN backpressure handling.
             for pkt in packets {
-                match self.socket.send_to(&pkt.data, pkt.to) {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        self.unsent.push_back(pkt);
-                    }
-                    _ => {
-                        self.recycled_tx.push(pkt.data);
-                    }
-                }
+                self.pending_tx.push_back(pkt);
             }
+            self.submit_pending_tx()?;
+            let _ = self.ring.submit();
             Ok(())
         }
 
         fn pending_tx_count(&self) -> usize {
-            self.unsent.len()
+            self.pending_tx.len() + self.tx_in_flight
         }
 
         fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
@@ -336,18 +388,34 @@ mod inner {
             Ok(())
         }
 
-        /// Retry sending queued packets. Stops at the first WouldBlock.
-        fn drain_unsent(&mut self) {
-            while let Some(front) = self.unsent.front() {
-                match self.socket.send_to(&front.data, front.to) {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
-                    Ok(_) | Err(_) => {
-                        if let Some(pkt) = self.unsent.pop_front() {
-                            self.recycled_tx.push(pkt.data);
-                        }
-                    }
+        fn submit_pending_tx(&mut self) -> io::Result<()> {
+            while let Some(packet) = self.pending_tx.pop_front() {
+                let Some(idx) = self.tx_slots.iter().position(|slot| !slot.in_flight) else {
+                    self.pending_tx.push_front(packet);
+                    break;
+                };
+
+                self.tx_slots[idx].prepare(packet);
+                let slot = &mut self.tx_slots[idx];
+                let entry = io_uring::opcode::SendMsg::new(
+                    io_uring::types::Fd(self.socket_fd),
+                    slot.msg.as_mut() as *mut libc::msghdr,
+                )
+                .build()
+                .user_data(OP_SEND | idx as u64);
+
+                // SAFETY: tx slot buffers have stable addresses while in flight.
+                let push_result = unsafe { self.ring.submission().push(&entry) };
+                if push_result.is_err() {
+                    let packet = self.tx_slots[idx].take_packet();
+                    self.pending_tx.push_front(packet);
+                    break;
                 }
+
+                self.tx_in_flight += 1;
             }
+
+            Ok(())
         }
     }
 
@@ -392,6 +460,47 @@ mod inner {
             Some(SocketAddr::from((ip, port)))
         } else {
             None
+        }
+    }
+
+    fn socketaddr_to_sockaddr(
+        addr: SocketAddr,
+        storage: &mut libc::sockaddr_storage,
+    ) -> libc::socklen_t {
+        match addr {
+            SocketAddr::V4(addr_v4) => {
+                let sockaddr = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as libc::sa_family_t,
+                    sin_port: addr_v4.port().to_be(),
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(addr_v4.ip().octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                // SAFETY: `storage` points to valid writable storage with enough
+                // space for `sockaddr_in`.
+                unsafe {
+                    std::ptr::write(storage as *mut _ as *mut libc::sockaddr_in, sockaddr);
+                }
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
+            }
+            SocketAddr::V6(addr_v6) => {
+                let sockaddr = libc::sockaddr_in6 {
+                    sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                    sin6_port: addr_v6.port().to_be(),
+                    sin6_flowinfo: addr_v6.flowinfo(),
+                    sin6_addr: libc::in6_addr {
+                        s6_addr: addr_v6.ip().octets(),
+                    },
+                    sin6_scope_id: addr_v6.scope_id(),
+                };
+                // SAFETY: `storage` points to valid writable storage with enough
+                // space for `sockaddr_in6`.
+                unsafe {
+                    std::ptr::write(storage as *mut _ as *mut libc::sockaddr_in6, sockaddr);
+                }
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
+            }
         }
     }
 }
