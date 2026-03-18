@@ -16,6 +16,12 @@ interface BenchServerConfig {
   statsIntervalMs?: number;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function loadConfig(): BenchServerConfig {
   const configStr = process.argv[2];
   if (!configStr) {
@@ -36,6 +42,9 @@ async function main(): Promise<void> {
   binding.resetRuntimeTelemetry();
   const certs = generateTestCerts();
 
+  let sessionCount = 0;
+  let activeSessions = 0;
+  let sessionsClosed = 0;
   let streamCount = 0;
   let bytesEchoed = 0;
 
@@ -65,6 +74,39 @@ async function main(): Promise<void> {
     });
   });
 
+  server.on('session', (session) => {
+    sessionCount++;
+    activeSessions++;
+    session.once('close', () => {
+      activeSessions = Math.max(0, activeSessions - 1);
+      sessionsClosed++;
+    });
+  });
+
+  const emitJson = (message: Record<string, unknown>): void => {
+    process.stdout.write(`${JSON.stringify(message)}\n`);
+  };
+
+  const snapshot = (type: 'stats' | 'summary'): Record<string, unknown> => {
+    const cpu = process.cpuUsage();
+    const memory = process.memoryUsage();
+    return {
+      type,
+      timestamp: Date.now(),
+      sessionCount,
+      activeSessions,
+      sessionsClosed,
+      streamCount,
+      bytesEchoed,
+      heapUsed: memory.heapUsed,
+      rss: memory.rss,
+      cpuUser: cpu.user,
+      cpuSystem: cpu.system,
+      runtimeInfo: server.runtimeInfo,
+      reactorTelemetry: binding.runtimeTelemetry(),
+    };
+  };
+
   const addr = await new Promise<{ address: string; port: number }>((resolve) => {
     server.on('listening', () => {
       resolve(server.address()!);
@@ -72,42 +114,23 @@ async function main(): Promise<void> {
     server.listen(config.port ?? 0, config.host ?? '127.0.0.1');
   });
 
-  process.stdout.write(JSON.stringify({
+  emitJson({
     type: 'ready',
     port: addr.port,
     address: addr.address,
     runtimeInfo: server.runtimeInfo,
-  }) + '\n');
+  });
 
   const statsInterval = setInterval(() => {
-    process.stdout.write(JSON.stringify({
-      type: 'stats',
-      streamCount,
-      bytesEchoed,
-      heapUsed: process.memoryUsage().heapUsed,
-      rss: process.memoryUsage().rss,
-      cpuUser: process.cpuUsage().user,
-      cpuSystem: process.cpuUsage().system,
-      runtimeInfo: server.runtimeInfo,
-      reactorTelemetry: binding.runtimeTelemetry(),
-    }) + '\n');
+    emitJson(snapshot('stats'));
   }, config.statsIntervalMs ?? 1000);
   statsInterval.unref();
 
   process.on('SIGTERM', async () => {
     clearInterval(statsInterval);
-    process.stdout.write(JSON.stringify({
-      type: 'summary',
-      streamCount,
-      bytesEchoed,
-      heapUsed: process.memoryUsage().heapUsed,
-      rss: process.memoryUsage().rss,
-      cpuUser: process.cpuUsage().user,
-      cpuSystem: process.cpuUsage().system,
-      runtimeInfo: server.runtimeInfo,
-      reactorTelemetry: binding.runtimeTelemetry(),
-    }) + '\n');
     await server.close();
+    await sleep(100);
+    emitJson(snapshot('summary'));
     process.exit(0);
   });
 

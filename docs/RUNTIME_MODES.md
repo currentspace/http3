@@ -100,6 +100,15 @@ Observable surfaces:
 - `npm run bench:quic` and `npm run bench:h3` now include internal reactor telemetry:
   driver setup attempts/successes, worker spawns, shared-worker reuse, session
   open/close counts, and TX buffer recycling.
+- Backend-specific counters now expose queue/backlog pressure that generic
+  counters cannot explain on their own:
+  - `ioUringRxInFlightHighWatermark`
+  - `ioUringTxInFlightHighWatermark`
+  - `ioUringPendingTxHighWatermark`
+  - `ioUringRetryableSendCompletions`
+  - `kqueueUnsentHighWatermark`
+  - `kqueueWouldBlockSends`
+  - `kqueueWriteWakeups`
 
 ## Environment matrix
 
@@ -251,11 +260,12 @@ HTTP3_RUNTIME_TEST_PRIVILEGED=1 npm run test:docker:runtime
 ## Benchmark observability
 
 Two host-side benchmark harnesses now expose runtime selection plus internal
-reactor counters in both human and JSON output:
+reactor counters in both human and JSON output, and can persist timestamped
+artifacts for later comparison:
 
 ```bash
-npm run bench:quic -- --profile smoke --json
-npm run bench:h3 -- --profile smoke --json
+npm run bench:quic -- --profile smoke --json --results-dir perf-results --label quic-smoke
+npm run bench:h3 -- --profile smoke --json --results-dir perf-results --label h3-smoke
 ```
 
 Look for:
@@ -265,4 +275,8 @@ Look for:
   `rawQuicClientSharedWorkersCreated` or `h3ClientSharedWorkersCreated`
 - `clientLocalPortReuseHits`
 - protocol-specific session open/close counts
+- backend-specific `io_uring` and `kqueue` queue/backlog counters
 - `txBuffersRecycled`
+
+For the full cross-platform profiling matrix, profiler wrappers, and comparison
+workflow, see [`PERF_PROFILING.md`](./PERF_PROFILING.md).

@@ -19,6 +19,12 @@ interface BenchServerConfig {
   statsIntervalMs?: number;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function loadConfig(): BenchServerConfig {
   const configStr = process.argv[2];
   if (!configStr) {
@@ -50,11 +56,18 @@ async function main(): Promise<void> {
   });
 
   let sessionCount = 0;
+  let activeSessions = 0;
+  let sessionsClosed = 0;
   let streamCount = 0;
   let bytesEchoed = 0;
 
   server.on('session', (session: QuicServerSession) => {
     sessionCount++;
+    activeSessions++;
+    session.once('close', () => {
+      activeSessions = Math.max(0, activeSessions - 1);
+      sessionsClosed++;
+    });
     session.on('stream', (stream: QuicStream) => {
       streamCount++;
       stream.on('data', (chunk: Buffer) => {
@@ -75,6 +88,8 @@ async function main(): Promise<void> {
       type,
       timestamp: Date.now(),
       sessionCount,
+      activeSessions,
+      sessionsClosed,
       streamCount,
       bytesEchoed,
       heapUsed: memory.heapUsed,
@@ -107,8 +122,9 @@ async function main(): Promise<void> {
     }
     shuttingDown = true;
     clearInterval(statsInterval);
-    emitJson(snapshot('summary'));
     await server.close();
+    await sleep(100);
+    emitJson(snapshot('summary'));
     process.exit(0);
   };
 

@@ -39,6 +39,13 @@ pub struct JsReactorTelemetrySnapshot {
     pub h3ClientSessionsClosed: i64,
     pub h3ServerSessionsOpened: i64,
     pub h3ServerSessionsClosed: i64,
+    pub ioUringRxInFlightHighWatermark: i64,
+    pub ioUringTxInFlightHighWatermark: i64,
+    pub ioUringPendingTxHighWatermark: i64,
+    pub ioUringRetryableSendCompletions: i64,
+    pub kqueueUnsentHighWatermark: i64,
+    pub kqueueWouldBlockSends: i64,
+    pub kqueueWriteWakeups: i64,
     pub txBuffersRecycled: i64,
 }
 
@@ -96,6 +103,14 @@ static H3_CLIENT_SESSIONS_CLOSED: AtomicU64 = AtomicU64::new(0);
 static H3_SERVER_SESSIONS_OPENED: AtomicU64 = AtomicU64::new(0);
 static H3_SERVER_SESSIONS_CLOSED: AtomicU64 = AtomicU64::new(0);
 
+static IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static IO_URING_PENDING_TX_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static IO_URING_RETRYABLE_SEND_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_UNSENT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_WOULD_BLOCK_SENDS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_WRITE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+
 static TX_BUFFERS_RECYCLED: AtomicU64 = AtomicU64::new(0);
 
 fn load(counter: &AtomicU64) -> i64 {
@@ -108,6 +123,10 @@ fn reset_counter(counter: &AtomicU64) {
 
 fn bump(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
+}
+
+fn observe_max(counter: &AtomicU64, value: usize) {
+    counter.fetch_max(value as u64, Ordering::Relaxed);
 }
 
 pub(crate) fn record_driver_setup_attempt(kind: RuntimeDriverKind) {
@@ -178,6 +197,41 @@ pub(crate) fn record_session_close(kind: SessionKind) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_rx_in_flight(count: usize) {
+    observe_max(&IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK, count);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tx_in_flight(count: usize) {
+    observe_max(&IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK, count);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_pending_tx(count: usize) {
+    observe_max(&IO_URING_PENDING_TX_HIGH_WATERMARK, count);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_retryable_send_completion() {
+    bump(&IO_URING_RETRYABLE_SEND_COMPLETIONS);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_unsent_depth(count: usize) {
+    observe_max(&KQUEUE_UNSENT_HIGH_WATERMARK, count);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_would_block_send() {
+    bump(&KQUEUE_WOULD_BLOCK_SENDS);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_write_wakeup() {
+    bump(&KQUEUE_WRITE_WAKEUPS);
+}
+
 pub(crate) fn record_tx_buffers_recycled(count: usize) {
     TX_BUFFERS_RECYCLED.fetch_add(count as u64, Ordering::Relaxed);
 }
@@ -214,6 +268,13 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         h3ClientSessionsClosed: load(&H3_CLIENT_SESSIONS_CLOSED),
         h3ServerSessionsOpened: load(&H3_SERVER_SESSIONS_OPENED),
         h3ServerSessionsClosed: load(&H3_SERVER_SESSIONS_CLOSED),
+        ioUringRxInFlightHighWatermark: load(&IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK),
+        ioUringTxInFlightHighWatermark: load(&IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK),
+        ioUringPendingTxHighWatermark: load(&IO_URING_PENDING_TX_HIGH_WATERMARK),
+        ioUringRetryableSendCompletions: load(&IO_URING_RETRYABLE_SEND_COMPLETIONS),
+        kqueueUnsentHighWatermark: load(&KQUEUE_UNSENT_HIGH_WATERMARK),
+        kqueueWouldBlockSends: load(&KQUEUE_WOULD_BLOCK_SENDS),
+        kqueueWriteWakeups: load(&KQUEUE_WRITE_WAKEUPS),
         txBuffersRecycled: load(&TX_BUFFERS_RECYCLED),
     }
 }
@@ -250,6 +311,13 @@ pub fn reset() {
         &H3_CLIENT_SESSIONS_CLOSED,
         &H3_SERVER_SESSIONS_OPENED,
         &H3_SERVER_SESSIONS_CLOSED,
+        &IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK,
+        &IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK,
+        &IO_URING_PENDING_TX_HIGH_WATERMARK,
+        &IO_URING_RETRYABLE_SEND_COMPLETIONS,
+        &KQUEUE_UNSENT_HIGH_WATERMARK,
+        &KQUEUE_WOULD_BLOCK_SENDS,
+        &KQUEUE_WRITE_WAKEUPS,
         &TX_BUFFERS_RECYCLED,
     ] {
         reset_counter(counter);

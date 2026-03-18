@@ -13,6 +13,7 @@ mod inner {
 
     use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
 
+    use crate::reactor_metrics;
     use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
 
     const WAKER_IDENT: usize = 0xCAFE;
@@ -176,6 +177,7 @@ mod inner {
 
             // Drain unsent queue if writable
             if writable {
+                reactor_metrics::record_kqueue_write_wakeup();
                 self.drain_unsent();
             }
 
@@ -204,7 +206,9 @@ mod inner {
             for pkt in packets {
                 match self.socket.send_to(&pkt.data, pkt.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        reactor_metrics::record_kqueue_would_block_send();
                         self.unsent.push_back(pkt);
+                        reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
                     }
                     _ => {
                         self.recycled_tx.push(pkt.data);
@@ -235,7 +239,11 @@ mod inner {
         fn drain_unsent(&mut self) {
             while let Some(front) = self.unsent.front() {
                 match self.socket.send_to(&front.data, front.to) {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        reactor_metrics::record_kqueue_would_block_send();
+                        reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+                        return;
+                    }
                     Ok(_) | Err(_) => {
                         if let Some(pkt) = self.unsent.pop_front() {
                             self.recycled_tx.push(pkt.data);
