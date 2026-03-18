@@ -37,13 +37,15 @@ console.log('QUIC echo server listening on :4433');
 
 ## Client connect (async)
 
-`connectQuicAsync` waits for the QUIC handshake to complete before resolving:
+`connectQuicAsync` waits for the QUIC handshake to complete before resolving.
+Hostname URLs and Docker service names are supported:
 
 ```ts
 import { connectQuicAsync } from '@currentspace/http3';
 
-const session = await connectQuicAsync('127.0.0.1:4433', {
+const session = await connectQuicAsync('https://sfu:4433', {
   rejectUnauthorized: false, // for self-signed certs
+  runtimeMode: 'portable',
 });
 
 const stream = session.openStream();
@@ -71,6 +73,8 @@ import { connectQuic } from '@currentspace/http3';
 
 const session = connectQuic('127.0.0.1:4433', {
   rejectUnauthorized: false,
+  runtimeMode: 'auto',
+  fallbackPolicy: 'warn-and-fallback',
 });
 
 await session.ready();
@@ -81,6 +85,23 @@ stream.end(Buffer.from('hello'));
 // ... read response, then close
 await session.close();
 ```
+
+You can also separate the transport address from TLS identity explicitly:
+
+```ts
+const session = await connectQuicAsync({
+  address: '10.10.1.10',
+  port: 4433,
+  servername: 'sfu.internal.example',
+}, {
+  ca,
+  runtimeMode: 'fast',
+  fallbackPolicy: 'error',
+});
+```
+
+Check `session.runtimeInfo` or listen for `'runtime'` when you need to know
+which runtime was selected.
 
 ## Multiple streams
 

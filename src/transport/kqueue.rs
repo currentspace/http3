@@ -13,7 +13,7 @@ mod inner {
 
     use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
 
-    use crate::transport::{Driver, DriverWaker, PollOutcome, RxDatagram, TxDatagram};
+    use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
 
     const WAKER_IDENT: usize = 0xCAFE;
 
@@ -225,6 +225,10 @@ mod inner {
         fn local_addr(&self) -> io::Result<SocketAddr> {
             self.socket.local_addr()
         }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::Kqueue
+        }
     }
 
     impl KqueueDriver {
@@ -288,4 +292,4 @@ mod inner {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use inner::KqueueDriver;
+pub(crate) use inner::{KqueueDriver, KqueueWaker};

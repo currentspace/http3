@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { Http2Session } from 'node:http2';
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
+import type { RuntimeInfo } from './runtime.js';
 
 /** QUIC transport tuning parameters shared by server and client. */
 export interface SessionOptions {
@@ -52,6 +53,7 @@ export interface Http3Session {
   on(event: 'metrics', listener: (metrics: SessionMetrics) => void): this;
   on(event: 'keylog', listener: (line: Buffer) => void): this;
   on(event: 'datagram', listener: (data: Buffer) => void): this;
+  on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
 }
 
@@ -81,6 +83,8 @@ export class Http3Session extends EventEmitter {
   _metricsPolling = false;
   /** @internal */
   _keylogUnsubscribe: (() => void) | null = null;
+  /** @internal */
+  _runtimeInfo: RuntimeInfo | null = null;
 
   /** Negotiated ALPN protocol (`'h3'` or `'h2'`). */
   get alpnProtocol(): string { return this._alpnProtocol; }
@@ -90,6 +94,8 @@ export class Http3Session extends EventEmitter {
   get remotePort(): number { return this._remotePort; }
   /** Whether the QUIC/TLS handshake has completed. */
   get handshakeComplete(): boolean { return this._handshakeComplete; }
+  /** Runtime mode/driver information for this session, when available. */
+  get runtimeInfo(): RuntimeInfo | null { return this._runtimeInfo; }
 
   /** @internal */
   _startMetricsEmitter(

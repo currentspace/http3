@@ -7,7 +7,8 @@ HTTP/3, HTTP/2, and raw QUIC server/client package for Node.js 24+, powered by R
 - HTTP/3 server and client over QUIC/UDP
 - HTTP/2 fallback over TLS/TCP on the same listener
 - Raw QUIC: bidirectional streams, datagrams, session resumption, custom ALPN
-- Platform-native I/O: kqueue (macOS), io_uring (Linux)
+- Explicit runtime selection: `fast`, `portable`, or `auto`
+- Platform-native I/O: kqueue (macOS), io_uring (Linux fast path), `poll` (Linux portable path)
 - fetch/SSE/EventSource adapters
 - Express compatibility via `@currentspace/http3/express`
 
@@ -46,6 +47,33 @@ const stream = session.request({
   ':scheme': 'https',
 }, { endStream: true });
 ```
+
+## Runtime modes
+
+Every QUIC-capable API accepts:
+
+- `runtimeMode: 'auto' | 'fast' | 'portable'`
+- `fallbackPolicy: 'error' | 'warn-and-fallback'`
+- `onRuntimeEvent(info)`
+
+Returned client sessions and server objects expose `runtimeInfo`, and `auto`
+fallback also emits a process warning with code `WARN_HTTP3_RUNTIME_FALLBACK`.
+
+```ts
+import { connectQuicAsync } from '@currentspace/http3';
+
+const session = await connectQuicAsync('https://sfu:9080', {
+  alpn: ['sfu-repl'],
+  rejectUnauthorized: false,
+  runtimeMode: 'auto',
+  fallbackPolicy: 'warn-and-fallback',
+});
+
+console.log(session.runtimeInfo);
+```
+
+See [`docs/RUNTIME_MODES.md`](./docs/RUNTIME_MODES.md) for the deployment matrix,
+capability requirements, Docker guidance, and the raw endpoint contract.
 
 ## Quick QUIC server
 
@@ -98,6 +126,7 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 ## Reference docs
 
 - [Configuration options reference](./docs/CONFIGURATION_OPTIONS.md)
+- [Runtime modes and deployment matrix](./docs/RUNTIME_MODES.md)
 - [Error handling guide](./docs/ERROR_HANDLING.md)
 - [Test strategy](./docs/TEST_STRATEGY.md)
 - [Contributing guide](./CONTRIBUTING.md)

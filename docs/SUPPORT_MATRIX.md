@@ -16,17 +16,35 @@
 
 ## Transport Layer
 
-- macOS: kqueue (platform-native I/O)
-- Linux: io_uring (platform-native I/O)
+- macOS: kqueue (`fast` and `portable`)
+- Linux `fast`: io_uring
+- Linux `portable`: readiness-based `poll(2)` + `eventfd`
 - QUIC engine: quiche 0.26.1
 
 ## Platform Targets (N-API prebuild intent)
 
 - Linux x64 (gnu)
 - Linux arm64 (gnu)
-- macOS x64
 - macOS arm64
-- Windows x64 (msvc)
+- Other platforms may require local native compilation and are not part of the
+  current prebuild release set.
+
+## Runtime Modes By Environment
+
+| Environment | `fast` | `portable` | `auto` |
+| --- | --- | --- | --- |
+| macOS | supported (`kqueue`) | supported (`kqueue`) | prefers `fast` |
+| Native Linux with `io_uring` allowed | supported (`io_uring`) | supported (`poll`) | prefers `fast` |
+| Ordinary Docker/Kubernetes on Linux | usually blocked by seccomp | supported | falls back to `portable` if allowed |
+| Docker/Kubernetes with `seccomp=unconfined` or equivalent custom seccomp allowing `io_uring_*` | supported | supported | prefers `fast` |
+| `privileged: true` container | supported | supported | prefers `fast` |
+
+## Container / Deployment Notes
+
+- Linux arm64 Docker Desktop is validated through the repository runtime matrix.
+- `cap_add` alone did not restore `io_uring` in the tested default Docker seccomp profile.
+- `seccomp=unconfined` restored the Linux fast path without requiring `privileged: true`.
+- `privileged: true` remains a broad fallback, not the recommended default deployment mode.
 
 ## Production Environments
 

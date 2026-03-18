@@ -3,6 +3,9 @@ import { binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
+import { toSessionError } from './error-map.js';
+import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
+import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
 
 const EVENT_NEW_SESSION = 1;
 const EVENT_NEW_STREAM = 2;
@@ -17,6 +20,12 @@ const EVENT_DATAGRAM = 14;
 
 /** Options for creating a raw QUIC server (no HTTP/3 framing). */
 export interface QuicServerOptions {
+  /** Runtime selection mode. Default: `'auto'`. */
+  runtimeMode?: RuntimeOptions['runtimeMode'];
+  /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
+  fallbackPolicy?: RuntimeOptions['fallbackPolicy'];
+  /** Callback invoked when runtime selection resolves or falls back. */
+  onRuntimeEvent?: RuntimeOptions['onRuntimeEvent'];
   /** PEM-encoded private key. */
   key: Buffer | string;
   /** PEM-encoded certificate chain. */
@@ -200,6 +209,7 @@ export interface QuicServer {
   on(event: 'session', listener: (session: QuicServerSession) => void): this;
   on(event: 'close', listener: () => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
 }
 
@@ -214,10 +224,18 @@ export class QuicServer extends EventEmitter {
   private readonly _sessions = new Map<number, QuicServerSession>();
   private readonly _options: QuicServerOptions;
   private _address: { address: string; family: string; port: number } | null = null;
+  /** @internal */
+  _runtimeInfo: RuntimeInfo | null = null;
 
   constructor(options: QuicServerOptions) {
     super();
     this._options = options;
+    setPendingRuntimeInfo(this, options);
+  }
+
+  /** Runtime mode/driver information for this server, when available. */
+  get runtimeInfo(): RuntimeInfo | null {
+    return this._runtimeInfo;
   }
 
   /**
@@ -228,34 +246,38 @@ export class QuicServer extends EventEmitter {
   async listen(port: number, host?: string): Promise<{ address: string; family: string; port: number }> {
     const opts = this._options;
     const NativeQuicServer = getNativeQuicServerConstructor();
-    const native = new NativeQuicServer(
-      {
-        key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
-        cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
-        ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
-        alpn: opts.alpn,
-        maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
-        maxUdpPayloadSize: opts.maxUdpPayloadSize,
-        initialMaxData: opts.initialMaxData,
-        initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal,
-        initialMaxStreamsBidi: opts.initialMaxStreamsBidi,
-        disableActiveMigration: opts.disableActiveMigration,
-        enableDatagrams: opts.enableDatagrams,
-        maxConnections: opts.maxConnections,
-        disableRetry: opts.disableRetry,
-        qlogDir: opts.qlogDir,
-        qlogLevel: opts.qlogLevel,
-        keylog: opts.keylog,
-      },
-      (_err: Error | null, events: NativeEvent[]) => {
-        this._dispatchEvents(events);
-      },
-    );
+    const addr = runWithRuntimeSelectionSync(this, opts, (runtimeMode) => {
+      const native = new NativeQuicServer(
+        {
+          key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
+          cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
+          ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
+          alpn: opts.alpn,
+          runtimeMode,
+          maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
+          maxUdpPayloadSize: opts.maxUdpPayloadSize,
+          initialMaxData: opts.initialMaxData,
+          initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal,
+          initialMaxStreamsBidi: opts.initialMaxStreamsBidi,
+          disableActiveMigration: opts.disableActiveMigration,
+          enableDatagrams: opts.enableDatagrams,
+          maxConnections: opts.maxConnections,
+          disableRetry: opts.disableRetry,
+          qlogDir: opts.qlogDir,
+          qlogLevel: opts.qlogLevel,
+          keylog: opts.keylog,
+        },
+        (_err: Error | null, events: NativeEvent[]) => {
+          this._dispatchEvents(events);
+        },
+      );
 
-    const eventLoop = new QuicWorkerEventLoop(native);
-    this._eventLoop = eventLoop;
+      const eventLoop = new QuicWorkerEventLoop(native);
+      const addr = native.listen(port, host ?? '127.0.0.1');
+      this._eventLoop = eventLoop;
+      return addr;
+    });
 
-    const addr = native.listen(port, host ?? '127.0.0.1');
     this._address = addr;
     this.emit('listening');
     await Promise.resolve();
@@ -399,14 +421,17 @@ export class QuicServer extends EventEmitter {
 
   private _onError(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
-    if (!session) return;
+    if (!session) {
+      this.emit('error', toSessionError(event));
+      return;
+    }
     if (event.streamId >= 0) {
       const stream = session._streams.get(event.streamId);
       if (stream) {
         stream.destroy(new Error(event.meta?.errorReason ?? 'stream error'));
       }
     } else {
-      session.emit('error', new Error(event.meta?.errorReason ?? 'session error'));
+      session.emit('error', toSessionError(event));
     }
   }
 

@@ -17,6 +17,14 @@ instances before they reach JS session and stream objects.
 | `code` | `string` | Stable `ERR_HTTP3_*` category. |
 | `quicCode` | `number \| undefined` | QUIC transport close code, when the failure is session-scoped. |
 | `h3Code` | `number \| undefined` | HTTP/3 application error code, when the failure is stream-scoped. |
+| `requestedMode` | `'auto' \| 'fast' \| 'portable' \| undefined` | Requested runtime mode for runtime-selection failures. |
+| `selectedMode` | `'fast' \| 'portable' \| undefined` | Selected runtime mode when known. |
+| `driver` | `'io_uring' \| 'poll' \| 'kqueue' \| undefined` | Native driver associated with the failure. |
+| `reasonCode` | `string \| undefined` | Structured reason identifier for endpoint/runtime failures. |
+| `errno` | `number \| undefined` | Native errno when available. |
+| `syscall` | `string \| undefined` | Native syscall/operation name when available. |
+| `endpoint` | `string \| undefined` | Endpoint string involved in parse/resolve failures. |
+| `runtimeInfo` | `RuntimeInfo \| undefined` | Runtime snapshot attached to selection failures. |
 
 ## Exported Error Codes
 
@@ -29,13 +37,23 @@ instances before they reach JS session and stream objects.
 | `ERR_HTTP3_GOAWAY` | Peer is draining and should not receive new requests. | Exported public constant; current session handling primarily surfaces GOAWAY as an event. |
 | `ERR_HTTP3_TLS_CONFIG_ERROR` | TLS inputs are invalid or missing. | Missing `key`/`cert`, bad `pfx`, bad passphrase. |
 | `ERR_HTTP3_KEYLOG_ERROR` | TLS key logging setup failed. | Exported public constant for keylog setup failures. |
+| `ERR_HTTP3_ENDPOINT_INVALID` | Endpoint string/object is malformed. | Invalid URL, missing host, invalid port, malformed endpoint object. |
+| `ERR_HTTP3_ENDPOINT_RESOLUTION` | Hostname lookup failed. | Docker service names, DNS lookups, bad hostnames. |
+| `ERR_HTTP3_FAST_PATH_UNAVAILABLE` | Requested Linux fast path could not be used. | `io_uring_setup` blocked by seccomp/policy, unsupported fast runtime. |
+| `ERR_HTTP3_RUNTIME_UNSUPPORTED` | Runtime driver failed for an environmental reason. | Post-start driver failure or unsupported runtime environment. |
+| `ERR_HTTP3_RUNTIME_FALLBACK` | Runtime fallback category for consumers classifying warnings/events. | `runtimeInfo` / `'runtime'` events / `onRuntimeEvent`. |
 
 ## How Native Errors Are Mapped
 
-The native worker reports `errorReason` plus a numeric `errorCode`.
+The native worker reports `errorReason` plus a numeric `errorCode`. Runtime
+selection failures and post-start transport driver failures also preserve
+driver-specific metadata when available.
 
 - Stream failures are converted with `toStreamError()`, which sets `code` to `ERR_HTTP3_STREAM_ERROR` and copies the numeric native code into `h3Code`.
 - Session failures are converted with `toSessionError()`, which sets `code` to `ERR_HTTP3_SESSION_ERROR` and copies the numeric native code into `quicCode`.
+- Runtime driver failures are converted into `ERR_HTTP3_FAST_PATH_UNAVAILABLE`
+  or `ERR_HTTP3_RUNTIME_UNSUPPORTED` and preserve `driver`, `errno`, `syscall`,
+  and `reasonCode`.
 
 This keeps application code stable even if the lower-level native event shape
 changes.
@@ -46,6 +64,9 @@ changes.
 
 - `createSecureServer()` / `server.listen()` can throw `Http3Error` with `ERR_HTTP3_INVALID_STATE` if the server is already listening.
 - TLS resolution can throw `Http3Error` with `ERR_HTTP3_TLS_CONFIG_ERROR` when credentials are missing or a `pfx` bundle cannot be decoded.
+- `fast` runtime selection failures throw `ERR_HTTP3_FAST_PATH_UNAVAILABLE`.
+- `auto` runtime fallback surfaces through `runtimeInfo`, the `'runtime'` event,
+  `onRuntimeEvent`, and a `WARN_HTTP3_RUNTIME_FALLBACK` process warning.
 
 ### HTTP/3 server sessions and streams
 
@@ -60,6 +81,8 @@ changes.
 - `Http3ClientSession` emits `'error'` for session-level transport failures.
 - `ClientHttp3Stream` instances are destroyed with `Http3Error` on stream resets and stream-scoped native failures.
 - GOAWAY is surfaced via the session `'goaway'` event, followed by normal close/drain behavior.
+- Endpoint parsing/resolution failures reject `connectAsync()` cleanly with
+  `ERR_HTTP3_ENDPOINT_INVALID` or `ERR_HTTP3_ENDPOINT_RESOLUTION`.
 
 ### Fetch/SSE/EventSource adapters
 
@@ -135,9 +158,39 @@ Recovery:
 - Validate PKCS#12 archives with OpenSSL when debugging packaging issues.
 - Prefer explicit `ca` material in local/dev environments rather than disabling verification everywhere.
 
+### Endpoint parse / resolution error
+
+Use when:
+
+- The authority string is malformed.
+- The hostname cannot be resolved.
+- A caller should pass `{ address, port, servername }` instead of a hostname.
+
+Recovery:
+
+- Fix the endpoint syntax.
+- Verify container DNS / host resolver behavior.
+- Use the explicit endpoint object form when the transport address and TLS
+  identity differ.
+
+### Fast path unavailable
+
+Use when:
+
+- `runtimeMode: 'fast'` was requested and Linux `io_uring` could not be enabled.
+- `runtimeMode: 'auto'` was requested with `fallbackPolicy: 'error'`.
+
+Recovery:
+
+- Switch to `runtimeMode: 'portable'` for ordinary containers.
+- Keep `runtimeMode: 'fast'` and allow `io_uring_*` syscalls, typically via
+  `seccomp=unconfined` or an equivalent custom seccomp policy.
+- Inspect `driver`, `errno`, and `syscall` in logs.
+
 ## Practical Recommendations
 
 - Listen for `'error'`, `'close'`, and `'goaway'` on sessions, not just streams.
 - Treat stream-level and session-level failures differently: stream errors can often be retried in place, session errors usually require reconnect.
 - Keep retries idempotent and bounded.
-- Log `code`, `quicCode`, and `h3Code` together so transport and application failures are easy to correlate.
+- Log `code`, `quicCode`, `h3Code`, `driver`, `errno`, and `syscall` together so transport and application failures are easy to correlate.
+- Log or forward `runtimeInfo` whenever you allow `auto` fallback.

@@ -22,9 +22,17 @@ export interface NativeEvent {
   meta?: {
     errorCode?: number;
     errorReason?: string;
+    errorCategory?: string;
     remoteAddr?: string;
     remotePort?: number;
     serverName?: string;
+    reasonCode?: string;
+    runtimeDriver?: string;
+    runtimeMode?: string;
+    requestedRuntimeMode?: string;
+    fallbackOccurred?: boolean;
+    errno?: number;
+    syscall?: string;
   };
   metrics?: {
     packetsIn: number;
@@ -107,6 +115,7 @@ export interface NativeQuicServerOptions {
   cert: Buffer;
   ca?: Buffer;
   alpn?: string[];
+  runtimeMode?: 'fast' | 'portable';
   maxIdleTimeoutMs?: number;
   maxUdpPayloadSize?: number;
   initialMaxData?: number;
@@ -129,6 +138,7 @@ export interface NativeQuicClientOptions {
   ca?: Buffer;
   rejectUnauthorized?: boolean;
   alpn?: string[];
+  runtimeMode?: 'fast' | 'portable';
   maxIdleTimeoutMs?: number;
   maxUdpPayloadSize?: number;
   initialMaxData?: number;
@@ -188,6 +198,7 @@ interface NativeServerOptions {
   key: Buffer;
   cert: Buffer;
   ca?: Buffer;
+  runtimeMode?: 'fast' | 'portable';
   quicLb?: boolean;
   serverId?: Buffer;
   maxIdleTimeoutMs?: number;
@@ -213,6 +224,7 @@ interface NativeServerOptions {
 interface NativeClientOptions {
   ca?: Buffer;
   rejectUnauthorized?: boolean;
+  runtimeMode?: 'fast' | 'portable';
   maxIdleTimeoutMs?: number;
   maxUdpPayloadSize?: number;
   initialMaxData?: number;
