@@ -114,7 +114,7 @@ const publish = flags.has('--publish');
 if (!binaryPath || !version) {
   throw new Error(
     'Usage: node scripts/bootstrap-native-package.mjs '
-    + '--binary /path/to/http3.linux-x64-gnu.node --version 0.3.1-bootstrap.0 [--dist-tag bootstrap] [--publish]',
+    + '--binary /path/to/http3.linux-x64-gnu.node --version 0.4.0-bootstrap.0 [--dist-tag bootstrap] [--publish]',
   );
 }
 

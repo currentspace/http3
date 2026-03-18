@@ -3,9 +3,13 @@ import { ClientHttp3Stream } from './stream.js';
 import type { IncomingHeaders } from './stream.js';
 import { ClientEventLoop, binding } from './event-loop.js';
 import type { NativeEvent } from './event-loop.js';
+import type { ConnectionEndpoint } from './endpoint.js';
+import { resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import { Http3Error, ERR_HTTP3_INVALID_STATE, ERR_HTTP3_STREAM_ERROR } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
+import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
+import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
 
 // Event type constants (must match Rust)
 const EVENT_HEADERS = 3;
@@ -28,6 +32,12 @@ function normalizeCaOption(ca?: string | Buffer | Array<string | Buffer>): Buffe
 
 /** Options for connecting to an HTTP/3 server. */
 export interface ConnectOptions {
+  /** Runtime selection mode. Default: `'auto'`. */
+  runtimeMode?: RuntimeOptions['runtimeMode'];
+  /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
+  fallbackPolicy?: RuntimeOptions['fallbackPolicy'];
+  /** Callback invoked when runtime selection resolves or falls back. */
+  onRuntimeEvent?: RuntimeOptions['onRuntimeEvent'];
   /** PEM-encoded CA certificate(s) to trust. */
   ca?: string | Buffer | Array<string | Buffer>;
   /** If `false`, accept self-signed certificates. Default: `true`. */
@@ -77,6 +87,7 @@ export interface Http3ClientSession {
   on(event: 'connect', listener: () => void): this;
   on(event: 'goaway', listener: () => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: 'sessionTicket', listener: (ticket: Buffer) => void): this;
   on(event: 'datagram', listener: (data: Buffer) => void): this;
   on(event: 'close', listener: () => void): this;
@@ -96,6 +107,8 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   private _allow0RTT = false;
   private _allowUnsafe0RTTMethods = false;
   private _onEarlyData: ((headers: IncomingHeaders) => boolean) | undefined;
+  /** @internal */
+  _closeRequested = false;
   private _readySettled = false;
   private readonly _readyPromise: Promise<void>;
   private _resolveReady: (() => void) | null = null;
@@ -125,6 +138,22 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     return this._readyPromise;
   }
 
+  override async close(code?: number): Promise<void> {
+    this._closeRequested = true;
+    if (!this._handshakeComplete) {
+      this._markReadyError(new Http3Error('session closed before handshake completed', ERR_HTTP3_INVALID_STATE));
+    }
+    await super.close(code);
+  }
+
+  override async destroy(err?: Error): Promise<void> {
+    this._closeRequested = true;
+    if (!this._handshakeComplete) {
+      this._markReadyError(err ?? new Http3Error('session destroyed before handshake completed', ERR_HTTP3_INVALID_STATE));
+    }
+    await super.destroy(err);
+  }
+
   /**
    * Open a new HTTP/3 request stream.
    * @param headers - Pseudo-headers (`:method`, `:path`, etc.) and regular headers.
@@ -132,9 +161,6 @@ export class Http3ClientSession extends Http3ClientSessionBase {
    * @returns A {@link ClientHttp3Stream} duplex for reading the response.
    */
   request(headers: IncomingHeaders, options?: RequestOptions): ClientHttp3Stream {
-    if (!this._eventLoop) {
-      throw new Http3Error('not connected', ERR_HTTP3_INVALID_STATE);
-    }
     if (!this._handshakeComplete) {
       if (!this._allow0RTT) {
         throw new Http3Error('handshake not complete — wait for "connect" event', ERR_HTTP3_INVALID_STATE);
@@ -148,6 +174,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
           ERR_HTTP3_INVALID_STATE,
         );
       }
+    }
+    if (!this._eventLoop) {
+      throw new Http3Error('not connected', ERR_HTTP3_INVALID_STATE);
     }
 
     const h = Object.entries(headers).map(([name, value]) => ({
@@ -276,11 +305,25 @@ export class Http3ClientSession extends Http3ClientSessionBase {
         stream.destroy(toStreamError(event));
       }
     } else {
-      this.emit('error', toSessionError(event));
+      this._emitSessionError(toSessionError(event));
       if (!this._handshakeComplete) {
         this._markReadyError(toSessionError(event));
       }
     }
+  }
+
+  /** @internal */
+  _emitSessionError(err: Error): void {
+    if (!this._handshakeComplete && this.listenerCount('error') === 0) {
+      process.nextTick(() => {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', err);
+        }
+      });
+      return;
+    }
+
+    this.emit('error', err);
   }
 
   private _onSessionTicket(event: NativeEvent): void {
@@ -333,30 +376,16 @@ export class Http3ClientSession extends Http3ClientSessionBase {
  * });
  * ```
  */
-export function connect(authority: string, options?: ConnectOptions): Http3ClientSession {
-  // Parse authority: "https://host:port" or "host:port"
-  let host: string;
-  let port: number;
-  let servername: string;
-
-  try {
-    const url = new URL(authority.includes('://') ? authority : `https://${authority}`);
-    host = url.hostname;
-    port = parseInt(url.port || '443', 10);
-    servername = options?.servername ?? host;
-  } catch {
-    // Fallback: treat as host:port
-    const parts = authority.split(':');
-    host = parts[0];
-    port = parseInt(parts[1] ?? '443', 10);
-    servername = options?.servername ?? host;
-  }
-
-  const session = new Http3ClientSession(authority, {
+export function connect(authority: ConnectionEndpoint, options?: ConnectOptions): Http3ClientSession {
+  const authorityString = typeof authority === 'string'
+    ? authority
+    : stringifyConnectionEndpoint(authority);
+  const session = new Http3ClientSession(authorityString, {
     allow0RTT: options?.allow0RTT,
     allowUnsafe0RTTMethods: options?.allowUnsafe0RTTMethods,
     onEarlyData: options?.onEarlyData,
   });
+  setPendingRuntimeInfo(session, options);
   session._qlogPath = options?.qlogDir ?? null;
   const keylogPath = prepareKeylogFile(options?.keylog);
   if (keylogPath) {
@@ -367,37 +396,65 @@ export function connect(authority: string, options?: ConnectOptions): Http3Clien
       session.emit('keylog', Buffer.from(`# keylog enabled ${keylogPath}\n`));
     });
   }
-
-  const nativeClient = new binding.NativeWorkerClient({
-    ca: normalizeCaOption(options?.ca),
-    rejectUnauthorized: options?.rejectUnauthorized,
-    maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
-    maxUdpPayloadSize: options?.maxUdpPayloadSize,
-    initialMaxData: options?.initialMaxData,
-    initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
-    initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
-    sessionTicket: options?.sessionTicket,
-    allow0Rtt: options?.allow0RTT,
-    keylog: Boolean(keylogPath),
-    enableDatagrams: options?.enableDatagrams,
-    qlogDir: options?.qlogDir,
-    qlogLevel: options?.qlogLevel,
-  }, (_err: Error | null, events: NativeEvent[]) => {
-    session._dispatchEvents(events);
-  });
-  const eventLoop = new ClientEventLoop(nativeClient);
-  session._eventLoop = eventLoop;
-  session._startMetricsEmitter(options?.metricsIntervalMs ?? 1000, () => session.getMetrics());
+  const shouldAbortConnect = (): boolean => session._closeRequested;
 
   void (async (): Promise<void> => {
     try {
-      await eventLoop.connect(`${host}:${port}`, servername);
+      const resolved = await resolveConnectionEndpoint(authority, {
+        defaultScheme: 'https',
+        defaultPort: 443,
+      });
+      if (shouldAbortConnect()) {
+        return;
+      }
+
+      await runWithRuntimeSelection(session, options, async (runtimeMode) => {
+        const nativeClient = new binding.NativeWorkerClient({
+          ca: normalizeCaOption(options?.ca),
+          rejectUnauthorized: options?.rejectUnauthorized,
+          runtimeMode,
+          maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+          maxUdpPayloadSize: options?.maxUdpPayloadSize,
+          initialMaxData: options?.initialMaxData,
+          initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+          initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+          sessionTicket: options?.sessionTicket,
+          allow0Rtt: options?.allow0RTT,
+          keylog: Boolean(keylogPath),
+          enableDatagrams: options?.enableDatagrams,
+          qlogDir: options?.qlogDir,
+          qlogLevel: options?.qlogLevel,
+        }, (_err: Error | null, events: NativeEvent[]) => {
+          session._dispatchEvents(events);
+        });
+
+        const eventLoop = new ClientEventLoop(nativeClient);
+        session._eventLoop = eventLoop;
+        if (shouldAbortConnect()) {
+          await eventLoop.close();
+          session._eventLoop = null;
+          return;
+        }
+        try {
+          await eventLoop.connect(resolved.socketAddress, options?.servername ?? resolved.servername);
+        } catch (error: unknown) {
+          session._eventLoop = null;
+          throw error;
+        }
+        if (shouldAbortConnect()) {
+          await eventLoop.close();
+          session._eventLoop = null;
+          return;
+        }
+        session._startMetricsEmitter(options?.metricsIntervalMs ?? 1000, () => session.getMetrics());
+      });
     } catch (err: unknown) {
-      const error = err instanceof Error
-        ? new Http3Error(err.message, ERR_HTTP3_INVALID_STATE)
-        : new Http3Error(String(err), ERR_HTTP3_INVALID_STATE);
+      if (shouldAbortConnect()) {
+        return;
+      }
+      const error = err instanceof Error ? err : new Error(String(err));
       session._markReadyError(error);
-      session.emit('error', error);
+      session._emitSessionError(error);
     }
   })();
 
@@ -408,7 +465,7 @@ export function connect(authority: string, options?: ConnectOptions): Http3Clien
  * Connect to an HTTP/3 server and wait for the handshake to complete.
  * Convenience wrapper around {@link connect} + `session.ready()`.
  */
-export async function connectAsync(authority: string, options?: ConnectOptions): Promise<Http3ClientSession> {
+export async function connectAsync(authority: ConnectionEndpoint, options?: ConnectOptions): Promise<Http3ClientSession> {
   const session = connect(authority, options);
   await session.ready();
   return session;

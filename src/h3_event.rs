@@ -31,9 +31,17 @@ pub struct JsHeader {
 pub struct JsEventMeta {
     pub error_code: Option<u32>,
     pub error_reason: Option<String>,
+    pub error_category: Option<String>,
     pub remote_addr: Option<String>,
     pub remote_port: Option<u16>,
     pub server_name: Option<String>,
+    pub reason_code: Option<String>,
+    pub runtime_driver: Option<String>,
+    pub runtime_mode: Option<String>,
+    pub requested_runtime_mode: Option<String>,
+    pub fallback_occurred: Option<bool>,
+    pub errno: Option<i32>,
+    pub syscall: Option<String>,
 }
 
 #[napi(object)]
@@ -92,9 +100,17 @@ impl JsH3Event {
             meta: Some(JsEventMeta {
                 error_code: None,
                 error_reason: None,
+                error_category: None,
                 remote_addr: Some(remote_addr),
                 remote_port: Some(remote_port),
                 server_name: Some(server_name),
+                reason_code: None,
+                runtime_driver: None,
+                runtime_mode: None,
+                requested_runtime_mode: None,
+                fallback_occurred: None,
+                errno: None,
+                syscall: None,
             }),
             metrics: None,
         }
@@ -182,9 +198,17 @@ impl JsH3Event {
             meta: Some(JsEventMeta {
                 error_code: Some(error_code as u32),
                 error_reason: None,
+                error_category: None,
                 remote_addr: None,
                 remote_port: None,
                 server_name: None,
+                reason_code: None,
+                runtime_driver: None,
+                runtime_mode: None,
+                requested_runtime_mode: None,
+                fallback_occurred: None,
+                errno: None,
+                syscall: None,
             }),
             metrics: None,
         }
@@ -240,9 +264,50 @@ impl JsH3Event {
             meta: Some(JsEventMeta {
                 error_code: Some(error_code),
                 error_reason: Some(reason),
+                error_category: None,
                 remote_addr: None,
                 remote_port: None,
                 server_name: None,
+                reason_code: None,
+                runtime_driver: None,
+                runtime_mode: None,
+                requested_runtime_mode: None,
+                fallback_occurred: None,
+                errno: None,
+                syscall: None,
+            }),
+            metrics: None,
+        }
+    }
+
+    pub fn runtime_error(
+        conn_handle: u32,
+        driver: &str,
+        syscall: &str,
+        reason_code: &str,
+        err: &std::io::Error,
+    ) -> Self {
+        Self {
+            event_type: EVENT_ERROR,
+            conn_handle,
+            stream_id: -1,
+            headers: None,
+            data: None,
+            fin: None,
+            meta: Some(JsEventMeta {
+                error_code: None,
+                error_reason: Some(err.to_string()),
+                error_category: Some("runtime".into()),
+                remote_addr: None,
+                remote_port: None,
+                server_name: None,
+                reason_code: Some(reason_code.into()),
+                runtime_driver: Some(driver.into()),
+                runtime_mode: None,
+                requested_runtime_mode: None,
+                fallback_occurred: None,
+                errno: err.raw_os_error(),
+                syscall: Some(syscall.into()),
             }),
             metrics: None,
         }

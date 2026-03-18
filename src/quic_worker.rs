@@ -15,12 +15,13 @@ use slab::Slab;
 
 use crate::buffer_pool::BufferPool;
 use crate::cid::CidEncoding;
+use crate::config::TransportRuntimeMode;
 use crate::error::Http3NativeError;
 use crate::event_loop::{self, EventTsfn, ProtocolHandler, SEND_BUF_SIZE};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::timer_heap::TimerHeap;
-use crate::transport::{self, Driver, ErasedWaker, TxDatagram};
+use crate::transport::{self, ErasedWaker, TxDatagram};
 
 const SCID_LEN: usize = crate::cid::SCID_LEN;
 const TOKEN_LIFETIME_SECS: u64 = 60;
@@ -536,6 +537,7 @@ pub struct QuicServerConfig {
     pub max_connections: usize,
     pub disable_retry: bool,
     pub cid_encoding: CidEncoding,
+    pub runtime_mode: TransportRuntimeMode,
 }
 
 pub fn spawn_quic_server(
@@ -561,7 +563,7 @@ pub fn spawn_quic_server(
     }
 
     let (driver, waker) =
-        transport::PlatformDriver::new(std_socket).map_err(Http3NativeError::Io)?;
+        transport::create_platform_driver(std_socket, server_config.runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
@@ -588,6 +590,7 @@ pub fn spawn_quic_client(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<QuicClientHandle, Http3NativeError> {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -609,8 +612,7 @@ pub fn spawn_quic_client(
         quiche_config.set_max_send_udp_payload_size(mtu);
     }
 
-    let (driver, waker) =
-        transport::PlatformDriver::new(std_socket).map_err(Http3NativeError::Io)?;
+    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 

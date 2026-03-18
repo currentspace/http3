@@ -19,7 +19,22 @@ export type { SessionOptions, SessionMetrics } from './session.js';
 export { ServerHttp3Stream, ClientHttp3Stream } from './stream.js';
 export type { IncomingHeaders, StreamFlags, RespondOptions } from './stream.js';
 
-export { Http3Error } from './errors.js';
+export {
+  Http3Error,
+  ERR_HTTP3_STREAM_ERROR,
+  ERR_HTTP3_SESSION_ERROR,
+  ERR_HTTP3_HEADERS_SENT,
+  ERR_HTTP3_INVALID_STATE,
+  ERR_HTTP3_GOAWAY,
+  ERR_HTTP3_TLS_CONFIG_ERROR,
+  ERR_HTTP3_KEYLOG_ERROR,
+  ERR_HTTP3_ENDPOINT_INVALID,
+  ERR_HTTP3_ENDPOINT_RESOLUTION,
+  ERR_HTTP3_FAST_PATH_UNAVAILABLE,
+  ERR_HTTP3_RUNTIME_UNSUPPORTED,
+  ERR_HTTP3_RUNTIME_FALLBACK,
+  WARN_HTTP3_RUNTIME_FALLBACK,
+} from './errors.js';
 
 export { createSseStream, ServerSentEventStream, encodeSseEvent, encodeSseComment, sseHeaders } from './sse.js';
 export type { SseEvent, SseStreamOptions } from './sse.js';
@@ -43,6 +58,17 @@ export { connectQuic, connectQuicAsync, QuicClientSession } from './quic-client.
 export type { QuicConnectOptions } from './quic-client.js';
 
 export { QuicStream } from './quic-stream.js';
+
+export type {
+  RuntimeMode,
+  SelectedRuntimeMode,
+  FallbackPolicy,
+  RuntimeDriver,
+  RuntimeReasonCode,
+  RuntimeInfo,
+  RuntimeOptions,
+} from './runtime.js';
+export type { ConnectionEndpoint, HostEndpoint, AddressEndpoint } from './endpoint.js';
 
 export * as constants from './constants.js';
 export * as parity from './http2-parity.js';

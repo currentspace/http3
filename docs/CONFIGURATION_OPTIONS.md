@@ -7,6 +7,8 @@ Defaults below reflect the current runtime behavior in the JS wrappers and
 native config builders. Where a field is optional and there is no internal
 fallback, the default is listed as `none`.
 
+For deployment/runtime guidance, see [`RUNTIME_MODES.md`](./RUNTIME_MODES.md).
+
 ## Relevant RFCs
 
 - QUIC transport: [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000)
@@ -36,6 +38,9 @@ Used by `createSecureServer()` and `serveFetch()`.
 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the QUIC/H3 worker. |
+| `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
+| `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
 | `maxUdpPayloadSize` | `number` | `1350` | Max UDP payload size for send/receive paths. |
 | `initialMaxData` | `number` | `100000000` | Connection-level flow-control window in bytes. |
@@ -64,6 +69,9 @@ Used by `connect()` and `connectAsync()`.
 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the QUIC/H3 client worker. |
+| `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
+| `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `ca` | `string \| Buffer \| Array<string \| Buffer>` | `none` | PEM-encoded CA bundle used to verify the remote certificate. |
 | `rejectUnauthorized` | `boolean` | `true` | Set `false` to accept self-signed or otherwise untrusted certs. |
 | `servername` | `string` | authority host | Overrides the SNI hostname sent during TLS handshake. |
@@ -81,6 +89,17 @@ Used by `connect()` and `connectAsync()`.
 | `metricsIntervalMs` | `number` | `1000` | Interval for emitting session `'metrics'` events. |
 | `qlogDir` | `string` | `none` | Directory where per-connection qlog files are written. |
 | `qlogLevel` | `string` | `none` | qlog verbosity string passed through to the native layer. |
+
+### Endpoint parameter
+
+`connect()` / `connectAsync()` accept:
+
+- authority strings such as `https://api.example.com:443`, `api.example.com:443`, or `127.0.0.1:443`
+- `{ host, port, servername? }`
+- `{ address, port, servername }`
+
+Use `{ address, port, servername }` when the transport address differs from the
+certificate identity.
 
 ## `RequestOptions`
 
@@ -100,6 +119,9 @@ Used by `createQuicServer()`.
 | `cert` | `Buffer \| string` | required | PEM-encoded certificate chain. |
 | `ca` | `Buffer \| string` | `none` | PEM-encoded CA bundle for peer verification. |
 | `alpn` | `string[]` | `['quic']` | ALPN protocols advertised by the raw QUIC server. |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the raw QUIC server worker. |
+| `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
+| `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
 | `maxUdpPayloadSize` | `number` | `1350` | Max UDP payload size for send/receive paths. |
 | `initialMaxData` | `number` | `100000000` | Connection-level flow-control window in bytes. |
@@ -119,6 +141,9 @@ Used by `connectQuic()` and `connectQuicAsync()`.
 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the raw QUIC client worker. |
+| `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
+| `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `ca` | `Buffer \| string` | `none` | PEM-encoded CA bundle used to verify the remote certificate. |
 | `rejectUnauthorized` | `boolean` | `true` | Set `false` to accept self-signed or otherwise untrusted certs. |
 | `alpn` | `string[]` | `['quic']` | ALPN protocols offered by the raw QUIC client. |
@@ -134,3 +159,9 @@ Used by `connectQuic()` and `connectQuicAsync()`.
 | `keylog` | `boolean` | `false` | Enables TLS key logging for raw QUIC. |
 | `qlogDir` | `string` | `none` | Directory where per-connection qlog files are written. |
 | `qlogLevel` | `string` | `none` | qlog verbosity string passed through to the native layer. |
+
+### Raw QUIC endpoint parameter
+
+`connectQuic()` / `connectQuicAsync()` accept the same endpoint shapes as
+`connect()` / `connectAsync()`, including Docker service-name URLs such as
+`https://sfu:9080`.

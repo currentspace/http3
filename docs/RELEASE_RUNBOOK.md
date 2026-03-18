@@ -21,7 +21,7 @@
 ## One-Time Bootstrap For A New Native Package
 
 - New native sidecar packages must exist on npm before Trusted Publisher can be configured for them.
-- Use a prerelease bootstrap version such as `0.3.1-bootstrap.0`, publish it with `npm run release:bootstrap:native -- --binary <downloaded-node-file> --version 0.3.1-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm.
+- Use a prerelease bootstrap version such as `0.4.0-bootstrap.0`, publish it with `npm run release:bootstrap:native -- --binary <downloaded-node-file> --version 0.4.0-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm.
 - After Trusted Publisher is saved for the new package, publish the real release version through `release.yml`.
 
 ## Post-Release Validation

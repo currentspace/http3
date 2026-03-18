@@ -3,6 +3,13 @@
 This runbook starts the unified H3/H2 server in Docker and runs load tests
 using either curl (`--http3-only` / `--http2`) or a Rust QUIC client.
 
+For the Linux runtime-mode matrix (`portable`, `auto`, `fast`, seccomp checks),
+use [`RUNTIME_MODES.md`](./RUNTIME_MODES.md) plus:
+
+```bash
+npm run test:docker:runtime
+```
+
 ## 1) Generate local TLS certs
 
 ```bash
@@ -105,3 +112,5 @@ npm run docker:down
 - Use the Rust load client path as a fallback for H3 benchmarking.
 - For privileged host port 443 mapping, adjust `docker-compose.yml` published
   ports from `8443` to `443` for both TCP and UDP.
+- Ordinary Linux containers usually need `runtimeMode: 'portable'`; Linux
+  `fast` mode typically requires a seccomp policy that allows `io_uring_*`.
