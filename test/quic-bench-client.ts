@@ -6,6 +6,7 @@
  */
 
 import { connectQuicAsync } from '../lib/index.js';
+import { binding } from '../lib/event-loop.js';
 import type { QuicClientSession } from '../lib/index.js';
 import type { QuicStream } from '../lib/quic-stream.js';
 
@@ -91,6 +92,7 @@ async function main(): Promise<void> {
   }
 
   const config: BenchConfig = JSON.parse(configStr);
+  binding.resetRuntimeTelemetry();
   const cpuStart = process.cpuUsage();
   const memStart = process.memoryUsage();
   const hrStart = process.hrtime.bigint();
@@ -212,6 +214,7 @@ async function main(): Promise<void> {
       rssEnd: memEnd.rss,
       rssMB: Number((memEnd.rss / 1e6).toFixed(1)),
     },
+    reactorTelemetry: binding.runtimeTelemetry(),
   };
 
   process.stdout.write(JSON.stringify(result) + '\n');

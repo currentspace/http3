@@ -238,6 +238,40 @@ interface NativeClientOptions {
   qlogLevel?: string;
 }
 
+export interface ReactorTelemetrySnapshot {
+  driverSetupAttemptsTotal: number;
+  driverSetupSuccessTotal: number;
+  driverSetupFailureTotal: number;
+  ioUringDriverSetupAttempts: number;
+  ioUringDriverSetupSuccesses: number;
+  ioUringDriverSetupFailures: number;
+  pollDriverSetupAttempts: number;
+  pollDriverSetupSuccesses: number;
+  pollDriverSetupFailures: number;
+  kqueueDriverSetupAttempts: number;
+  kqueueDriverSetupSuccesses: number;
+  kqueueDriverSetupFailures: number;
+  workerThreadSpawnsTotal: number;
+  rawQuicServerWorkerSpawns: number;
+  rawQuicClientDedicatedWorkerSpawns: number;
+  rawQuicClientSharedWorkersCreated: number;
+  rawQuicClientSharedWorkerReuses: number;
+  h3ServerWorkerSpawns: number;
+  h3ClientDedicatedWorkerSpawns: number;
+  h3ClientSharedWorkersCreated: number;
+  h3ClientSharedWorkerReuses: number;
+  clientLocalPortReuseHits: number;
+  rawQuicClientSessionsOpened: number;
+  rawQuicClientSessionsClosed: number;
+  rawQuicServerSessionsOpened: number;
+  rawQuicServerSessionsClosed: number;
+  h3ClientSessionsOpened: number;
+  h3ClientSessionsClosed: number;
+  h3ServerSessionsOpened: number;
+  h3ServerSessionsClosed: number;
+  txBuffersRecycled: number;
+}
+
 interface NativeBinding {
   NativeWorkerServer: new (
     options: NativeServerOptions,
@@ -256,6 +290,8 @@ interface NativeBinding {
     callback: (err: Error | null, events: NativeEvent[]) => void,
   ) => NativeQuicClientBinding;
   version(): string;
+  runtimeTelemetry(): ReactorTelemetrySnapshot;
+  resetRuntimeTelemetry(): void;
 }
 
 // ----- Binding loader -----

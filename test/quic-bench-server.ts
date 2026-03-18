@@ -6,6 +6,7 @@
  */
 
 import { createQuicServer } from '../lib/index.js';
+import { binding } from '../lib/event-loop.js';
 import { generateTestCerts } from './generate-certs.js';
 import type { QuicServerSession } from '../lib/index.js';
 import type { QuicStream } from '../lib/quic-stream.js';
@@ -35,6 +36,7 @@ function loadConfig(): BenchServerConfig {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  binding.resetRuntimeTelemetry();
   const certs = generateTestCerts();
 
   const server = createQuicServer({
@@ -80,6 +82,7 @@ async function main(): Promise<void> {
       cpuUser: cpu.user,
       cpuSystem: cpu.system,
       runtimeInfo: server.runtimeInfo,
+      reactorTelemetry: binding.runtimeTelemetry(),
     };
   };
 

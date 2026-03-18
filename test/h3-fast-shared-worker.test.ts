@@ -3,22 +3,37 @@ import { describe, it } from 'node:test';
 import {
   ERR_HTTP3_FAST_PATH_UNAVAILABLE,
   Http3Error,
-  connectQuicAsync,
-  createQuicServer,
+  connectAsync,
+  createSecureServer,
 } from '../lib/index.js';
 import { binding } from '../lib/event-loop.js';
-import type { QuicClientSession, QuicServer, QuicServerSession } from '../lib/index.js';
-import type { QuicStream } from '../lib/quic-stream.js';
+import type { Http3ClientSession, Http3SecureServer } from '../lib/index.js';
 import { generateTestCerts } from './generate-certs.js';
 
 function isFastPathUnavailable(error: unknown): boolean {
   return error instanceof Http3Error && error.code === ERR_HTTP3_FAST_PATH_UNAVAILABLE;
 }
 
-function collectStream(stream: QuicStream, timeoutMs: number): Promise<Buffer> {
+function localPortForSession(session: Http3ClientSession): number {
+  const loop = (session as unknown as {
+    _eventLoop: { worker: { localAddress(): { port: number } } } | null;
+  })._eventLoop;
+  assert.ok(loop, 'expected client event loop to be available');
+  return loop.worker.localAddress().port;
+}
+
+async function doRequest(session: Http3ClientSession, body: Buffer): Promise<Buffer> {
+  const stream = session.request({
+    ':method': 'POST',
+    ':path': '/echo',
+    ':authority': 'localhost',
+    ':scheme': 'https',
+  }, { endStream: false });
+  stream.end(body);
+
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    const timer = setTimeout(() => reject(new Error('stream timed out')), timeoutMs);
+    const timer = setTimeout(() => reject(new Error('request timed out')), 5_000);
     stream.on('data', (chunk: Buffer) => {
       chunks.push(chunk);
     });
@@ -33,39 +48,44 @@ function collectStream(stream: QuicStream, timeoutMs: number): Promise<Buffer> {
   });
 }
 
-function localPortForSession(session: QuicClientSession): number {
-  const loop = (session as unknown as {
-    _eventLoop: { worker: { localAddress(): { port: number } } } | null;
-  })._eventLoop;
-  assert.ok(loop, 'expected client event loop to be available');
-  return loop.worker.localAddress().port;
-}
-
-describe('raw QUIC fast shared worker', () => {
+describe('H3 shared worker topology', () => {
   it('reuses one local UDP port across concurrent fast sessions', { timeout: 20_000 }, async (t) => {
     const certs = generateTestCerts();
-    const payload = Buffer.from('shared-fast-worker');
-    let server: QuicServer | null = null;
-    let clients: QuicClientSession[] = [];
+    const payload = Buffer.from('shared-h3-worker');
+    let server: Http3SecureServer | null = null;
+    let clients: Http3ClientSession[] = [];
 
     try {
       binding.resetRuntimeTelemetry();
-      server = createQuicServer({
+      server = createSecureServer({
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
         runtimeMode: 'fast',
         fallbackPolicy: 'error',
-      });
-
-      server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => {
-          stream.pipe(stream);
+      }, (stream, _headers, flags) => {
+        if (flags.endStream) {
+          stream.respond({ ':status': '200' }, { endStream: true });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        stream.on('data', (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        stream.on('end', () => {
+          stream.respond({ ':status': '200' });
+          stream.end(Buffer.concat(chunks));
         });
       });
 
-      const addr = await server.listen(0, '127.0.0.1');
-      clients = await Promise.all(Array.from({ length: 4 }, () => connectQuicAsync(
+      const addr = await new Promise<{ address: string; port: number }>((resolve) => {
+        server!.on('listening', () => {
+          resolve(server!.address()!);
+        });
+        server!.listen(0, '127.0.0.1');
+      });
+
+      clients = await Promise.all(Array.from({ length: 4 }, () => connectAsync(
         `127.0.0.1:${addr.port}`,
         {
           rejectUnauthorized: false,
@@ -76,9 +96,7 @@ describe('raw QUIC fast shared worker', () => {
 
       for (const client of clients) {
         assert.strictEqual(client.runtimeInfo?.selectedMode, 'fast');
-        const stream = client.openStream();
-        stream.end(payload);
-        const echoed = await collectStream(stream, 5_000);
+        const echoed = await doRequest(client, payload);
         assert.deepStrictEqual(echoed, payload);
       }
 
@@ -86,17 +104,17 @@ describe('raw QUIC fast shared worker', () => {
       assert.strictEqual(new Set(localPorts).size, 1, `expected a shared client UDP port, got ${localPorts.join(', ')}`);
 
       const telemetry = binding.runtimeTelemetry();
-      assert.strictEqual(telemetry.rawQuicClientSharedWorkersCreated, 1);
-      assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, 0);
-      assert.strictEqual(telemetry.rawQuicClientSessionsOpened, clients.length);
-      assert.ok(telemetry.rawQuicClientSharedWorkerReuses >= clients.length - 1);
+      assert.strictEqual(telemetry.h3ClientSharedWorkersCreated, 1);
+      assert.strictEqual(telemetry.h3ClientDedicatedWorkerSpawns, 0);
+      assert.strictEqual(telemetry.h3ClientSessionsOpened, clients.length);
+      assert.ok(telemetry.h3ClientSharedWorkerReuses >= clients.length - 1);
       assert.ok(telemetry.clientLocalPortReuseHits >= clients.length - 1);
 
       await Promise.all(clients.map((client) => client.close()));
       clients = [];
       await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
       const closedTelemetry = binding.runtimeTelemetry();
-      assert.ok(closedTelemetry.rawQuicClientSessionsClosed >= 1);
+      assert.ok(closedTelemetry.h3ClientSessionsClosed >= 1);
     } catch (error: unknown) {
       if (isFastPathUnavailable(error)) {
         const message = error instanceof Error ? error.message : String(error);
@@ -125,25 +143,30 @@ describe('raw QUIC fast shared worker', () => {
     }
 
     const certs = generateTestCerts();
-    let server: QuicServer | null = null;
-    let clients: QuicClientSession[] = [];
+    let server: Http3SecureServer | null = null;
+    let clients: Http3ClientSession[] = [];
 
     try {
       binding.resetRuntimeTelemetry();
-      server = createQuicServer({
+      server = createSecureServer({
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
         runtimeMode: 'portable',
-      });
-      server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => {
-          stream.pipe(stream);
-        });
+      }, (stream, _headers, flags) => {
+        if (flags.endStream) {
+          stream.respond({ ':status': '204' }, { endStream: true });
+        }
       });
 
-      const addr = await server.listen(0, '127.0.0.1');
-      clients = await Promise.all(Array.from({ length: 3 }, () => connectQuicAsync(
+      const addr = await new Promise<{ address: string; port: number }>((resolve) => {
+        server!.on('listening', () => {
+          resolve(server!.address()!);
+        });
+        server!.listen(0, '127.0.0.1');
+      });
+
+      clients = await Promise.all(Array.from({ length: 3 }, () => connectAsync(
         `127.0.0.1:${addr.port}`,
         {
           rejectUnauthorized: false,
@@ -155,8 +178,8 @@ describe('raw QUIC fast shared worker', () => {
       assert.strictEqual(new Set(localPorts).size, 1, `expected a shared portable client UDP port, got ${localPorts.join(', ')}`);
 
       const telemetry = binding.runtimeTelemetry();
-      assert.strictEqual(telemetry.rawQuicClientSharedWorkersCreated, 1);
-      assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, 0);
+      assert.strictEqual(telemetry.h3ClientSharedWorkersCreated, 1);
+      assert.strictEqual(telemetry.h3ClientDedicatedWorkerSpawns, 0);
     } finally {
       await Promise.all(clients.map(async (client) => {
         try {

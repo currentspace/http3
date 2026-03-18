@@ -4,10 +4,36 @@
  */
 
 import { createSecureServer } from '../lib/index.js';
+import { binding } from '../lib/event-loop.js';
 import { generateTestCerts } from './generate-certs.js';
 import type { ServerHttp3Stream, IncomingHeaders, StreamFlags } from '../lib/index.js';
 
+interface BenchServerConfig {
+  host?: string;
+  port?: number;
+  runtimeMode?: 'auto' | 'fast' | 'portable';
+  fallbackPolicy?: 'error' | 'warn-and-fallback';
+  statsIntervalMs?: number;
+}
+
+function loadConfig(): BenchServerConfig {
+  const configStr = process.argv[2];
+  if (!configStr) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(configStr) as BenchServerConfig;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Invalid h3 bench server config: ${message}\n`);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
+  const config = loadConfig();
+  binding.resetRuntimeTelemetry();
   const certs = generateTestCerts();
 
   let streamCount = 0;
@@ -18,6 +44,8 @@ async function main(): Promise<void> {
     cert: certs.cert,
     disableRetry: true,
     initialMaxStreamsBidi: 50_000,
+    runtimeMode: config.runtimeMode,
+    fallbackPolicy: config.fallbackPolicy,
   }, (stream: ServerHttp3Stream, _headers: IncomingHeaders, flags: StreamFlags) => {
     streamCount++;
     if (flags.endStream) {
@@ -41,13 +69,14 @@ async function main(): Promise<void> {
     server.on('listening', () => {
       resolve(server.address()!);
     });
-    server.listen(0, '127.0.0.1');
+    server.listen(config.port ?? 0, config.host ?? '127.0.0.1');
   });
 
   process.stdout.write(JSON.stringify({
     type: 'ready',
     port: addr.port,
     address: addr.address,
+    runtimeInfo: server.runtimeInfo,
   }) + '\n');
 
   const statsInterval = setInterval(() => {
@@ -59,12 +88,25 @@ async function main(): Promise<void> {
       rss: process.memoryUsage().rss,
       cpuUser: process.cpuUsage().user,
       cpuSystem: process.cpuUsage().system,
+      runtimeInfo: server.runtimeInfo,
+      reactorTelemetry: binding.runtimeTelemetry(),
     }) + '\n');
-  }, 1000);
+  }, config.statsIntervalMs ?? 1000);
   statsInterval.unref();
 
   process.on('SIGTERM', async () => {
     clearInterval(statsInterval);
+    process.stdout.write(JSON.stringify({
+      type: 'summary',
+      streamCount,
+      bytesEchoed,
+      heapUsed: process.memoryUsage().heapUsed,
+      rss: process.memoryUsage().rss,
+      cpuUser: process.cpuUsage().user,
+      cpuSystem: process.cpuUsage().system,
+      runtimeInfo: server.runtimeInfo,
+      reactorTelemetry: binding.runtimeTelemetry(),
+    }) + '\n');
     await server.close();
     process.exit(0);
   });

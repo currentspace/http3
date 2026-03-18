@@ -73,7 +73,24 @@ console.log(session.runtimeInfo);
 ```
 
 See [`docs/RUNTIME_MODES.md`](./docs/RUNTIME_MODES.md) for the deployment matrix,
-capability requirements, Docker guidance, and the raw endpoint contract.
+capability requirements, Docker guidance, topology policy, and the raw endpoint
+contract.
+
+Client topology is now explicit in the implementation:
+
+- raw QUIC fast clients share one worker and one local UDP port per bind family
+- H3 fast clients share one worker and one local UDP port per bind family
+- macOS portable mode keeps the same shared client-worker ownership model on
+  top of `kqueue`
+- QUIC and H3 servers remain one-worker-per-port architectures
+
+Use the built-in benchmarks to inspect both runtime selection and internal
+reactor counters:
+
+```bash
+npm run bench:quic -- --profile smoke
+npm run bench:h3 -- --profile smoke
+```
 
 ## Quick QUIC server
 

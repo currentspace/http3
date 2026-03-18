@@ -174,6 +174,13 @@ function summarizeFailure(output) {
   return selectedLines.join(' | ');
 }
 
+function formatExpectedFailureSummary(summary) {
+  if (/ERR_HTTP3_FAST_PATH_UNAVAILABLE/u.test(summary)) {
+    return `fast path unavailable as expected under this container policy: ${summary}`;
+  }
+  return `expected diagnostic outcome: ${summary}`;
+}
+
 function runLane({ name, dockerFlags = [], benchmarkArgs = [], expectFailure = false }, platform, forwardedArgs) {
   const args = ['run', '--rm', '--init'];
   if (platform) {
@@ -211,7 +218,7 @@ function runLane({ name, dockerFlags = [], benchmarkArgs = [], expectFailure = f
   }
 
   const failureSummary = summarizeFailure(result);
-  console.log(`${expectFailure ? 'expected failure' : 'failed'}: ${failureSummary}`);
+  console.log(expectFailure ? formatExpectedFailureSummary(failureSummary) : `failed: ${failureSummary}`);
 
   return {
     name,
@@ -333,12 +340,12 @@ function createLaneMatrix(includePrivileged) {
       benchmarkArgs: ['--runtime-mode', 'auto', '--fallback-policy', 'warn-and-fallback'],
     },
     {
-      name: 'ordinary fast failure',
+      name: 'ordinary fast unavailable (expected)',
       benchmarkArgs: ['--runtime-mode', 'fast', '--fallback-policy', 'error'],
       expectFailure: true,
     },
     {
-      name: 'cap-add fast failure',
+      name: 'cap-add fast unavailable (expected)',
       dockerFlags: ['--cap-add', 'SYS_ADMIN'],
       benchmarkArgs: ['--runtime-mode', 'fast', '--fallback-policy', 'error'],
       expectFailure: true,
