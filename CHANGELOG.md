@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+- Aligned fast raw-QUIC and HTTP/3 client ownership so high-connection client lanes now reuse one worker and one local UDP port per bind family instead of scaling setup work with session count.
+- Reduced `runtimeMode: 'auto'` fallback churn by caching fast-path unavailability for the life of a process, so restricted Linux environments stop re-probing `io_uring` on every new connection attempt.
+- Added a repeatable cross-platform performance workflow with persisted host and Docker artifacts, Linux/macOS profiler wrappers, and attribution harnesses for quiche-direct, loopback, and Node mock-transport analysis.
+- Fixed the raw-QUIC timeout/reap regression captured in the committed `quic-bottlenecks` artifact set, returning the affected 1000-stream lane from `950/1000` completions with timeouts to `1000/1000` with lower tail latency.
+- Kept one important limit explicit: like-for-like HTTP/3 lanes still trail raw QUIC controls, so this release should be read as transport hardening and observability work rather than as proof that higher-layer overhead is gone.
+
 ## 0.4.0
 
 - Added explicit QUIC runtime selection with `runtimeMode: 'auto' | 'fast' | 'portable'`, structured fallback reporting, and runtime metadata on client/server objects.

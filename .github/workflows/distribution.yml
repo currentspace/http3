@@ -14,10 +14,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: npm
@@ -30,6 +30,9 @@ jobs:
 
       - name: Build release artifact
         run: npm run build
+
+      - name: Run release packaging lane
+        run: npm run test:release
 
       - name: Smoke install packed artifact
         run: npm run smoke:install

@@ -1,6 +1,6 @@
-# Production Readiness Docs
+# Docs Index
 
-## API and Reference
+## Start Here
 
 - API contract: [API_CONTRACT.md](./API_CONTRACT.md)
 - Configuration options: [CONFIGURATION_OPTIONS.md](./CONFIGURATION_OPTIONS.md)
@@ -10,9 +10,8 @@
 - Support matrix: [SUPPORT_MATRIX.md](./SUPPORT_MATRIX.md)
 - QUIC guide: [QUIC_GUIDE.md](./QUIC_GUIDE.md)
 - Quickstart: [QUICKSTART.md](./QUICKSTART.md)
-- Test strategy: [TEST_STRATEGY.md](./TEST_STRATEGY.md)
  
-## Operations and Deployment
+## Deploy and Operate
 
 - Safari validation runbook: [SAFARI_VALIDATION_RUNBOOK.md](./SAFARI_VALIDATION_RUNBOOK.md)
 - Deployment examples: [DEPLOYMENT_EXAMPLES.md](./DEPLOYMENT_EXAMPLES.md)
@@ -24,12 +23,17 @@
 - Observability runbook: [OBSERVABILITY_RUNBOOK.md](./OBSERVABILITY_RUNBOOK.md)
 - Cross-platform perf campaign: [PERF_PROFILING.md](./PERF_PROFILING.md)
 - Security/supply chain: [SECURITY_SUPPLY_CHAIN.md](./SECURITY_SUPPLY_CHAIN.md)
-- Release process: [RELEASE_RUNBOOK.md](./RELEASE_RUNBOOK.md)
 - Local Docker load test: [LOCAL_DOCKER_LOADTEST.md](./LOCAL_DOCKER_LOADTEST.md)
 
-## Contributor and Example Guides
+## Contributors and Maintainers
 
+- Test strategy: [TEST_STRATEGY.md](./TEST_STRATEGY.md)
+- 0.5.0 release evidence ledger: [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md)
+- Release process: [RELEASE_RUNBOOK.md](./RELEASE_RUNBOOK.md)
 - [../CONTRIBUTING.md](../CONTRIBUTING.md)
+
+## Examples
+
 - [../examples/raw-api/README.md](../examples/raw-api/README.md)
 - [../examples/express-adapter/README.md](../examples/express-adapter/README.md)
 - [../examples/hono/README.md](../examples/hono/README.md)

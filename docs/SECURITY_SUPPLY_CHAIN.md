@@ -7,14 +7,14 @@
 - CodeQL static analysis
 - SBOM generation (`npm sbom`)
 - Lint + typecheck gate
-- Browser interop gate (Chromium + Firefox)
+- Browser compatibility smoke (Chromium + Firefox)
 - Rust clippy gate
 
 ## Release Controls
 
 - Required checks before publish:
   - full tests
-  - curl interop tests
+  - interop lanes
   - concurrency gate
   - install smoke from packed tarball
 - npm provenance enabled during publish

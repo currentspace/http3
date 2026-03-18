@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: npm
@@ -27,20 +27,20 @@ jobs:
       - name: Build native + tests
         run: npm run build && npm run build:test
 
-      - name: Run curl interop tests
-        run: node --test dist-test/test/curl-interop.test.js
+      - name: Run TypeScript interop lane
+        run: npm run test:interop
 
   quiche-loopback:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run quiche UDP loopback interop tests
-        run: cargo test --test udp_loopback
+        run: cargo test --test interop_udp_loopback
 
-      - name: Run quiche curl interop tests
-        run: cargo test --test curl_interop
+      - name: Run quiche direct H3 interop tests
+        run: cargo test --test interop_quiche_direct

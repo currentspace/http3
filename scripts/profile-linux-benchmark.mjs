@@ -70,7 +70,7 @@ Usage:
 Examples:
   npm run perf:linux:quic -- --perf-stat --profile throughput
   npm run perf:linux:h3 -- --perf-record --strace --profile stress --rounds 2
-  npm run perf:linux:quic -- --docker --strace --include-privileged --profile balanced
+  npm run perf:linux:quic -- --docker --docker-lane "ordinary portable" --strace --profile balanced
 
 Options:
   --protocol quic|h3                    Benchmark protocol (default: quic)
@@ -89,6 +89,8 @@ Options:
 
 Notes:
   Remaining arguments are forwarded to the selected benchmark runner.
+  When using --docker with --perf-stat, --perf-record, or --strace, also pass
+  --docker-lane so the profiler runs inside a specific container lane.
   If no profiler flag is provided, the benchmark still runs once and persists artifacts.
 `);
 }
@@ -100,9 +102,9 @@ function ensureDefaultWorkloadArgs(args) {
 
   if (!hasProfile) {
     finalArgs.push('--profile', 'balanced');
-  }
-  if (!hasRounds) {
-    finalArgs.push('--rounds', '2');
+    if (!hasRounds) {
+      finalArgs.push('--rounds', '2');
+    }
   }
 
   return finalArgs;
@@ -162,6 +164,11 @@ function resolveSettings(argv) {
 
   if (docker) {
     requireBinary('docker');
+  }
+  if (docker && !dockerLane && (flags.has('--perf-stat') || flags.has('--perf-record') || flags.has('--strace'))) {
+    throw new Error(
+      '--docker profiling requires --docker-lane so perf/strace runs inside a specific container lane instead of around the outer Docker runner.',
+    );
   }
 
   const profilerModes = [];

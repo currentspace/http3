@@ -10,24 +10,28 @@ use [`RUNTIME_MODES.md`](./RUNTIME_MODES.md) plus:
 npm run test:docker:runtime
 ```
 
+That command defaults to the host CPU architecture locally. Set
+`DOCKER_RUNTIME_PLATFORM=linux/arm64` when you want to match the CI runtime
+matrix exactly.
+
 For raw QUIC runtime/driver benchmarking inside Linux containers, use:
 
 ```bash
-npm run bench:quic:docker
+npm run bench:quic:docker -- --profile smoke
 ```
 
 For the matching HTTP/3 matrix, use:
 
 ```bash
-npm run bench:h3:docker
+npm run bench:h3:docker -- --profile smoke
 ```
 
 Both Docker runners execute the same runtime lanes and can persist a matrix
 artifact with embedded per-lane benchmark summaries:
 
 ```bash
-npm run bench:quic:docker -- --results-dir perf-results --label quic-docker
-npm run bench:h3:docker -- --results-dir perf-results --label h3-docker
+npm run bench:quic:docker -- --profile smoke --results-dir perf-results --label quic-docker
+npm run bench:h3:docker -- --profile smoke --results-dir perf-results --label h3-docker
 ```
 
 These run the benchmark in Docker across:

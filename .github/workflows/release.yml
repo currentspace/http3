@@ -47,7 +47,7 @@ jobs:
         run: npx napi build --release --platform --target ${{ matrix.target }}
 
       - name: Upload prebuild artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: prebuild-${{ matrix.target }}
           path: "*.node"
@@ -73,7 +73,7 @@ jobs:
       - run: npm ci
 
       - name: Download prebuild artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: prebuild-*
           merge-multiple: true

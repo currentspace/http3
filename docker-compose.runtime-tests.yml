@@ -6,7 +6,7 @@ services:
     image: currentspace/http3-runtime-tests:dev
     platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
     init: true
-    command: ["node", "dist-test/test/docker-runtime/runtime-server.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-server.js"]
     environment:
       SERVER_RUNTIME_MODE: ${SERVER_RUNTIME_MODE:-portable}
       SERVER_FALLBACK_POLICY: ${SERVER_FALLBACK_POLICY:-warn-and-fallback}
@@ -26,7 +26,7 @@ services:
     depends_on:
       sfu:
         condition: service_healthy
-    command: ["node", "dist-test/test/docker-runtime/runtime-client.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-client.js"]
     environment:
       SERVER_HOST: "sfu"
       RAW_QUIC_PORT: "9080"
@@ -42,7 +42,7 @@ services:
     image: currentspace/http3-runtime-tests:dev
     platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
     init: true
-    command: ["node", "dist-test/test/docker-runtime/runtime-fast-failure.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-fast-failure.js"]
 
   fast-cap-add-check:
     image: currentspace/http3-runtime-tests:dev
@@ -50,7 +50,7 @@ services:
     init: true
     cap_add:
       - SYS_ADMIN
-    command: ["node", "dist-test/test/docker-runtime/runtime-fast-failure.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-fast-failure.js"]
 
   sfu-unconfined:
     image: currentspace/http3-runtime-tests:dev
@@ -58,7 +58,7 @@ services:
     init: true
     security_opt:
       - seccomp=unconfined
-    command: ["node", "dist-test/test/docker-runtime/runtime-server.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-server.js"]
     environment:
       SERVER_RUNTIME_MODE: "fast"
       SERVER_FALLBACK_POLICY: "error"
@@ -80,7 +80,7 @@ services:
     depends_on:
       sfu-unconfined:
         condition: service_healthy
-    command: ["node", "dist-test/test/docker-runtime/runtime-client.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-client.js"]
     environment:
       SERVER_HOST: "sfu-unconfined"
       RAW_QUIC_PORT: "9080"
@@ -97,7 +97,7 @@ services:
     platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
     init: true
     privileged: true
-    command: ["node", "dist-test/test/docker-runtime/runtime-server.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-server.js"]
     environment:
       SERVER_RUNTIME_MODE: "fast"
       SERVER_FALLBACK_POLICY: "error"
@@ -118,7 +118,7 @@ services:
     depends_on:
       sfu-privileged:
         condition: service_healthy
-    command: ["node", "dist-test/test/docker-runtime/runtime-client.js"]
+    command: ["node", "dist-test/test/support/runtime/runtime-client.js"]
     environment:
       SERVER_HOST: "sfu-privileged"
       RAW_QUIC_PORT: "9080"
