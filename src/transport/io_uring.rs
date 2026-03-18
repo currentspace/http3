@@ -13,7 +13,7 @@ mod inner {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use crate::transport::{Driver, DriverWaker, PollOutcome, RxDatagram, TxDatagram};
+    use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
 
     const RX_SLOTS: usize = 256;
     const RX_BUF_SIZE: usize = 65535;
@@ -283,6 +283,10 @@ mod inner {
 
         fn local_addr(&self) -> io::Result<SocketAddr> {
             self.socket.local_addr()
+        }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::IoUring
         }
     }
 

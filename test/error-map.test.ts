@@ -6,7 +6,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { toStreamError, toSessionError } from '../lib/error-map.js';
-import { Http3Error, ERR_HTTP3_STREAM_ERROR, ERR_HTTP3_SESSION_ERROR } from '../lib/errors.js';
+import {
+  Http3Error,
+  ERR_HTTP3_FAST_PATH_UNAVAILABLE,
+  ERR_HTTP3_STREAM_ERROR,
+  ERR_HTTP3_SESSION_ERROR,
+} from '../lib/errors.js';
 import type { NativeEvent } from '../lib/event-loop.js';
 
 describe('error-map', () => {
@@ -92,6 +97,31 @@ describe('error-map', () => {
       assert.strictEqual(err.message, 'session error');
       assert.strictEqual(err.code, ERR_HTTP3_SESSION_ERROR);
       assert.strictEqual(err.quicCode, undefined);
+    });
+
+    it('maps runtime metadata to a typed runtime error', () => {
+      const event: NativeEvent = {
+        eventType: 7,
+        connHandle: 0,
+        streamId: -1,
+        meta: {
+          errorCategory: 'runtime',
+          errorReason: 'Operation not permitted (os error 1)',
+          reasonCode: 'fast-path-unavailable',
+          runtimeDriver: 'io_uring',
+          errno: 1,
+          syscall: 'io_uring_setup',
+        },
+      };
+
+      const err = toSessionError(event);
+
+      assert.ok(err instanceof Http3Error);
+      assert.strictEqual(err.code, ERR_HTTP3_FAST_PATH_UNAVAILABLE);
+      assert.strictEqual(err.driver, 'io_uring');
+      assert.strictEqual(err.errno, 1);
+      assert.strictEqual(err.syscall, 'io_uring_setup');
+      assert.strictEqual(err.reasonCode, 'fast-path-unavailable');
     });
   });
 

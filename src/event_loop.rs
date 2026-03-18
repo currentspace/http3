@@ -6,6 +6,7 @@
 //! [`Driver`](crate::transport::Driver) implementations.
 
 use std::net::SocketAddr;
+use std::io;
 use std::time::Instant;
 
 use crossbeam_channel::Receiver;
@@ -89,6 +90,23 @@ pub(crate) struct EventBatcher {
     events_dropped: u64,
 }
 
+fn flush_runtime_error<D: Driver>(
+    batcher: &mut EventBatcher,
+    driver: &D,
+    syscall: &str,
+    reason_code: &str,
+    err: &io::Error,
+) -> bool {
+    batcher.batch.push(JsH3Event::runtime_error(
+        0,
+        driver.driver_kind().as_str(),
+        syscall,
+        reason_code,
+        err,
+    ));
+    batcher.flush()
+}
+
 impl EventBatcher {
     pub fn new(tsfn: EventTsfn) -> Self {
         Self {
@@ -150,7 +168,16 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     // Initial flush — sends Client Hello for client handlers, no-op for servers.
     handler.flush_sends(&mut outbound);
     if !outbound.is_empty() {
-        let _ = driver.submit_sends(std::mem::take(&mut outbound));
+        if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+            let _ = flush_runtime_error(
+                &mut batcher,
+                driver,
+                "submit_sends",
+                "driver-submit-sends-failed",
+                &err,
+            );
+            return;
+        }
     }
 
     loop {
@@ -160,7 +187,16 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         // 2. Block until events occur
         let outcome = match driver.poll(deadline) {
             Ok(o) => o,
-            Err(_) => break,
+            Err(err) => {
+                let _ = flush_runtime_error(
+                    &mut batcher,
+                    driver,
+                    "poll",
+                    "driver-poll-failed",
+                    &err,
+                );
+                return;
+            }
         };
 
         // 3. Drain command channel (unconditional — waker just makes poll return early)
@@ -169,7 +205,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 // Shutdown requested: flush remaining sends before exiting
                 handler.flush_sends(&mut outbound);
                 if !outbound.is_empty() {
-                    let _ = driver.submit_sends(std::mem::take(&mut outbound));
+                    if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                        let _ = flush_runtime_error(
+                            &mut batcher,
+                            driver,
+                            "submit_sends",
+                            "driver-submit-sends-failed",
+                            &err,
+                        );
+                    }
                 }
                 return;
             }
@@ -178,7 +222,16 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         // 3b. Flush sends after commands (response data goes out immediately)
         handler.flush_sends(&mut outbound);
         if !outbound.is_empty() {
-            let _ = driver.submit_sends(std::mem::take(&mut outbound));
+            if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                let _ = flush_runtime_error(
+                    &mut batcher,
+                    driver,
+                    "submit_sends",
+                    "driver-submit-sends-failed",
+                    &err,
+                );
+                return;
+            }
         }
 
         // 4. Process completed RX datagrams.
@@ -198,13 +251,31 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             );
             // Submit retry / version-negotiation packets immediately
             if !pending_outbound.is_empty() {
-                let _ = driver.submit_sends(std::mem::take(&mut pending_outbound));
+                if let Err(err) = driver.submit_sends(std::mem::take(&mut pending_outbound)) {
+                    let _ = flush_runtime_error(
+                        &mut batcher,
+                        driver,
+                        "submit_sends",
+                        "driver-submit-sends-failed",
+                        &err,
+                    );
+                    return;
+                }
             }
             // Mid-RX flush: send accumulated outbound every 64 packets
             if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
                 handler.flush_sends(&mut outbound);
                 if !outbound.is_empty() {
-                    let _ = driver.submit_sends(std::mem::take(&mut outbound));
+                    if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                        let _ = flush_runtime_error(
+                            &mut batcher,
+                            driver,
+                            "submit_sends",
+                            "driver-submit-sends-failed",
+                            &err,
+                        );
+                        return;
+                    }
                 }
             }
             // Mid-batch flush if needed
@@ -228,7 +299,16 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         // 7. Flush outbound from all connections
         handler.flush_sends(&mut outbound);
         if !outbound.is_empty() {
-            let _ = driver.submit_sends(std::mem::take(&mut outbound));
+            if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                let _ = flush_runtime_error(
+                    &mut batcher,
+                    driver,
+                    "submit_sends",
+                    "driver-submit-sends-failed",
+                    &err,
+                );
+                return;
+            }
         }
 
         // 7b. Recycle TX buffers accumulated during this iteration

@@ -261,6 +261,7 @@ describe('QUIC kqueue stress tests', () => {
     const snap = snapResources();
     const payload = Buffer.alloc(64 * 1024, 0xcc);
     const streamTimeout = scaleStressTimeout(20_000);
+    const interRoundPauseMs = scaleStressTimeout(250);
     const rounds = 5;
     const streamsPerRound = 50;
 
@@ -286,7 +287,7 @@ describe('QUIC kqueue stress tests', () => {
       roundTimes.push(Date.now() - roundStart);
 
       if (round < rounds - 1) {
-        await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
+        await new Promise<void>((resolve) => { setTimeout(resolve, interRoundPauseMs); });
       }
     }
 

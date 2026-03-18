@@ -1,0 +1,131 @@
+services:
+  sfu:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime-test
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    command: ["node", "dist-test/test/docker-runtime/runtime-server.js"]
+    environment:
+      SERVER_RUNTIME_MODE: ${SERVER_RUNTIME_MODE:-portable}
+      SERVER_FALLBACK_POLICY: ${SERVER_FALLBACK_POLICY:-warn-and-fallback}
+      RAW_QUIC_PORT: "9080"
+      H3_PORT: "9443"
+      HEALTH_PORT: "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080 >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  client:
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    depends_on:
+      sfu:
+        condition: service_healthy
+    command: ["node", "dist-test/test/docker-runtime/runtime-client.js"]
+    environment:
+      SERVER_HOST: "sfu"
+      RAW_QUIC_PORT: "9080"
+      H3_PORT: "9443"
+      CLIENT_RUNTIME_MODE: ${CLIENT_RUNTIME_MODE:-portable}
+      CLIENT_FALLBACK_POLICY: ${CLIENT_FALLBACK_POLICY:-warn-and-fallback}
+      EXPECT_CLIENT_SELECTED_MODE: ${EXPECT_CLIENT_SELECTED_MODE:-portable}
+      EXPECT_CLIENT_FALLBACK: ${EXPECT_CLIENT_FALLBACK:-false}
+      EXPECT_SERVER_SELECTED_MODE: ${EXPECT_SERVER_SELECTED_MODE:-portable}
+      EXPECT_SERVER_FALLBACK: ${EXPECT_SERVER_FALLBACK:-false}
+
+  fast-check:
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    command: ["node", "dist-test/test/docker-runtime/runtime-fast-failure.js"]
+
+  fast-cap-add-check:
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    cap_add:
+      - SYS_ADMIN
+    command: ["node", "dist-test/test/docker-runtime/runtime-fast-failure.js"]
+
+  sfu-unconfined:
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    security_opt:
+      - seccomp=unconfined
+    command: ["node", "dist-test/test/docker-runtime/runtime-server.js"]
+    environment:
+      SERVER_RUNTIME_MODE: "fast"
+      SERVER_FALLBACK_POLICY: "error"
+      RAW_QUIC_PORT: "9080"
+      H3_PORT: "9443"
+      HEALTH_PORT: "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080 >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  client-unconfined:
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    security_opt:
+      - seccomp=unconfined
+    depends_on:
+      sfu-unconfined:
+        condition: service_healthy
+    command: ["node", "dist-test/test/docker-runtime/runtime-client.js"]
+    environment:
+      SERVER_HOST: "sfu-unconfined"
+      RAW_QUIC_PORT: "9080"
+      H3_PORT: "9443"
+      CLIENT_RUNTIME_MODE: "fast"
+      CLIENT_FALLBACK_POLICY: "error"
+      EXPECT_CLIENT_SELECTED_MODE: "fast"
+      EXPECT_CLIENT_FALLBACK: "false"
+      EXPECT_SERVER_SELECTED_MODE: "fast"
+      EXPECT_SERVER_FALLBACK: "false"
+
+  sfu-privileged:
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    privileged: true
+    command: ["node", "dist-test/test/docker-runtime/runtime-server.js"]
+    environment:
+      SERVER_RUNTIME_MODE: "fast"
+      SERVER_FALLBACK_POLICY: "error"
+      RAW_QUIC_PORT: "9080"
+      H3_PORT: "9443"
+      HEALTH_PORT: "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080 >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  client-privileged:
+    image: currentspace/http3-runtime-tests:dev
+    platform: ${DOCKER_RUNTIME_PLATFORM:-linux/arm64}
+    init: true
+    privileged: true
+    depends_on:
+      sfu-privileged:
+        condition: service_healthy
+    command: ["node", "dist-test/test/docker-runtime/runtime-client.js"]
+    environment:
+      SERVER_HOST: "sfu-privileged"
+      RAW_QUIC_PORT: "9080"
+      H3_PORT: "9443"
+      CLIENT_RUNTIME_MODE: "fast"
+      CLIENT_FALLBACK_POLICY: "error"
+      EXPECT_CLIENT_SELECTED_MODE: "fast"
+      EXPECT_CLIENT_FALLBACK: "false"
+      EXPECT_SERVER_SELECTED_MODE: "fast"
+      EXPECT_SERVER_FALLBACK: "false"

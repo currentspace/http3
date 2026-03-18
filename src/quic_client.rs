@@ -4,7 +4,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::config::JsQuicClientOptions;
+use crate::config::{JsQuicClientOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsSessionMetrics};
 
 use std::net::SocketAddr;
@@ -18,6 +18,7 @@ pub struct NativeQuicClient {
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
 }
 
 #[napi]
@@ -40,6 +41,8 @@ impl NativeQuicClient {
             qlog_dir: options.qlog_dir,
             qlog_level: options.qlog_level,
             user_set_mtu,
+            runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
+                .map_err(napi::Error::from)?,
         })
     }
 
@@ -70,6 +73,7 @@ impl NativeQuicClient {
             self.qlog_dir.clone(),
             self.qlog_level.clone(),
             self.user_set_mtu,
+            self.runtime_mode,
             tsfn,
         )
         .map_err(napi::Error::from)?;

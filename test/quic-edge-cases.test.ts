@@ -7,6 +7,7 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from './generate-certs.js';
 import { createQuicServer, connectQuic, connectQuicAsync } from '../lib/index.js';
+import { ERR_HTTP3_ENDPOINT_RESOLUTION } from '../lib/errors.js';
 import type { QuicServerSession } from '../lib/index.js';
 import type { QuicStream } from '../lib/quic-stream.js';
 
@@ -46,6 +47,39 @@ describe('QUIC edge cases', () => {
     stream.end(); // no data, just FIN
     const echoed = await collect(stream);
     assert.strictEqual(echoed.length, 0, 'empty stream should echo back 0 bytes');
+
+    await client.close();
+    await server.close();
+  });
+
+  it('supports hostname URL authorities for raw QUIC clients', async () => {
+    const server = createQuicServer({
+      key: certs.key,
+      cert: certs.cert,
+      disableRetry: true,
+      runtimeMode: 'portable',
+    });
+    server.on('session', (session: QuicServerSession) => {
+      session.on('stream', (stream: QuicStream) => {
+        stream.pipe(stream);
+      });
+    });
+
+    const addr = await server.listen(0, '127.0.0.1');
+    const client = await connectQuicAsync(`https://localhost:${addr.port}`, {
+      ca: certs.cert,
+      rejectUnauthorized: true,
+      runtimeMode: 'portable',
+    });
+
+    assert.strictEqual(client.runtimeInfo?.requestedMode, 'portable');
+    assert.strictEqual(client.runtimeInfo?.selectedMode, 'portable');
+    assert.ok(client.runtimeInfo?.driver);
+
+    const stream = client.openStream();
+    stream.end(Buffer.from('hostname-ok'));
+    const echoed = await collect(stream);
+    assert.strictEqual(echoed.toString(), 'hostname-ok');
 
     await client.close();
     await server.close();
@@ -276,6 +310,24 @@ describe('QUIC edge cases', () => {
     }
 
     try { await session.close(); } catch { /* already failed/closing */ }
+  });
+
+  it('rejects failed hostname connects without requiring an error listener', async () => {
+    const session = connectQuic('https://no-such-host.invalid:9443', {
+      rejectUnauthorized: false,
+      runtimeMode: 'portable',
+    });
+
+    await assert.rejects(
+      async () => session.ready(),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual((err as Error & { code?: string }).code, ERR_HTTP3_ENDPOINT_RESOLUTION);
+        return true;
+      },
+    );
+
+    await session.close();
   });
 
   it('rapid open/close connections (churn)', async () => {
