@@ -3,20 +3,30 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock, Weak,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use ring::rand::SecureRandom;
+use slab::Slab;
 
 use crate::buffer_pool::BufferPool;
+use crate::client_topology::{
+    default_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
+    ClientSocketStrategy, SharedClientWorkerKey as SharedH3ClientWorkerKey,
+};
 use crate::config::{Http3Config, TransportRuntimeMode};
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::connection_map::ConnectionMap;
 use crate::error::Http3NativeError;
-use crate::event_loop::{self, ProtocolHandler, SEND_BUF_SIZE};
+use crate::event_loop::{self, EventBatcher, ProtocolHandler, MAX_BATCH_SIZE, SEND_BUF_SIZE};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
+use crate::reactor_metrics::{self, SessionKind, WorkerSpawnKind};
+use crate::shared_client_reactor;
 use crate::timer_heap::TimerHeap;
 use crate::transport::{self, ErasedWaker, TxDatagram};
 
@@ -239,12 +249,97 @@ pub enum ClientWorkerCommand {
     Shutdown,
 }
 
+enum SharedClientWorkerCommand {
+    OpenSession {
+        quiche_config: quiche::Config,
+        server_addr: SocketAddr,
+        server_name: String,
+        session_ticket: Option<Vec<u8>>,
+        qlog_dir: Option<String>,
+        qlog_level: Option<String>,
+        tsfn: EventTsfn,
+        resp_tx: Sender<Result<u32, Http3NativeError>>,
+    },
+    SendRequest {
+        session_handle: u32,
+        headers: Vec<(String, String)>,
+        fin: bool,
+        resp_tx: Sender<Result<u64, String>>,
+    },
+    StreamSend {
+        session_handle: u32,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+    },
+    StreamClose {
+        session_handle: u32,
+        stream_id: u64,
+        error_code: u32,
+    },
+    SendDatagram {
+        session_handle: u32,
+        data: Vec<u8>,
+        resp_tx: Sender<bool>,
+    },
+    GetSessionMetrics {
+        session_handle: u32,
+        resp_tx: Sender<Option<JsSessionMetrics>>,
+    },
+    GetRemoteSettings {
+        session_handle: u32,
+        resp_tx: Sender<Vec<(u64, u64)>>,
+    },
+    GetQlogPath {
+        session_handle: u32,
+        resp_tx: Sender<Option<String>>,
+    },
+    Ping {
+        session_handle: u32,
+        resp_tx: Sender<bool>,
+    },
+    Close {
+        session_handle: u32,
+        error_code: u32,
+        reason: String,
+    },
+    ReleaseSession {
+        session_handle: u32,
+    },
+}
+
+struct SharedClientWorkerControl {
+    cmd_tx: Sender<SharedClientWorkerCommand>,
+    waker: Arc<dyn ErasedWaker>,
+    local_addr: SocketAddr,
+    join_handle: Mutex<Option<thread::JoinHandle<()>>>,
+    running: AtomicBool,
+    session_count: AtomicUsize,
+    key: SharedH3ClientWorkerKey,
+}
+
+impl SharedClientWorkerControl {
+    fn wake(&self) {
+        let _ = self.waker.wake();
+    }
+}
+
+enum ClientWorkerHandleKind {
+    Dedicated {
+        cmd_tx: Sender<ClientWorkerCommand>,
+        join_handle: Option<thread::JoinHandle<()>>,
+        waker: Arc<dyn ErasedWaker>,
+    },
+    Shared {
+        session_handle: u32,
+        worker: Arc<SharedClientWorkerControl>,
+    },
+}
+
 /// Handle returned to JS for controlling the client worker thread.
 pub struct ClientWorkerHandle {
-    cmd_tx: Sender<ClientWorkerCommand>,
-    join_handle: Option<thread::JoinHandle<()>>,
+    kind: Option<ClientWorkerHandleKind>,
     local_addr: SocketAddr,
-    waker: Arc<dyn ErasedWaker>,
 }
 
 impl ClientWorkerHandle {
@@ -255,14 +350,38 @@ impl ClientWorkerHandle {
         fin: bool,
     ) -> Result<u64, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(ClientWorkerCommand::SendRequest {
-                headers,
-                fin,
-                resp_tx,
-            })
-            .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(ClientWorkerCommand::SendRequest {
+                        headers,
+                        fin,
+                        resp_tx,
+                    })
+                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                let _ = waker.wake();
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::SendRequest {
+                        session_handle: *session_handle,
+                        headers,
+                        fin,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("shared client worker not running".into())
+                    })?;
+                worker.wake();
+            }
+            None => {
+                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+            }
+        }
 
         match resp_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(stream_id)) => Ok(stream_id),
@@ -275,44 +394,114 @@ impl ClientWorkerHandle {
 
     /// Queue stream data to be sent by the worker.
     pub fn stream_send(&self, stream_id: u64, data: Vec<u8>, fin: bool) -> bool {
-        if self
-            .cmd_tx
-            .send(ClientWorkerCommand::StreamSend {
-                stream_id,
-                data,
-                fin,
-            })
-            .is_ok()
-        {
-            let _ = self.waker.wake();
-            true
-        } else {
-            false
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                if cmd_tx
+                    .send(ClientWorkerCommand::StreamSend {
+                        stream_id,
+                        data,
+                        fin,
+                    })
+                    .is_ok()
+                {
+                    let _ = waker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                if worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::StreamSend {
+                        session_handle: *session_handle,
+                        stream_id,
+                        data,
+                        fin,
+                    })
+                    .is_ok()
+                {
+                    worker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         }
     }
 
     pub fn stream_close(&self, stream_id: u64, error_code: u32) -> bool {
-        if self
-            .cmd_tx
-            .send(ClientWorkerCommand::StreamClose {
-                stream_id,
-                error_code,
-            })
-            .is_ok()
-        {
-            let _ = self.waker.wake();
-            true
-        } else {
-            false
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                if cmd_tx
+                    .send(ClientWorkerCommand::StreamClose {
+                        stream_id,
+                        error_code,
+                    })
+                    .is_ok()
+                {
+                    let _ = waker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                if worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::StreamClose {
+                        session_handle: *session_handle,
+                        stream_id,
+                        error_code,
+                    })
+                    .is_ok()
+                {
+                    worker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         }
     }
 
     pub fn send_datagram(&self, data: Vec<u8>) -> Result<bool, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(ClientWorkerCommand::SendDatagram { data, resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(ClientWorkerCommand::SendDatagram { data, resp_tx })
+                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                let _ = waker.wake();
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::SendDatagram {
+                        session_handle: *session_handle,
+                        data,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("shared client worker not running".into())
+                    })?;
+                worker.wake();
+            }
+            None => {
+                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+            }
+        }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for client datagram send".into())
         })
@@ -320,10 +509,32 @@ impl ClientWorkerHandle {
 
     pub fn get_session_metrics(&self) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(ClientWorkerCommand::GetSessionMetrics { resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(ClientWorkerCommand::GetSessionMetrics { resp_tx })
+                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                let _ = waker.wake();
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::GetSessionMetrics {
+                        session_handle: *session_handle,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("shared client worker not running".into())
+                    })?;
+                worker.wake();
+            }
+            None => {
+                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+            }
+        }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for client metrics".into())
         })
@@ -331,10 +542,32 @@ impl ClientWorkerHandle {
 
     pub fn get_remote_settings(&self) -> Result<Vec<(u64, u64)>, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(ClientWorkerCommand::GetRemoteSettings { resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(ClientWorkerCommand::GetRemoteSettings { resp_tx })
+                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                let _ = waker.wake();
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::GetRemoteSettings {
+                        session_handle: *session_handle,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("shared client worker not running".into())
+                    })?;
+                worker.wake();
+            }
+            None => {
+                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+            }
+        }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for client settings".into())
         })
@@ -342,10 +575,32 @@ impl ClientWorkerHandle {
 
     pub fn ping(&self) -> Result<bool, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(ClientWorkerCommand::Ping { resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(ClientWorkerCommand::Ping { resp_tx })
+                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                let _ = waker.wake();
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::Ping {
+                        session_handle: *session_handle,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("shared client worker not running".into())
+                    })?;
+                worker.wake();
+            }
+            None => {
+                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+            }
+        }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for client ping".into()))
@@ -353,10 +608,32 @@ impl ClientWorkerHandle {
 
     pub fn get_qlog_path(&self) -> Result<Option<String>, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(ClientWorkerCommand::GetQlogPath { resp_tx })
-            .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
-        let _ = self.waker.wake();
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                cmd_tx
+                    .send(ClientWorkerCommand::GetQlogPath { resp_tx })
+                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                let _ = waker.wake();
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::GetQlogPath {
+                        session_handle: *session_handle,
+                        resp_tx,
+                    })
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("shared client worker not running".into())
+                    })?;
+                worker.wake();
+            }
+            None => {
+                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+            }
+        }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for client qlog path".into())
         })
@@ -364,15 +641,38 @@ impl ClientWorkerHandle {
 
     /// Request a graceful connection close.
     pub fn close(&self, error_code: u32, reason: String) -> bool {
-        if self
-            .cmd_tx
-            .send(ClientWorkerCommand::Close { error_code, reason })
-            .is_ok()
-        {
-            let _ = self.waker.wake();
-            true
-        } else {
-            false
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                if cmd_tx
+                    .send(ClientWorkerCommand::Close { error_code, reason })
+                    .is_ok()
+                {
+                    let _ = waker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                if worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::Close {
+                        session_handle: *session_handle,
+                        error_code,
+                        reason,
+                    })
+                    .is_ok()
+                {
+                    worker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         }
     }
 
@@ -381,10 +681,40 @@ impl ClientWorkerHandle {
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.cmd_tx.send(ClientWorkerCommand::Shutdown);
-        let _ = self.waker.wake();
-        if let Some(handle) = self.join_handle.take() {
-            let _ = handle.join();
+        let Some(kind) = self.kind.take() else {
+            return;
+        };
+        match kind {
+            ClientWorkerHandleKind::Dedicated {
+                cmd_tx,
+                mut join_handle,
+                waker,
+            } => {
+                let _ = cmd_tx.send(ClientWorkerCommand::Shutdown);
+                let _ = waker.wake();
+                if let Some(handle) = join_handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            } => {
+                let _ = worker
+                    .cmd_tx
+                    .send(SharedClientWorkerCommand::ReleaseSession { session_handle });
+                worker.wake();
+                if worker.session_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    if let Ok(mut join_handle) = worker.join_handle.lock() {
+                        if let Some(handle) = join_handle.take() {
+                            let _ = handle.join();
+                        }
+                    }
+                    if let Ok(mut registry) = shared_client_worker_registry().lock() {
+                        registry.remove(&worker.key);
+                    }
+                }
+            }
         }
     }
 }
@@ -410,12 +740,23 @@ pub fn spawn_client_worker(
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
+    if default_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
+        return spawn_shared_client_worker(
+            quiche_config,
+            server_addr,
+            server_name,
+            session_ticket,
+            qlog_dir,
+            qlog_level,
+            user_set_mtu,
+            runtime_mode,
+            tsfn,
+        );
+    }
+
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
 
-    let bind_addr = match server_addr {
-        SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
-        SocketAddr::V6(_) => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)),
-    };
+    let bind_addr = shared_client_bind_addr(server_addr);
     let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
     std_socket
         .set_nonblocking(true)
@@ -434,6 +775,7 @@ pub fn spawn_client_worker(
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
+    reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3ClientDedicated);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
         let mut quiche_config = quiche_config;
@@ -451,11 +793,529 @@ pub fn spawn_client_worker(
     });
 
     Ok(ClientWorkerHandle {
-        cmd_tx,
-        join_handle: Some(join_handle),
+        kind: Some(ClientWorkerHandleKind::Dedicated {
+            cmd_tx,
+            join_handle: Some(join_handle),
+            waker: waker_clone,
+        }),
         local_addr,
-        waker: waker_clone,
     })
+}
+
+struct SharedClientSession {
+    handler: H3ClientHandler,
+    batcher: EventBatcher,
+    server_addr: SocketAddr,
+}
+
+fn shared_client_worker_registry(
+) -> &'static Mutex<HashMap<SharedH3ClientWorkerKey, Weak<SharedClientWorkerControl>>> {
+    static REGISTRY: OnceLock<
+        Mutex<HashMap<SharedH3ClientWorkerKey, Weak<SharedClientWorkerControl>>>,
+    > = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn acquire_shared_client_worker(
+    server_addr: SocketAddr,
+    runtime_mode: TransportRuntimeMode,
+) -> Result<Arc<SharedClientWorkerControl>, Http3NativeError> {
+    let key = shared_client_worker_key(server_addr);
+    let mut registry = shared_client_worker_registry()
+        .lock()
+        .map_err(|_| Http3NativeError::InvalidState("shared client registry poisoned".into()))?;
+    if let Some(worker) = registry.get(&key).and_then(Weak::upgrade) {
+        if worker.running.load(Ordering::Acquire) {
+            reactor_metrics::record_shared_worker_reuse(WorkerSpawnKind::H3ClientShared);
+            return Ok(worker);
+        }
+    }
+
+    let bind_addr = shared_client_bind_addr(server_addr);
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+    let std_socket = UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io)?;
+    std_socket
+        .set_nonblocking(true)
+        .map_err(Http3NativeError::Io)?;
+    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
+    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+
+    let (driver, waker) = transport::create_platform_driver(std_socket, runtime_mode)?;
+    let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+    let control = Arc::new(SharedClientWorkerControl {
+        cmd_tx,
+        waker: waker_arc.clone(),
+        local_addr,
+        join_handle: Mutex::new(None),
+        running: AtomicBool::new(true),
+        session_count: AtomicUsize::new(0),
+        key: key.clone(),
+    });
+    let control_for_thread = Arc::clone(&control);
+    reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3ClientShared);
+    let join_handle = thread::spawn(move || {
+        let mut driver = driver;
+        run_shared_client_event_loop(&mut driver, cmd_rx, local_addr);
+        control_for_thread.running.store(false, Ordering::Release);
+    });
+    if let Ok(mut slot) = control.join_handle.lock() {
+        *slot = Some(join_handle);
+    }
+    registry.insert(key, Arc::downgrade(&control));
+    Ok(control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_shared_client_worker(
+    mut quiche_config: quiche::Config,
+    server_addr: SocketAddr,
+    server_name: String,
+    session_ticket: Option<Vec<u8>>,
+    qlog_dir: Option<String>,
+    qlog_level: Option<String>,
+    user_set_mtu: bool,
+    runtime_mode: TransportRuntimeMode,
+    tsfn: EventTsfn,
+) -> Result<ClientWorkerHandle, Http3NativeError> {
+    let worker = acquire_shared_client_worker(server_addr, runtime_mode)?;
+
+    if !user_set_mtu {
+        let mtu = crate::config::effective_max_datagram_size(&server_addr);
+        quiche_config.set_max_recv_udp_payload_size(mtu);
+        quiche_config.set_max_send_udp_payload_size(mtu);
+    }
+
+    let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
+    worker
+        .cmd_tx
+        .send(SharedClientWorkerCommand::OpenSession {
+            quiche_config,
+            server_addr,
+            server_name,
+            session_ticket,
+            qlog_dir,
+            qlog_level,
+            tsfn,
+            resp_tx,
+        })
+        .map_err(|_| Http3NativeError::InvalidState("shared client worker not running".into()))?;
+    worker.wake();
+
+    let session_handle = resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        Http3NativeError::InvalidState("timed out waiting for shared h3 session".into())
+    })??;
+    worker.session_count.fetch_add(1, Ordering::AcqRel);
+
+    Ok(ClientWorkerHandle {
+        kind: Some(ClientWorkerHandleKind::Shared {
+            session_handle,
+            worker: Arc::clone(&worker),
+        }),
+        local_addr: worker.local_addr,
+    })
+}
+
+fn emit_shared_client_runtime_error<D: transport::Driver>(
+    sessions: &mut Slab<SharedClientSession>,
+    driver: &D,
+    syscall: &str,
+    reason_code: &str,
+    err: &std::io::Error,
+) {
+    shared_client_reactor::emit_runtime_error(
+        sessions,
+        driver,
+        syscall,
+        reason_code,
+        err,
+        |session| &mut session.batcher,
+    );
+}
+
+fn remove_shared_client_session(
+    sessions: &mut Slab<SharedClientSession>,
+    route_by_dcid: &mut HashMap<Vec<u8>, usize>,
+    timer_heap: &mut TimerHeap,
+    handle: usize,
+) {
+    if !sessions.contains(handle) {
+        return;
+    }
+    if let Some(session) = sessions.get(handle) {
+        if !session.handler.session_closed_emitted {
+            reactor_metrics::record_session_close(SessionKind::H3Client);
+        }
+    }
+    timer_heap.remove_connection(handle);
+    let _ = sessions.remove(handle);
+    route_by_dcid.retain(|_, mapped_handle| *mapped_handle != handle);
+}
+
+fn refresh_shared_client_dcid(
+    route_by_dcid: &mut HashMap<Vec<u8>, usize>,
+    handle: usize,
+    session: &mut SharedClientSession,
+) {
+    let (current_dcid, needs_update, retired_dcids) = session.handler.take_dcid_updates();
+    if needs_update {
+        route_by_dcid.insert(current_dcid, handle);
+    }
+    for retired in retired_dcids {
+        route_by_dcid.remove(&retired);
+    }
+}
+
+fn sync_shared_client_timer(timer_heap: &mut TimerHeap, handle: usize, session: &SharedClientSession) {
+    shared_client_reactor::sync_timer(timer_heap, handle, session, |current| {
+        current.handler.timer_deadline
+    });
+}
+
+fn flush_shared_client_sends(
+    sessions: &mut Slab<SharedClientSession>,
+    handles_buf: &mut Vec<usize>,
+    tx_pool: &mut BufferPool,
+    outbound: &mut Vec<TxDatagram>,
+) {
+    shared_client_reactor::flush_round_robin_sends(
+        sessions,
+        handles_buf,
+        outbound,
+        |session| {
+            H3ClientHandler::try_send_next_with_pool_parts(
+                &mut session.handler.conn,
+                session.handler.send_buf.as_mut_slice(),
+                tx_pool,
+            )
+        },
+    );
+}
+
+fn run_shared_client_event_loop<D: transport::Driver>(
+    driver: &mut D,
+    cmd_rx: crossbeam_channel::Receiver<SharedClientWorkerCommand>,
+    local_addr: SocketAddr,
+) {
+    let mut sessions: Slab<SharedClientSession> = Slab::new();
+    let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut timer_heap = TimerHeap::new();
+    let mut tx_pool = BufferPool::new(512, 1350);
+    let mut handles_buf = Vec::new();
+    let mut outbound = Vec::new();
+    let mut closed_sessions = Vec::new();
+
+    loop {
+        let deadline = timer_heap.next_deadline();
+
+        let outcome = match driver.poll(deadline) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                emit_shared_client_runtime_error(
+                    &mut sessions,
+                    driver,
+                    "poll",
+                    "driver-poll-failed",
+                    &err,
+                );
+                return;
+            }
+        };
+
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                SharedClientWorkerCommand::OpenSession {
+                    mut quiche_config,
+                    server_addr,
+                    server_name,
+                    session_ticket,
+                    qlog_dir,
+                    qlog_level,
+                    tsfn,
+                    resp_tx,
+                } => {
+                    let handler = H3ClientHandler::new(
+                        local_addr,
+                        server_addr,
+                        &server_name,
+                        session_ticket.as_deref(),
+                        qlog_dir.as_deref(),
+                        qlog_level.as_deref(),
+                        &mut quiche_config,
+                    );
+                    let result = handler.map_or_else(
+                        || {
+                            Err(Http3NativeError::Config(
+                                "failed to create h3 client session".into(),
+                            ))
+                        },
+                        |handler| {
+                            let dcid = handler.current_dcid();
+                            let handle = sessions.insert(SharedClientSession {
+                                handler,
+                                batcher: EventBatcher::new(tsfn),
+                                server_addr,
+                            });
+                            route_by_dcid.insert(dcid, handle);
+                            if let Some(session) = sessions.get(handle) {
+                                sync_shared_client_timer(&mut timer_heap, handle, session);
+                            }
+                            Ok(handle as u32)
+                        },
+                    );
+                    let _ = resp_tx.send(result);
+                }
+                SharedClientWorkerCommand::SendRequest {
+                    session_handle,
+                    headers,
+                    fin,
+                    resp_tx,
+                } => {
+                    let result = sessions
+                        .get_mut(session_handle as usize)
+                        .map(|session| session.handler.send_request(headers, fin))
+                        .unwrap_or_else(|| Err("client session not running".into()));
+                    let _ = resp_tx.send(result);
+                }
+                SharedClientWorkerCommand::StreamSend {
+                    session_handle,
+                    stream_id,
+                    data,
+                    fin,
+                } => {
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.handler.queue_stream_send(stream_id, data, fin);
+                    }
+                }
+                SharedClientWorkerCommand::StreamClose {
+                    session_handle,
+                    stream_id,
+                    error_code,
+                } => {
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.handler.close_stream(stream_id, error_code);
+                    }
+                }
+                SharedClientWorkerCommand::SendDatagram {
+                    session_handle,
+                    data,
+                    resp_tx,
+                } => {
+                    let ok = sessions
+                        .get_mut(session_handle as usize)
+                        .is_some_and(|session| session.handler.send_datagram(&data));
+                    let _ = resp_tx.send(ok);
+                }
+                SharedClientWorkerCommand::GetSessionMetrics {
+                    session_handle,
+                    resp_tx,
+                } => {
+                    let metrics = sessions
+                        .get(session_handle as usize)
+                        .map(|session| session.handler.metrics_snapshot());
+                    let _ = resp_tx.send(metrics);
+                }
+                SharedClientWorkerCommand::GetRemoteSettings {
+                    session_handle,
+                    resp_tx,
+                } => {
+                    let settings = sessions
+                        .get(session_handle as usize)
+                        .map(|session| session.handler.remote_settings())
+                        .unwrap_or_default();
+                    let _ = resp_tx.send(settings);
+                }
+                SharedClientWorkerCommand::GetQlogPath {
+                    session_handle,
+                    resp_tx,
+                } => {
+                    let path = sessions
+                        .get(session_handle as usize)
+                        .and_then(|session| session.handler.qlog_path());
+                    let _ = resp_tx.send(path);
+                }
+                SharedClientWorkerCommand::Ping {
+                    session_handle,
+                    resp_tx,
+                } => {
+                    let ok = sessions
+                        .get_mut(session_handle as usize)
+                        .is_some_and(|session| session.handler.ping());
+                    let _ = resp_tx.send(ok);
+                }
+                SharedClientWorkerCommand::Close {
+                    session_handle,
+                    error_code,
+                    reason,
+                } => {
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.handler.close_session(error_code, &reason);
+                    }
+                }
+                SharedClientWorkerCommand::ReleaseSession { session_handle } => {
+                    remove_shared_client_session(
+                        &mut sessions,
+                        &mut route_by_dcid,
+                        &mut timer_heap,
+                        session_handle as usize,
+                    );
+                }
+            }
+        }
+
+        flush_shared_client_sends(&mut sessions, &mut handles_buf, &mut tx_pool, &mut outbound);
+        if !outbound.is_empty() {
+            if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                emit_shared_client_runtime_error(
+                    &mut sessions,
+                    driver,
+                    "submit_sends",
+                    "driver-submit-sends-failed",
+                    &err,
+                );
+                return;
+            }
+        }
+
+        let rx_count = outcome.rx.len();
+        for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
+            let Ok(header) = quiche::Header::from_slice(pkt.data.as_mut_slice(), crate::cid::SCID_LEN) else {
+                continue;
+            };
+            let Some(handle) = route_by_dcid.get(header.dcid.as_ref()).copied() else {
+                continue;
+            };
+            let mut should_remove = false;
+            if let Some(session) = sessions.get_mut(handle) {
+                if pkt.peer == session.server_addr {
+                    session.handler.process_packet_for_handle(
+                        pkt.data.as_mut_slice(),
+                        pkt.peer,
+                        local_addr,
+                        &mut session.batcher.batch,
+                        handle as u32,
+                    );
+                    refresh_shared_client_dcid(&mut route_by_dcid, handle, session);
+                    sync_shared_client_timer(&mut timer_heap, handle, session);
+                    if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                        should_remove = true;
+                    }
+                }
+            }
+            if should_remove {
+                remove_shared_client_session(
+                    &mut sessions,
+                    &mut route_by_dcid,
+                    &mut timer_heap,
+                    handle,
+                );
+            }
+            if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
+                flush_shared_client_sends(
+                    &mut sessions,
+                    &mut handles_buf,
+                    &mut tx_pool,
+                    &mut outbound,
+                );
+                if !outbound.is_empty() {
+                    if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                        emit_shared_client_runtime_error(
+                            &mut sessions,
+                            driver,
+                            "submit_sends",
+                            "driver-submit-sends-failed",
+                            &err,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        let now = Instant::now();
+        closed_sessions.clear();
+        for handle in timer_heap.pop_expired(now) {
+            if let Some(session) = sessions.get_mut(handle) {
+                session.handler.process_timers_for_handle(
+                    now,
+                    &mut session.batcher.batch,
+                    handle as u32,
+                );
+                refresh_shared_client_dcid(&mut route_by_dcid, handle, session);
+                sync_shared_client_timer(&mut timer_heap, handle, session);
+                if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                    closed_sessions.push(handle);
+                }
+            }
+        }
+        handles_buf.clear();
+        handles_buf.extend(sessions.iter().map(|(handle, _)| handle));
+        for handle in handles_buf.iter().copied() {
+            if let Some(session) = sessions.get_mut(handle) {
+                session
+                    .handler
+                    .poll_drain_events_for_handle(&mut session.batcher.batch, handle as u32);
+                session.handler.flush_pending_writes_for_handle(
+                    &mut session.batcher.batch,
+                    handle as u32,
+                );
+                if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                    closed_sessions.push(handle);
+                }
+            }
+        }
+        for handle in closed_sessions.drain(..) {
+            remove_shared_client_session(
+                &mut sessions,
+                &mut route_by_dcid,
+                &mut timer_heap,
+                handle,
+            );
+        }
+
+        flush_shared_client_sends(&mut sessions, &mut handles_buf, &mut tx_pool, &mut outbound);
+        if !outbound.is_empty() {
+            if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                emit_shared_client_runtime_error(
+                    &mut sessions,
+                    driver,
+                    "submit_sends",
+                    "driver-submit-sends-failed",
+                    &err,
+                );
+                return;
+            }
+        }
+        let recycled = driver.drain_recycled_tx();
+        if !recycled.is_empty() {
+            reactor_metrics::record_tx_buffers_recycled(recycled.len());
+            for buf in recycled {
+                tx_pool.checkin(buf);
+            }
+        }
+
+        closed_sessions.clear();
+        handles_buf.clear();
+        handles_buf.extend(sessions.iter().map(|(handle, _)| handle));
+        for handle in handles_buf.iter().copied() {
+            if let Some(session) = sessions.get_mut(handle) {
+                if !session.batcher.flush() || session.handler.is_reapable() {
+                    closed_sessions.push(handle);
+                }
+            }
+        }
+        for handle in closed_sessions.drain(..) {
+            remove_shared_client_session(
+                &mut sessions,
+                &mut route_by_dcid,
+                &mut timer_heap,
+                handle,
+            );
+        }
+
+        if sessions.is_empty() && driver.pending_tx_count() == 0 {
+            return;
+        }
+    }
 }
 
 /// Spawn a worker thread for the given server configuration.
@@ -488,6 +1348,7 @@ pub fn spawn_worker(
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
+    reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
         let mut handler = H3ServerHandler::new(quiche_config, http3_config);
@@ -735,6 +1596,7 @@ impl ProtocolHandler for H3ServerHandler {
                 ) {
                     Ok(h) => {
                         self.conn_map.add_dcid(h, client_dcid);
+                        reactor_metrics::record_session_open(SessionKind::H3Server);
                         batch.push(JsH3Event::new_session(
                             h as u32,
                             peer.ip().to_string(),
@@ -763,6 +1625,7 @@ impl ProtocolHandler for H3ServerHandler {
                         ) {
                             Ok(h) => {
                                 self.conn_map.add_dcid(h, odcid);
+                                reactor_metrics::record_session_open(SessionKind::H3Server);
                                 batch.push(JsH3Event::new_session(
                                     h as u32,
                                     peer.ip().to_string(),
@@ -867,6 +1730,7 @@ impl ProtocolHandler for H3ServerHandler {
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 conn.on_timeout();
                 if conn.is_closed() {
+                    reactor_metrics::record_session_close(SessionKind::H3Server);
                     batch.push(JsH3Event::session_close(handle as u32));
                 } else {
                     conn.poll_h3_events(handle as u32, batch);
@@ -967,6 +1831,7 @@ impl ProtocolHandler for H3ServerHandler {
     }
 
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+        reactor_metrics::record_tx_buffers_recycled(buffers.len());
         for buf in buffers {
             self.tx_pool.checkin(buf);
         }
@@ -981,6 +1846,7 @@ impl ProtocolHandler for H3ServerHandler {
             self.pending_writes
                 .retain(|&(ch, _), _| ch != *handle as u32);
             if !self.last_expired.contains(handle) {
+                reactor_metrics::record_session_close(SessionKind::H3Server);
                 batch.push(JsH3Event::session_close(*handle as u32));
             }
         }
@@ -1007,6 +1873,7 @@ struct H3ClientHandler {
     conn: H3Connection,
     pending_writes: HashMap<u64, PendingWrite>,
     send_buf: Vec<u8>,
+    tx_pool: BufferPool,
     timer_deadline: Option<Instant>,
     session_closed_emitted: bool,
 }
@@ -1049,114 +1916,123 @@ impl H3ClientHandler {
             },
         );
         let timer_deadline = conn.timeout().map(|t| Instant::now() + t);
+        reactor_metrics::record_session_open(SessionKind::H3Client);
         Some(Self {
             conn,
             pending_writes: HashMap::new(),
             send_buf: vec![0u8; SEND_BUF_SIZE],
+            tx_pool: BufferPool::new(256, 1350),
             timer_deadline,
             session_closed_emitted: false,
         })
     }
-}
-
-impl ProtocolHandler for H3ClientHandler {
-    type Command = ClientWorkerCommand;
-
-    fn dispatch_command(
-        &mut self,
-        cmd: ClientWorkerCommand,
-        _batch: &mut Vec<JsH3Event>,
-    ) -> bool {
-        match cmd {
-            ClientWorkerCommand::Shutdown => return true,
-            ClientWorkerCommand::Close { error_code, reason } => {
-                let _ = self
-                    .conn
-                    .quiche_conn
-                    .close(true, u64::from(error_code), reason.as_bytes());
-            }
-            ClientWorkerCommand::SendRequest {
-                headers,
-                fin,
-                resp_tx,
-            } => {
-                if (self.conn.quiche_conn.is_established()
-                    || self.conn.quiche_conn.is_in_early_data())
-                    && !self.conn.is_established
-                {
-                    let _ = self.conn.init_h3();
-                }
-                let h3_headers: Vec<quiche::h3::Header> = headers
-                    .iter()
-                    .map(|(n, v)| quiche::h3::Header::new(n.as_bytes(), v.as_bytes()))
-                    .collect();
-                let result = self
-                    .conn
-                    .send_request(&h3_headers, fin)
-                    .map_err(|e| format!("send_request failed: {e}"));
-                let _ = resp_tx.send(result);
-            }
-            ClientWorkerCommand::StreamSend {
-                stream_id,
-                data,
-                fin,
-            } => {
-                if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
-                    pw.data.extend_from_slice(&data);
-                    pw.fin = pw.fin || fin;
-                } else {
-                    let written = self.conn.send_body(stream_id, &data, fin).unwrap_or(0);
-                    if written < data.len() {
-                        self.pending_writes.insert(
-                            stream_id,
-                            PendingWrite {
-                                data: data[written..].to_vec(),
-                                fin,
-                            },
-                        );
-                    } else if fin && written == 0 && data.is_empty() {
-                        self.pending_writes.insert(
-                            stream_id,
-                            PendingWrite {
-                                data: Vec::new(),
-                                fin: true,
-                            },
-                        );
-                    }
-                }
-            }
-            ClientWorkerCommand::StreamClose {
-                stream_id,
-                error_code,
-            } => {
-                let _ = self.conn.stream_close(stream_id, u64::from(error_code));
-            }
-            ClientWorkerCommand::SendDatagram { data, resp_tx } => {
-                let _ = resp_tx.send(self.conn.send_datagram(&data).is_ok());
-            }
-            ClientWorkerCommand::GetSessionMetrics { resp_tx } => {
-                let _ = resp_tx.send(Some(snapshot_metrics(&self.conn)));
-            }
-            ClientWorkerCommand::GetRemoteSettings { resp_tx } => {
-                let _ = resp_tx.send(self.conn.remote_settings());
-            }
-            ClientWorkerCommand::GetQlogPath { resp_tx } => {
-                let _ = resp_tx.send(self.conn.qlog_path.clone());
-            }
-            ClientWorkerCommand::Ping { resp_tx } => {
-                let _ = resp_tx.send(self.conn.quiche_conn.send_ack_eliciting().is_ok());
-            }
-        }
-        false
+    
+    fn current_dcid(&self) -> Vec<u8> {
+        self.conn.quiche_conn.source_id().into_owned().to_vec()
     }
 
-    fn process_packet(
+    fn take_dcid_updates(&mut self) -> (Vec<u8>, bool, Vec<Vec<u8>>) {
+        let current_dcid = self.current_dcid();
+        let needs_update = current_dcid.as_slice() != self.conn.conn_id.as_slice();
+        if needs_update {
+            self.conn.conn_id = current_dcid.clone();
+        }
+        let mut retired_dcids = Vec::new();
+        while let Some(retired) = self.conn.quiche_conn.retired_scid_next() {
+            retired_dcids.push(retired.into_owned().to_vec());
+        }
+        (current_dcid, needs_update, retired_dcids)
+    }
+
+    fn close_session(&mut self, error_code: u32, reason: &str) {
+        let _ = self
+            .conn
+            .quiche_conn
+            .close(true, u64::from(error_code), reason.as_bytes());
+    }
+
+    fn send_request(&mut self, headers: Vec<(String, String)>, fin: bool) -> Result<u64, String> {
+        if (self.conn.quiche_conn.is_established() || self.conn.quiche_conn.is_in_early_data())
+            && !self.conn.is_established
+        {
+            let _ = self.conn.init_h3();
+        }
+        let h3_headers: Vec<quiche::h3::Header> = headers
+            .iter()
+            .map(|(name, value)| quiche::h3::Header::new(name.as_bytes(), value.as_bytes()))
+            .collect();
+        self.conn
+            .send_request(&h3_headers, fin)
+            .map_err(|error| format!("send_request failed: {error}"))
+    }
+
+    fn queue_stream_send(&mut self, stream_id: u64, data: Vec<u8>, fin: bool) {
+        if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
+            pw.data.extend_from_slice(&data);
+            pw.fin = pw.fin || fin;
+            return;
+        }
+
+        let written = self.conn.send_body(stream_id, &data, fin).unwrap_or(0);
+        if written < data.len() {
+            self.pending_writes.insert(
+                stream_id,
+                PendingWrite {
+                    data: data[written..].to_vec(),
+                    fin,
+                },
+            );
+        } else if fin && written == 0 && data.is_empty() {
+            self.pending_writes.insert(
+                stream_id,
+                PendingWrite {
+                    data: Vec::new(),
+                    fin: true,
+                },
+            );
+        }
+    }
+
+    fn close_stream(&mut self, stream_id: u64, error_code: u32) {
+        let _ = self.conn.stream_close(stream_id, u64::from(error_code));
+    }
+
+    fn send_datagram(&mut self, data: &[u8]) -> bool {
+        self.conn.send_datagram(data).is_ok()
+    }
+
+    fn metrics_snapshot(&self) -> JsSessionMetrics {
+        snapshot_metrics(&self.conn)
+    }
+
+    fn remote_settings(&self) -> Vec<(u64, u64)> {
+        self.conn.remote_settings()
+    }
+
+    fn ping(&mut self) -> bool {
+        self.conn.quiche_conn.send_ack_eliciting().is_ok()
+    }
+
+    fn qlog_path(&self) -> Option<String> {
+        self.conn.qlog_path.clone()
+    }
+
+    fn emit_session_close(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
+        if self.session_closed_emitted {
+            return;
+        }
+        reactor_metrics::record_session_close(SessionKind::H3Client);
+        batch.push(JsH3Event::session_close(conn_handle));
+        self.session_closed_emitted = true;
+    }
+
+    fn process_packet_for_handle(
         &mut self,
         buf: &mut [u8],
         peer: SocketAddr,
         local: SocketAddr,
-        _pending_outbound: &mut Vec<TxDatagram>,
         batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
     ) {
         let recv_info = quiche::RecvInfo {
             from: peer,
@@ -1173,56 +2049,185 @@ impl ProtocolHandler for H3ClientHandler {
         }
         if self.conn.quiche_conn.is_established() && !self.conn.handshake_complete_emitted {
             self.conn.handshake_complete_emitted = true;
-            batch.push(JsH3Event::handshake_complete(0));
+            batch.push(JsH3Event::handshake_complete(conn_handle));
         }
-        self.conn.poll_h3_events(0, batch);
+        self.conn.poll_h3_events(conn_handle, batch);
         if let Some(ticket) = self.conn.update_session_ticket() {
-            batch.push(JsH3Event::session_ticket(0, ticket));
+            batch.push(JsH3Event::session_ticket(conn_handle, ticket));
         }
         self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
 
-        if self.conn.is_closed() && !self.session_closed_emitted {
-            batch.push(JsH3Event::session_close(0));
-            self.session_closed_emitted = true;
+        if self.conn.is_closed() {
+            self.emit_session_close(batch, conn_handle);
         }
     }
 
-    fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
-        if self.timer_deadline.is_some_and(|d| d <= now) {
+    fn process_timers_for_handle(
+        &mut self,
+        now: Instant,
+        batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
+    ) {
+        if self.timer_deadline.is_some_and(|deadline| deadline <= now) {
             self.conn.on_timeout();
-            if self.conn.is_closed() && !self.session_closed_emitted {
-                batch.push(JsH3Event::session_close(0));
-                self.session_closed_emitted = true;
+            if self.conn.is_closed() {
+                self.emit_session_close(batch, conn_handle);
             } else {
-                self.conn.poll_h3_events(0, batch);
+                self.conn.poll_h3_events(conn_handle, batch);
                 if let Some(ticket) = self.conn.update_session_ticket() {
-                    batch.push(JsH3Event::session_ticket(0, ticket));
+                    batch.push(JsH3Event::session_ticket(conn_handle, ticket));
                 }
                 self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
             }
         }
     }
 
+    fn try_send_next(&mut self) -> Option<TxDatagram> {
+        Self::try_send_next_with_pool_parts(
+            &mut self.conn,
+            self.send_buf.as_mut_slice(),
+            &mut self.tx_pool,
+        )
+    }
+
+    fn try_send_next_with_pool_parts(
+        conn: &mut H3Connection,
+        send_buf: &mut [u8],
+        tx_pool: &mut BufferPool,
+    ) -> Option<TxDatagram> {
+        let Ok((len, send_info)) = conn.send(send_buf) else {
+            return None;
+        };
+        let mut tx_buf = tx_pool.checkout();
+        if tx_buf.len() < len {
+            tx_buf.resize(len, 0);
+        }
+        tx_buf[..len].copy_from_slice(&send_buf[..len]);
+        tx_buf.truncate(len);
+        Some(TxDatagram {
+            data: tx_buf,
+            to: send_info.to,
+        })
+    }
+
+    fn flush_pending_writes_for_handle(
+        &mut self,
+        batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
+    ) {
+        let flushed = flush_client_pending_writes(&mut self.conn, &mut self.pending_writes);
+        for stream_id in flushed {
+            batch.push(JsH3Event::drain(conn_handle, stream_id));
+        }
+    }
+
+    fn poll_drain_events_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
+        if !self.conn.blocked_set.is_empty() {
+            self.conn.poll_drain_events(conn_handle, batch);
+        }
+    }
+
+    fn recycle_tx_buffers_into_pool(&mut self, buffers: Vec<Vec<u8>>) {
+        reactor_metrics::record_tx_buffers_recycled(buffers.len());
+        for buf in buffers {
+            self.tx_pool.checkin(buf);
+        }
+    }
+
+    fn is_reapable(&self) -> bool {
+        self.session_closed_emitted && self.pending_writes.is_empty()
+    }
+}
+
+impl ProtocolHandler for H3ClientHandler {
+    type Command = ClientWorkerCommand;
+
+    fn dispatch_command(
+        &mut self,
+        cmd: ClientWorkerCommand,
+        _batch: &mut Vec<JsH3Event>,
+    ) -> bool {
+        match cmd {
+            ClientWorkerCommand::Shutdown => {
+                if !self.session_closed_emitted {
+                    reactor_metrics::record_session_close(SessionKind::H3Client);
+                    self.session_closed_emitted = true;
+                }
+                return true;
+            }
+            ClientWorkerCommand::Close { error_code, reason } => {
+                self.close_session(error_code, &reason);
+            }
+            ClientWorkerCommand::SendRequest {
+                headers,
+                fin,
+                resp_tx,
+            } => {
+                let _ = resp_tx.send(self.send_request(headers, fin));
+            }
+            ClientWorkerCommand::StreamSend {
+                stream_id,
+                data,
+                fin,
+            } => {
+                self.queue_stream_send(stream_id, data, fin);
+            }
+            ClientWorkerCommand::StreamClose {
+                stream_id,
+                error_code,
+            } => {
+                self.close_stream(stream_id, error_code);
+            }
+            ClientWorkerCommand::SendDatagram { data, resp_tx } => {
+                let _ = resp_tx.send(self.send_datagram(&data));
+            }
+            ClientWorkerCommand::GetSessionMetrics { resp_tx } => {
+                let _ = resp_tx.send(Some(self.metrics_snapshot()));
+            }
+            ClientWorkerCommand::GetRemoteSettings { resp_tx } => {
+                let _ = resp_tx.send(self.remote_settings());
+            }
+            ClientWorkerCommand::GetQlogPath { resp_tx } => {
+                let _ = resp_tx.send(self.qlog_path());
+            }
+            ClientWorkerCommand::Ping { resp_tx } => {
+                let _ = resp_tx.send(self.ping());
+            }
+        }
+        false
+    }
+
+    fn process_packet(
+        &mut self,
+        buf: &mut [u8],
+        peer: SocketAddr,
+        local: SocketAddr,
+        _pending_outbound: &mut Vec<TxDatagram>,
+        batch: &mut Vec<JsH3Event>,
+    ) {
+        self.process_packet_for_handle(buf, peer, local, batch, 0);
+    }
+
+    fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
+        self.process_timers_for_handle(now, batch, 0);
+    }
+
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>) {
-        while let Ok((len, send_info)) = self.conn.send(self.send_buf.as_mut_slice()) {
-            outbound.push(TxDatagram {
-                data: self.send_buf[..len].to_vec(),
-                to: send_info.to,
-            });
+        while let Some(packet) = self.try_send_next() {
+            outbound.push(packet);
         }
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
-        let flushed = flush_client_pending_writes(&mut self.conn, &mut self.pending_writes);
-        for stream_id in flushed {
-            batch.push(JsH3Event::drain(0, stream_id));
-        }
+        self.flush_pending_writes_for_handle(batch, 0);
     }
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
-        if !self.conn.blocked_set.is_empty() {
-            self.conn.poll_drain_events(0, batch);
-        }
+        self.poll_drain_events_for_handle(batch, 0);
+    }
+
+    fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+        self.recycle_tx_buffers_into_pool(buffers);
     }
 
     fn cleanup_closed(&mut self, _batch: &mut Vec<JsH3Event>) {

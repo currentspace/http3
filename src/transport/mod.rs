@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use crate::config::TransportRuntimeMode;
 use crate::error::Http3NativeError;
+use crate::reactor_metrics;
 
 /// A completed received UDP datagram. Owned by the caller.
 pub(crate) struct RxDatagram {
@@ -142,7 +143,17 @@ pub(crate) fn create_platform_driver(
     socket: std::net::UdpSocket,
     _runtime_mode: TransportRuntimeMode,
 ) -> Result<(PlatformDriver, PlatformWaker), Http3NativeError> {
-    kqueue::KqueueDriver::new(socket).map_err(Http3NativeError::Io)
+    reactor_metrics::record_driver_setup_attempt(RuntimeDriverKind::Kqueue);
+    match kqueue::KqueueDriver::new(socket) {
+        Ok((driver, waker)) => {
+            reactor_metrics::record_driver_setup_success(RuntimeDriverKind::Kqueue);
+            Ok((driver, waker))
+        }
+        Err(error) => {
+            reactor_metrics::record_driver_setup_failure(RuntimeDriverKind::Kqueue);
+            Err(Http3NativeError::Io(error))
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -161,22 +172,41 @@ pub(crate) fn create_platform_driver(
     runtime_mode: TransportRuntimeMode,
 ) -> Result<(PlatformDriver, PlatformWaker), Http3NativeError> {
     match runtime_mode {
-        TransportRuntimeMode::Fast => io_uring::IoUringDriver::new(socket)
-            .map(|(driver, waker)| {
-                (
-                    PlatformDriver::IoUring(driver),
-                    PlatformWaker::IoUring(waker),
-                )
-            })
-            .map_err(|error| match error.raw_os_error() {
-                Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::ENOSYS) => {
-                    Http3NativeError::fast_path_unavailable("io_uring", "io_uring_setup", error)
+        TransportRuntimeMode::Fast => {
+            reactor_metrics::record_driver_setup_attempt(RuntimeDriverKind::IoUring);
+            match io_uring::IoUringDriver::new(socket) {
+                Ok((driver, waker)) => {
+                    reactor_metrics::record_driver_setup_success(RuntimeDriverKind::IoUring);
+                    Ok((PlatformDriver::IoUring(driver), PlatformWaker::IoUring(waker)))
                 }
-                _ => Http3NativeError::Io(error),
-            }),
-        TransportRuntimeMode::Portable => poll::PollDriver::new(socket)
-            .map(|(driver, waker)| (PlatformDriver::Poll(driver), PlatformWaker::Poll(waker)))
-            .map_err(Http3NativeError::Io),
+                Err(error) => {
+                    reactor_metrics::record_driver_setup_failure(RuntimeDriverKind::IoUring);
+                    Err(match error.raw_os_error() {
+                        Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::ENOSYS) => {
+                            Http3NativeError::fast_path_unavailable(
+                                "io_uring",
+                                "io_uring_setup",
+                                error,
+                            )
+                        }
+                        _ => Http3NativeError::Io(error),
+                    })
+                }
+            }
+        }
+        TransportRuntimeMode::Portable => {
+            reactor_metrics::record_driver_setup_attempt(RuntimeDriverKind::Poll);
+            match poll::PollDriver::new(socket) {
+                Ok((driver, waker)) => {
+                    reactor_metrics::record_driver_setup_success(RuntimeDriverKind::Poll);
+                    Ok((PlatformDriver::Poll(driver), PlatformWaker::Poll(waker)))
+                }
+                Err(error) => {
+                    reactor_metrics::record_driver_setup_failure(RuntimeDriverKind::Poll);
+                    Err(Http3NativeError::Io(error))
+                }
+            }
+        }
     }
 }
 

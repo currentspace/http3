@@ -78,6 +78,29 @@ The same object is emitted on the `'runtime'` event and passed to
   process warning with code `WARN_HTTP3_RUNTIME_FALLBACK`.
 - If fallback is forbidden, fails with `ERR_HTTP3_FAST_PATH_UNAVAILABLE`.
 
+## Topology and worker ownership
+
+Runtime mode selects the backend/driver. It does not always imply a unique
+worker/socket topology:
+
+- Raw QUIC server: one worker per bound UDP port, many sessions multiplexed on it.
+- H3 server: one worker per bound UDP port, many sessions multiplexed on it.
+- Raw QUIC client fast mode: one shared worker and one local UDP port per bind family.
+- H3 client fast mode: one shared worker and one local UDP port per bind family.
+- macOS `kqueue`: the shared client ownership model is also used for portable mode,
+  so macOS topology stays aligned even though both runtime modes use `kqueue`.
+- Linux portable mode: still uses the compatibility driver and may use dedicated
+  client workers when the topology policy requires it.
+
+Observable surfaces:
+
+- `session.runtimeInfo` / `server.runtimeInfo` tells you the selected mode and driver.
+- `session._eventLoop.worker.localAddress()` remains the easiest way to confirm
+  client-port reuse in focused tests.
+- `npm run bench:quic` and `npm run bench:h3` now include internal reactor telemetry:
+  driver setup attempts/successes, worker spawns, shared-worker reuse, session
+  open/close counts, and TX buffer recycling.
+
 ## Environment matrix
 
 | Environment | `fast` | `portable` | `auto` |
@@ -224,3 +247,22 @@ To include the optional privileged confirmation lane:
 ```bash
 HTTP3_RUNTIME_TEST_PRIVILEGED=1 npm run test:docker:runtime
 ```
+
+## Benchmark observability
+
+Two host-side benchmark harnesses now expose runtime selection plus internal
+reactor counters in both human and JSON output:
+
+```bash
+npm run bench:quic -- --profile smoke --json
+npm run bench:h3 -- --profile smoke --json
+```
+
+Look for:
+
+- `driverSetupAttemptsTotal` / `driverSetupSuccessTotal`
+- protocol-specific shared-worker counters such as
+  `rawQuicClientSharedWorkersCreated` or `h3ClientSharedWorkersCreated`
+- `clientLocalPortReuseHits`
+- protocol-specific session open/close counts
+- `txBuffersRecycled`
