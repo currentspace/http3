@@ -227,6 +227,12 @@ function flattenSummary(summary, sourcePath, context = {}) {
     backendSignals: {
       ioUringPendingTxHighWatermark: clientTelemetry.ioUringPendingTxHighWatermark ?? 0,
       ioUringRetryableSendCompletions: clientTelemetry.ioUringRetryableSendCompletions ?? 0,
+      rawQuicFinObservations: clientTelemetry.rawQuicFinObservations ?? 0,
+      rawQuicFinishedEventEmits: clientTelemetry.rawQuicFinishedEventEmits ?? 0,
+      rawQuicClientPendingWriteHighWatermark: clientTelemetry.rawQuicClientPendingWriteHighWatermark ?? 0,
+      rawQuicClientReapsWithKnownStreams: clientTelemetry.rawQuicClientReapsWithKnownStreams ?? 0,
+      rawQuicClientCloseByTimeout: clientTelemetry.rawQuicClientCloseByTimeout ?? 0,
+      rawQuicClientCloseByRelease: clientTelemetry.rawQuicClientCloseByRelease ?? 0,
       kqueueUnsentHighWatermark: clientTelemetry.kqueueUnsentHighWatermark ?? 0,
       kqueueWouldBlockSends: clientTelemetry.kqueueWouldBlockSends ?? 0,
       kqueueWriteWakeups: clientTelemetry.kqueueWriteWakeups ?? 0,
@@ -257,6 +263,12 @@ function flattenSummary(summary, sourcePath, context = {}) {
       backendSignals: {
         ioUringPendingTxHighWatermark: serverTelemetry.ioUringPendingTxHighWatermark ?? 0,
         ioUringRetryableSendCompletions: serverTelemetry.ioUringRetryableSendCompletions ?? 0,
+        rawQuicFinObservations: serverTelemetry.rawQuicFinObservations ?? 0,
+        rawQuicFinishedEventEmits: serverTelemetry.rawQuicFinishedEventEmits ?? 0,
+        rawQuicClientPendingWriteHighWatermark: serverTelemetry.rawQuicClientPendingWriteHighWatermark ?? 0,
+        rawQuicClientReapsWithKnownStreams: serverTelemetry.rawQuicClientReapsWithKnownStreams ?? 0,
+        rawQuicClientCloseByTimeout: serverTelemetry.rawQuicClientCloseByTimeout ?? 0,
+        rawQuicClientCloseByRelease: serverTelemetry.rawQuicClientCloseByRelease ?? 0,
         kqueueUnsentHighWatermark: serverTelemetry.kqueueUnsentHighWatermark ?? 0,
         kqueueWouldBlockSends: serverTelemetry.kqueueWouldBlockSends ?? 0,
         kqueueWriteWakeups: serverTelemetry.kqueueWriteWakeups ?? 0,
@@ -345,6 +357,12 @@ function groupRecords(records) {
         backendSignals: {
           ioUringPendingTxHighWatermark: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringPendingTxHighWatermark), 0, ''),
           ioUringRetryableSendCompletions: rangeText(recordsForKey.map((record) => record.backendSignals.ioUringRetryableSendCompletions), 0, ''),
+          rawQuicFinObservations: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicFinObservations), 0, ''),
+          rawQuicFinishedEventEmits: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicFinishedEventEmits), 0, ''),
+          rawQuicClientPendingWriteHighWatermark: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicClientPendingWriteHighWatermark), 0, ''),
+          rawQuicClientReapsWithKnownStreams: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicClientReapsWithKnownStreams), 0, ''),
+          rawQuicClientCloseByTimeout: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicClientCloseByTimeout), 0, ''),
+          rawQuicClientCloseByRelease: rangeText(recordsForKey.map((record) => record.backendSignals.rawQuicClientCloseByRelease), 0, ''),
           kqueueUnsentHighWatermark: rangeText(recordsForKey.map((record) => record.backendSignals.kqueueUnsentHighWatermark), 0, ''),
           kqueueWouldBlockSends: rangeText(recordsForKey.map((record) => record.backendSignals.kqueueWouldBlockSends), 0, ''),
           kqueueWriteWakeups: rangeText(recordsForKey.map((record) => record.backendSignals.kqueueWriteWakeups), 0, ''),
@@ -375,6 +393,12 @@ function printGroups(groups) {
     console.log(
       `  backend: io_uring pending=${group.backendSignals.ioUringPendingTxHighWatermark},` +
       ` io_uring retries=${group.backendSignals.ioUringRetryableSendCompletions},` +
+      ` raw fin=${group.backendSignals.rawQuicFinObservations},` +
+      ` raw finished=${group.backendSignals.rawQuicFinishedEventEmits},` +
+      ` raw pendingHw=${group.backendSignals.rawQuicClientPendingWriteHighWatermark},` +
+      ` raw reapKnown=${group.backendSignals.rawQuicClientReapsWithKnownStreams},` +
+      ` raw timeoutClose=${group.backendSignals.rawQuicClientCloseByTimeout},` +
+      ` raw releaseClose=${group.backendSignals.rawQuicClientCloseByRelease},` +
       ` kqueue backlog=${group.backendSignals.kqueueUnsentHighWatermark},` +
       ` kqueue wouldBlock=${group.backendSignals.kqueueWouldBlockSends},` +
       ` kqueue writeWakeups=${group.backendSignals.kqueueWriteWakeups}`,

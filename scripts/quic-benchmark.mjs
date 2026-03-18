@@ -638,6 +638,43 @@ function formatServerReactorSummary(telemetry) {
   ].join(', ');
 }
 
+function formatRawQuicSignalSummary(telemetry) {
+  if (!telemetry) {
+    return null;
+  }
+  const values = [
+    telemetry.rawQuicFinObservations ?? 0,
+    telemetry.rawQuicFinishedEventEmits ?? 0,
+    telemetry.rawQuicDrainEventEmits ?? 0,
+    telemetry.rawQuicBlockedStreamHighWatermark ?? 0,
+    telemetry.rawQuicClientPendingWriteHighWatermark ?? 0,
+    telemetry.rawQuicClientReapsWithPendingWrites ?? 0,
+    telemetry.rawQuicClientReapsWithBlockedStreams ?? 0,
+    telemetry.rawQuicClientReapsWithKnownStreams ?? 0,
+    telemetry.rawQuicClientCloseByPacket ?? 0,
+    telemetry.rawQuicClientCloseByTimeout ?? 0,
+    telemetry.rawQuicClientCloseByShutdown ?? 0,
+    telemetry.rawQuicClientCloseByRelease ?? 0,
+  ];
+  if (values.every((value) => value === 0)) {
+    return null;
+  }
+  return [
+    `fin=${telemetry.rawQuicFinObservations ?? 0}`,
+    `finished=${telemetry.rawQuicFinishedEventEmits ?? 0}`,
+    `drains=${telemetry.rawQuicDrainEventEmits ?? 0}`,
+    `blockedHw=${telemetry.rawQuicBlockedStreamHighWatermark ?? 0}`,
+    `pendingHw=${telemetry.rawQuicClientPendingWriteHighWatermark ?? 0}`,
+    `reaps=pw:${telemetry.rawQuicClientReapsWithPendingWrites ?? 0}` +
+      `/blocked:${telemetry.rawQuicClientReapsWithBlockedStreams ?? 0}` +
+      `/known:${telemetry.rawQuicClientReapsWithKnownStreams ?? 0}`,
+    `close=packet:${telemetry.rawQuicClientCloseByPacket ?? 0}` +
+      `/timeout:${telemetry.rawQuicClientCloseByTimeout ?? 0}` +
+      `/shutdown:${telemetry.rawQuicClientCloseByShutdown ?? 0}` +
+      `/release:${telemetry.rawQuicClientCloseByRelease ?? 0}`,
+  ].join(', ');
+}
+
 function printSummary(summary) {
   const {
     settings,
@@ -680,6 +717,10 @@ function printSummary(summary) {
   );
   console.log(`  Client runtime selections: ${formatCountSummary(clientStats.runtimeSelections)}`);
   console.log(`  Client reactor: ${formatClientReactorSummary(clientStats.reactorTelemetry)}`);
+  const clientRawQuicSignals = formatRawQuicSignalSummary(clientStats.reactorTelemetry);
+  if (clientRawQuicSignals) {
+    console.log(`  Client raw-quic signals: ${clientRawQuicSignals}`);
+  }
 
   if (serverStats) {
     console.log(`  Server runtime selected: ${formatRuntimeInfo(serverStats.runtimeInfo)}`);
@@ -699,6 +740,10 @@ function printSummary(summary) {
       ` util=${serverStats.cpuUtilizationPct.toFixed(1)}%`,
     );
     console.log(`  Server reactor: ${formatServerReactorSummary(serverStats.reactorTelemetry)}`);
+    const serverRawQuicSignals = formatRawQuicSignalSummary(serverStats.reactorTelemetry);
+    if (serverRawQuicSignals) {
+      console.log(`  Server raw-quic signals: ${serverRawQuicSignals}`);
+    }
   }
 
   console.log('  Rounds:');

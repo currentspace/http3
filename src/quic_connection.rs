@@ -9,6 +9,7 @@ use std::time::Instant;
 use crate::connection::ConnectionMetrics;
 use crate::error::Http3NativeError;
 use crate::h3_event::JsH3Event;
+use crate::reactor_metrics;
 
 /// A raw QUIC connection (no HTTP/3 framing).
 /// Streams carry opaque byte data, not HTTP semantics.
@@ -127,6 +128,7 @@ impl QuicConnection {
                             fin,
                         ));
                         if fin {
+                            reactor_metrics::record_raw_quic_fin_observed();
                             // Don't emit separate FINISHED — the NEW_STREAM event
                             // carries fin=true and TS handler will push(null).
                             self.known_streams.remove(&stream_id);
@@ -169,6 +171,8 @@ impl QuicConnection {
                             ));
                         }
                         if fin {
+                            reactor_metrics::record_raw_quic_fin_observed();
+                            reactor_metrics::record_raw_quic_finished_event();
                             events.push(JsH3Event::finished(conn_handle, stream_id));
                             self.known_streams.remove(&stream_id);
                             // Change 8: proactive stream_shutdown on FIN
@@ -209,6 +213,7 @@ impl QuicConnection {
             match self.quiche_conn.stream_writable(stream_id, 1) {
                 Ok(true) => {
                     self.blocked_set.remove(&stream_id);
+                    reactor_metrics::record_raw_quic_drain_event();
                     events.push(JsH3Event::drain(conn_handle, stream_id));
                 }
                 Err(e) => {
@@ -249,6 +254,7 @@ impl QuicConnection {
             Ok(written) => {
                 if written < data.len() && self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
+                    reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
                 self.known_streams.insert(stream_id);
                 // Signal progress for FIN-only sends (0 data bytes written
@@ -263,6 +269,7 @@ impl QuicConnection {
             Err(quiche::Error::Done) => {
                 if self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
+                    reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
                 Ok(0)
             }
