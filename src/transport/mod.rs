@@ -18,6 +18,10 @@ pub struct RxDatagram {
     pub peer: SocketAddr,
     /// Local address this packet was received on (from IP_PKTINFO cmsg).
     pub local: SocketAddr,
+    /// When `Some`, this buffer contains multiple GRO-coalesced segments of
+    /// this size (last segment may be shorter). The event loop splits them
+    /// before passing to `process_packet`.
+    pub segment_size: Option<u16>,
 }
 
 /// A transmit request. Ownership transfers to the driver.

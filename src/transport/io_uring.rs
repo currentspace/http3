@@ -20,7 +20,7 @@ mod inner {
 
     use crate::reactor_metrics;
     use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso};
-    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg, probe_gso, build_gso_cmsg};
+    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg, probe_gso, build_gso_cmsg, enable_gro, parse_gro_cmsg};
 
     /// Number of provided buffers in the RX buffer ring.
     const RX_RING_SIZE: u16 = 256;
@@ -307,6 +307,7 @@ mod inner {
             let local_addr = socket.local_addr()?;
             let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
+            enable_gro(&socket);
 
             // Create eventfd for wakeup
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.
@@ -434,11 +435,13 @@ mod inner {
                                         let local = local_ip
                                             .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                                             .unwrap_or(self.local_addr);
+                                        let segment_size = parse_gro_cmsg(control);
                                         let payload = parsed.payload_data();
                                         outcome.rx.push(RxDatagram {
                                             data: payload.to_vec(),
                                             peer,
                                             local,
+                                            segment_size,
                                         });
                                         reactor_metrics::record_io_uring_rx_datagrams(1);
                                     }

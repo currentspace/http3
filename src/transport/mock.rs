@@ -136,6 +136,7 @@ impl Driver for MockDriver {
                         data: datagram.bytes,
                         peer: datagram.from,
                         local: self.local_addr,
+                        segment_size: None,
                     });
                 }
                 Err(TryRecvError::Empty) => break,
@@ -162,12 +163,14 @@ impl Driver for MockDriver {
                         data: datagram.bytes,
                         peer: datagram.from,
                         local: self.local_addr,
+                        segment_size: None,
                     });
                     while let Ok(extra) = self.inbound_rx.try_recv() {
                         outcome.rx.push(RxDatagram {
                             data: extra.bytes,
                             peer: extra.from,
                             local: self.local_addr,
+                            segment_size: None,
                         });
                     }
                 } else {

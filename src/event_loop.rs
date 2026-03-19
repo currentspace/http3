@@ -360,13 +360,29 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         let mut rx_recycled: Vec<Vec<u8>> = Vec::new();
         for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
             pending_outbound.clear();
-            handler.process_packet(
-                &mut pkt.data,
-                pkt.peer,
-                pkt.local,
-                &mut pending_outbound,
-                &mut batcher.batch,
-            );
+            // GRO: kernel may coalesce multiple datagrams into one buffer.
+            // Split by segment_size and call process_packet for each.
+            if let Some(seg_size) = pkt.segment_size {
+                let seg = seg_size as usize;
+                for chunk in pkt.data.chunks(seg) {
+                    let mut buf = chunk.to_vec();
+                    handler.process_packet(
+                        &mut buf,
+                        pkt.peer,
+                        pkt.local,
+                        &mut pending_outbound,
+                        &mut batcher.batch,
+                    );
+                }
+            } else {
+                handler.process_packet(
+                    &mut pkt.data,
+                    pkt.peer,
+                    pkt.local,
+                    &mut pending_outbound,
+                    &mut batcher.batch,
+                );
+            }
             rx_recycled.push(pkt.data);
             // Submit retry / version-negotiation packets immediately
             if !pending_outbound.is_empty() {

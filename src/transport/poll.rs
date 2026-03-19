@@ -17,7 +17,7 @@ mod inner {
     };
     use crate::transport::socket::{
         CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg,
-        probe_gso, build_gso_cmsg,
+        probe_gso, build_gso_cmsg, enable_gro, parse_gro_cmsg,
     };
 
     const MAX_RX_PER_POLL: usize = 256;
@@ -123,6 +123,7 @@ mod inner {
             let local_addr = socket.local_addr()?;
             let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
+            enable_gro(&socket);
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.
             let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
             if efd < 0 {
@@ -280,18 +281,18 @@ mod inner {
                     namelen,
                 );
                 if let Some(peer) = peer {
-                    let cmsg_len = self.rx_batch.hdrs[i].msg_hdr.msg_controllen;
-                    let local_ip = parse_pktinfo_cmsg(
-                        &self.rx_batch.slots[i].cmsg_buf[..cmsg_len],
-                    );
+                    let cmsg_data =
+                        &self.rx_batch.slots[i].cmsg_buf[..self.rx_batch.hdrs[i].msg_hdr.msg_controllen];
+                    let local_ip = parse_pktinfo_cmsg(cmsg_data);
                     let local = local_ip
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
+                    let segment_size = parse_gro_cmsg(cmsg_data);
                     let mut data = self.recycled_rx.pop()
                         .unwrap_or_else(|| Vec::with_capacity(len));
                     data.clear();
                     data.extend_from_slice(&self.rx_batch.slots[i].buf[..len]);
-                    outcome.rx.push(RxDatagram { data, peer, local });
+                    outcome.rx.push(RxDatagram { data, peer, local, segment_size });
                 }
             }
         }
