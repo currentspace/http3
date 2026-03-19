@@ -195,6 +195,58 @@ pub(crate) fn build_gso_cmsg(buf: &mut [u8], segment_size: u16) -> usize {
     cmsg_align(cmsg_len)
 }
 
+// ── UDP GRO (Generic Receive Offload) ───────────────────────────────
+
+#[cfg(target_os = "linux")]
+pub(crate) const UDP_GRO: libc::c_int = 104;
+
+/// Enable UDP GRO so the kernel coalesces same-source, same-size datagrams
+/// into a single large buffer with a `UDP_GRO` cmsg indicating segment size.
+/// Linux ≥5.0 only; silently no-ops on older kernels.
+#[cfg(target_os = "linux")]
+pub(crate) fn enable_gro(socket: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let enable: libc::c_int = 1;
+    // SAFETY: fd is a valid socket descriptor, enable points to a valid int.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::setsockopt(
+            fd,
+            SOL_UDP,
+            UDP_GRO,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+    }
+}
+
+/// Parse cmsg control data for `UDP_GRO` segment size.
+/// Returns the segment size if a GRO cmsg is present.
+#[cfg(target_os = "linux")]
+pub(crate) fn parse_gro_cmsg(control: &[u8]) -> Option<u16> {
+    let mut offset = 0;
+    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
+        let hdr: libc::cmsghdr =
+            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
+        if hdr.cmsg_len == 0 {
+            break;
+        }
+        let data_off = offset + cmsg_data_offset();
+
+        if hdr.cmsg_level == SOL_UDP && hdr.cmsg_type == UDP_GRO {
+            if data_off + std::mem::size_of::<u16>() <= control.len() {
+                let seg: u16 =
+                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+                return Some(seg);
+            }
+        }
+
+        offset += cmsg_align(hdr.cmsg_len as usize);
+    }
+    None
+}
+
 #[cfg(unix)]
 fn set_unix_reuse_port(socket: &socket2::Socket) -> Result<(), std::io::Error> {
     use std::os::fd::AsRawFd;
