@@ -13,19 +13,19 @@ use crate::error::Http3NativeError;
 use crate::reactor_metrics;
 
 /// A completed received UDP datagram. Owned by the caller.
-pub(crate) struct RxDatagram {
+pub struct RxDatagram {
     pub data: Vec<u8>,
     pub peer: SocketAddr,
 }
 
 /// A transmit request. Ownership transfers to the driver.
-pub(crate) struct TxDatagram {
+pub struct TxDatagram {
     pub data: Vec<u8>,
     pub to: SocketAddr,
 }
 
 /// Outcome of a single `Driver::poll()` cycle.
-pub(crate) struct PollOutcome {
+pub struct PollOutcome {
     /// Completed receive operations since last poll.
     pub rx: Vec<RxDatagram>,
     /// Cross-thread waker fired — drain command channel.
@@ -43,7 +43,7 @@ pub(crate) struct PollOutcome {
 /// On Linux (io_uring): completion-based. poll() processes CQEs from
 /// pre-submitted recvmsg SQEs, returning completed RxDatagram objects.
 /// submit_sends() builds sendmsg SQEs with owned stable-address buffers.
-pub(crate) trait Driver: Sized {
+pub trait Driver: Sized {
     type Waker: DriverWaker;
 
     /// Wrap an existing nonblocking `UdpSocket`. Returns `(driver, waker)`.
@@ -70,10 +70,14 @@ pub(crate) trait Driver: Sized {
 
     /// Concrete runtime driver backing this instance.
     fn driver_kind(&self) -> RuntimeDriverKind;
+
+    /// Return consumed RX buffers for reuse by the driver's receive path.
+    /// Default no-op; drivers that pool RX buffers override this.
+    fn recycle_rx_buffers(&mut self, _buffers: Vec<Vec<u8>>) {}
 }
 
 /// Cross-thread wake handle. Clone + Send + Sync.
-pub(crate) trait DriverWaker: Send + Sync + Clone + 'static {
+pub trait DriverWaker: Send + Sync + Clone + 'static {
     fn wake(&self) -> io::Result<()>;
 }
 
@@ -90,7 +94,7 @@ impl<W: DriverWaker> ErasedWaker for W {
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RuntimeDriverKind {
+pub enum RuntimeDriverKind {
     Kqueue,
     IoUring,
     Poll,
@@ -109,6 +113,10 @@ impl RuntimeDriverKind {
 }
 
 pub(crate) mod socket;
+
+#[cfg(feature = "bench-internals")]
+pub mod mock;
+#[cfg(not(feature = "bench-internals"))]
 pub(crate) mod mock;
 
 // ── Platform driver selection ───────────────────────────────────────
@@ -116,10 +124,14 @@ pub(crate) mod mock;
 #[cfg(target_os = "macos")]
 mod kqueue;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bench-internals"))]
+pub mod io_uring;
+#[cfg(all(target_os = "linux", not(feature = "bench-internals")))]
 mod io_uring;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bench-internals"))]
+pub mod poll;
+#[cfg(all(target_os = "linux", not(feature = "bench-internals")))]
 mod poll;
 
 #[cfg(target_os = "macos")]
@@ -272,6 +284,13 @@ impl Driver for PlatformDriver {
         match self {
             Self::IoUring(driver) => driver.driver_kind(),
             Self::Poll(driver) => driver.driver_kind(),
+        }
+    }
+
+    fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+        match self {
+            Self::IoUring(driver) => driver.recycle_rx_buffers(buffers),
+            Self::Poll(driver) => driver.recycle_rx_buffers(buffers),
         }
     }
 }
