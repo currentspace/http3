@@ -129,6 +129,9 @@ mod inner {
         }
     }
 
+    const FIXED_SOCKET: io_uring::types::Fixed = io_uring::types::Fixed(0);
+    const FIXED_EVENTFD: io_uring::types::Fixed = io_uring::types::Fixed(1);
+
     pub struct IoUringDriver {
         ring: io_uring::IoUring,
         socket_fd: RawFd,
@@ -173,6 +176,11 @@ mod inner {
             }
             // SAFETY: efd is a valid fd from successful eventfd() call.
             let eventfd = unsafe { OwnedFd::from_raw_fd(efd) };
+
+            // Register socket and eventfd for fixed-fd SQE submission.
+            ring.submitter()
+                .register_files(&[socket_fd, eventfd.as_raw_fd()])
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("register_files: {e}")))?;
 
             let rx_slots: Vec<RxSlot> = (0..RX_SLOTS).map(|_| RxSlot::new()).collect();
             let tx_slots: Vec<TxSlot> = (0..TX_SLOTS).map(|_| TxSlot::new()).collect();
@@ -367,7 +375,7 @@ mod inner {
 
                 let slot = &mut self.rx_slots[i];
                 let entry = io_uring::opcode::RecvMsg::new(
-                    io_uring::types::Fd(self.socket_fd),
+                    FIXED_SOCKET,
                     slot.msg.as_mut() as *mut libc::msghdr,
                 )
                 .build()
@@ -392,7 +400,7 @@ mod inner {
 
         fn submit_waker_read(&mut self) -> io::Result<()> {
             let entry = io_uring::opcode::Read::new(
-                io_uring::types::Fd(self.eventfd.as_raw_fd()),
+                FIXED_EVENTFD,
                 self.waker_buf.as_mut_ptr(),
                 8,
             )
@@ -422,7 +430,7 @@ mod inner {
                 self.tx_slots[idx].prepare(packet);
                 let slot = &mut self.tx_slots[idx];
                 let entry = io_uring::opcode::SendMsg::new(
-                    io_uring::types::Fd(self.socket_fd),
+                    FIXED_SOCKET,
                     slot.msg.as_mut() as *mut libc::msghdr,
                 )
                 .build()
