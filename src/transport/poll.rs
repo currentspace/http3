@@ -121,9 +121,9 @@ mod inner {
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
-            let gso_supported = probe_gso(&socket);
+            let gso_supported = false; // probe_gso(&socket);
             set_pktinfo(&socket);
-            enable_gro(&socket);
+            // enable_gro(&socket);
             log::info!(
                 "PollDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} tid={:?}",
                 std::thread::current().id(),
@@ -313,7 +313,12 @@ mod inner {
                 "poll::send_batch pkts={} gso={} tid={:?}",
                 packets.len(), self.gso_supported, std::thread::current().id(),
             );
-            if self.gso_supported && packets.len() > 1 {
+            if false && self.gso_supported && packets.len() > 1 {
+                #[cfg(test)]
+                eprintln!(
+                    "send_batch -> send_batch_gso: socket_fd={} socket.as_raw_fd={} pkts={}",
+                    self.socket_fd, self.socket.as_raw_fd(), packets.len(),
+                );
                 self.send_batch_gso(packets);
                 return;
             }
@@ -449,18 +454,44 @@ mod inner {
             for i in 0..count {
                 let hdr = &self.tx_hdrs[i].msg_hdr;
                 #[cfg(test)]
-                if hdr.msg_controllen > 0 {
-                    let ctrl = unsafe { std::slice::from_raw_parts(hdr.msg_control.cast::<u8>(), hdr.msg_controllen) };
+                {
+                    let ctrl = if hdr.msg_controllen > 0 {
+                        unsafe { std::slice::from_raw_parts(hdr.msg_control.cast::<u8>(), hdr.msg_controllen) }
+                    } else { &[] as &[u8] };
                     eprintln!(
-                        "GSO sendmsg: iov_len={} controllen={} control_bytes={:02x?} flags={}",
-                        unsafe { (*hdr.msg_iov).iov_len }, hdr.msg_controllen, ctrl, hdr.msg_flags,
+                        "GSO sendmsg[{i}]: iov_len={} controllen={} namelen={} iovlen_field={} flags={} seg_size={} iov_base={:?} control={:?}",
+                        unsafe { (*hdr.msg_iov).iov_len }, hdr.msg_controllen, hdr.msg_namelen,
+                        hdr.msg_iovlen, hdr.msg_flags, batch_seg_sizes[i],
+                        unsafe { (*hdr.msg_iov).iov_base }, hdr.msg_control,
                     );
+                    eprintln!("  control_bytes={:02x?}", ctrl);
+                    // Check: is the condition batch_data[i].len() > batch_seg_sizes[i] true?
+                    eprintln!(
+                        "  batch_data.len()={} > seg_size {} = {} (should attach cmsg = {})",
+                        batch_data[i].len(), batch_seg_sizes[i],
+                        batch_data[i].len() > batch_seg_sizes[i] as usize,
+                        hdr.msg_controllen > 0,
+                    );
+                }
+                // Build a fresh msghdr with exactly the same pointers for comparison.
+                #[cfg(test)]
+                {
+                    let mut fresh: libc::msghdr = unsafe { std::mem::zeroed() };
+                    fresh.msg_name = hdr.msg_name;
+                    fresh.msg_namelen = hdr.msg_namelen;
+                    fresh.msg_iov = hdr.msg_iov;
+                    fresh.msg_iovlen = hdr.msg_iovlen;
+                    fresh.msg_control = hdr.msg_control;
+                    fresh.msg_controllen = hdr.msg_controllen;
+                    fresh.msg_flags = hdr.msg_flags;
+                    let rc2 = unsafe { libc::sendmsg(self.socket_fd, &fresh, 0) };
+                    eprintln!("  fresh sendmsg rc={rc2}");
                 }
                 let rc = unsafe {
                     libc::sendmsg(
                         self.socket_fd,
                         &self.tx_hdrs[i].msg_hdr,
-                        0, // No MSG_DONTWAIT — nonblocking already set on socket
+                        0,
                     )
                 };
                 #[cfg(test)]
