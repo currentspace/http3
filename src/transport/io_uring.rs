@@ -479,19 +479,17 @@ mod inner {
         type Waker = IoUringWaker;
 
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
-            // Try optimal flags first (kernel ≥6.1), fall back gracefully.
+            // DEFER_TASKRUN defers completion task_work to the io_uring_enter
+            // call, which can reduce overhead in tight event loops. However, it
+            // requires SINGLE_ISSUER and mandates that io_uring_enter(GETEVENTS)
+            // is called by the *same thread* that set up the ring — otherwise the
+            // kernel returns EEXIST. Our architecture creates the driver on the
+            // main thread then moves it to a dedicated worker thread, violating
+            // that constraint. Skip DEFER_TASKRUN; the remaining flags are still
+            // beneficial.
             let ring = io_uring::IoUring::builder()
-                .setup_coop_taskrun()
-                .setup_single_issuer()
-                .setup_defer_taskrun()
                 .setup_cqsize(4096)
                 .build(128)
-                .or_else(|_| {
-                    // Fallback: older kernel without DEFER_TASKRUN support.
-                    io_uring::IoUring::builder()
-                        .setup_cqsize(4096)
-                        .build(128)
-                })
                 .or_else(|_| {
                     // Minimal fallback: no optional flags.
                     io_uring::IoUring::new(128)
