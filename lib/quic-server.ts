@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { X509Certificate } from 'node:crypto';
 import { binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
@@ -6,6 +7,7 @@ import type { QuicServerEventLoopLike } from './quic-stream.js';
 import { toSessionError } from './error-map.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
+import { resolveServerClientAuthMode } from './tls-client-auth.js';
 
 const EVENT_NEW_SESSION = 1;
 const EVENT_NEW_STREAM = 2;
@@ -17,6 +19,23 @@ const EVENT_DRAIN = 8;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
+
+const peerCertificatePresentedState = new WeakMap<QuicServerSession, boolean>();
+const peerCertificateChainRawState = new WeakMap<QuicServerSession, Buffer[]>();
+const peerCertificateChainState = new WeakMap<QuicServerSession, X509Certificate[]>();
+
+function setSessionPeerCertificateInfo(
+  session: QuicServerSession,
+  presented: boolean,
+  chain?: Buffer[],
+): void {
+  peerCertificatePresentedState.set(session, presented);
+  peerCertificateChainRawState.set(
+    session,
+    chain ? chain.map((certificate) => Buffer.from(certificate)) : [],
+  );
+  peerCertificateChainState.delete(session);
+}
 
 /** Options for creating a raw QUIC server (no HTTP/3 framing). */
 export interface QuicServerOptions {
@@ -30,8 +49,10 @@ export interface QuicServerOptions {
   key: Buffer | string;
   /** PEM-encoded certificate chain. */
   cert: Buffer | string;
-  /** PEM-encoded CA certificate for client verification. */
+  /** PEM-encoded CA certificate used to verify client certificates. */
   ca?: Buffer | string;
+  /** Client certificate policy. Default: `'require'` when `ca` is set, otherwise `'none'`. */
+  clientAuth?: 'none' | 'request' | 'require';
   /** ALPN protocol strings. Default: `['quic']`. */
   alpn?: string[];
   /** Idle timeout in milliseconds. Default: 30_000. */
@@ -137,6 +158,11 @@ export class QuicServerSession extends EventEmitter {
     this._eventLoop = eventLoop;
   }
 
+  /** Whether the peer presented a verified certificate during the QUIC handshake. */
+  get peerCertificatePresented(): boolean {
+    return peerCertificatePresentedState.get(this) ?? false;
+  }
+
   /** Open a new server-initiated bidirectional stream. */
   openStream(): QuicStream {
     const streamId = this._nextBidiStreamId;
@@ -176,6 +202,25 @@ export class QuicServerSession extends EventEmitter {
   /** Send a PING frame. Returns `true` if the command was queued. */
   ping(): boolean {
     return this._eventLoop.pingSession(this.connHandle);
+  }
+
+  /** Return the peer leaf certificate, or `null` when the peer did not present one. */
+  getPeerCertificate(): X509Certificate | null {
+    return this.getPeerCertificateChain()[0] ?? null;
+  }
+
+  /** Return the peer certificate chain as `X509Certificate` objects, leaf first. */
+  getPeerCertificateChain(): readonly X509Certificate[] {
+    const chainRaw = peerCertificateChainRawState.get(this) ?? [];
+    if (chainRaw.length === 0) {
+      return [];
+    }
+    let chain = peerCertificateChainState.get(this);
+    if (!chain) {
+      chain = chainRaw.map((certificate) => new X509Certificate(certificate));
+      peerCertificateChainState.set(this, chain);
+    }
+    return [...chain];
   }
 
   /** @internal */
@@ -246,12 +291,17 @@ export class QuicServer extends EventEmitter {
   async listen(port: number, host?: string): Promise<{ address: string; family: string; port: number }> {
     const opts = this._options;
     const NativeQuicServer = getNativeQuicServerConstructor();
+    const clientAuth = resolveServerClientAuthMode({
+      ca: opts.ca,
+      clientAuth: opts.clientAuth,
+    });
     const addr = runWithRuntimeSelectionSync(this, opts, (runtimeMode) => {
       const native = new NativeQuicServer(
         {
           key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
           cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
           ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
+          clientAuth,
           alpn: opts.alpn,
           runtimeMode,
           maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
@@ -355,6 +405,11 @@ export class QuicServer extends EventEmitter {
   private _onHandshakeComplete(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
     if (session) {
+      setSessionPeerCertificateInfo(
+        session,
+        event.meta?.peerCertificatePresented ?? false,
+        event.meta?.peerCertificateChain,
+      );
       this.emit('session', session);
     }
   }

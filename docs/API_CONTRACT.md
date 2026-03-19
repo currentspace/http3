@@ -62,6 +62,9 @@ first production-ready release line.
 - `QuicServerSession#sendDatagram(data)`
 - `QuicServerSession#getMetrics()` → `{ packetsIn, packetsOut, bytesIn, bytesOut, handshakeTimeMs, rttMs, cwnd } | null`
 - `QuicServerSession#ping()`
+- `QuicServerSession#peerCertificatePresented` (read-only boolean)
+- `QuicServerSession#getPeerCertificate()` → `X509Certificate | null`
+- `QuicServerSession#getPeerCertificateChain()` → `readonly X509Certificate[]`
 - `QuicServerSession` events: `'stream'`, `'datagram'`, `'close'`, `'error'`
 
 ## Stable QUIC Client API
@@ -86,8 +89,18 @@ first production-ready release line.
 
 ## Stable QUIC Options
 
-- `QuicServerOptions`: `key`, `cert`, `ca?`, `alpn?`, `maxIdleTimeoutMs?`, `maxUdpPayloadSize?`, `initialMaxData?`, `initialMaxStreamDataBidiLocal?`, `initialMaxStreamsBidi?`, `disableActiveMigration?`, `enableDatagrams?`, `maxConnections?`, `disableRetry?`, `qlogDir?`, `qlogLevel?`, `keylog?`
-- `QuicConnectOptions`: `ca?`, `rejectUnauthorized?`, `alpn?`, `servername?`, `maxIdleTimeoutMs?`, `maxUdpPayloadSize?`, `initialMaxData?`, `initialMaxStreamDataBidiLocal?`, `initialMaxStreamsBidi?`, `sessionTicket?`, `allow0RTT?`, `enableDatagrams?`, `keylog?`, `qlogDir?`, `qlogLevel?`
+- `QuicServerOptions`: `key`, `cert`, `ca?`, `clientAuth?`, `alpn?`, `maxIdleTimeoutMs?`, `maxUdpPayloadSize?`, `initialMaxData?`, `initialMaxStreamDataBidiLocal?`, `initialMaxStreamsBidi?`, `disableActiveMigration?`, `enableDatagrams?`, `maxConnections?`, `disableRetry?`, `qlogDir?`, `qlogLevel?`, `keylog?`
+- `QuicConnectOptions`: `ca?`, `cert?`, `key?`, `rejectUnauthorized?`, `alpn?`, `servername?`, `maxIdleTimeoutMs?`, `maxUdpPayloadSize?`, `initialMaxData?`, `initialMaxStreamDataBidiLocal?`, `initialMaxStreamsBidi?`, `sessionTicket?`, `allow0RTT?`, `enableDatagrams?`, `keylog?`, `qlogDir?`, `qlogLevel?`
+
+When `QuicServerOptions.ca` is provided and `clientAuth` is omitted, raw QUIC
+servers default to `clientAuth: 'require'`. Use `clientAuth: 'request'` only
+when you intentionally want to allow anonymous clients while still capturing a
+validated client certificate when one is presented.
+
+When a raw QUIC peer certificate is available through `QuicServerSession`, it is
+exposed as Node.js `X509Certificate` objects so applications can inspect
+fingerprints, subject/issuer fields, validity windows, and raw DER bytes using
+the standard `node:crypto` API.
 
 ## QUIC Error Constants
 

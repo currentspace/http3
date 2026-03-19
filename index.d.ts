@@ -114,6 +114,8 @@ export interface JsEventMeta {
   fallbackOccurred?: boolean
   errno?: number
   syscall?: string
+  peerCertificatePresented?: boolean
+  peerCertificateChain?: Array<ByteBuf>
 }
 
 export interface JsH3Event {
@@ -150,6 +152,8 @@ export interface JsMockQuicProfileOptions {
 
 export interface JsQuicClientOptions {
   ca?: ByteBuf
+  cert?: ByteBuf
+  key?: ByteBuf
   rejectUnauthorized?: boolean
   alpn?: Array<string>
   runtimeMode?: string
@@ -170,6 +174,7 @@ export interface JsQuicServerOptions {
   key: ByteBuf
   cert: ByteBuf
   ca?: ByteBuf
+  clientAuth?: string
   alpn?: Array<string>
   runtimeMode?: string
   maxIdleTimeoutMs?: number

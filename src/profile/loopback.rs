@@ -11,8 +11,8 @@ use serde::Serialize;
 
 use crate::cid::CidEncoding;
 use crate::config::{
-    JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode, new_quic_client_config,
-    new_quic_server_config,
+    ClientAuthMode, JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode,
+    new_quic_client_config, new_quic_server_config,
 };
 use crate::event_loop::EventBatcherStatsSnapshot;
 use crate::h3_event::{
@@ -598,6 +598,7 @@ fn build_server_config(options: &ServerOptions) -> Result<QuicServerConfig, Stri
         qlog_level: None,
         max_connections: 4_096,
         disable_retry: true,
+        client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: options.common.runtime_mode,
     })
@@ -610,6 +611,7 @@ fn build_server_quiche_config(options: &ServerOptions) -> Result<quiche::Config,
         key: key.into(),
         cert: cert.into(),
         ca: None,
+        client_auth: None,
         alpn: Some(vec![options.common.alpn.clone()]),
         runtime_mode: Some(runtime_mode_as_str(options.common.runtime_mode).into()),
         max_idle_timeout_ms: Some(DEFAULT_TIMEOUT_MS as u32),
@@ -632,6 +634,8 @@ fn build_server_quiche_config(options: &ServerOptions) -> Result<quiche::Config,
 fn build_client_quiche_config(options: &ClientOptions) -> Result<quiche::Config, String> {
     let client_options = JsQuicClientOptions {
         ca: None,
+        cert: None,
+        key: None,
         reject_unauthorized: Some(false),
         alpn: Some(vec![options.common.alpn.clone()]),
         runtime_mode: Some(runtime_mode_as_str(options.common.runtime_mode).into()),

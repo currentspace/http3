@@ -136,7 +136,8 @@ The fast Linux path is gated by syscall policy first, not by broad capabilities.
 | `privileged: true` | enabled | Broad workaround; not the preferred recommendation. |
 | Host `io_uring` disabled by kernel policy/sysctl | unavailable | `fast` still fails precisely; use `portable`. |
 
-In the tested Linux arm64 Docker Desktop matrix for 0.5.0:
+In the tested Linux arm64 Docker Desktop matrix captured during the 0.5.0
+release campaign:
 
 - ordinary containers worked in `portable`
 - ordinary containers failed precisely in `fast`
