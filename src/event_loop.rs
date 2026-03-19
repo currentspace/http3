@@ -28,7 +28,7 @@ use crate::transport::{Driver, TxDatagram};
 pub type EventTsfn = ThreadsafeFunction<Vec<JsH3Event>>;
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct EventBatcherStatsSnapshot {
+pub struct EventBatcherStatsSnapshot {
     pub sink_kind: &'static str,
     pub flush_count: u64,
     pub attempted_events: u64,
@@ -48,7 +48,7 @@ struct EventBatcherStatsInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct EventBatcherStatsHandle {
+pub struct EventBatcherStatsHandle {
     sink_kind: &'static str,
     inner: Arc<EventBatcherStatsInner>,
 }
@@ -100,7 +100,7 @@ impl EventBatcherStatsHandle {
 /// At 2048 events × ~50 bytes ≈ 100KB per batch — well within comfort.
 /// Larger batches amortize TSFN (Rust→JS thread boundary) overhead: at 10K
 /// streams, ~30K events per cycle ÷ 2048 ≈ 15 calls vs 60 at 512.
-pub(crate) const MAX_BATCH_SIZE: usize = 2048;
+pub const MAX_BATCH_SIZE: usize = 2048;
 
 /// Per-connection QUIC packet scratch buffer size.
 pub(crate) const SEND_BUF_SIZE: usize = 65535;
@@ -161,7 +161,7 @@ pub(crate) trait ProtocolHandler {
 
 // ── Event batcher ───────────────────────────────────────────────────
 
-pub(crate) trait EventSink: Send {
+pub trait EventSink: Send {
     fn kind(&self) -> &'static str;
     fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool;
 }
@@ -209,7 +209,7 @@ impl EventSink for TsfnEventSink {
     }
 }
 
-pub(crate) struct EventBatcher {
+pub struct EventBatcher {
     pub batch: Vec<JsH3Event>,
     sink: Box<dyn EventSink>,
     stats: EventBatcherStatsHandle,
@@ -357,6 +357,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         //    packets before any sends causes congestion-window stalls under
         //    fan-out (many connections sending concurrently).
         let rx_count = outcome.rx.len();
+        let mut rx_recycled: Vec<Vec<u8>> = Vec::new();
         for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
             pending_outbound.clear();
             handler.process_packet(
@@ -366,6 +367,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 &mut pending_outbound,
                 &mut batcher.batch,
             );
+            rx_recycled.push(pkt.data);
             // Submit retry / version-negotiation packets immediately
             if !pending_outbound.is_empty() {
                 if let Err(err) = driver.submit_sends(std::mem::take(&mut pending_outbound)) {
@@ -399,6 +401,9 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
                 return;
             }
+        }
+        if !rx_recycled.is_empty() {
+            driver.recycle_rx_buffers(rx_recycled);
         }
 
         // 5. Process protocol timers (always — cheap when nothing is expired)

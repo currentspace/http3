@@ -82,6 +82,7 @@ mod inner {
         eventfd: OwnedFd,
         unsent: VecDeque<TxDatagram>,
         recycled_tx: Vec<Vec<u8>>,
+        recycled_rx: Vec<Vec<u8>>,
         waker_buf: [u8; 8],
         rx_batch: RxBatch,
         /// Pre-allocated mmsghdr + iovec + sockaddr arrays for sendmmsg.
@@ -120,6 +121,7 @@ mod inner {
                 eventfd,
                 unsent: VecDeque::new(),
                 recycled_tx: Vec::new(),
+                recycled_rx: Vec::with_capacity(MAX_RX_PER_POLL),
                 waker_buf: [0u8; 8],
                 rx_batch: RxBatch::new(),
                 tx_hdrs: Vec::with_capacity(256),
@@ -225,6 +227,10 @@ mod inner {
         fn driver_kind(&self) -> RuntimeDriverKind {
             RuntimeDriverKind::Poll
         }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            self.recycled_rx.extend(buffers);
+        }
     }
 
     impl PollDriver {
@@ -255,10 +261,11 @@ mod inner {
                     namelen,
                 );
                 if let Some(peer) = peer {
-                    outcome.rx.push(RxDatagram {
-                        data: self.rx_batch.slots[i].buf[..len].to_vec(),
-                        peer,
-                    });
+                    let mut data = self.recycled_rx.pop()
+                        .unwrap_or_else(|| Vec::with_capacity(len));
+                    data.clear();
+                    data.extend_from_slice(&self.rx_batch.slots[i].buf[..len]);
+                    outcome.rx.push(RxDatagram { data, peer });
                 }
             }
         }
