@@ -254,7 +254,23 @@ mod inner {
         type Waker = IoUringWaker;
 
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
-            let ring = io_uring::IoUring::new(512)?;
+            // Try optimal flags first (kernel ≥6.1), fall back gracefully.
+            let ring = io_uring::IoUring::builder()
+                .setup_coop_taskrun()
+                .setup_single_issuer()
+                .setup_defer_taskrun()
+                .setup_cqsize(4096)
+                .build(128)
+                .or_else(|_| {
+                    // Fallback: older kernel without DEFER_TASKRUN support.
+                    io_uring::IoUring::builder()
+                        .setup_cqsize(4096)
+                        .build(128)
+                })
+                .or_else(|_| {
+                    // Minimal fallback: no optional flags.
+                    io_uring::IoUring::new(128)
+                })?;
             let socket_fd = socket.as_raw_fd();
 
             // Create eventfd for wakeup
