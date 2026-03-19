@@ -16,6 +16,8 @@ use crate::reactor_metrics;
 pub struct RxDatagram {
     pub data: Vec<u8>,
     pub peer: SocketAddr,
+    /// Local address this packet was received on (from IP_PKTINFO cmsg).
+    pub local: SocketAddr,
 }
 
 /// A transmit request. Ownership transfers to the driver.

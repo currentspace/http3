@@ -14,6 +14,7 @@ mod inner {
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
     };
+    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg};
 
     const MAX_RX_PER_POLL: usize = 256;
     const RX_BUF_SIZE: usize = 65535;
@@ -23,6 +24,7 @@ mod inner {
         buf: Vec<u8>,
         addr: libc::sockaddr_storage,
         iov: libc::iovec,
+        cmsg_buf: [u8; CMSG_CONTROL_LEN],
     }
 
     /// Pre-allocated recvmmsg batch state.
@@ -42,6 +44,7 @@ mod inner {
                         iov_base: std::ptr::null_mut(),
                         iov_len: 0,
                     },
+                    cmsg_buf: [0u8; CMSG_CONTROL_LEN],
                 })
                 .collect();
 
@@ -59,6 +62,8 @@ mod inner {
                     (&mut slots[i].addr as *mut libc::sockaddr_storage).cast();
                 hdrs[i].msg_hdr.msg_namelen =
                     std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                hdrs[i].msg_hdr.msg_control = slots[i].cmsg_buf.as_mut_ptr().cast();
+                hdrs[i].msg_hdr.msg_controllen = CMSG_CONTROL_LEN;
             }
 
             Self { slots, hdrs }
@@ -70,6 +75,7 @@ mod inner {
                 self.slots[i].iov.iov_len = RX_BUF_SIZE;
                 self.hdrs[i].msg_hdr.msg_namelen =
                     std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                self.hdrs[i].msg_hdr.msg_controllen = CMSG_CONTROL_LEN;
                 self.hdrs[i].msg_hdr.msg_flags = 0;
                 self.hdrs[i].msg_len = 0;
             }
@@ -79,6 +85,7 @@ mod inner {
     pub struct PollDriver {
         socket: std::net::UdpSocket,
         socket_fd: RawFd,
+        local_addr: SocketAddr,
         eventfd: OwnedFd,
         unsent: VecDeque<TxDatagram>,
         recycled_tx: Vec<Vec<u8>>,
@@ -107,6 +114,8 @@ mod inner {
 
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
             let socket_fd = socket.as_raw_fd();
+            let local_addr = socket.local_addr()?;
+            set_pktinfo(&socket);
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.
             let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
             if efd < 0 {
@@ -118,6 +127,7 @@ mod inner {
             let driver = Self {
                 socket,
                 socket_fd,
+                local_addr,
                 eventfd,
                 unsent: VecDeque::new(),
                 recycled_tx: Vec::new(),
@@ -261,11 +271,18 @@ mod inner {
                     namelen,
                 );
                 if let Some(peer) = peer {
+                    let cmsg_len = self.rx_batch.hdrs[i].msg_hdr.msg_controllen;
+                    let local_ip = parse_pktinfo_cmsg(
+                        &self.rx_batch.slots[i].cmsg_buf[..cmsg_len],
+                    );
+                    let local = local_ip
+                        .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
+                        .unwrap_or(self.local_addr);
                     let mut data = self.recycled_rx.pop()
                         .unwrap_or_else(|| Vec::with_capacity(len));
                     data.clear();
                     data.extend_from_slice(&self.rx_batch.slots[i].buf[..len]);
-                    outcome.rx.push(RxDatagram { data, peer });
+                    outcome.rx.push(RxDatagram { data, peer, local });
                 }
             }
         }

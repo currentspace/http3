@@ -39,7 +39,7 @@ impl MockTraceRecorder {
 }
 
 #[derive(Clone)]
-pub(crate) struct MockWaker {
+pub struct MockWaker {
     wake_tx: Sender<()>,
 }
 
@@ -48,7 +48,7 @@ struct MockInboundDatagram {
     bytes: Vec<u8>,
 }
 
-pub(crate) struct MockDriver {
+pub struct MockDriver {
     local_addr: SocketAddr,
     inbound_rx: Receiver<MockInboundDatagram>,
     outbound_tx: Sender<MockInboundDatagram>,
@@ -58,7 +58,7 @@ pub(crate) struct MockDriver {
 }
 
 impl MockDriver {
-    pub(crate) fn pair(
+    pub fn pair(
         left_addr: SocketAddr,
         right_addr: SocketAddr,
     ) -> ((Self, MockWaker), (Self, MockWaker)) {
@@ -135,6 +135,7 @@ impl Driver for MockDriver {
                     outcome.rx.push(RxDatagram {
                         data: datagram.bytes,
                         peer: datagram.from,
+                        local: self.local_addr,
                     });
                 }
                 Err(TryRecvError::Empty) => break,
@@ -160,11 +161,13 @@ impl Driver for MockDriver {
                     outcome.rx.push(RxDatagram {
                         data: datagram.bytes,
                         peer: datagram.from,
+                        local: self.local_addr,
                     });
                     while let Ok(extra) = self.inbound_rx.try_recv() {
                         outcome.rx.push(RxDatagram {
                             data: extra.bytes,
                             peer: extra.from,
+                            local: self.local_addr,
                         });
                     }
                 } else {

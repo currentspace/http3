@@ -20,13 +20,15 @@ mod inner {
 
     use crate::reactor_metrics;
     use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
+    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg};
 
     /// Number of provided buffers in the RX buffer ring.
     const RX_RING_SIZE: u16 = 256;
     /// Each buffer must hold a full UDP datagram + the recvmsg_out header + sockaddr.
     /// Header: io_uring_recvmsg_out (16 bytes) + sockaddr_storage (128 bytes) = 144 bytes overhead.
     const RX_BUF_OVERHEAD: usize = std::mem::size_of::<libc::sockaddr_storage>()
-        + 16; // io_uring_recvmsg_out header
+        + 16 // io_uring_recvmsg_out header
+        + CMSG_CONTROL_LEN;
     const RX_BUF_SIZE: usize = 65535 + RX_BUF_OVERHEAD;
     const TX_SLOTS: usize = 256;
 
@@ -112,11 +114,13 @@ mod inner {
                 tail_ptr.write(RX_RING_SIZE);
             }
 
-            // Build the msghdr for multishot (only msg_namelen is used by kernel).
+            // Build the msghdr for multishot (msg_namelen and msg_controllen are
+            // used by the kernel to size the name/control regions in each provided buffer).
             // SAFETY: zeroed msghdr is valid.
             let mut msg: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
             msg.msg_namelen =
                 std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            msg.msg_controllen = CMSG_CONTROL_LEN;
 
             Ok(Self {
                 ring_ptr,
@@ -231,6 +235,7 @@ mod inner {
         ring: io_uring::IoUring,
         socket_fd: RawFd,
         socket: std::net::UdpSocket,
+        local_addr: SocketAddr,
         eventfd: OwnedFd,
         rx_ring: RxBufferRing,
         /// Whether the multishot recvmsg SQE is currently armed.
@@ -276,6 +281,8 @@ mod inner {
                     io_uring::IoUring::new(128)
                 })?;
             let socket_fd = socket.as_raw_fd();
+            let local_addr = socket.local_addr()?;
+            set_pktinfo(&socket);
 
             // Create eventfd for wakeup
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.
@@ -300,6 +307,7 @@ mod inner {
                 ring,
                 socket_fd,
                 socket,
+                local_addr,
                 eventfd,
                 rx_ring,
                 rx_armed: false,
@@ -396,10 +404,16 @@ mod inner {
                                     let name_data = parsed.name_data();
                                     let peer = parse_sockaddr(name_data);
                                     if let Some(peer) = peer {
+                                        let control = parsed.control_data();
+                                        let local_ip = parse_pktinfo_cmsg(control);
+                                        let local = local_ip
+                                            .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
+                                            .unwrap_or(self.local_addr);
                                         let payload = parsed.payload_data();
                                         outcome.rx.push(RxDatagram {
                                             data: payload.to_vec(),
                                             peer,
+                                            local,
                                         });
                                         reactor_metrics::record_io_uring_rx_datagrams(1);
                                     }
