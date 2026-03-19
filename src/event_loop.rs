@@ -277,7 +277,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     cmd_rx: Receiver<P::Command>,
     handler: &mut P,
     mut batcher: EventBatcher,
-    local_addr: SocketAddr,
+    _local_addr: SocketAddr,
 ) {
     let mut outbound: Vec<TxDatagram> = Vec::new();
     let mut pending_outbound: Vec<TxDatagram> = Vec::new();
@@ -363,7 +363,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             handler.process_packet(
                 &mut pkt.data,
                 pkt.peer,
-                local_addr,
+                pkt.local,
                 &mut pending_outbound,
                 &mut batcher.batch,
             );
