@@ -28,7 +28,7 @@
 ## Contributors and Maintainers
 
 - Test strategy: [TEST_STRATEGY.md](./TEST_STRATEGY.md)
-- 0.5.0 release evidence ledger: [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md)
+- 0.6.0 release evidence ledger: [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md)
 - Release process: [RELEASE_RUNBOOK.md](./RELEASE_RUNBOOK.md)
 - [../CONTRIBUTING.md](../CONTRIBUTING.md)
 

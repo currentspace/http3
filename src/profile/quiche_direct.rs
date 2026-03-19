@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::config::{JsQuicClientOptions, JsQuicServerOptions, new_quic_client_config, new_quic_server_config};
+use crate::config::{
+    JsQuicClientOptions, JsQuicServerOptions, new_quic_client_config, new_quic_server_config,
+};
 
 const DEFAULT_ALPN: &str = "quic";
 const DEFAULT_SERVER_NAME: &str = "localhost";
@@ -365,6 +367,7 @@ fn build_server_config(options: &DirectOptions) -> Result<quiche::Config, String
         key: key.into(),
         cert: cert.into(),
         ca: None,
+        client_auth: None,
         alpn: Some(vec![options.alpn.clone()]),
         runtime_mode: None,
         max_idle_timeout_ms: Some(DEFAULT_TIMEOUT_MS as u32),
@@ -387,6 +390,8 @@ fn build_server_config(options: &DirectOptions) -> Result<quiche::Config, String
 fn build_client_config(options: &DirectOptions) -> Result<quiche::Config, String> {
     let client_options = JsQuicClientOptions {
         ca: None,
+        cert: None,
+        key: None,
         reject_unauthorized: Some(false),
         alpn: Some(vec![options.alpn.clone()]),
         runtime_mode: None,

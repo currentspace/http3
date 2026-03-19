@@ -22,7 +22,7 @@ use crate::client_topology::{
     default_quic_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
     ClientSocketStrategy, SharedClientWorkerKey as SharedQuicClientWorkerKey,
 };
-use crate::config::TransportRuntimeMode;
+use crate::config::{ClientAuthMode, TransportRuntimeMode};
 use crate::error::Http3NativeError;
 use crate::event_loop::{self, EventBatcher, ProtocolHandler, MAX_BATCH_SIZE, SEND_BUF_SIZE};
 #[cfg(feature = "node-api")]
@@ -819,6 +819,7 @@ pub struct QuicServerConfig {
     pub qlog_level: Option<String>,
     pub max_connections: usize,
     pub disable_retry: bool,
+    pub client_auth: ClientAuthMode,
     pub cid_encoding: CidEncoding,
     pub runtime_mode: TransportRuntimeMode,
 }
@@ -1829,8 +1830,34 @@ impl ProtocolHandler for QuicServerHandler {
                 conn.mark_established();
             }
             if conn.quiche_conn.is_established() && !conn.handshake_complete_emitted {
-                conn.handshake_complete_emitted = true;
-                batch.push(JsH3Event::handshake_complete(handle as u32));
+                if self.server_config.client_auth.require_client_cert()
+                    && conn.quiche_conn.peer_cert().is_none()
+                {
+                    let _ = conn
+                        .quiche_conn
+                        .close(false, 0x0100, b"client certificate required");
+                } else {
+                    let peer_certificate_chain = conn
+                        .quiche_conn
+                        .peer_cert_chain()
+                        .map(|chain| {
+                            chain
+                                .into_iter()
+                                .map(|certificate| certificate.to_vec())
+                                .collect()
+                        })
+                        .or_else(|| {
+                            conn.quiche_conn
+                                .peer_cert()
+                                .map(|certificate| vec![certificate.to_vec()])
+                        });
+                    conn.handshake_complete_emitted = true;
+                    batch.push(JsH3Event::handshake_complete_with_peer_certificate(
+                        handle as u32,
+                        conn.quiche_conn.peer_cert().is_some(),
+                        peer_certificate_chain,
+                    ));
+                }
             }
 
             let current_scid: Vec<u8> = conn.quiche_conn.source_id().into_owned().to_vec();

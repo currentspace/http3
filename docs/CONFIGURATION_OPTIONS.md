@@ -117,7 +117,8 @@ Used by `createQuicServer()`.
 | --- | --- | --- | --- |
 | `key` | `Buffer \| string` | required | PEM-encoded private key. |
 | `cert` | `Buffer \| string` | required | PEM-encoded certificate chain. |
-| `ca` | `Buffer \| string` | `none` | PEM-encoded CA bundle for peer verification. |
+| `ca` | `Buffer \| string` | `none` | PEM-encoded CA bundle used to verify client certificates. |
+| `clientAuth` | `'none' \| 'request' \| 'require'` | `'require'` when `ca` is set, otherwise `'none'` | `'require'` closes clients that do not present a verifiable certificate; `'request'` accepts anonymous clients but records a verified client cert when one is presented. |
 | `alpn` | `string[]` | `['quic']` | ALPN protocols advertised by the raw QUIC server. |
 | `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the raw QUIC server worker. |
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
@@ -135,6 +136,9 @@ Used by `createQuicServer()`.
 | `qlogLevel` | `string` | `none` | qlog verbosity string passed through to the native layer. |
 | `keylog` | `boolean` | `false` | Enables TLS key logging for raw QUIC. |
 
+`clientAuth: 'request'` and `clientAuth: 'require'` both require `ca`.
+`clientAuth: 'none'` cannot be combined with `ca`.
+
 ## `QuicConnectOptions`
 
 Used by `connectQuic()` and `connectQuicAsync()`.
@@ -145,6 +149,8 @@ Used by `connectQuic()` and `connectQuicAsync()`.
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `ca` | `Buffer \| string` | `none` | PEM-encoded CA bundle used to verify the remote certificate. |
+| `cert` | `Buffer \| string` | `none` | PEM-encoded client certificate chain for mutual TLS. Requires `key`. |
+| `key` | `Buffer \| string` | `none` | PEM-encoded client private key for mutual TLS. Requires `cert`. |
 | `rejectUnauthorized` | `boolean` | `true` | Set `false` to accept self-signed or otherwise untrusted certs. |
 | `alpn` | `string[]` | `['quic']` | ALPN protocols offered by the raw QUIC client. |
 | `servername` | `string` | authority host | Overrides the SNI hostname sent during TLS handshake. |
@@ -159,6 +165,10 @@ Used by `connectQuic()` and `connectQuicAsync()`.
 | `keylog` | `boolean` | `false` | Enables TLS key logging for raw QUIC. |
 | `qlogDir` | `string` | `none` | Directory where per-connection qlog files are written. |
 | `qlogLevel` | `string` | `none` | qlog verbosity string passed through to the native layer. |
+
+When either `cert` or `key` is provided, the other must also be provided.
+Invalid client mTLS input combinations or malformed PEM material fail through
+the public API with `ERR_HTTP3_TLS_CONFIG_ERROR`.
 
 ### Raw QUIC endpoint parameter
 

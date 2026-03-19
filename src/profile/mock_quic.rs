@@ -10,8 +10,8 @@ use serde::Serialize;
 
 use crate::cid::CidEncoding;
 use crate::config::{
-    JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode, new_quic_client_config,
-    new_quic_server_config,
+    ClientAuthMode, JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode,
+    new_quic_client_config, new_quic_server_config,
 };
 use crate::event_loop::EventBatcherStatsSnapshot;
 #[cfg(feature = "node-api")]
@@ -332,6 +332,7 @@ fn run_mock_quic_profile(
         qlog_level: None,
         max_connections: 128,
         disable_retry: true,
+        client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
     };

@@ -192,5 +192,12 @@ fn clone_event_meta(meta: &JsEventMeta) -> JsEventMeta {
         fallback_occurred: meta.fallback_occurred,
         errno: meta.errno,
         syscall: meta.syscall.clone(),
+        peer_certificate_presented: meta.peer_certificate_presented,
+        peer_certificate_chain: meta.peer_certificate_chain.as_ref().map(|chain| {
+            chain
+                .iter()
+                .map(|certificate| certificate.to_vec().into())
+                .collect()
+        }),
     }
 }

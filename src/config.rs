@@ -45,6 +45,56 @@ impl TransportRuntimeMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ClientAuthMode {
+    None,
+    Request,
+    Require,
+}
+
+impl ClientAuthMode {
+    pub fn parse(value: Option<&str>, has_ca: bool) -> Result<Self, Http3NativeError> {
+        match value {
+            None => Ok(if has_ca { Self::Require } else { Self::None }),
+            Some("none") => {
+                if has_ca {
+                    return Err(Http3NativeError::Config(
+                        "clientAuth='none' cannot be combined with ca".into(),
+                    ));
+                }
+                Ok(Self::None)
+            }
+            Some("request") => {
+                if !has_ca {
+                    return Err(Http3NativeError::Config(
+                        "clientAuth='request' requires ca".into(),
+                    ));
+                }
+                Ok(Self::Request)
+            }
+            Some("require") => {
+                if !has_ca {
+                    return Err(Http3NativeError::Config(
+                        "clientAuth='require' requires ca".into(),
+                    ));
+                }
+                Ok(Self::Require)
+            }
+            Some(other) => Err(Http3NativeError::Config(format!(
+                "invalid clientAuth: {other} (expected 'none', 'request', or 'require')",
+            ))),
+        }
+    }
+
+    pub fn verify_peer(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn require_client_cert(self) -> bool {
+        matches!(self, Self::Require)
+    }
+}
+
 /// Return the effective max datagram size for `addr`.
 /// Loopback addresses get 8192; everything else gets the standard 1350.
 pub fn effective_max_datagram_size(addr: &std::net::SocketAddr) -> usize {
@@ -341,6 +391,7 @@ pub struct JsQuicServerOptions {
     pub key: ByteBuf,
     pub cert: ByteBuf,
     pub ca: Option<ByteBuf>,
+    pub client_auth: Option<String>,
     pub alpn: Option<Vec<String>>,
     pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
@@ -361,6 +412,8 @@ pub struct JsQuicServerOptions {
 #[cfg_attr(feature = "node-api", napi(object))]
 pub struct JsQuicClientOptions {
     pub ca: Option<ByteBuf>,
+    pub cert: Option<ByteBuf>,
+    pub key: Option<ByteBuf>,
     pub reject_unauthorized: Option<bool>,
     pub alpn: Option<Vec<String>>,
     pub runtime_mode: Option<String>,
@@ -390,6 +443,8 @@ pub fn new_quic_server_config(
 ) -> Result<quiche::Config, Http3NativeError> {
     let mut config =
         quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(Http3NativeError::Quiche)?;
+    let client_auth =
+        ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
 
     let cert_path = TempFileGuard::new(&options.cert, "_qcert.pem")?;
     let key_path = TempFileGuard::new(&options.key, "_qkey.pem")?;
@@ -406,6 +461,7 @@ pub fn new_quic_server_config(
             .load_verify_locations_from_file(ca_path.as_str("ca")?)
             .map_err(Http3NativeError::Quiche)?;
     }
+    config.verify_peer(client_auth.verify_peer());
 
     let default_alpn = vec!["quic".to_string()];
     let alpn_protos = options.alpn.as_deref().unwrap_or(&default_alpn);
@@ -479,6 +535,35 @@ pub fn new_quic_client_config(
         config.verify_peer(true);
     } else {
         config.verify_peer(false);
+    }
+
+    match (options.cert.as_ref(), options.key.as_ref()) {
+        (Some(cert), Some(key)) => {
+            let cert_path = TempFileGuard::new(cert, "_qclient-cert.pem")?;
+            config
+                .load_cert_chain_from_pem_file(cert_path.as_str("client cert")?)
+                .map_err(|err| {
+                    Http3NativeError::Config(format!("invalid client certificate PEM: {err}"))
+                })?;
+
+            let key_path = TempFileGuard::new(key, "_qclient-key.pem")?;
+            config
+                .load_priv_key_from_pem_file(key_path.as_str("client key")?)
+                .map_err(|err| {
+                    Http3NativeError::Config(format!("invalid client private key PEM: {err}"))
+                })?;
+        }
+        (Some(_), None) => {
+            return Err(Http3NativeError::Config(
+                "client certificate requires private key".into(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(Http3NativeError::Config(
+                "client private key requires certificate".into(),
+            ));
+        }
+        (None, None) => {}
     }
 
     if let Some(ca) = options.ca.as_ref() {
@@ -607,4 +692,5 @@ mod tests {
             CidEncoding::Random => panic!("expected QUIC-LB plaintext CID encoding"),
         }
     }
+
 }

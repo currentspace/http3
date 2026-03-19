@@ -7,7 +7,7 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
 import { createQuicServer, connectQuic, connectQuicAsync } from '../../lib/index.js';
-import { ERR_HTTP3_ENDPOINT_RESOLUTION } from '../../lib/errors.js';
+import { ERR_HTTP3_ENDPOINT_RESOLUTION, ERR_HTTP3_TLS_CONFIG_ERROR } from '../../lib/errors.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
 
@@ -83,6 +83,114 @@ describe('QUIC edge cases', () => {
 
     await client.close();
     await server.close();
+  });
+
+  it('rejects cert without key through connectQuicAsync()', async () => {
+    await assert.rejects(
+      async () => connectQuicAsync('127.0.0.1:4433', {
+        cert: certs.cert,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual((err as Error & { code?: string }).code, ERR_HTTP3_TLS_CONFIG_ERROR);
+        assert.match(err.message, /key.*required.*cert/i);
+        return true;
+      },
+    );
+  });
+
+  it('throws for key without cert through connectQuic()', () => {
+    assert.throws(
+      () => connectQuic('127.0.0.1:4433', {
+        key: certs.key,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual((err as Error & { code?: string }).code, ERR_HTTP3_TLS_CONFIG_ERROR);
+        assert.match(err.message, /cert.*required.*key/i);
+        return true;
+      },
+    );
+  });
+
+  it('throws explicit TLS config errors for malformed client PEM material', () => {
+    assert.throws(
+      () => connectQuic('127.0.0.1:4433', {
+        cert: 'not a cert pem',
+        key: 'not a key pem',
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual((err as Error & { code?: string }).code, ERR_HTTP3_TLS_CONFIG_ERROR);
+        assert.match(err.message, /pem-encoded/i);
+        return true;
+      },
+    );
+  });
+
+  it('wraps native client TLS parse failures as public TLS config errors', async () => {
+    const invalidCertPem = [
+      '-----BEGIN CERTIFICATE-----',
+      'not-base64',
+      '-----END CERTIFICATE-----',
+    ].join('\n');
+    const invalidKeyPem = [
+      '-----BEGIN PRIVATE KEY-----',
+      'not-base64',
+      '-----END PRIVATE KEY-----',
+    ].join('\n');
+
+    await assert.rejects(
+      async () => connectQuicAsync('127.0.0.1:4433', {
+        cert: invalidCertPem,
+        key: invalidKeyPem,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual((err as Error & { code?: string }).code, ERR_HTTP3_TLS_CONFIG_ERROR);
+        assert.match(err.message, /certificate pem|private key pem/i);
+        return true;
+      },
+    );
+  });
+
+  it('rejects server clientAuth=require without ca', async () => {
+    const server = createQuicServer({
+      key: certs.key,
+      cert: certs.cert,
+      clientAuth: 'require',
+      disableRetry: true,
+    });
+
+    await assert.rejects(
+      async () => server.listen(0, '127.0.0.1'),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual((err as Error & { code?: string }).code, ERR_HTTP3_TLS_CONFIG_ERROR);
+        assert.match(err.message, /clientauth.*requires.*ca/i);
+        return true;
+      },
+    );
+  });
+
+  it('rejects server clientAuth=none when ca is configured', async () => {
+    const server = createQuicServer({
+      key: certs.key,
+      cert: certs.cert,
+      ca: certs.cert,
+      clientAuth: 'none',
+      disableRetry: true,
+    });
+
+    await assert.rejects(
+      async () => server.listen(0, '127.0.0.1'),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.strictEqual((err as Error & { code?: string }).code, ERR_HTTP3_TLS_CONFIG_ERROR);
+        assert.match(err.message, /cannot be combined with.*ca/i);
+        return true;
+      },
+    );
   });
 
   it('ALPN mismatch — client connection fails', async () => {
