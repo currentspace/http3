@@ -153,6 +153,8 @@ impl RuntimeDriverKind {
 }
 
 pub(crate) mod socket;
+#[cfg(test)]
+mod socket_tests;
 
 #[cfg(feature = "bench-internals")]
 pub mod mock;

@@ -1,0 +1,493 @@
+{
+  "artifactType": "iouring-vs-poll-comparison",
+  "generatedAt": "2026-03-19T16:02:07.797Z",
+  "tiers": [
+    {
+      "label": "baseline",
+      "clients": 1,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "timeoutMs": 30000
+    },
+    {
+      "label": "moderate",
+      "clients": 2,
+      "connections": 20,
+      "streams": 50,
+      "messageSize": "4KB",
+      "timeoutMs": 45000
+    },
+    {
+      "label": "heavy",
+      "clients": 4,
+      "connections": 20,
+      "streams": 100,
+      "messageSize": "16KB",
+      "timeoutMs": 60000
+    },
+    {
+      "label": "stress",
+      "clients": 4,
+      "connections": 50,
+      "streams": 100,
+      "messageSize": "16KB",
+      "timeoutMs": 90000
+    },
+    {
+      "label": "extreme",
+      "clients": 8,
+      "connections": 50,
+      "streams": 200,
+      "messageSize": "64KB",
+      "timeoutMs": 120000
+    }
+  ],
+  "protocols": [
+    "quic",
+    "h3"
+  ],
+  "rounds": 3,
+  "results": {
+    "quic:baseline:fast": {
+      "throughputMbps": 17.186013986013986,
+      "streamsPerSecond": 262.23776223776224,
+      "latencyMeanMs": 14.146666666666667,
+      "latencyP50Ms": 14.089999999999998,
+      "latencyP95Ms": 15.17,
+      "latencyP99Ms": 15.526666666666666,
+      "errors": 0,
+      "totalStreams": 1500,
+      "requestedStreams": 1500,
+      "wallElapsedMs": 5720,
+      "clientCpuPct": 4.230769230769231,
+      "serverCpuPct": 3.2779195804195806,
+      "peakRssMB": 117.63712,
+      "serverDriver": "io_uring",
+      "clientSelections": {
+        "fast->fast/io_uring/direct": 30
+      }
+    },
+    "quic:baseline:portable": {
+      "throughputMbps": 170.66666666666669,
+      "streamsPerSecond": 2604.166666666667,
+      "latencyMeanMs": 11.583333333333334,
+      "latencyP50Ms": 11.01,
+      "latencyP95Ms": 18.24,
+      "latencyP99Ms": 18.593333333333334,
+      "errors": 0,
+      "totalStreams": 1500,
+      "requestedStreams": 1500,
+      "wallElapsedMs": 576,
+      "clientCpuPct": 31.59722222222222,
+      "serverCpuPct": 35.284375000000004,
+      "peakRssMB": 96.632832,
+      "serverDriver": "poll",
+      "clientSelections": {
+        "portable->portable/poll/direct": 30
+      }
+    },
+    "h3:baseline:fast": {
+      "throughputMbps": 17.439063331559343,
+      "streamsPerSecond": 266.0989888238425,
+      "latencyMeanMs": 21.60333333333333,
+      "latencyP50Ms": 22.233333333333334,
+      "latencyP95Ms": 27.69333333333333,
+      "latencyP99Ms": 28.873333333333335,
+      "errors": 0,
+      "totalStreams": 1500,
+      "requestedStreams": 1500,
+      "wallElapsedMs": 5637,
+      "clientCpuPct": 5.2687599787120805,
+      "serverCpuPct": 4.715912719531666,
+      "peakRssMB": 113.573888,
+      "serverDriver": "io_uring",
+      "clientSelections": {
+        "fast->fast/io_uring/direct": 30
+      }
+    },
+    "h3:baseline:portable": {
+      "throughputMbps": 167.46848381601365,
+      "streamsPerSecond": 2555.366269165247,
+      "latencyMeanMs": 18.18,
+      "latencyP50Ms": 18.013333333333335,
+      "latencyP95Ms": 22.02,
+      "latencyP99Ms": 22.733333333333334,
+      "errors": 0,
+      "totalStreams": 1500,
+      "requestedStreams": 1500,
+      "wallElapsedMs": 587,
+      "clientCpuPct": 52.4701873935264,
+      "serverCpuPct": 50.28415672913118,
+      "peakRssMB": 93.945856,
+      "serverDriver": "poll",
+      "clientSelections": {
+        "portable->portable/poll/direct": 30
+      }
+    },
+    "quic:moderate:fast": {
+      "throughputMbps": 22.106932029009954,
+      "streamsPerSecond": 337.325012649688,
+      "latencyMeanMs": 32.38,
+      "latencyP50Ms": 31.91666666666666,
+      "latencyP95Ms": 46.025000000000006,
+      "latencyP99Ms": 51.25000000000001,
+      "errors": 0,
+      "totalStreams": 6000,
+      "requestedStreams": 6000,
+      "wallElapsedMs": 17787,
+      "clientCpuPct": 5.194805194805195,
+      "serverCpuPct": 3.6818968909878,
+      "peakRssMB": 142.835712,
+      "serverDriver": "io_uring",
+      "clientSelections": {
+        "fast->fast/io_uring/direct": 120
+      }
+    },
+    "quic:moderate:portable": {
+      "throughputMbps": 529.2274562584118,
+      "streamsPerSecond": 8075.3701211305515,
+      "latencyMeanMs": 26.74,
+      "latencyP50Ms": 26.245,
+      "latencyP95Ms": 36.883333333333326,
+      "latencyP99Ms": 37.89666666666667,
+      "errors": 0,
+      "totalStreams": 6000,
+      "requestedStreams": 6000,
+      "wallElapsedMs": 743,
+      "clientCpuPct": 99.46164199192464,
+      "serverCpuPct": 66.9792732166891,
+      "peakRssMB": 148.455424,
+      "serverDriver": "poll",
+      "clientSelections": {
+        "portable->portable/poll/direct": 120
+      }
+    },
+    "h3:moderate:fast": null,
+    "h3:moderate:portable": {
+      "throughputMbps": 529.9407008086254,
+      "streamsPerSecond": 8086.253369272237,
+      "latencyMeanMs": 33.88166666666667,
+      "latencyP50Ms": 31.13,
+      "latencyP95Ms": 47.52333333333333,
+      "latencyP99Ms": 48.02333333333333,
+      "errors": 0,
+      "totalStreams": 6000,
+      "requestedStreams": 6000,
+      "wallElapsedMs": 742,
+      "clientCpuPct": 133.96226415094338,
+      "serverCpuPct": 85.02035040431267,
+      "peakRssMB": 115.064832,
+      "serverDriver": "poll",
+      "clientSelections": {
+        "portable->portable/poll/direct": 120
+      }
+    },
+    "quic:heavy:fast": {
+      "throughputMbps": 93.1115748346135,
+      "streamsPerSecond": 355.1924699196377,
+      "latencyMeanMs": 490.70166666666665,
+      "latencyP50Ms": 233.29333333333332,
+      "latencyP95Ms": 2813.5591666666674,
+      "latencyP99Ms": 5259.425833333334,
+      "errors": 0,
+      "totalStreams": 24000,
+      "requestedStreams": 24000,
+      "wallElapsedMs": 67569,
+      "clientCpuPct": 9.052968077076766,
+      "serverCpuPct": 4.856249167517649,
+      "peakRssMB": 359.30112,
+      "serverDriver": "io_uring",
+      "clientSelections": {
+        "fast->fast/io_uring/direct": 240
+      }
+    },
+    "quic:heavy:portable": {
+      "throughputMbps": 1431.5030716723552,
+      "streamsPerSecond": 5460.750853242322,
+      "latencyMeanMs": 155.32666666666665,
+      "latencyP50Ms": 139.9725,
+      "latencyP95Ms": 395.3066666666666,
+      "latencyP99Ms": 447.75833333333327,
+      "errors": 0,
+      "totalStreams": 24000,
+      "requestedStreams": 24000,
+      "wallElapsedMs": 4395,
+      "clientCpuPct": 111.51308304891923,
+      "serverCpuPct": 62.57610921501706,
+      "peakRssMB": 364.150784,
+      "serverDriver": "poll",
+      "clientSelections": {
+        "portable->portable/poll/direct": 240
+      }
+    },
+    "h3:heavy:fast": null,
+    "h3:heavy:portable": null,
+    "quic:stress:fast": {
+      "throughputMbps": 580.7140483662544,
+      "streamsPerSecond": 2215.2482924127744,
+      "latencyMeanMs": 648.1558333333334,
+      "latencyP50Ms": 661.6466666666666,
+      "latencyP95Ms": 1037.7725,
+      "latencyP99Ms": 1566.2033333333336,
+      "errors": 0,
+      "totalStreams": 60000,
+      "requestedStreams": 60000,
+      "wallElapsedMs": 27085,
+      "clientCpuPct": 64.61879268968063,
+      "serverCpuPct": 31.292213402252166,
+      "peakRssMB": 710.344704,
+      "serverDriver": "io_uring",
+      "clientSelections": {
+        "fast->fast/io_uring/direct": 600
+      }
+    },
+    "quic:stress:portable": null,
+    "h3:stress:fast": null,
+    "h3:stress:portable": null,
+    "quic:extreme:fast": null,
+    "quic:extreme:portable": null,
+    "h3:extreme:fast": null,
+    "h3:extreme:portable": null
+  },
+  "comparisons": {
+    "quic:baseline": {
+      "fast": {
+        "throughputMbps": 17.186013986013986,
+        "streamsPerSecond": 262.23776223776224,
+        "latencyMeanMs": 14.146666666666667,
+        "latencyP50Ms": 14.089999999999998,
+        "latencyP95Ms": 15.17,
+        "latencyP99Ms": 15.526666666666666,
+        "errors": 0,
+        "totalStreams": 1500,
+        "requestedStreams": 1500,
+        "wallElapsedMs": 5720,
+        "clientCpuPct": 4.230769230769231,
+        "serverCpuPct": 3.2779195804195806,
+        "peakRssMB": 117.63712,
+        "serverDriver": "io_uring",
+        "clientSelections": {
+          "fast->fast/io_uring/direct": 30
+        }
+      },
+      "portable": {
+        "throughputMbps": 170.66666666666669,
+        "streamsPerSecond": 2604.166666666667,
+        "latencyMeanMs": 11.583333333333334,
+        "latencyP50Ms": 11.01,
+        "latencyP95Ms": 18.24,
+        "latencyP99Ms": 18.593333333333334,
+        "errors": 0,
+        "totalStreams": 1500,
+        "requestedStreams": 1500,
+        "wallElapsedMs": 576,
+        "clientCpuPct": 31.59722222222222,
+        "serverCpuPct": 35.284375000000004,
+        "peakRssMB": 96.632832,
+        "serverDriver": "poll",
+        "clientSelections": {
+          "portable->portable/poll/direct": 30
+        }
+      },
+      "delta": {
+        "throughputDelta": -89.93006993006993,
+        "streamsSecDelta": -89.93006993006993,
+        "latencyMeanDelta": 22.12949640287769,
+        "latencyP95Delta": -16.831140350877185,
+        "latencyP99Delta": -16.49336679813554,
+        "clientCpuDelta": -86.61031276415892,
+        "serverCpuDelta": -90.70999676083372
+      }
+    },
+    "h3:baseline": {
+      "fast": {
+        "throughputMbps": 17.439063331559343,
+        "streamsPerSecond": 266.0989888238425,
+        "latencyMeanMs": 21.60333333333333,
+        "latencyP50Ms": 22.233333333333334,
+        "latencyP95Ms": 27.69333333333333,
+        "latencyP99Ms": 28.873333333333335,
+        "errors": 0,
+        "totalStreams": 1500,
+        "requestedStreams": 1500,
+        "wallElapsedMs": 5637,
+        "clientCpuPct": 5.2687599787120805,
+        "serverCpuPct": 4.715912719531666,
+        "peakRssMB": 113.573888,
+        "serverDriver": "io_uring",
+        "clientSelections": {
+          "fast->fast/io_uring/direct": 30
+        }
+      },
+      "portable": {
+        "throughputMbps": 167.46848381601365,
+        "streamsPerSecond": 2555.366269165247,
+        "latencyMeanMs": 18.18,
+        "latencyP50Ms": 18.013333333333335,
+        "latencyP95Ms": 22.02,
+        "latencyP99Ms": 22.733333333333334,
+        "errors": 0,
+        "totalStreams": 1500,
+        "requestedStreams": 1500,
+        "wallElapsedMs": 587,
+        "clientCpuPct": 52.4701873935264,
+        "serverCpuPct": 50.28415672913118,
+        "peakRssMB": 93.945856,
+        "serverDriver": "poll",
+        "clientSelections": {
+          "portable->portable/poll/direct": 30
+        }
+      },
+      "delta": {
+        "throughputDelta": -89.58665957069363,
+        "streamsSecDelta": -89.58665957069364,
+        "latencyMeanDelta": 18.830216354968822,
+        "latencyP95Delta": 25.764456554647285,
+        "latencyP99Delta": 27.008797653958943,
+        "clientCpuDelta": -89.958564586026,
+        "serverCpuDelta": -90.62147398645827
+      }
+    },
+    "quic:moderate": {
+      "fast": {
+        "throughputMbps": 22.106932029009954,
+        "streamsPerSecond": 337.325012649688,
+        "latencyMeanMs": 32.38,
+        "latencyP50Ms": 31.91666666666666,
+        "latencyP95Ms": 46.025000000000006,
+        "latencyP99Ms": 51.25000000000001,
+        "errors": 0,
+        "totalStreams": 6000,
+        "requestedStreams": 6000,
+        "wallElapsedMs": 17787,
+        "clientCpuPct": 5.194805194805195,
+        "serverCpuPct": 3.6818968909878,
+        "peakRssMB": 142.835712,
+        "serverDriver": "io_uring",
+        "clientSelections": {
+          "fast->fast/io_uring/direct": 120
+        }
+      },
+      "portable": {
+        "throughputMbps": 529.2274562584118,
+        "streamsPerSecond": 8075.3701211305515,
+        "latencyMeanMs": 26.74,
+        "latencyP50Ms": 26.245,
+        "latencyP95Ms": 36.883333333333326,
+        "latencyP99Ms": 37.89666666666667,
+        "errors": 0,
+        "totalStreams": 6000,
+        "requestedStreams": 6000,
+        "wallElapsedMs": 743,
+        "clientCpuPct": 99.46164199192464,
+        "serverCpuPct": 66.9792732166891,
+        "peakRssMB": 148.455424,
+        "serverDriver": "poll",
+        "clientSelections": {
+          "portable->portable/poll/direct": 120
+        }
+      },
+      "delta": {
+        "throughputDelta": -95.82279192668804,
+        "streamsSecDelta": -95.82279192668804,
+        "latencyMeanDelta": 21.09199700822739,
+        "latencyP95Delta": 24.785359240849566,
+        "latencyP99Delta": 35.236168528454584,
+        "clientCpuDelta": -94.77707677978313,
+        "serverCpuDelta": -94.50293096033417
+      }
+    },
+    "quic:heavy": {
+      "fast": {
+        "throughputMbps": 93.1115748346135,
+        "streamsPerSecond": 355.1924699196377,
+        "latencyMeanMs": 490.70166666666665,
+        "latencyP50Ms": 233.29333333333332,
+        "latencyP95Ms": 2813.5591666666674,
+        "latencyP99Ms": 5259.425833333334,
+        "errors": 0,
+        "totalStreams": 24000,
+        "requestedStreams": 24000,
+        "wallElapsedMs": 67569,
+        "clientCpuPct": 9.052968077076766,
+        "serverCpuPct": 4.856249167517649,
+        "peakRssMB": 359.30112,
+        "serverDriver": "io_uring",
+        "clientSelections": {
+          "fast->fast/io_uring/direct": 240
+        }
+      },
+      "portable": {
+        "throughputMbps": 1431.5030716723552,
+        "streamsPerSecond": 5460.750853242322,
+        "latencyMeanMs": 155.32666666666665,
+        "latencyP50Ms": 139.9725,
+        "latencyP95Ms": 395.3066666666666,
+        "latencyP99Ms": 447.75833333333327,
+        "errors": 0,
+        "totalStreams": 24000,
+        "requestedStreams": 24000,
+        "wallElapsedMs": 4395,
+        "clientCpuPct": 111.51308304891923,
+        "serverCpuPct": 62.57610921501706,
+        "peakRssMB": 364.150784,
+        "serverDriver": "poll",
+        "clientSelections": {
+          "portable->portable/poll/direct": 240
+        }
+      },
+      "delta": {
+        "throughputDelta": -93.49553789459664,
+        "streamsSecDelta": -93.49553789459664,
+        "latencyMeanDelta": 215.91591913816046,
+        "latencyP95Delta": 611.7408847139775,
+        "latencyP99Delta": 1074.6126072472132,
+        "clientCpuDelta": -91.88169869439862,
+        "serverCpuDelta": -92.23945171977512
+      }
+    }
+  },
+  "errors": [
+    {
+      "key": "h3:moderate:fast",
+      "error": "h3 moderate fast exited 1\nfile:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455\n      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: H3 benchmark client 4 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    },
+    {
+      "key": "h3:heavy:fast",
+      "error": "h3 heavy fast exited 1\nfile:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455\n      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: H3 benchmark client 4 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    },
+    {
+      "key": "h3:heavy:portable",
+      "error": "h3 heavy portable exited 1\nfile:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455\n      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: H3 benchmark client 7 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    },
+    {
+      "key": "quic:stress:portable",
+      "error": "Timeout: quic stress portable"
+    },
+    {
+      "key": "h3:stress:fast",
+      "error": "h3 stress fast exited 1\nfile:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455\n      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: H3 benchmark client 4 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    },
+    {
+      "key": "h3:stress:portable",
+      "error": "h3 stress portable exited 1\nfile:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455\n      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: H3 benchmark client 5 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    },
+    {
+      "key": "quic:extreme:fast",
+      "error": "Timeout: quic extreme fast"
+    },
+    {
+      "key": "quic:extreme:portable",
+      "error": "quic extreme portable exited 1\nStream error (conn 38, stream 6): stream timed out\nStream error (conn 32, stream 55): stream timed out\nStream error (conn 0, stream 7): stream timed out\nfile:///home/brianmeek/scratch/http3-repo/scripts/quic-benchmark.mjs:502\n      reject(new Error(`QUIC benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: QUIC benchmark client 5 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/quic-benchmark.mjs:502:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    },
+    {
+      "key": "h3:extreme:fast",
+      "error": "h3 extreme fast exited 1\nfile:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455\n      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: H3 benchmark client 2 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    },
+    {
+      "key": "h3:extreme:portable",
+      "error": "h3 extreme portable exited 1\nfile:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455\n      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));\n             ^\n\nError: H3 benchmark client 4 timed out\n    at Timeout.<anonymous> (file:///home/brianmeek/scratch/http3-repo/scripts/h3-benchmark.mjs:455:14)\n    at listOnTimeout (node:internal/timers:614:17)\n    at process.processTimers (node:internal/timers:549:7)\n\nNode.js v23.2.0"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+Benchmark results after Phases 1-4 (IP_PKTINFO + GSO + GRO + send bundles)
+Kernel: 6.16.0-1002-asahi-arm
+Date: 2026-03-19
+Params: --warm-up-time 1 --measurement-time 3 --sample-size 20
+
+driver_submit_sends/io_uring/1      237.45 ns - 238.77 ns
+driver_submit_sends/io_uring/16     3.4779 µs - 3.5061 µs
+driver_submit_sends/io_uring/64     13.836 µs - 13.959 µs
+driver_submit_sends/io_uring/256    35.364 µs - 35.449 µs
+
+driver_submit_sends/poll/1          1.2747 µs - 1.2785 µs
+driver_submit_sends/poll/16         4.6628 µs - 4.7061 µs
+driver_submit_sends/poll/64         14.158 µs - 14.260 µs
+driver_submit_sends/poll/256        58.929 µs - 59.233 µs
+
+driver_poll_rx/io_uring/1           1.6923 µs - 1.6968 µs
+driver_poll_rx/io_uring/16          20.668 µs - 20.743 µs
+driver_poll_rx/io_uring/64          81.861 µs - 82.030 µs
+driver_poll_rx/io_uring/128         163.55 µs - 163.94 µs
+
+driver_poll_rx/poll/1               2.2030 µs - 2.2069 µs
+driver_poll_rx/poll/16              20.669 µs - 20.700 µs
+driver_poll_rx/poll/64              80.402 µs - 80.465 µs
+driver_poll_rx/poll/128             159.68 µs - 160.00 µs
+
+driver_roundtrip/io_uring           7.1984 µs - 8.5569 µs
+driver_roundtrip/poll               8.6009 µs - 8.7605 µs
+
+driver_poll_idle_wake/io_uring      28.257 µs - 28.687 µs
+driver_poll_idle_wake/poll          27.116 µs - 27.983 µs

@@ -1,0 +1,142 @@
+{
+  "artifactType": "iouring-vs-poll-escalation",
+  "generatedAt": "2026-03-19T22:11:18.467Z",
+  "stopConditions": {
+    "p95SpikeFactor": 3,
+    "errorRateThreshold": 0.02
+  },
+  "rounds": 3,
+  "initial": {
+    "clients": 2,
+    "connections": 10,
+    "streams": 50,
+    "messageSize": "4KB"
+  },
+  "escalation": {
+    "clients": 1.3,
+    "connections": 1.4,
+    "streams": 1.5
+  },
+  "results": [
+    {
+      "protocol": "quic",
+      "runtime": "fast",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": null,
+      "error": "exited 1"
+    },
+    {
+      "protocol": "quic",
+      "runtime": "portable",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": null,
+      "error": "exited 1"
+    },
+    {
+      "protocol": "h3",
+      "runtime": "fast",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": null,
+      "error": "exited 1"
+    },
+    {
+      "protocol": "h3",
+      "runtime": "portable",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": {
+        "throughputMbps": 12.172830333696279,
+        "streamsPerSecond": 185.74265035547302,
+        "latencyMeanMs": 27.73155172413793,
+        "latencyP50Ms": 18.748333333333335,
+        "latencyP95Ms": 101.3633333333333,
+        "latencyP99Ms": 157.44500000000002,
+        "errors": 100,
+        "totalStreams": 2900,
+        "errorRate": 0.034482758620689655,
+        "wallElapsedMs": 15613,
+        "clientCpuPct": 4.624351501953501,
+        "serverCpuPct": 3.599231409722667,
+        "peakRssMB": 123.895808,
+        "serverDriver": "poll"
+      }
+    },
+    {
+      "protocol": "h3",
+      "runtime": "portable",
+      "level": 1,
+      "iteration": 1,
+      "clients": 3,
+      "connections": 14,
+      "streams": 75,
+      "messageSize": "4KB",
+      "totalStreams": 9450,
+      "metrics": {
+        "throughputMbps": 19.850029326270914,
+        "streamsPerSecond": 302.88741037400683,
+        "latencyMeanMs": 43.99699082960119,
+        "latencyP50Ms": 37.417777777777786,
+        "latencyP95Ms": 80.0311111111111,
+        "latencyP99Ms": 220,
+        "errors": 72,
+        "totalStreams": 9378,
+        "errorRate": 0.007677543186180422,
+        "wallElapsedMs": 30962,
+        "clientCpuPct": 5.687617079000065,
+        "serverCpuPct": 3.4227827659711907,
+        "peakRssMB": 148.701184,
+        "serverDriver": "poll"
+      }
+    },
+    {
+      "protocol": "h3",
+      "runtime": "portable",
+      "level": 2,
+      "iteration": 2,
+      "clients": 3,
+      "connections": 20,
+      "streams": 113,
+      "messageSize": "16KB",
+      "totalStreams": 20340,
+      "metrics": {
+        "throughputMbps": 107.1350770102172,
+        "streamsPerSecond": 408.68788532339937,
+        "latencyMeanMs": 269.93179371002134,
+        "latencyP50Ms": 175.54111111111112,
+        "latencyP95Ms": 419.2344444444444,
+        "latencyP99Ms": 3663.445555555556,
+        "errors": 1580,
+        "totalStreams": 18760,
+        "errorRate": 0.08422174840085288,
+        "wallElapsedMs": 45903,
+        "clientCpuPct": 12.441452628368516,
+        "serverCpuPct": 7.073531141755442,
+        "peakRssMB": 288.243712,
+        "serverDriver": "poll"
+      }
+    }
+  ]
+}

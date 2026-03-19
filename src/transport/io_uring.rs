@@ -499,6 +499,10 @@ mod inner {
             let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
             enable_gro(&socket);
+            log::info!(
+                "IoUringDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} tid={:?}",
+                std::thread::current().id(),
+            );
 
             // Create eventfd for wakeup
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.

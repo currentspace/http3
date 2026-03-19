@@ -360,6 +360,12 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         let mut rx_recycled: Vec<Vec<u8>> = Vec::new();
         for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
             pending_outbound.clear();
+            if rx_idx == 0 {
+                log::trace!(
+                    "event_loop: processing {rx_count} rx pkts, first: len={} peer={} local={} gro={:?} tid={:?}",
+                    pkt.data.len(), pkt.peer, pkt.local, pkt.segment_size, std::thread::current().id(),
+                );
+            }
             // GRO: kernel may coalesce multiple datagrams into one buffer.
             // Split by segment_size and call process_packet for each.
             if let Some(seg_size) = pkt.segment_size {

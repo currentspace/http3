@@ -32,6 +32,19 @@ mod transport;
 #[cfg(feature = "node-api")]
 mod worker;
 
+#[cfg(feature = "bench-internals")]
+pub mod bench_exports {
+    pub use crate::transport::{
+        Driver, DriverWaker, PollOutcome, RxDatagram, TxDatagram, RuntimeDriverKind,
+    };
+    pub use crate::transport::mock::{MockDriver, MockWaker};
+
+    #[cfg(target_os = "linux")]
+    pub use crate::transport::io_uring::{IoUringDriver, IoUringWaker};
+    #[cfg(target_os = "linux")]
+    pub use crate::transport::poll::{PollDriver, PollWaker};
+}
+
 #[cfg(feature = "node-api")]
 use napi_derive::napi;
 
