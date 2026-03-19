@@ -144,6 +144,57 @@ fn cmsg_data_offset() -> usize {
     cmsg_align(std::mem::size_of::<libc::cmsghdr>())
 }
 
+// ── UDP GSO (Generic Segmentation Offload) ──────────────────────────
+
+/// `SOL_UDP` / `UDP_SEGMENT` may be missing from older libc crate versions.
+#[cfg(target_os = "linux")]
+pub(crate) const SOL_UDP: libc::c_int = 17;
+#[cfg(target_os = "linux")]
+pub(crate) const UDP_SEGMENT: libc::c_int = 103;
+
+/// Probe whether the kernel supports UDP GSO (Generic Segmentation Offload).
+/// Sets `UDP_SEGMENT` as a socket option; returns `true` if the kernel accepts it.
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_gso(socket: &UdpSocket) -> bool {
+    use std::os::fd::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let segment: libc::c_int = 0;
+    // SAFETY: fd is a valid socket, segment points to a valid int.
+    #[allow(unsafe_code)]
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            SOL_UDP,
+            UDP_SEGMENT,
+            &segment as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&segment) as libc::socklen_t,
+        )
+    };
+    rc == 0
+}
+
+/// Build a `UDP_SEGMENT` (GSO) cmsg into the provided buffer.
+/// Returns the total byte length of the cmsg (aligned).
+/// `buf` must be at least 32 bytes.
+#[cfg(target_os = "linux")]
+pub(crate) fn build_gso_cmsg(buf: &mut [u8], segment_size: u16) -> usize {
+    debug_assert!(buf.len() >= 32);
+    let cmsg_len = std::mem::size_of::<libc::cmsghdr>() + std::mem::size_of::<u16>();
+    // SAFETY: buf is large enough for the cmsghdr + u16 data.
+    #[allow(unsafe_code)]
+    unsafe {
+        let hdr = libc::cmsghdr {
+            cmsg_len: cmsg_len as _,
+            cmsg_level: SOL_UDP,
+            cmsg_type: UDP_SEGMENT,
+        };
+        std::ptr::write(buf.as_mut_ptr().cast(), hdr);
+        let data_ptr = buf.as_mut_ptr().add(cmsg_data_offset());
+        std::ptr::write(data_ptr.cast::<u16>(), segment_size);
+    }
+    cmsg_align(cmsg_len)
+}
+
 #[cfg(unix)]
 fn set_unix_reuse_port(socket: &socket2::Socket) -> Result<(), std::io::Error> {
     use std::os::fd::AsRawFd;

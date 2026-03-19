@@ -19,8 +19,8 @@ mod inner {
     use std::time::{Duration, Instant};
 
     use crate::reactor_metrics;
-    use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
-    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg};
+    use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso};
+    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg, probe_gso, build_gso_cmsg};
 
     /// Number of provided buffers in the RX buffer ring.
     const RX_RING_SIZE: u16 = 256;
@@ -181,6 +181,9 @@ mod inner {
         addr: Box<libc::sockaddr_storage>,
         iov: Box<libc::iovec>,
         msg: Box<libc::msghdr>,
+        cmsg_buf: Box<[u8; 32]>,
+        /// Non-zero when this slot holds a GSO batch. Used to split on retry.
+        gso_segment_size: u16,
         in_flight: bool,
     }
 
@@ -197,6 +200,8 @@ mod inner {
                 }),
                 // SAFETY: zeroed msghdr is valid (null pointers, zero lengths).
                 msg: Box::new(unsafe { std::mem::zeroed() }),
+                cmsg_buf: Box::new([0u8; 32]),
+                gso_segment_size: 0,
                 in_flight: false,
             };
             slot.msg.msg_name = (slot.addr.as_mut() as *mut libc::sockaddr_storage).cast();
@@ -214,11 +219,27 @@ mod inner {
             self.msg.msg_control = std::ptr::null_mut();
             self.msg.msg_controllen = 0;
             self.msg.msg_flags = 0;
+            self.gso_segment_size = 0;
+            self.in_flight = true;
+        }
+
+        fn prepare_gso(&mut self, data: Vec<u8>, to: SocketAddr, segment_size: u16) {
+            self.data = data;
+            self.peer = to;
+            self.iov.iov_base = self.data.as_mut_ptr().cast();
+            self.iov.iov_len = self.data.len();
+            self.msg.msg_namelen = socketaddr_to_sockaddr(self.peer, self.addr.as_mut());
+            let cmsg_len = build_gso_cmsg(&mut *self.cmsg_buf, segment_size);
+            self.msg.msg_control = self.cmsg_buf.as_mut_ptr().cast();
+            self.msg.msg_controllen = cmsg_len;
+            self.msg.msg_flags = 0;
+            self.gso_segment_size = segment_size;
             self.in_flight = true;
         }
 
         fn take_packet(&mut self) -> TxDatagram {
             self.in_flight = false;
+            self.gso_segment_size = 0;
             TxDatagram {
                 data: std::mem::take(&mut self.data),
                 to: self.peer,
@@ -227,6 +248,7 @@ mod inner {
 
         fn recycle_buffer(&mut self) -> Vec<u8> {
             self.in_flight = false;
+            self.gso_segment_size = 0;
             std::mem::take(&mut self.data)
         }
     }
@@ -236,6 +258,7 @@ mod inner {
         socket_fd: RawFd,
         socket: std::net::UdpSocket,
         local_addr: SocketAddr,
+        gso_supported: bool,
         eventfd: OwnedFd,
         rx_ring: RxBufferRing,
         /// Whether the multishot recvmsg SQE is currently armed.
@@ -282,6 +305,7 @@ mod inner {
                 })?;
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
+            let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
 
             // Create eventfd for wakeup
@@ -308,6 +332,7 @@ mod inner {
                 socket_fd,
                 socket,
                 local_addr,
+                gso_supported,
                 eventfd,
                 rx_ring,
                 rx_armed: false,
@@ -437,7 +462,20 @@ mod inner {
                             let errno = -result;
                             if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR {
                                 reactor_metrics::record_io_uring_retryable_send_completion();
-                                self.pending_tx.push_back(slot.take_packet());
+                                // GSO batch: split back into individual packets for retry.
+                                let seg = slot.gso_segment_size;
+                                if seg > 0 {
+                                    let peer = slot.peer;
+                                    let data = slot.recycle_buffer();
+                                    for chunk in data.chunks(seg as usize) {
+                                        self.pending_tx.push_back(TxDatagram {
+                                            data: chunk.to_vec(),
+                                            to: peer,
+                                        });
+                                    }
+                                } else {
+                                    self.pending_tx.push_back(slot.take_packet());
+                                }
                                 reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
                             } else {
                                 self.recycled_tx.push(slot.recycle_buffer());
@@ -484,9 +522,13 @@ mod inner {
         }
 
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
-            for pkt in packets {
-                self.pending_tx.push_back(pkt);
-                reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
+            if self.gso_supported && packets.len() > 1 {
+                self.submit_sends_gso(packets)?;
+            } else {
+                for pkt in packets {
+                    self.pending_tx.push_back(pkt);
+                    reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
+                }
             }
             self.submit_pending_tx()?;
             Ok(())
@@ -549,6 +591,58 @@ mod inner {
                 })?;
             }
             reactor_metrics::record_io_uring_submitted_sqes(1);
+            Ok(())
+        }
+
+        /// Group packets into GSO batches and submit as SQEs directly.
+        /// Packets that don't fit into available slots are put back into pending_tx.
+        fn submit_sends_gso(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            let batches = group_for_gso(packets);
+            for batch in batches {
+                let Some(idx) = self.tx_slots.iter().position(|s| !s.in_flight) else {
+                    // No free slot — split batch back into individual packets.
+                    let seg = batch.segment_size as usize;
+                    for chunk in batch.data.chunks(seg) {
+                        self.pending_tx.push_back(TxDatagram {
+                            data: chunk.to_vec(),
+                            to: batch.to,
+                        });
+                    }
+                    reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
+                    continue;
+                };
+
+                self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
+                let slot = &mut self.tx_slots[idx];
+                let entry = io_uring::opcode::SendMsg::new(
+                    FIXED_SOCKET,
+                    slot.msg.as_mut() as *mut libc::msghdr,
+                )
+                .build()
+                .user_data(OP_SEND | idx as u64);
+
+                // SAFETY: tx slot buffers have stable addresses while in flight.
+                let push_result = unsafe { self.ring.submission().push(&entry) };
+                if push_result.is_err() {
+                    // SQ full — split back to pending.
+                    let seg = self.tx_slots[idx].gso_segment_size as usize;
+                    let peer = self.tx_slots[idx].peer;
+                    let data = self.tx_slots[idx].recycle_buffer();
+                    for chunk in data.chunks(seg) {
+                        self.pending_tx.push_back(TxDatagram {
+                            data: chunk.to_vec(),
+                            to: peer,
+                        });
+                    }
+                    reactor_metrics::record_io_uring_sq_full_event();
+                    break;
+                }
+
+                self.tx_in_flight += 1;
+                reactor_metrics::record_io_uring_submitted_sqes(1);
+                reactor_metrics::record_io_uring_tx_in_flight(self.tx_in_flight);
+                reactor_metrics::record_io_uring_tx_datagrams_submitted(1);
+            }
             Ok(())
         }
 
