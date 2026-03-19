@@ -143,6 +143,8 @@ mod inner {
         pending_tx: VecDeque<TxDatagram>,
         /// Buffers from successfully sent packets, ready for pool recycling.
         recycled_tx: Vec<Vec<u8>>,
+        /// Reusable buffer for draining CQEs without per-poll allocation.
+        cqe_buf: Vec<io_uring::cqueue::Entry>,
     }
 
     // SAFETY: IoUringDriver is created on the main thread and moved to the worker
@@ -187,6 +189,7 @@ mod inner {
                 tx_in_flight: 0,
                 pending_tx: VecDeque::new(),
                 recycled_tx: Vec::new(),
+                cqe_buf: Vec::with_capacity(512),
             };
 
             // Submit initial recvmsg SQEs for all RX slots
@@ -241,17 +244,13 @@ mod inner {
                 outcome.timer_expired = true;
             }
 
-            // Process all available CQEs.
-            let cq = self.ring.completion();
-            let cqes: Vec<io_uring::cqueue::Entry> = cq.collect();
-            reactor_metrics::record_io_uring_completions(cqes.len());
+            // Drain CQEs into reusable buffer (no per-poll allocation).
+            self.cqe_buf.clear();
+            self.cqe_buf.extend(self.ring.completion());
+            let cqe_count = self.cqe_buf.len();
 
-            if cqes.is_empty() {
-                reactor_metrics::record_io_uring_timeout_poll();
-                outcome.timer_expired = true;
-            }
-
-            for cqe in cqes {
+            for cqe_idx in 0..cqe_count {
+                let cqe = &self.cqe_buf[cqe_idx];
                 let user_data = cqe.user_data();
                 let op = user_data & OP_MASK;
                 let idx = (user_data & IDX_MASK) as usize;
@@ -312,6 +311,12 @@ mod inner {
                     }
                     _ => {}
                 }
+            }
+            reactor_metrics::record_io_uring_completions(cqe_count);
+
+            if cqe_count == 0 {
+                reactor_metrics::record_io_uring_timeout_poll();
+                outcome.timer_expired = true;
             }
 
             // Replenish RX depth and queue pending TX — these SQEs will be
