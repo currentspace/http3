@@ -35,10 +35,16 @@ mod inner {
     const OP_RECV: u64 = 1 << 56;
     const OP_SEND: u64 = 2 << 56;
     const OP_WAKER: u64 = 3 << 56;
+    const OP_BUNDLE: u64 = 4 << 56;
     const OP_MASK: u64 = 0xFF << 56;
     const IDX_MASK: u64 = (1 << 56) - 1;
 
     const BUF_GROUP: u16 = 0;
+    const TX_BUF_GROUP: u16 = 1;
+    /// Size of each TX buffer ring entry (max QUIC datagram + headroom).
+    const TX_BUF_ENTRY_SIZE: usize = 1500;
+    /// Number of TX buffer ring entries.
+    const TX_RING_ENTRIES: u16 = 256;
 
     const FIXED_SOCKET: io_uring::types::Fixed = io_uring::types::Fixed(0);
     const FIXED_EVENTFD: io_uring::types::Fixed = io_uring::types::Fixed(1);
@@ -173,6 +179,191 @@ mod inner {
         }
     }
 
+    /// TX provided buffer ring for send bundles (kernel ≥6.10).
+    /// At most one SendBundle SQE is in flight at a time. Between CQEs the
+    /// ring is empty (head == tail) so we can refill from position 0.
+    struct TxBufRing {
+        ring_ptr: *mut u8,
+        ring_layout_size: usize,
+        buf_base: *mut u8,
+        tail: u16,
+        /// True when a SendBundle SQE is in flight.
+        in_flight: bool,
+        /// Number of buffers in the current in-flight bundle.
+        in_flight_count: usize,
+        /// Data length for each buffer in the current in-flight bundle.
+        in_flight_lengths: Vec<usize>,
+        /// The connected peer address (SendBundle only works with connected sockets).
+        connected_peer: SocketAddr,
+    }
+
+    // SAFETY: TxBufRing is only accessed from the single driver thread.
+    unsafe impl Send for TxBufRing {}
+
+    impl TxBufRing {
+        fn new(submitter: &io_uring::Submitter<'_>, peer: SocketAddr) -> io::Result<Self> {
+            let entry_size = std::mem::size_of::<io_uring::types::BufRingEntry>();
+            let ring_header_size = entry_size * (TX_RING_ENTRIES as usize);
+            let total_buf_size = TX_BUF_ENTRY_SIZE * (TX_RING_ENTRIES as usize);
+            let total_size = ring_header_size + total_buf_size;
+
+            // SAFETY: mmap with MAP_ANONYMOUS | MAP_PRIVATE returns zeroed memory.
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    total_size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error());
+            }
+            let ring_ptr = ptr.cast::<u8>();
+            let buf_base = unsafe { ring_ptr.add(ring_header_size) };
+
+            // Initialize entries with buffer addresses.
+            let entries = ring_ptr.cast::<io_uring::types::BufRingEntry>();
+            for i in 0..(TX_RING_ENTRIES as usize) {
+                let entry = unsafe { &mut *entries.add(i) };
+                let buf_addr = unsafe { buf_base.add(i * TX_BUF_ENTRY_SIZE) };
+                entry.set_addr(buf_addr as u64);
+                entry.set_len(0);
+                entry.set_bid(i as u16);
+            }
+
+            // Register with kernel.
+            // SAFETY: ring_ptr is page-aligned mmap memory, entries are initialized.
+            unsafe {
+                submitter.register_buf_ring(ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP)?;
+            }
+
+            // Tail starts at 0 — no buffers available until fill_and_submit.
+            unsafe {
+                let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+                tail_ptr.write(0);
+            }
+
+            Ok(Self {
+                ring_ptr,
+                ring_layout_size: total_size,
+                buf_base,
+                tail: 0,
+                in_flight: false,
+                in_flight_count: 0,
+                in_flight_lengths: Vec::with_capacity(TX_RING_ENTRIES as usize),
+                connected_peer: peer,
+            })
+        }
+
+        /// Fill ring entries with packet data and publish the tail.
+        /// Returns how many packets were enqueued.
+        fn fill_and_publish(&mut self, packets: &[TxDatagram]) -> usize {
+            let n = packets.len().min(TX_RING_ENTRIES as usize);
+            let entries = self.ring_ptr.cast::<io_uring::types::BufRingEntry>();
+
+            self.in_flight_lengths.clear();
+            for i in 0..n {
+                let slot = (self.tail % TX_RING_ENTRIES) as usize;
+                let len = packets[i].data.len().min(TX_BUF_ENTRY_SIZE);
+                let buf_offset = slot * TX_BUF_ENTRY_SIZE;
+
+                // SAFETY: slot is in [0, TX_RING_ENTRIES), buf_offset is valid.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        packets[i].data.as_ptr(),
+                        self.buf_base.add(buf_offset),
+                        len,
+                    );
+                    let entry = &mut *entries.add(slot);
+                    entry.set_addr(self.buf_base.add(buf_offset) as u64);
+                    entry.set_len(len as u32);
+                    entry.set_bid(slot as u16);
+                }
+
+                self.in_flight_lengths.push(len);
+                self.tail = self.tail.wrapping_add(1);
+            }
+
+            // Publish tail to kernel.
+            unsafe {
+                let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                tail_ptr.write(self.tail);
+            }
+
+            self.in_flight = true;
+            self.in_flight_count = n;
+            n
+        }
+
+        /// Process a completed SendBundle CQE. Returns (consumed, unsent_packets).
+        /// Unsent packets are extracted from the ring and returned for retry.
+        fn complete(
+            &mut self,
+            bytes_sent: usize,
+        ) -> (usize, Vec<TxDatagram>) {
+            let mut remaining = bytes_sent;
+            let mut consumed = 0;
+            for &len in &self.in_flight_lengths {
+                if remaining >= len {
+                    remaining -= len;
+                    consumed += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Extract unsent packet data for retry.
+            let mut unsent = Vec::new();
+            let base_slot = ((self.tail.wrapping_sub(self.in_flight_count as u16)) % TX_RING_ENTRIES) as usize;
+            for i in consumed..self.in_flight_count {
+                let slot = (base_slot + i) % TX_RING_ENTRIES as usize;
+                let len = self.in_flight_lengths[i];
+                let buf_offset = slot * TX_BUF_ENTRY_SIZE;
+                let data = unsafe {
+                    std::slice::from_raw_parts(self.buf_base.add(buf_offset), len).to_vec()
+                };
+                unsent.push(TxDatagram {
+                    data,
+                    to: self.connected_peer,
+                });
+            }
+
+            self.in_flight = false;
+            self.in_flight_count = 0;
+            self.in_flight_lengths.clear();
+            (consumed, unsent)
+        }
+
+        /// Reset the ring by unregistering and re-registering.
+        /// Called after partial sends to reset the kernel's internal head pointer.
+        fn reset(&mut self, submitter: &io_uring::Submitter<'_>) -> io::Result<()> {
+            submitter.unregister_buf_ring(TX_BUF_GROUP)?;
+            unsafe {
+                submitter.register_buf_ring(self.ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP)?;
+            }
+            self.tail = 0;
+            let entries = self.ring_ptr.cast::<io_uring::types::BufRingEntry>();
+            unsafe {
+                let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+                tail_ptr.write(0);
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for TxBufRing {
+        fn drop(&mut self) {
+            // SAFETY: ring_ptr was obtained from mmap with ring_layout_size.
+            unsafe {
+                libc::munmap(self.ring_ptr.cast(), self.ring_layout_size);
+            }
+        }
+    }
+
     /// A single sendmsg operation slot. All kernel-visible pointers live behind
     /// `Box` so they remain stable while an SQE is in flight.
     struct TxSlot {
@@ -263,6 +454,8 @@ mod inner {
         rx_ring: RxBufferRing,
         /// Whether the multishot recvmsg SQE is currently armed.
         rx_armed: bool,
+        /// TX provided buffer ring for send bundles (None if unsupported).
+        tx_buf_ring: Option<TxBufRing>,
         tx_slots: Vec<TxSlot>,
         waker_buf: Box<[u8; 8]>,
         tx_in_flight: usize,
@@ -328,6 +521,15 @@ mod inner {
 
             let tx_slots: Vec<TxSlot> = (0..TX_SLOTS).map(|_| TxSlot::new()).collect();
 
+            // Probe for send bundle support (kernel ≥6.10) with connected socket.
+            let tx_buf_ring = if ring.params().is_feature_recvsend_bundle() {
+                socket.peer_addr().ok().and_then(|peer| {
+                    TxBufRing::new(&ring.submitter(), peer).ok()
+                })
+            } else {
+                None
+            };
+
             let mut driver = Self {
                 ring,
                 socket_fd,
@@ -337,6 +539,7 @@ mod inner {
                 eventfd,
                 rx_ring,
                 rx_armed: false,
+                tx_buf_ring,
                 tx_slots,
                 waker_buf: Box::new([0u8; 8]),
                 tx_in_flight: 0,
@@ -401,6 +604,7 @@ mod inner {
             self.cqe_buf.extend(self.ring.completion());
             let cqe_count = self.cqe_buf.len();
 
+            let mut bundle_needs_reset = false;
             for cqe_idx in 0..cqe_count {
                 let cqe = &self.cqe_buf[cqe_idx];
                 let user_data = cqe.user_data();
@@ -500,6 +704,28 @@ mod inner {
                         // Resubmit waker read — flushed by next submit_with_args.
                         let _ = self.submit_waker_read();
                     }
+                    OP_BUNDLE => {
+                        if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                            let (consumed, unsent) = if result > 0 {
+                                tx_ring.complete(result as usize)
+                            } else {
+                                tx_ring.complete(0)
+                            };
+                            reactor_metrics::record_io_uring_tx_datagrams_completed(consumed);
+                            if !unsent.is_empty() {
+                                let retryable = result >= 0
+                                    || matches!(-result, e if e == libc::EAGAIN || e == libc::ENOBUFS || e == libc::EINTR);
+                                if retryable {
+                                    for pkt in unsent {
+                                        self.pending_tx.push_back(pkt);
+                                    }
+                                }
+                                bundle_needs_reset = true;
+                            } else if result <= 0 {
+                                bundle_needs_reset = true;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -507,6 +733,13 @@ mod inner {
 
             // Single fence to publish all returned buffers to the kernel.
             self.rx_ring.flush_buffer_returns();
+
+            // Deferred TX bundle ring reset (avoids borrow conflict in CQE loop).
+            if bundle_needs_reset {
+                if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                    let _ = tx_ring.reset(&self.ring.submitter());
+                }
+            }
 
             if cqe_count == 0 {
                 reactor_metrics::record_io_uring_timeout_poll();
@@ -525,6 +758,14 @@ mod inner {
         }
 
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            // Try send bundles first (connected socket, kernel ≥6.10).
+            if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                if !tx_ring.in_flight && !packets.is_empty() {
+                    // Process any pending CQEs to reclaim the ring.
+                    self.drain_bundle_cqes();
+                    return self.submit_send_bundle(packets);
+                }
+            }
             if self.gso_supported && packets.len() > 1 {
                 self.submit_sends_gso(packets)?;
             } else {
@@ -595,6 +836,85 @@ mod inner {
             }
             reactor_metrics::record_io_uring_submitted_sqes(1);
             Ok(())
+        }
+
+        /// Submit packets via send bundle (connected socket, kernel ≥6.10).
+        /// Falls back to GSO/SendMsg for overflow packets.
+        fn submit_send_bundle(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            let tx_ring = self.tx_buf_ring.as_mut().unwrap();
+            let enqueued = tx_ring.fill_and_publish(&packets);
+
+            // Submit one SendBundle SQE for all enqueued packets.
+            if enqueued > 0 {
+                let entry = io_uring::opcode::SendBundle::new(FIXED_SOCKET, TX_BUF_GROUP)
+                    .build()
+                    .user_data(OP_BUNDLE | enqueued as u64);
+
+                // SAFETY: TX buffer ring is registered and entries are valid.
+                let push_result = unsafe { self.ring.submission().push(&entry) };
+                if push_result.is_err() {
+                    // SQ full — reclaim ring and fall back.
+                    let (_, unsent) = tx_ring.complete(0);
+                    let _ = tx_ring.reset(&self.ring.submitter());
+                    for pkt in unsent {
+                        self.pending_tx.push_back(pkt);
+                    }
+                    reactor_metrics::record_io_uring_sq_full_event();
+                } else {
+                    reactor_metrics::record_io_uring_submitted_sqes(1);
+                    reactor_metrics::record_io_uring_tx_datagrams_submitted(enqueued);
+                    // Flush the SQE so the kernel processes it before the next submit_sends.
+                    reactor_metrics::record_io_uring_submit_call();
+                    let _ = self.ring.submit();
+                }
+            }
+
+            // Overflow packets that didn't fit in the ring: fall back to GSO/SendMsg.
+            if enqueued < packets.len() {
+                let overflow: Vec<TxDatagram> = packets.into_iter().skip(enqueued).collect();
+                if self.gso_supported && overflow.len() > 1 {
+                    self.submit_sends_gso(overflow)?;
+                } else {
+                    for pkt in overflow {
+                        self.pending_tx.push_back(pkt);
+                    }
+                }
+            }
+
+            self.submit_pending_tx()?;
+            Ok(())
+        }
+
+        /// Process pending CQEs to reclaim the TX buffer ring.
+        fn drain_bundle_cqes(&mut self) {
+            let mut needs_reset = false;
+            // Check for completed bundle CQEs without blocking.
+            for cqe in self.ring.completion() {
+                let user_data = cqe.user_data();
+                let op = user_data & OP_MASK;
+                if op == OP_BUNDLE {
+                    let result = cqe.result();
+                    if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                        let (consumed, unsent) = if result > 0 {
+                            tx_ring.complete(result as usize)
+                        } else {
+                            tx_ring.complete(0)
+                        };
+                        reactor_metrics::record_io_uring_tx_datagrams_completed(consumed);
+                        if !unsent.is_empty() {
+                            for pkt in unsent {
+                                self.pending_tx.push_back(pkt);
+                            }
+                            needs_reset = true;
+                        }
+                    }
+                }
+            }
+            if needs_reset {
+                if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                    let _ = tx_ring.reset(&self.ring.submitter());
+                }
+            }
         }
 
         /// Group packets into GSO batches and submit as SQEs directly.
