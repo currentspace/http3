@@ -377,10 +377,10 @@ mod tests {
         set_pktinfo(&sender);
         enable_gro(&sender);
 
-        // Build 4 × 100 byte coalesced buffer + GSO cmsg.
-        let payload = vec![0xABu8; 400];
+        // Build 4 × 200 byte coalesced buffer + GSO cmsg.
+        let payload = vec![0xABu8; 800];
         let mut cmsg_buf = [0u8; 32];
-        let cmsg_len = build_gso_cmsg(&mut cmsg_buf, 100);
+        let cmsg_len = build_gso_cmsg(&mut cmsg_buf, 200);
 
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let addrlen = match recv_addr {
@@ -482,6 +482,150 @@ mod tests {
 
         eprintln!("Vec layout GSO: received {packets:?}");
         assert_eq!(packets.len(), 4, "Vec-based GSO should segment into 4, got {packets:?}");
+    }
+
+    // ── Test: Vec layout + pktinfo + gro (exact PollDriver conditions) ─
+
+    #[test]
+    fn gso_vec_layout_with_pktinfo_and_gro() {
+        use crate::transport::socket::{build_gso_cmsg, set_pktinfo, enable_gro, SOL_UDP, UDP_SEGMENT};
+
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.set_nonblocking(true).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let sender_fd = sender.as_raw_fd();
+        let recv_addr = receiver.local_addr().unwrap();
+
+        let mut gso_val: libc::c_int = 0;
+        let mut gso_len = std::mem::size_of_val(&gso_val) as libc::socklen_t;
+        if unsafe { libc::getsockopt(sender_fd, SOL_UDP, UDP_SEGMENT, &mut gso_val as *mut _ as *mut _, &mut gso_len) } != 0 {
+            eprintln!("GSO not supported, skipping"); return;
+        }
+
+        // Apply SAME socket options as PollDriver::new
+        set_pktinfo(&sender);
+        enable_gro(&sender);
+
+        // Vec-based layout (exactly like send_batch_gso)
+        let count = 1;
+        let mut tx_hdrs: Vec<libc::mmsghdr> = vec![unsafe { std::mem::zeroed() }; count];
+        let mut tx_iovs: Vec<libc::iovec> = vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; count];
+        let mut tx_addrs: Vec<libc::sockaddr_storage> = vec![unsafe { std::mem::zeroed() }; count];
+        let mut tx_cmsg_bufs: Vec<[u8; 32]> = vec![[0u8; 32]; count];
+
+        let payload = vec![0xABu8; 800]; // 4 × 200
+
+        match recv_addr {
+            std::net::SocketAddr::V4(a) => {
+                let sin = libc::sockaddr_in { sin_family: libc::AF_INET as _, sin_port: a.port().to_be(), sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) }, sin_zero: [0; 8] };
+                unsafe { std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin); }
+                tx_hdrs[0].msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as _;
+            }
+            _ => panic!("v4 only"),
+        };
+
+        tx_iovs[0].iov_base = payload.as_ptr() as *mut _;
+        tx_iovs[0].iov_len = payload.len();
+        tx_hdrs[0].msg_hdr.msg_name = (&mut tx_addrs[0] as *mut libc::sockaddr_storage).cast();
+        tx_hdrs[0].msg_hdr.msg_iov = &mut tx_iovs[0] as *mut _;
+        tx_hdrs[0].msg_hdr.msg_iovlen = 1;
+
+        let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[0], 200);
+        tx_hdrs[0].msg_hdr.msg_control = tx_cmsg_bufs[0].as_mut_ptr().cast();
+        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
+
+        let rc = unsafe { libc::sendmsg(sender_fd, &tx_hdrs[0].msg_hdr, 0) };
+        eprintln!("gso_vec_layout_with_pktinfo_and_gro: sendmsg rc={rc}");
+        assert!(rc > 0);
+
+        thread::sleep(Duration::from_millis(50));
+        let recv_fd = receiver.as_raw_fd();
+        let mut packets = Vec::new();
+        for _ in 0..10 {
+            let n = recvmmsg_one(recv_fd);
+            if n == 0 { break; }
+            packets.push(n);
+        }
+
+        eprintln!("received: {packets:?}");
+        assert_eq!(packets.len(), 4, "should get 4 segments, got {packets:?}");
+    }
+
+    // ── Test: group_for_gso produces correct batch data ───────────
+
+    #[test]
+    fn group_for_gso_coalesced_send() {
+        use crate::transport::{TxDatagram, group_for_gso};
+        use crate::transport::socket::{build_gso_cmsg, set_pktinfo, enable_gro, SOL_UDP, UDP_SEGMENT};
+
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.set_nonblocking(true).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let sender_fd = sender.as_raw_fd();
+        let recv_addr = receiver.local_addr().unwrap();
+
+        let mut gso_val: libc::c_int = 0;
+        let mut gso_len = std::mem::size_of_val(&gso_val) as libc::socklen_t;
+        if unsafe { libc::getsockopt(sender_fd, SOL_UDP, UDP_SEGMENT, &mut gso_val as *mut _ as *mut _, &mut gso_len) } != 0 {
+            return;
+        }
+
+        set_pktinfo(&sender);
+        enable_gro(&sender);
+
+        // Build packets like the test does
+        let packets: Vec<TxDatagram> = (0..4)
+            .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
+            .collect();
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 1, "4 same-size should coalesce into 1 batch");
+        let batch = &batches[0];
+        eprintln!("batch: data.len()={} seg_size={}", batch.data.len(), batch.segment_size);
+        assert_eq!(batch.data.len(), 800);
+        assert_eq!(batch.segment_size, 200);
+
+        // Now send with Vec layout
+        let mut tx_hdrs: Vec<libc::mmsghdr> = vec![unsafe { std::mem::zeroed() }; 1];
+        let mut tx_iovs: Vec<libc::iovec> = vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; 1];
+        let mut tx_addrs: Vec<libc::sockaddr_storage> = vec![unsafe { std::mem::zeroed() }; 1];
+        let mut tx_cmsg_bufs: Vec<[u8; 32]> = vec![[0u8; 32]; 1];
+
+        match recv_addr {
+            std::net::SocketAddr::V4(a) => {
+                let sin = libc::sockaddr_in { sin_family: libc::AF_INET as _, sin_port: a.port().to_be(), sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) }, sin_zero: [0; 8] };
+                unsafe { std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin); }
+                tx_hdrs[0].msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as _;
+            }
+            _ => panic!("v4 only"),
+        };
+
+        // Use batch.data directly (this is what send_batch_gso does after extracting from batches)
+        tx_iovs[0].iov_base = batch.data.as_ptr() as *mut _;
+        tx_iovs[0].iov_len = batch.data.len();
+        tx_hdrs[0].msg_hdr.msg_name = (&mut tx_addrs[0] as *mut libc::sockaddr_storage).cast();
+        tx_hdrs[0].msg_hdr.msg_iov = &mut tx_iovs[0] as *mut _;
+        tx_hdrs[0].msg_hdr.msg_iovlen = 1;
+
+        let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[0], batch.segment_size);
+        tx_hdrs[0].msg_hdr.msg_control = tx_cmsg_bufs[0].as_mut_ptr().cast();
+        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
+
+        let rc = unsafe { libc::sendmsg(sender_fd, &tx_hdrs[0].msg_hdr, 0) };
+        eprintln!("group_for_gso_coalesced_send: sendmsg rc={rc}");
+        assert!(rc > 0);
+
+        thread::sleep(Duration::from_millis(50));
+        let mut packets_received = Vec::new();
+        for _ in 0..10 {
+            let n = recvmmsg_one(receiver.as_raw_fd());
+            if n == 0 { break; }
+            packets_received.push(n);
+        }
+
+        eprintln!("received: {packets_received:?}");
+        assert_eq!(packets_received.len(), 4, "should get 4 segments via group_for_gso, got {packets_received:?}");
     }
 
     // ── Test: PollDriver GSO send SAME thread ─────────────────────
