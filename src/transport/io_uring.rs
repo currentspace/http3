@@ -2,6 +2,11 @@
 //! Linux. Both RX and TX stay on `io_uring` so the fast path does not fall
 //! back to readiness or synchronous socket syscalls once the driver is active.
 //!
+//! RX uses multishot recvmsg with a kernel-managed provided buffer ring
+//! (requires kernel ≥6.0). A single SQE arms the kernel to receive
+//! datagrams into provided buffers, producing one CQE per datagram without
+//! any per-packet SQE re-submission.
+//!
 //! This module is only compiled on Linux (`cfg(target_os = "linux")`).
 
 #[cfg(target_os = "linux")]
@@ -16,63 +21,152 @@ mod inner {
     use crate::reactor_metrics;
     use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
 
-    const RX_SLOTS: usize = 256;
-    const RX_BUF_SIZE: usize = 65535;
+    /// Number of provided buffers in the RX buffer ring.
+    const RX_RING_SIZE: u16 = 256;
+    /// Each buffer must hold a full UDP datagram + the recvmsg_out header + sockaddr.
+    /// Header: io_uring_recvmsg_out (16 bytes) + sockaddr_storage (128 bytes) = 144 bytes overhead.
+    const RX_BUF_OVERHEAD: usize = std::mem::size_of::<libc::sockaddr_storage>()
+        + 16; // io_uring_recvmsg_out header
+    const RX_BUF_SIZE: usize = 65535 + RX_BUF_OVERHEAD;
     const TX_SLOTS: usize = 256;
 
-    // user_data encoding: high byte = op type, low bytes = slot index
     const OP_RECV: u64 = 1 << 56;
     const OP_SEND: u64 = 2 << 56;
     const OP_WAKER: u64 = 3 << 56;
     const OP_MASK: u64 = 0xFF << 56;
     const IDX_MASK: u64 = (1 << 56) - 1;
 
-    /// A single recvmsg operation slot. All fields are heap-allocated (Box)
-    /// to guarantee stable addresses while the SQE is in-flight.
-    struct RxSlot {
-        buf: Box<[u8; RX_BUF_SIZE]>,
-        addr: Box<libc::sockaddr_storage>,
-        iov: Box<libc::iovec>,
+    const BUF_GROUP: u16 = 0;
+
+    const FIXED_SOCKET: io_uring::types::Fixed = io_uring::types::Fixed(0);
+    const FIXED_EVENTFD: io_uring::types::Fixed = io_uring::types::Fixed(1);
+
+    /// Page-aligned buffer ring memory for the kernel provided-buffer interface.
+    struct RxBufferRing {
+        /// The raw memory region: buf_ring entries at the front, buffers after.
+        /// Laid out as: [BufRingEntry × RX_RING_SIZE] [buffer × RX_RING_SIZE]
+        /// Allocated via mmap for page-alignment.
+        ring_ptr: *mut u8,
+        ring_layout_size: usize,
+        /// Pointer to the start of the buffer data area.
+        buf_base: *mut u8,
+        /// The msghdr used by the multishot SQE (only msg_namelen matters).
         msg: Box<libc::msghdr>,
-        in_flight: bool,
+        /// Tracks the next buffer ID for tail advancement.
+        tail: u16,
     }
 
-    impl RxSlot {
-        fn new() -> Self {
-            let mut slot = Self {
-                buf: Box::new([0u8; RX_BUF_SIZE]),
-                // SAFETY: zeroed sockaddr_storage is valid (all-zeros family = AF_UNSPEC).
-                addr: Box::new(unsafe { std::mem::zeroed() }),
-                iov: Box::new(libc::iovec {
-                    iov_base: std::ptr::null_mut(),
-                    iov_len: 0,
-                }),
-                // SAFETY: zeroed msghdr is valid (null pointers, zero lengths).
-                msg: Box::new(unsafe { std::mem::zeroed() }),
-                in_flight: false,
+    // SAFETY: RxBufferRing is only accessed from the single driver thread.
+    unsafe impl Send for RxBufferRing {}
+
+    impl RxBufferRing {
+        fn new(submitter: &io_uring::Submitter<'_>) -> io::Result<Self> {
+            let entry_size = std::mem::size_of::<io_uring::types::BufRingEntry>();
+            let ring_header_size = entry_size * (RX_RING_SIZE as usize);
+            let total_buf_size = RX_BUF_SIZE * (RX_RING_SIZE as usize);
+            let total_size = ring_header_size + total_buf_size;
+
+            // Allocate page-aligned memory via mmap.
+            // SAFETY: mmap with MAP_ANONYMOUS | MAP_PRIVATE returns zeroed memory.
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    total_size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                    -1,
+                    0,
+                )
             };
-            // Fix up pointers — safe because Box addresses are stable.
-            slot.iov.iov_base = slot.buf.as_mut_ptr().cast();
-            slot.iov.iov_len = RX_BUF_SIZE;
-            slot.msg.msg_name = (slot.addr.as_mut() as *mut libc::sockaddr_storage).cast();
-            slot.msg.msg_namelen =
+            if ptr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error());
+            }
+            let ring_ptr = ptr.cast::<u8>();
+            let buf_base = unsafe { ring_ptr.add(ring_header_size) };
+
+            // Fill buf ring entries with buffer addresses.
+            let entries = ring_ptr.cast::<io_uring::types::BufRingEntry>();
+            for i in 0..(RX_RING_SIZE as usize) {
+                let entry = unsafe { &mut *entries.add(i) };
+                let buf_addr = unsafe { buf_base.add(i * RX_BUF_SIZE) };
+                entry.set_addr(buf_addr as u64);
+                entry.set_len(RX_BUF_SIZE as u32);
+                entry.set_bid(i as u16);
+            }
+
+            // Register with the kernel.
+            // SAFETY: ring_ptr is page-aligned mmap memory, entries are initialized.
+            unsafe {
+                submitter.register_buf_ring(
+                    ring_ptr as u64,
+                    RX_RING_SIZE,
+                    BUF_GROUP,
+                )?;
+            }
+
+            // Advance tail to make all buffers available.
+            // SAFETY: entries is the base of a valid buf ring.
+            unsafe {
+                let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                tail_ptr.write(RX_RING_SIZE);
+            }
+
+            // Build the msghdr for multishot (only msg_namelen is used by kernel).
+            // SAFETY: zeroed msghdr is valid.
+            let mut msg: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
+            msg.msg_namelen =
                 std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-            slot.msg.msg_iov = slot.iov.as_mut() as *mut libc::iovec;
-            slot.msg.msg_iovlen = 1;
-            slot
+
+            Ok(Self {
+                ring_ptr,
+                ring_layout_size: total_size,
+                buf_base,
+                msg,
+                tail: RX_RING_SIZE, // Next tail value to write
+            })
         }
 
-        fn reset(&mut self) {
-            self.msg.msg_namelen =
-                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-            self.iov.iov_len = RX_BUF_SIZE;
-            self.in_flight = false;
+        /// Return a consumed buffer to the ring so the kernel can reuse it.
+        fn return_buffer(&mut self, bid: u16) {
+            let entries = self.ring_ptr.cast::<io_uring::types::BufRingEntry>();
+            let slot = (self.tail % RX_RING_SIZE) as usize;
+            let entry = unsafe { &mut *entries.add(slot) };
+
+            let buf_addr = unsafe { self.buf_base.add((bid as usize) * RX_BUF_SIZE) };
+            entry.set_addr(buf_addr as u64);
+            entry.set_len(RX_BUF_SIZE as u32);
+            entry.set_bid(bid);
+
+            self.tail = self.tail.wrapping_add(1);
+
+            // SAFETY: entries is the base of a valid buf ring.
+            unsafe {
+                let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                tail_ptr.write(self.tail);
+            }
+        }
+
+        /// Get a reference to the buffer data for a given buffer ID.
+        fn buffer_data(&self, bid: u16) -> &[u8] {
+            let offset = (bid as usize) * RX_BUF_SIZE;
+            // SAFETY: bid is within [0, RX_RING_SIZE), buffer region is valid.
+            unsafe { std::slice::from_raw_parts(self.buf_base.add(offset), RX_BUF_SIZE) }
         }
     }
 
-    /// A single sendmsg operation slot. Like [`RxSlot`], all kernel-visible
-    /// pointers live behind `Box` so they remain stable while an SQE is in
-    /// flight.
+    impl Drop for RxBufferRing {
+        fn drop(&mut self) {
+            // SAFETY: ring_ptr was obtained from mmap with ring_layout_size.
+            unsafe {
+                libc::munmap(self.ring_ptr.cast(), self.ring_layout_size);
+            }
+        }
+    }
+
+    /// A single sendmsg operation slot. All kernel-visible pointers live behind
+    /// `Box` so they remain stable while an SQE is in flight.
     struct TxSlot {
         data: Vec<u8>,
         peer: SocketAddr,
@@ -129,31 +223,26 @@ mod inner {
         }
     }
 
-    const FIXED_SOCKET: io_uring::types::Fixed = io_uring::types::Fixed(0);
-    const FIXED_EVENTFD: io_uring::types::Fixed = io_uring::types::Fixed(1);
-
     pub struct IoUringDriver {
         ring: io_uring::IoUring,
         socket_fd: RawFd,
         socket: std::net::UdpSocket,
         eventfd: OwnedFd,
-        rx_slots: Vec<RxSlot>,
+        rx_ring: RxBufferRing,
+        /// Whether the multishot recvmsg SQE is currently armed.
+        rx_armed: bool,
         tx_slots: Vec<TxSlot>,
         waker_buf: Box<[u8; 8]>,
-        rx_in_flight: usize,
         tx_in_flight: usize,
-        /// Packets waiting for an available TX slot or a retryable completion.
         pending_tx: VecDeque<TxDatagram>,
-        /// Buffers from successfully sent packets, ready for pool recycling.
         recycled_tx: Vec<Vec<u8>>,
-        /// Reusable buffer for draining CQEs without per-poll allocation.
         cqe_buf: Vec<io_uring::cqueue::Entry>,
     }
 
     // SAFETY: IoUringDriver is created on the main thread and moved to the worker
-    // thread before any I/O occurs. The raw pointers inside RxSlot (msghdr, iovec)
-    // point to co-located Box allocations that move with the driver. The driver is
-    // single-threaded after the move — no concurrent access.
+    // thread before any I/O occurs. The raw pointers inside RxBufferRing point to
+    // mmap'd memory that moves with the driver. The driver is single-threaded
+    // after the move — no concurrent access.
     unsafe impl Send for IoUringDriver {}
 
     #[derive(Clone)]
@@ -182,7 +271,9 @@ mod inner {
                 .register_files(&[socket_fd, eventfd.as_raw_fd()])
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("register_files: {e}")))?;
 
-            let rx_slots: Vec<RxSlot> = (0..RX_SLOTS).map(|_| RxSlot::new()).collect();
+            // Set up provided buffer ring for multishot recvmsg.
+            let rx_ring = RxBufferRing::new(&ring.submitter())?;
+
             let tx_slots: Vec<TxSlot> = (0..TX_SLOTS).map(|_| TxSlot::new()).collect();
 
             let mut driver = Self {
@@ -190,19 +281,18 @@ mod inner {
                 socket_fd,
                 socket,
                 eventfd,
-                rx_slots,
+                rx_ring,
+                rx_armed: false,
                 tx_slots,
                 waker_buf: Box::new([0u8; 8]),
-                rx_in_flight: 0,
                 tx_in_flight: 0,
                 pending_tx: VecDeque::new(),
                 recycled_tx: Vec::new(),
                 cqe_buf: Vec::with_capacity(512),
             };
 
-            // Submit initial recvmsg SQEs for all RX slots
-            driver.replenish_rx()?;
-            // Submit eventfd read for waker
+            // Arm multishot recvmsg and waker read.
+            driver.arm_multishot_recv()?;
             driver.submit_waker_read()?;
             reactor_metrics::record_io_uring_submit_call();
             driver.ring.submit()?;
@@ -252,7 +342,7 @@ mod inner {
                 outcome.timer_expired = true;
             }
 
-            // Drain CQEs into reusable buffer (no per-poll allocation).
+            // Drain CQEs into reusable buffer.
             self.cqe_buf.clear();
             self.cqe_buf.extend(self.ring.completion());
             let cqe_count = self.cqe_buf.len();
@@ -261,31 +351,49 @@ mod inner {
                 let cqe = &self.cqe_buf[cqe_idx];
                 let user_data = cqe.user_data();
                 let op = user_data & OP_MASK;
-                let idx = (user_data & IDX_MASK) as usize;
                 let result = cqe.result();
+                let flags = cqe.flags();
 
                 match op {
                     OP_RECV => {
-                        self.rx_in_flight -= 1;
-                        let slot = &mut self.rx_slots[idx];
-                        slot.in_flight = false;
+                        // Multishot recvmsg: check if more completions coming.
+                        let has_more = io_uring::cqueue::more(flags);
+                        if !has_more {
+                            self.rx_armed = false;
+                        }
 
                         if result > 0 {
-                            let peer = sockaddr_to_socketaddr(
-                                slot.addr.as_ref(),
-                                slot.msg.msg_namelen,
-                            );
-                            if let Some(peer) = peer {
-                                let len = result as usize;
-                                outcome.rx.push(RxDatagram {
-                                    data: slot.buf[..len].to_vec(),
-                                    peer,
-                                });
-                                reactor_metrics::record_io_uring_rx_datagrams(1);
+                            if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
+                                let buf = self.rx_ring.buffer_data(bid);
+                                let buf_len = result as usize;
+
+                                // Parse the recvmsg_out header to extract peer address
+                                // and payload from the provided buffer.
+                                if let Ok(parsed) = io_uring::types::RecvMsgOut::parse(
+                                    &buf[..buf_len],
+                                    self.rx_ring.msg.as_ref(),
+                                ) {
+                                    let name_data = parsed.name_data();
+                                    let peer = parse_sockaddr(name_data);
+                                    if let Some(peer) = peer {
+                                        let payload = parsed.payload_data();
+                                        outcome.rx.push(RxDatagram {
+                                            data: payload.to_vec(),
+                                            peer,
+                                        });
+                                        reactor_metrics::record_io_uring_rx_datagrams(1);
+                                    }
+                                }
+
+                                // Return buffer to the ring immediately.
+                                self.rx_ring.return_buffer(bid);
                             }
+                        } else if result < 0 {
+                            // Error on multishot — will re-arm below.
                         }
                     }
                     OP_SEND => {
+                        let idx = (user_data & IDX_MASK) as usize;
                         self.tx_in_flight -= 1;
                         let slot = &mut self.tx_slots[idx];
                         if result >= 0 {
@@ -314,8 +422,7 @@ mod inner {
                                 8,
                             );
                         }
-                        // Resubmit waker read — will be flushed by the next
-                        // iteration's submit_with_args, no extra submit needed.
+                        // Resubmit waker read — flushed by next submit_with_args.
                         let _ = self.submit_waker_read();
                     }
                     _ => {}
@@ -328,9 +435,12 @@ mod inner {
                 outcome.timer_expired = true;
             }
 
-            // Replenish RX depth and queue pending TX — these SQEs will be
-            // flushed by the next poll()'s submit_with_args call.
-            self.replenish_rx()?;
+            // Re-arm multishot recvmsg if it was disarmed.
+            if !self.rx_armed {
+                self.arm_multishot_recv()?;
+            }
+
+            // Queue pending TX — flushed by next submit_with_args.
             self.submit_pending_tx()?;
 
             Ok(outcome)
@@ -341,7 +451,6 @@ mod inner {
                 self.pending_tx.push_back(pkt);
                 reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
             }
-            // Queue SQEs — they'll be flushed by the next poll()'s submit_with_args.
             self.submit_pending_tx()?;
             Ok(())
         }
@@ -364,37 +473,25 @@ mod inner {
     }
 
     impl IoUringDriver {
-        fn replenish_rx(&mut self) -> io::Result<()> {
-            let mut submitted = 0usize;
-            for i in 0..self.rx_slots.len() {
-                if self.rx_slots[i].in_flight {
-                    continue;
-                }
-                self.rx_slots[i].reset();
-                self.rx_slots[i].in_flight = true;
+        /// Submit the single multishot recvmsg SQE.
+        fn arm_multishot_recv(&mut self) -> io::Result<()> {
+            let entry = io_uring::opcode::RecvMsgMulti::new(
+                FIXED_SOCKET,
+                self.rx_ring.msg.as_ref() as *const libc::msghdr,
+                BUF_GROUP,
+            )
+            .build()
+            .user_data(OP_RECV);
 
-                let slot = &mut self.rx_slots[i];
-                let entry = io_uring::opcode::RecvMsg::new(
-                    FIXED_SOCKET,
-                    slot.msg.as_mut() as *mut libc::msghdr,
-                )
-                .build()
-                .user_data(OP_RECV | i as u64);
-
-                // SAFETY: slot buffers have stable Box addresses. in_flight prevents reuse.
-                unsafe {
-                    self.ring.submission().push(&entry).map_err(|_| {
-                        reactor_metrics::record_io_uring_sq_full_event();
-                        io::Error::new(io::ErrorKind::Other, "SQ full")
-                    })?;
-                }
-                submitted += 1;
-                self.rx_in_flight += 1;
-                reactor_metrics::record_io_uring_rx_in_flight(self.rx_in_flight);
+            // SAFETY: rx_ring.msg has stable Box address, buffer ring is registered.
+            unsafe {
+                self.ring.submission().push(&entry).map_err(|_| {
+                    reactor_metrics::record_io_uring_sq_full_event();
+                    io::Error::new(io::ErrorKind::Other, "SQ full")
+                })?;
             }
-            if submitted > 0 {
-                reactor_metrics::record_io_uring_submitted_sqes(submitted);
-            }
+            self.rx_armed = true;
+            reactor_metrics::record_io_uring_submitted_sqes(1);
             Ok(())
         }
 
@@ -407,7 +504,7 @@ mod inner {
             .build()
             .user_data(OP_WAKER);
 
-            // SAFETY: waker_buf is a stable Box address. Only one read is in flight at a time.
+            // SAFETY: waker_buf is a stable Box address. Only one read is in flight.
             unsafe {
                 self.ring.submission().push(&entry).map_err(|_| {
                     reactor_metrics::record_io_uring_sq_full_event();
@@ -478,23 +575,30 @@ mod inner {
         }
     }
 
-    fn sockaddr_to_socketaddr(
-        addr: &libc::sockaddr_storage,
-        len: libc::socklen_t,
-    ) -> Option<SocketAddr> {
-        if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
-            && i32::from(addr.ss_family) == libc::AF_INET
+    /// Parse a `SocketAddr` from raw sockaddr bytes (as returned by recvmsg_out name_data).
+    fn parse_sockaddr(data: &[u8]) -> Option<SocketAddr> {
+        if data.len() < 2 {
+            return None;
+        }
+        // First two bytes are the address family (sa_family_t).
+        let family = u16::from_ne_bytes([data[0], data[1]]);
+        if family == libc::AF_INET as u16
+            && data.len() >= std::mem::size_of::<libc::sockaddr_in>()
         {
-            // SAFETY: ss_family is AF_INET and len is sufficient.
-            let sin: &libc::sockaddr_in = unsafe { &*(addr as *const _ as *const _) };
+            // SAFETY: data is large enough and we only read through a properly aligned cast.
+            let sin: libc::sockaddr_in = unsafe {
+                std::ptr::read_unaligned(data.as_ptr().cast())
+            };
             let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
             let port = u16::from_be(sin.sin_port);
             Some(SocketAddr::from((ip, port)))
-        } else if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
-            && i32::from(addr.ss_family) == libc::AF_INET6
+        } else if family == libc::AF_INET6 as u16
+            && data.len() >= std::mem::size_of::<libc::sockaddr_in6>()
         {
-            // SAFETY: ss_family is AF_INET6 and len is sufficient.
-            let sin6: &libc::sockaddr_in6 = unsafe { &*(addr as *const _ as *const _) };
+            // SAFETY: data is large enough and we use read_unaligned.
+            let sin6: libc::sockaddr_in6 = unsafe {
+                std::ptr::read_unaligned(data.as_ptr().cast())
+            };
             let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
             let port = u16::from_be(sin6.sin6_port);
             Some(SocketAddr::from((ip, port)))
