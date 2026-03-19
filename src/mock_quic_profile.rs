@@ -87,6 +87,7 @@ impl NativeMockQuicProfiler {
             key,
             cert,
             ca: server_ca,
+            client_auth: None,
             alpn: alpn.clone(),
             runtime_mode: Some("portable".into()),
             max_idle_timeout_ms: timeout_ms.or(Some(DEFAULT_TIMEOUT_MS)),
@@ -105,6 +106,8 @@ impl NativeMockQuicProfiler {
         };
         let client_options = JsQuicClientOptions {
             ca,
+            cert: None,
+            key: None,
             reject_unauthorized: reject_unauthorized.or(Some(false)),
             alpn,
             runtime_mode: Some("portable".into()),

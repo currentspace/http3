@@ -48,6 +48,8 @@ pub struct JsEventMeta {
     pub fallback_occurred: Option<bool>,
     pub errno: Option<i32>,
     pub syscall: Option<String>,
+    pub peer_certificate_presented: Option<bool>,
+    pub peer_certificate_chain: Option<Vec<ByteBuf>>,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]
@@ -117,6 +119,8 @@ impl JsH3Event {
                 fallback_occurred: None,
                 errno: None,
                 syscall: None,
+                peer_certificate_presented: None,
+                peer_certificate_chain: None,
             }),
             metrics: None,
         }
@@ -215,6 +219,8 @@ impl JsH3Event {
                 fallback_occurred: None,
                 errno: None,
                 syscall: None,
+                peer_certificate_presented: None,
+                peer_certificate_chain: None,
             }),
             metrics: None,
         }
@@ -281,6 +287,8 @@ impl JsH3Event {
                 fallback_occurred: None,
                 errno: None,
                 syscall: None,
+                peer_certificate_presented: None,
+                peer_certificate_chain: None,
             }),
             metrics: None,
         }
@@ -314,6 +322,8 @@ impl JsH3Event {
                 fallback_occurred: None,
                 errno: err.raw_os_error(),
                 syscall: Some(syscall.into()),
+                peer_certificate_presented: None,
+                peer_certificate_chain: None,
             }),
             metrics: None,
         }
@@ -328,6 +338,40 @@ impl JsH3Event {
             data: None,
             fin: None,
             meta: None,
+            metrics: None,
+        }
+    }
+
+    pub fn handshake_complete_with_peer_certificate(
+        conn_handle: u32,
+        peer_certificate_presented: bool,
+        peer_certificate_chain: Option<Vec<Vec<u8>>>,
+    ) -> Self {
+        Self {
+            event_type: EVENT_HANDSHAKE_COMPLETE,
+            conn_handle,
+            stream_id: -1,
+            headers: None,
+            data: None,
+            fin: None,
+            meta: Some(JsEventMeta {
+                error_code: None,
+                error_reason: None,
+                error_category: None,
+                remote_addr: None,
+                remote_port: None,
+                server_name: None,
+                reason_code: None,
+                runtime_driver: None,
+                runtime_mode: None,
+                requested_runtime_mode: None,
+                fallback_occurred: None,
+                errno: None,
+                syscall: None,
+                peer_certificate_presented: Some(peer_certificate_presented),
+                peer_certificate_chain: peer_certificate_chain
+                    .map(|chain| chain.into_iter().map(Into::into).collect()),
+            }),
             metrics: None,
         }
     }

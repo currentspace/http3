@@ -96,13 +96,13 @@ npm run bench:quic -- --profile smoke
 npm run bench:h3 -- --profile smoke
 ```
 
-## New In 0.5.0
+## New In 0.6.0
 
-- Fast raw-QUIC and H3 client lanes now share the same per-port worker and UDP socket ownership model.
-- `runtimeMode: 'auto'` now caches fast-path unavailability for the life of the process so restricted Linux environments stop re-probing `io_uring`.
-- Cross-platform perf work is now documented and artifact-driven, including host/Docker benchmark summaries plus loopback, quiche-direct, and mock-transport attribution harnesses.
+- Raw QUIC clients can now use mTLS through the stable public `cert` and `key` options on `connectQuic()` and `connectQuicAsync()`.
+- Raw QUIC servers now support explicit client certificate policy with `clientAuth`, defaulting to `require` when a verification `ca` is configured.
+- Raw QUIC server sessions now expose the verified peer certificate so applications can inspect or pin exact client certificates with Node's `X509Certificate` API.
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for the 0.5.0 release notes and
+See [`CHANGELOG.md`](./CHANGELOG.md) for the 0.6.0 release notes and
 [`docs/RELEASE_EVIDENCE.md`](./docs/RELEASE_EVIDENCE.md) for the supporting
 audit ledger and caveats behind this release.
 

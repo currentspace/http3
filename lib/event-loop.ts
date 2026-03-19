@@ -33,6 +33,8 @@ export interface NativeEvent {
     fallbackOccurred?: boolean;
     errno?: number;
     syscall?: string;
+    peerCertificatePresented?: boolean;
+    peerCertificateChain?: Buffer[];
   };
   metrics?: {
     packetsIn: number;
@@ -114,6 +116,7 @@ export interface NativeQuicServerOptions {
   key: Buffer;
   cert: Buffer;
   ca?: Buffer;
+  clientAuth?: 'none' | 'request' | 'require';
   alpn?: string[];
   runtimeMode?: 'fast' | 'portable';
   maxIdleTimeoutMs?: number;
@@ -136,6 +139,8 @@ export interface NativeQuicServerOptions {
  */
 export interface NativeQuicClientOptions {
   ca?: Buffer;
+  cert?: Buffer;
+  key?: Buffer;
   rejectUnauthorized?: boolean;
   alpn?: string[];
   runtimeMode?: 'fast' | 'portable';

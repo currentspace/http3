@@ -4,6 +4,7 @@ import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { resolveConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
+import { ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
@@ -30,6 +31,10 @@ export interface QuicConnectOptions {
   onRuntimeEvent?: RuntimeOptions['onRuntimeEvent'];
   /** PEM-encoded CA certificate to trust. */
   ca?: Buffer | string;
+  /** PEM-encoded client certificate chain for mutual TLS. */
+  cert?: Buffer | string;
+  /** PEM-encoded client private key for mutual TLS. */
+  key?: Buffer | string;
   /** If `false`, accept self-signed certificates. Default: `true`. */
   rejectUnauthorized?: boolean;
   /** ALPN protocol strings. Default: `['quic']`. */
@@ -58,6 +63,12 @@ export interface QuicConnectOptions {
   qlogDir?: string;
   /** qlog verbosity level. */
   qlogLevel?: string;
+}
+
+interface NormalizedQuicClientTlsOptions {
+  ca?: Buffer;
+  cert?: Buffer;
+  key?: Buffer;
 }
 
 class QuicClientEventLoop implements QuicClientEventLoopLike {
@@ -137,6 +148,7 @@ export class QuicClientSession extends EventEmitter {
   /** @internal */
   _closeRequested = false;
   private _readySettled = false;
+  private _readyHandle: NodeJS.Immediate | null = null;
   private readonly _readyPromise: Promise<void>;
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
@@ -230,9 +242,7 @@ export class QuicClientSession extends EventEmitter {
     for (const event of events) {
       switch (event.eventType) {
         case EVENT_HANDSHAKE_COMPLETE:
-          this._handshakeComplete = true;
-          this._markReady();
-          this.emit('connect');
+          this._scheduleHandshakeReady();
           break;
         case EVENT_NEW_STREAM:
           this._onNewStream(event);
@@ -362,8 +372,27 @@ export class QuicClientSession extends EventEmitter {
     this._streams.clear();
   }
 
+  private _scheduleHandshakeReady(): void {
+    if (this._readySettled || this._readyHandle) return;
+    // Give the next poll cycle a chance to deliver an immediate server-side
+    // policy close before we expose the session as successfully connected.
+    this._readyHandle = setImmediate(() => {
+      this._readyHandle = setImmediate(() => {
+        this._readyHandle = null;
+        if (this._readySettled) return;
+        this._handshakeComplete = true;
+        this._markReady();
+        this.emit('connect');
+      });
+    });
+  }
+
   private _markReady(): void {
     if (this._readySettled) return;
+    if (this._readyHandle) {
+      clearImmediate(this._readyHandle);
+      this._readyHandle = null;
+    }
     this._readySettled = true;
     this._resolveReady?.();
     this._resolveReady = null;
@@ -373,6 +402,10 @@ export class QuicClientSession extends EventEmitter {
   /** @internal */
   _markReadyError(err: Error): void {
     if (this._readySettled) return;
+    if (this._readyHandle) {
+      clearImmediate(this._readyHandle);
+      this._readyHandle = null;
+    }
     this._readySettled = true;
     this._rejectReady?.(err);
     this._resolveReady = null;
@@ -380,9 +413,72 @@ export class QuicClientSession extends EventEmitter {
   }
 }
 
-function normalizeCa(ca?: string | Buffer): Buffer | undefined {
-  if (!ca) return undefined;
-  return typeof ca === 'string' ? Buffer.from(ca) : ca;
+function normalizePem(value?: string | Buffer): Buffer | undefined {
+  if (!value) return undefined;
+  return typeof value === 'string' ? Buffer.from(value) : value;
+}
+
+function assertPemBlock(field: 'cert' | 'key', value: Buffer): void {
+  const pem = value.toString('utf8');
+  const pattern = field === 'cert'
+    ? /-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----/
+    : /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]+-----END [A-Z0-9 ]*PRIVATE KEY-----/;
+  if (!pattern.test(pem)) {
+    const description = field === 'cert' ? 'certificate chain' : 'private key';
+    throw new Http3Error(
+      `invalid QUIC client TLS ${field}: expected PEM-encoded ${description}`,
+      ERR_HTTP3_TLS_CONFIG_ERROR,
+    );
+  }
+}
+
+function normalizeQuicClientTlsOptions(options?: QuicConnectOptions): NormalizedQuicClientTlsOptions {
+  const ca = normalizePem(options?.ca);
+  const cert = normalizePem(options?.cert);
+  const key = normalizePem(options?.key);
+
+  if (cert && !key) {
+    throw new Http3Error(
+      'invalid QUIC client TLS options: `key` is required when `cert` is provided',
+      ERR_HTTP3_TLS_CONFIG_ERROR,
+    );
+  }
+  if (key && !cert) {
+    throw new Http3Error(
+      'invalid QUIC client TLS options: `cert` is required when `key` is provided',
+      ERR_HTTP3_TLS_CONFIG_ERROR,
+    );
+  }
+  if (cert) {
+    assertPemBlock('cert', cert);
+  }
+  if (key) {
+    assertPemBlock('key', key);
+  }
+
+  return { ca, cert, key };
+}
+
+function isQuicClientTlsConfigMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes('invalid quic client tls')
+    || normalized.includes('client certificate')
+    || normalized.includes('private key pem')
+    || normalized.includes('certificate pem');
+}
+
+function toQuicClientConnectError(error: unknown): Error {
+  if (error instanceof Http3Error) {
+    return error;
+  }
+  if (error instanceof Error && isQuicClientTlsConfigMessage(error.message)) {
+    return new Http3Error(
+      error.message.replace(/^config error:\s*/i, ''),
+      ERR_HTTP3_TLS_CONFIG_ERROR,
+      { cause: error },
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
@@ -419,6 +515,7 @@ function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
  * ```
  */
 export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnectOptions): QuicClientSession {
+  const tls = normalizeQuicClientTlsOptions(options);
   const session = new QuicClientSession();
   setPendingRuntimeInfo(session, options);
   const NativeQuicClient = getNativeQuicClientConstructor();
@@ -437,7 +534,9 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
       await runWithRuntimeSelection(session, options, async (runtimeMode) => {
         const nativeClient = new NativeQuicClient(
           {
-            ca: normalizeCa(options?.ca),
+            ca: tls.ca,
+            cert: tls.cert,
+            key: tls.key,
             rejectUnauthorized: options?.rejectUnauthorized,
             alpn: options?.alpn,
             runtimeMode,
@@ -481,7 +580,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
       if (shouldAbortConnect()) {
         return;
       }
-      const error = err instanceof Error ? err : new Error(String(err));
+      const error = toQuicClientConnectError(err);
       session._markReadyError(error);
       session._emitSessionError(error);
     }

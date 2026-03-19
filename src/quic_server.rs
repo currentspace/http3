@@ -4,7 +4,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::config::{JsQuicServerOptions, TransportRuntimeMode};
+use crate::config::{ClientAuthMode, JsQuicServerOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsSessionMetrics};
 
 use std::net::SocketAddr;
@@ -34,6 +34,11 @@ impl NativeQuicServer {
             qlog_level: options.qlog_level,
             max_connections: options.max_connections.unwrap_or(10_000) as usize,
             disable_retry: options.disable_retry.unwrap_or(true),
+            client_auth: ClientAuthMode::parse(
+                options.client_auth.as_deref(),
+                options.ca.is_some(),
+            )
+            .map_err(napi::Error::from)?,
             cid_encoding: crate::cid::CidEncoding::random(),
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,

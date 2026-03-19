@@ -103,6 +103,94 @@ const session = await connectQuicAsync({
 Check `session.runtimeInfo` or listen for `'runtime'` when you need to know
 which runtime was selected.
 
+## Client-authenticated QUIC (mTLS)
+
+Use `cert` and `key` when the remote QUIC server requires client
+authentication:
+
+```ts
+import { connectQuicAsync } from '@currentspace/http3';
+
+const session = await connectQuicAsync('quic://control.example.test:4000', {
+  alpn: ['sfu-repl'],
+  ca: controlCaPem,
+  cert: clientCertPem,
+  key: clientKeyPem,
+  servername: 'sharedview-control',
+  runtimeMode: 'portable',
+  fallbackPolicy: 'error',
+});
+```
+
+`cert` and `key` must be provided together. Invalid combinations and malformed
+PEM input fail through the public API with `ERR_HTTP3_TLS_CONFIG_ERROR`.
+
+## Requiring client certificates on the raw QUIC server
+
+When you configure `ca` on `createQuicServer()`, raw QUIC defaults to requiring
+client certificates:
+
+```ts
+import { createQuicServer } from '@currentspace/http3';
+
+const server = createQuicServer({
+  key: serverKeyPem,
+  cert: serverCertPem,
+  ca: clientCaPem,
+  alpn: ['sfu-repl'],
+});
+```
+
+That default maps to `clientAuth: 'require'`. Clients that do not present a
+certificate chain that the server can verify are closed immediately and are not
+surfaced through the server's `'session'` event.
+
+If you intentionally want optional client certificates, opt in explicitly:
+
+```ts
+const server = createQuicServer({
+  key: serverKeyPem,
+  cert: serverCertPem,
+  ca: clientCaPem,
+  clientAuth: 'request',
+});
+```
+
+## Inspecting and pinning the peer certificate
+
+Raw QUIC server sessions expose the verified peer certificate as Node.js
+`X509Certificate` objects:
+
+```ts
+import { X509Certificate } from 'node:crypto';
+import { createQuicServer } from '@currentspace/http3';
+
+const expectedFingerprint = new X509Certificate(allowedClientCertPem).fingerprint256;
+
+const server = createQuicServer({
+  key: serverKeyPem,
+  cert: serverCertPem,
+  ca: clientCaPem,
+  clientAuth: 'require',
+});
+
+server.on('session', (session) => {
+  const peerCertificate = session.getPeerCertificate();
+  if (!peerCertificate || peerCertificate.fingerprint256 !== expectedFingerprint) {
+    session.close(0x101, 'unexpected client certificate');
+    return;
+  }
+
+  session.on('stream', (stream) => {
+    stream.pipe(stream);
+  });
+});
+```
+
+Use `session.peerCertificatePresented` when you only need a boolean. Use
+`session.getPeerCertificateChain()` when you need to inspect the full verified
+chain that the peer presented, leaf first.
+
 ## Multiple streams
 
 QUIC multiplexes streams over a single connection with no head-of-line blocking:
