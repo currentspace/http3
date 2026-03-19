@@ -269,9 +269,10 @@ mod inner {
                             );
                             if let Some(peer) = peer {
                                 let len = result as usize;
-                                let mut data = vec![0u8; len];
-                                data.copy_from_slice(&slot.buf[..len]);
-                                outcome.rx.push(RxDatagram { data, peer });
+                                outcome.rx.push(RxDatagram {
+                                    data: slot.buf[..len].to_vec(),
+                                    peer,
+                                });
                                 reactor_metrics::record_io_uring_rx_datagrams(1);
                             }
                         }
