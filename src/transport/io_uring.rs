@@ -211,18 +211,14 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
-            // Submit any queued TX before blocking so send completions can wake the loop.
+            // Queue any pending TX SQEs — submit_with_args will flush them.
             self.submit_pending_tx()?;
 
             let wait_dur = deadline.map_or(Duration::from_millis(100), |d| {
                 d.saturating_duration_since(Instant::now())
             });
 
-            // Submit pending SQEs (replenished recvmsg + waker read).
-            reactor_metrics::record_io_uring_submit_call();
-            self.ring.submit()?;
-
-            // Wait for at least 1 CQE with timeout.
+            // Single syscall: submit all pending SQEs AND wait for ≥1 CQE.
             let ts = io_uring::types::Timespec::new()
                 .sec(wait_dur.as_secs())
                 .nsec(wait_dur.subsec_nanos());
@@ -310,21 +306,18 @@ mod inner {
                                 8,
                             );
                         }
-                        // Resubmit waker read and submit immediately so it's
-                        // ready before the next submit_with_args blocks.
+                        // Resubmit waker read — will be flushed by the next
+                        // iteration's submit_with_args, no extra submit needed.
                         let _ = self.submit_waker_read();
-                        reactor_metrics::record_io_uring_submit_call();
-                        let _ = self.ring.submit();
                     }
                     _ => {}
                 }
             }
 
-            // Replenish RX depth — resubmit completed slots.
+            // Replenish RX depth and queue pending TX — these SQEs will be
+            // flushed by the next poll()'s submit_with_args call.
             self.replenish_rx()?;
             self.submit_pending_tx()?;
-            reactor_metrics::record_io_uring_submit_call();
-            self.ring.submit()?;
 
             Ok(outcome)
         }
@@ -334,9 +327,8 @@ mod inner {
                 self.pending_tx.push_back(pkt);
                 reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
             }
+            // Queue SQEs — they'll be flushed by the next poll()'s submit_with_args.
             self.submit_pending_tx()?;
-            reactor_metrics::record_io_uring_submit_call();
-            let _ = self.ring.submit();
             Ok(())
         }
 
@@ -539,5 +531,7 @@ mod inner {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "bench-internals"))]
+pub use inner::{IoUringDriver, IoUringWaker};
+#[cfg(all(target_os = "linux", not(feature = "bench-internals")))]
 pub(crate) use inner::{IoUringDriver, IoUringWaker};
