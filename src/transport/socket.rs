@@ -144,6 +144,11 @@ fn cmsg_data_offset() -> usize {
     cmsg_align(std::mem::size_of::<libc::cmsghdr>())
 }
 
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn cmsg_data_offset_for_test() -> usize {
+    cmsg_data_offset()
+}
+
 // ── UDP GSO (Generic Segmentation Offload) ──────────────────────────
 
 /// `SOL_UDP` / `UDP_SEGMENT` may be missing from older libc crate versions.
@@ -153,24 +158,31 @@ pub(crate) const SOL_UDP: libc::c_int = 17;
 pub(crate) const UDP_SEGMENT: libc::c_int = 103;
 
 /// Probe whether the kernel supports UDP GSO (Generic Segmentation Offload).
-/// Sets `UDP_SEGMENT` as a socket option; returns `true` if the kernel accepts it.
+/// Uses `getsockopt` (read-only) instead of `setsockopt` to avoid leaving a
+/// persistent `UDP_SEGMENT` socket option that could alter kernel send code
+/// paths on the worker thread.
 #[cfg(target_os = "linux")]
 pub(crate) fn probe_gso(socket: &UdpSocket) -> bool {
     use std::os::fd::AsRawFd;
     let fd = socket.as_raw_fd();
-    let segment: libc::c_int = 0;
-    // SAFETY: fd is a valid socket, segment points to a valid int.
+    let mut val: libc::c_int = 0;
+    let mut len = std::mem::size_of_val(&val) as libc::socklen_t;
+    // SAFETY: fd is a valid socket, val/len point to valid stack memory.
     #[allow(unsafe_code)]
     let rc = unsafe {
-        libc::setsockopt(
+        libc::getsockopt(
             fd,
             SOL_UDP,
             UDP_SEGMENT,
-            &segment as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&segment) as libc::socklen_t,
+            &mut val as *mut _ as *mut libc::c_void,
+            &mut len,
         )
     };
-    rc == 0
+    let supported = rc == 0;
+    log::debug!(
+        "probe_gso: fd={fd} getsockopt(SOL_UDP, UDP_SEGMENT) rc={rc} supported={supported}"
+    );
+    supported
 }
 
 /// Build a `UDP_SEGMENT` (GSO) cmsg into the provided buffer.

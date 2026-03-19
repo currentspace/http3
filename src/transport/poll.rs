@@ -124,6 +124,10 @@ mod inner {
             let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
             enable_gro(&socket);
+            log::info!(
+                "PollDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} tid={:?}",
+                std::thread::current().id(),
+            );
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.
             let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
             if efd < 0 {
@@ -269,6 +273,12 @@ mod inner {
                 )
             };
 
+            if count > 0 {
+                log::trace!(
+                    "poll::recv_batch fd={} count={count} tid={:?}",
+                    self.socket_fd, std::thread::current().id(),
+                );
+            }
             if count <= 0 {
                 return;
             }
@@ -299,6 +309,10 @@ mod inner {
 
         /// Send datagrams using sendmmsg(2), with optional UDP GSO coalescing.
         fn send_batch(&mut self, packets: Vec<TxDatagram>) {
+            log::trace!(
+                "poll::send_batch pkts={} gso={} tid={:?}",
+                packets.len(), self.gso_supported, std::thread::current().id(),
+            );
             if self.gso_supported && packets.len() > 1 {
                 self.send_batch_gso(packets);
                 return;
@@ -420,29 +434,50 @@ mod inner {
                     self.tx_hdrs[i].msg_hdr.msg_control =
                         self.tx_cmsg_bufs[i].as_mut_ptr().cast();
                     self.tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
+                    log::trace!(
+                        "poll::send_batch_gso: batch {i} data_len={} seg_size={} cmsg_controllen={cmsg_len} cmsg_bytes={:02x?}",
+                        batch_data[i].len(), batch_seg_sizes[i],
+                        &self.tx_cmsg_bufs[i][..cmsg_len],
+                    );
                 }
             }
 
-            // SAFETY: all tx_hdrs/iovs/addrs/cmsg_bufs/batch_data are valid
-            // for the duration of the sendmmsg call.
-            let sent = unsafe {
-                libc::sendmmsg(
-                    self.socket_fd,
-                    self.tx_hdrs.as_mut_ptr(),
-                    count as libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                )
-            };
-
-            let sent_count = if sent < 0 {
-                if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
-                    0usize
-                } else {
-                    0
+            // Use sendmsg per batch instead of sendmmsg. sendmmsg on some
+            // kernels/architectures ignores msg_control (cmsg), causing GSO
+            // coalesced buffers to be sent as single oversized datagrams.
+            let mut sent_count = 0usize;
+            for i in 0..count {
+                let hdr = &self.tx_hdrs[i].msg_hdr;
+                #[cfg(test)]
+                if hdr.msg_controllen > 0 {
+                    let ctrl = unsafe { std::slice::from_raw_parts(hdr.msg_control.cast::<u8>(), hdr.msg_controllen) };
+                    eprintln!(
+                        "GSO sendmsg: iov_len={} controllen={} control_bytes={:02x?} flags={}",
+                        unsafe { (*hdr.msg_iov).iov_len }, hdr.msg_controllen, ctrl, hdr.msg_flags,
+                    );
                 }
-            } else {
-                sent as usize
-            };
+                let rc = unsafe {
+                    libc::sendmsg(
+                        self.socket_fd,
+                        &self.tx_hdrs[i].msg_hdr,
+                        0, // No MSG_DONTWAIT — nonblocking already set on socket
+                    )
+                };
+                #[cfg(test)]
+                eprintln!("  sendmsg rc={rc} (expected iov_len={})", unsafe { (*self.tx_hdrs[i].msg_hdr.msg_iov).iov_len });
+                if rc >= 0 {
+                    sent_count += 1;
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        log::trace!("poll::send_batch_gso sendmsg error: {err}");
+                    }
+                    break;
+                }
+            }
+            let sent = sent_count as libc::c_int;
+
+            let sent_count = sent as usize;
 
             // Recycle sent batch buffers, split unsent batches back to individual packets.
             for (i, data) in batch_data.into_iter().enumerate() {

@@ -9,6 +9,7 @@ autobins = false
 default = ["node-api"]
 node-api = []
 profile-binary = []
+bench-internals = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -49,6 +50,12 @@ napi-build = "2"
 [dev-dependencies]
 mio = { version = "1", features = ["os-poll", "net"] }
 rcgen = "0.13"
+criterion = { version = "0.5", features = ["html_reports"] }
+env_logger = "0.11"
+
+[[bench]]
+name = "driver_udp"
+harness = false
 
 [lints.rust]
 unsafe_code = "warn"
