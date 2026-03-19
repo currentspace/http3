@@ -26,6 +26,40 @@ pub struct TxDatagram {
     pub to: SocketAddr,
 }
 
+/// A batch of same-size packets to the same peer, coalesced for UDP GSO.
+#[cfg(target_os = "linux")]
+pub(crate) struct GsoBatch {
+    pub data: Vec<u8>,
+    pub to: SocketAddr,
+    pub segment_size: u16,
+}
+
+/// Group consecutive same-(destination, packet-size) packets into GSO batches.
+/// Packets within each batch are concatenated; the kernel segments them using
+/// the `UDP_SEGMENT` cmsg.  Max 64 segments per batch (kernel limit).
+#[cfg(target_os = "linux")]
+pub(crate) fn group_for_gso(packets: Vec<TxDatagram>) -> Vec<GsoBatch> {
+    let mut batches: Vec<GsoBatch> = Vec::new();
+    for pkt in packets {
+        let seg_size = pkt.data.len() as u16;
+        if let Some(last) = batches.last_mut() {
+            if last.to == pkt.to
+                && last.segment_size == seg_size
+                && (last.data.len() / seg_size as usize) < 64
+            {
+                last.data.extend_from_slice(&pkt.data);
+                continue;
+            }
+        }
+        batches.push(GsoBatch {
+            data: pkt.data,
+            to: pkt.to,
+            segment_size: seg_size,
+        });
+    }
+    batches
+}
+
 /// Outcome of a single `Driver::poll()` cycle.
 pub struct PollOutcome {
     /// Completed receive operations since last poll.

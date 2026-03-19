@@ -13,8 +13,12 @@ mod inner {
 
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+        group_for_gso,
     };
-    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg};
+    use crate::transport::socket::{
+        CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg,
+        probe_gso, build_gso_cmsg,
+    };
 
     const MAX_RX_PER_POLL: usize = 256;
     const RX_BUF_SIZE: usize = 65535;
@@ -86,6 +90,7 @@ mod inner {
         socket: std::net::UdpSocket,
         socket_fd: RawFd,
         local_addr: SocketAddr,
+        gso_supported: bool,
         eventfd: OwnedFd,
         unsent: VecDeque<TxDatagram>,
         recycled_tx: Vec<Vec<u8>>,
@@ -96,6 +101,7 @@ mod inner {
         tx_hdrs: Vec<libc::mmsghdr>,
         tx_iovs: Vec<libc::iovec>,
         tx_addrs: Vec<libc::sockaddr_storage>,
+        tx_cmsg_bufs: Vec<[u8; 32]>,
     }
 
     // SAFETY: PollDriver is created on the main thread and moved to the worker
@@ -115,6 +121,7 @@ mod inner {
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
+            let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.
             let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
@@ -128,6 +135,7 @@ mod inner {
                 socket,
                 socket_fd,
                 local_addr,
+                gso_supported,
                 eventfd,
                 unsent: VecDeque::new(),
                 recycled_tx: Vec::new(),
@@ -137,6 +145,7 @@ mod inner {
                 tx_hdrs: Vec::with_capacity(256),
                 tx_iovs: Vec::with_capacity(256),
                 tx_addrs: Vec::with_capacity(256),
+                tx_cmsg_bufs: Vec::with_capacity(256),
             };
 
             // SAFETY: dup returns a valid fd or -1.
@@ -287,8 +296,12 @@ mod inner {
             }
         }
 
-        /// Send datagrams using sendmmsg(2).
+        /// Send datagrams using sendmmsg(2), with optional UDP GSO coalescing.
         fn send_batch(&mut self, packets: Vec<TxDatagram>) {
+            if self.gso_supported && packets.len() > 1 {
+                self.send_batch_gso(packets);
+                return;
+            }
             let count = packets.len();
 
             // Prepare the mmsghdr array.
@@ -355,6 +368,100 @@ mod inner {
                         data,
                         to: pkt_addrs[i],
                     });
+                }
+            }
+        }
+
+        /// GSO-accelerated send: group packets by (dest, size) and use UDP_SEGMENT cmsg.
+        fn send_batch_gso(&mut self, packets: Vec<TxDatagram>) {
+            let batches = group_for_gso(packets);
+            let count = batches.len();
+
+            self.tx_hdrs.clear();
+            self.tx_iovs.clear();
+            self.tx_addrs.clear();
+            self.tx_cmsg_bufs.clear();
+            self.tx_hdrs.resize(count, unsafe { std::mem::zeroed() });
+            self.tx_iovs.resize(count, libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            });
+            self.tx_addrs.resize(count, unsafe { std::mem::zeroed() });
+            self.tx_cmsg_bufs.resize(count, [0u8; 32]);
+
+            // Stash batch data so pointers remain valid during sendmmsg.
+            let mut batch_data: Vec<Vec<u8>> = Vec::with_capacity(count);
+            let mut batch_addrs: Vec<SocketAddr> = Vec::with_capacity(count);
+            let mut batch_seg_sizes: Vec<u16> = Vec::with_capacity(count);
+            for batch in batches {
+                batch_addrs.push(batch.to);
+                batch_seg_sizes.push(batch.segment_size);
+                batch_data.push(batch.data);
+            }
+
+            for i in 0..count {
+                let addrlen = socketaddr_to_sockaddr(batch_addrs[i], &mut self.tx_addrs[i]);
+                self.tx_iovs[i].iov_base = batch_data[i].as_ptr() as *mut libc::c_void;
+                self.tx_iovs[i].iov_len = batch_data[i].len();
+                self.tx_hdrs[i].msg_hdr.msg_name =
+                    (&mut self.tx_addrs[i] as *mut libc::sockaddr_storage).cast();
+                self.tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
+                self.tx_hdrs[i].msg_hdr.msg_iov =
+                    &mut self.tx_iovs[i] as *mut libc::iovec;
+                self.tx_hdrs[i].msg_hdr.msg_iovlen = 1;
+
+                // Attach UDP_SEGMENT cmsg when the batch holds >1 segment.
+                if batch_data[i].len() > batch_seg_sizes[i] as usize {
+                    let cmsg_len = build_gso_cmsg(
+                        &mut self.tx_cmsg_bufs[i],
+                        batch_seg_sizes[i],
+                    );
+                    self.tx_hdrs[i].msg_hdr.msg_control =
+                        self.tx_cmsg_bufs[i].as_mut_ptr().cast();
+                    self.tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
+                }
+            }
+
+            // SAFETY: all tx_hdrs/iovs/addrs/cmsg_bufs/batch_data are valid
+            // for the duration of the sendmmsg call.
+            let sent = unsafe {
+                libc::sendmmsg(
+                    self.socket_fd,
+                    self.tx_hdrs.as_mut_ptr(),
+                    count as libc::c_uint,
+                    libc::MSG_DONTWAIT,
+                )
+            };
+
+            let sent_count = if sent < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
+                    0usize
+                } else {
+                    0
+                }
+            } else {
+                sent as usize
+            };
+
+            // Recycle sent batch buffers, split unsent batches back to individual packets.
+            for (i, data) in batch_data.into_iter().enumerate() {
+                if i < sent_count {
+                    self.recycled_tx.push(data);
+                } else {
+                    let seg = batch_seg_sizes[i] as usize;
+                    if data.len() > seg {
+                        for chunk in data.chunks(seg) {
+                            self.unsent.push_back(TxDatagram {
+                                data: chunk.to_vec(),
+                                to: batch_addrs[i],
+                            });
+                        }
+                    } else {
+                        self.unsent.push_back(TxDatagram {
+                            data,
+                            to: batch_addrs[i],
+                        });
+                    }
                 }
             }
         }
