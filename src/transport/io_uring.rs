@@ -127,8 +127,8 @@ mod inner {
             })
         }
 
-        /// Return a consumed buffer to the ring so the kernel can reuse it.
-        fn return_buffer(&mut self, bid: u16) {
+        /// Stage a consumed buffer for return (no fence yet).
+        fn stage_buffer_return(&mut self, bid: u16) {
             let entries = self.ring_ptr.cast::<io_uring::types::BufRingEntry>();
             let slot = (self.tail % RX_RING_SIZE) as usize;
             let entry = unsafe { &mut *entries.add(slot) };
@@ -139,7 +139,11 @@ mod inner {
             entry.set_bid(bid);
 
             self.tail = self.tail.wrapping_add(1);
+        }
 
+        /// Publish all staged buffer returns to the kernel with a single fence.
+        fn flush_buffer_returns(&self) {
+            let entries = self.ring_ptr.cast::<io_uring::types::BufRingEntry>();
             // SAFETY: entries is the base of a valid buf ring.
             unsafe {
                 let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
@@ -402,7 +406,7 @@ mod inner {
                                 }
 
                                 // Return buffer to the ring immediately.
-                                self.rx_ring.return_buffer(bid);
+                                self.rx_ring.stage_buffer_return(bid);
                             }
                         } else if result < 0 {
                             // Error on multishot — will re-arm below.
@@ -445,6 +449,9 @@ mod inner {
                 }
             }
             reactor_metrics::record_io_uring_completions(cqe_count);
+
+            // Single fence to publish all returned buffers to the kernel.
+            self.rx_ring.flush_buffer_returns();
 
             if cqe_count == 0 {
                 reactor_metrics::record_io_uring_timeout_poll();
