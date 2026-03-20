@@ -755,6 +755,66 @@ mod tests {
         }
     }
 
+    // ── Test: IoUringDriver rapid submit_sends without poll (regression for SQE flush) ──
+
+    /// Regression test for the io_uring intermittent slowdown bug.
+    /// Sends 200+ packets via multiple submit_sends() calls WITHOUT calling
+    /// poll() between them. Before the fix, unflushed SQEs would accumulate
+    /// in the SQ ring, invisible to the kernel until the next poll().
+    #[test]
+    fn iouring_driver_rapid_submit_sends_no_poll() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender_sock.set_nonblocking(true).unwrap();
+        receiver_sock.set_nonblocking(true).unwrap();
+        let recv_addr = receiver_sock.local_addr().unwrap();
+
+        let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
+        let (mut receiver, _rw) = IoUringDriver::new(receiver_sock).unwrap();
+
+        // Enable on worker thread.
+        let _ = receiver.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        // Simulate the event loop pattern: multiple submit_sends() calls with
+        // NO poll() in between. This is the pattern that triggered the bug —
+        // SQEs accumulated without being flushed to the kernel.
+        let calls = 8;
+        let pkts_per_call = 32;
+        let pkt_size = 200;
+        let total_expected = calls * pkts_per_call * pkt_size; // 51200 bytes
+
+        for call in 0..calls {
+            let packets: Vec<TxDatagram> = (0..pkts_per_call)
+                .map(|i| TxDatagram {
+                    data: vec![(call * pkts_per_call + i) as u8; pkt_size],
+                    to: recv_addr,
+                })
+                .collect();
+            sender.submit_sends(packets).unwrap();
+            // NO poll() here — this is the critical part of the test.
+        }
+
+        // Now receive all packets (receiver polls normally).
+        let mut total_bytes = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while total_bytes < total_expected && Instant::now() < deadline {
+            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+            for pkt in &outcome.rx {
+                total_bytes += pkt.data.len();
+            }
+        }
+        eprintln!("  rapid submit_sends: {total_bytes}/{total_expected} bytes");
+        assert_eq!(
+            total_bytes, total_expected,
+            "all packets should arrive without poll() between submit_sends() calls \
+             (got {total_bytes}/{total_expected})"
+        );
+    }
+
     // ── Test: PollDriver GSO send on worker thread ──────────────────
 
     #[test]

@@ -465,6 +465,11 @@ mod inner {
         pending_tx: VecDeque<TxDatagram>,
         recycled_tx: Vec<Vec<u8>>,
         cqe_buf: Vec<io_uring::cqueue::Entry>,
+        /// RX datagrams harvested during drain_completions_for_tx(), prepended
+        /// to the next poll() outcome so they aren't lost.
+        deferred_rx: Vec<RxDatagram>,
+        /// Waker fired during drain_completions_for_tx().
+        deferred_woken: bool,
     }
 
     // SAFETY: IoUringDriver is created on the main thread and moved to the worker
@@ -568,6 +573,8 @@ mod inner {
                 pending_tx: VecDeque::new(),
                 recycled_tx: Vec::new(),
                 cqe_buf: Vec::with_capacity(512),
+                deferred_rx: Vec::new(),
+                deferred_woken: false,
             };
 
             // When R_DISABLED is active, SQE submission is deferred until the
@@ -622,8 +629,8 @@ mod inner {
             }
 
             let mut outcome = PollOutcome {
-                rx: Vec::new(),
-                woken: false,
+                rx: std::mem::take(&mut self.deferred_rx),
+                woken: std::mem::take(&mut self.deferred_woken),
                 timer_expired: false,
             };
 
@@ -821,6 +828,7 @@ mod inner {
                     return self.submit_send_bundle(packets);
                 }
             }
+            let mut sqes_pushed = 0usize;
             if self.gso_supported && packets.len() > 1 {
                 // Group into GSO batches, then route through pending_tx so
                 // the SQE creation path is identical to non-GSO sends.
@@ -855,6 +863,7 @@ mod inner {
                             }
                         } else {
                             self.tx_in_flight += 1;
+                            sqes_pushed += 1;
                         }
                     } else {
                         // Single-packet batch: route through pending_tx (no cmsg needed).
@@ -867,7 +876,28 @@ mod inner {
                     reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
                 }
             }
-            self.submit_pending_tx()?;
+            sqes_pushed += self.submit_pending_tx()?;
+
+            // Flush SQEs to the kernel immediately so sends don't stall until
+            // the next poll(). This is a non-blocking io_uring_enter(to_submit=N,
+            // min_complete=0) — lightweight with DEFER_TASKRUN.
+            if sqes_pushed > 0 {
+                reactor_metrics::record_io_uring_submit_call();
+                let _ = self.ring.submit();
+            }
+
+            // Tier 2: If pending_tx still has items, all TX slots are in-flight.
+            // Drain deferred completions (TASKRUN-gated) to free slots, then retry.
+            if !self.pending_tx.is_empty() {
+                let freed = self.drain_completions_for_tx()?;
+                if freed > 0 {
+                    let retry_sqes = self.submit_pending_tx()?;
+                    if retry_sqes > 0 {
+                        reactor_metrics::record_io_uring_submit_call();
+                        let _ = self.ring.submit();
+                    }
+                }
+            }
             Ok(())
         }
 
@@ -983,10 +1013,11 @@ mod inner {
             }
 
             // Overflow packets that didn't fit in the ring: fall back to GSO/SendMsg.
+            let mut overflow_sqes = 0usize;
             if enqueued < packets.len() {
                 let overflow: Vec<TxDatagram> = packets.into_iter().skip(enqueued).collect();
                 if self.gso_supported && overflow.len() > 1 {
-                    self.submit_sends_gso(overflow)?;
+                    overflow_sqes += self.submit_sends_gso(overflow)?;
                 } else {
                     for pkt in overflow {
                         self.pending_tx.push_back(pkt);
@@ -994,7 +1025,13 @@ mod inner {
                 }
             }
 
-            self.submit_pending_tx()?;
+            overflow_sqes += self.submit_pending_tx()?;
+
+            // Flush overflow SQEs to the kernel immediately.
+            if overflow_sqes > 0 {
+                reactor_metrics::record_io_uring_submit_call();
+                let _ = self.ring.submit();
+            }
             Ok(())
         }
 
@@ -1032,7 +1069,8 @@ mod inner {
 
         /// Group packets into GSO batches and submit as SQEs directly.
         /// Packets that don't fit into available slots are put back into pending_tx.
-        fn submit_sends_gso(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+        /// Returns the number of SQEs pushed to the submission ring.
+        fn submit_sends_gso(&mut self, packets: Vec<TxDatagram>) -> io::Result<usize> {
             let batches = group_for_gso(packets);
             log::trace!(
                 "io_uring::submit_sends_gso: {} packets -> {} batches, tx_in_flight={} pending_tx={} tid={:?}",
@@ -1042,6 +1080,7 @@ mod inner {
                 self.pending_tx.len(),
                 std::thread::current().id(),
             );
+            let mut sqes_pushed = 0usize;
             for batch in batches {
                 let Some(idx) = self.tx_slots.iter().position(|s| !s.in_flight) else {
                     // No free slot — split batch back into individual packets.
@@ -1089,15 +1128,17 @@ mod inner {
                     break;
                 }
 
+                sqes_pushed += 1;
                 self.tx_in_flight += 1;
                 reactor_metrics::record_io_uring_submitted_sqes(1);
                 reactor_metrics::record_io_uring_tx_in_flight(self.tx_in_flight);
                 reactor_metrics::record_io_uring_tx_datagrams_submitted(1);
             }
-            Ok(())
+            Ok(sqes_pushed)
         }
 
-        fn submit_pending_tx(&mut self) -> io::Result<()> {
+        /// Drain pending_tx queue into SQEs. Returns the number of SQEs pushed.
+        fn submit_pending_tx(&mut self) -> io::Result<usize> {
             let mut submitted = 0usize;
             while let Some(packet) = self.pending_tx.pop_front() {
                 let Some(idx) = self.tx_slots.iter().position(|slot| !slot.in_flight) else {
@@ -1133,7 +1174,185 @@ mod inner {
                 reactor_metrics::record_io_uring_submitted_sqes(submitted);
                 reactor_metrics::record_io_uring_tx_datagrams_submitted(submitted);
             }
-            Ok(())
+            Ok(submitted)
+        }
+
+        /// IORING_ENTER_GETEVENTS flag for io_uring_enter.
+        const GETEVENTS: u32 = 1;
+
+        /// Drain deferred completions to free TX slots when `pending_tx` is
+        /// backed up due to slot exhaustion.
+        ///
+        /// With DEFER_TASKRUN, completed I/O sits in the kernel's work_llist
+        /// until we call `io_uring_enter(GETEVENTS)`. The `SQ_TASKRUN` flag
+        /// tells us (zero-syscall, mmap'd read) whether there's pending work.
+        ///
+        /// Returns the number of TX slots freed.
+        fn drain_completions_for_tx(&mut self) -> io::Result<usize> {
+            // Check if the kernel has deferred completions to process.
+            if !self.ring.submission().taskrun() {
+                return Ok(0);
+            }
+
+            // Drain the work_llist into the CQ ring. This calls
+            // io_uring_enter(to_submit=0, min_complete=0, flags=GETEVENTS)
+            // which runs io_run_local_work → posts CQEs → returns immediately.
+            // SAFETY: no SQEs submitted (to_submit=0), no blocking (min_complete=0).
+            unsafe {
+                self.ring.submitter().enter::<libc::sigset_t>(
+                    0,
+                    0,
+                    Self::GETEVENTS,
+                    None,
+                )?;
+            }
+
+            // Process all CQEs — we must handle every op type since
+            // ring.completion() advances the CQ head on drop.
+            self.cqe_buf.clear();
+            self.cqe_buf.extend(self.ring.completion());
+            let cqe_count = self.cqe_buf.len();
+            if cqe_count == 0 {
+                return Ok(0);
+            }
+
+            let mut tx_freed = 0usize;
+            let mut bundle_needs_reset = false;
+
+            for cqe_idx in 0..cqe_count {
+                let cqe = &self.cqe_buf[cqe_idx];
+                let user_data = cqe.user_data();
+                let op = user_data & OP_MASK;
+                let result = cqe.result();
+                let flags = cqe.flags();
+
+                match op {
+                    OP_RECV => {
+                        let has_more = io_uring::cqueue::more(flags);
+                        if !has_more {
+                            self.rx_armed = false;
+                        }
+                        if result > 0 {
+                            if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
+                                let buf = self.rx_ring.buffer_data(bid);
+                                let buf_len = result as usize;
+                                if let Ok(parsed) = io_uring::types::RecvMsgOut::parse(
+                                    &buf[..buf_len],
+                                    self.rx_ring.msg.as_ref(),
+                                ) {
+                                    let name_data = parsed.name_data();
+                                    let peer = parse_sockaddr(name_data);
+                                    if let Some(peer) = peer {
+                                        let control = parsed.control_data();
+                                        let local_ip = parse_pktinfo_cmsg(control);
+                                        let local = local_ip
+                                            .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
+                                            .unwrap_or(self.local_addr);
+                                        let segment_size = parse_gro_cmsg(control);
+                                        let payload = parsed.payload_data();
+                                        self.deferred_rx.push(RxDatagram {
+                                            data: payload.to_vec(),
+                                            peer,
+                                            local,
+                                            segment_size,
+                                        });
+                                        reactor_metrics::record_io_uring_rx_datagrams(1);
+                                    }
+                                }
+                                self.rx_ring.stage_buffer_return(bid);
+                            }
+                        }
+                    }
+                    OP_SEND => {
+                        let idx = (user_data & IDX_MASK) as usize;
+                        self.tx_in_flight -= 1;
+                        tx_freed += 1;
+                        let slot = &mut self.tx_slots[idx];
+                        if result >= 0 {
+                            self.recycled_tx.push(slot.recycle_buffer());
+                            reactor_metrics::record_io_uring_tx_datagrams_completed(1);
+                        } else {
+                            let errno = -result;
+                            if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR
+                                || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0)
+                            {
+                                reactor_metrics::record_io_uring_retryable_send_completion();
+                                let seg = slot.gso_segment_size;
+                                if seg > 0 {
+                                    let peer = slot.peer;
+                                    let data = slot.recycle_buffer();
+                                    for chunk in data.chunks(seg as usize) {
+                                        self.pending_tx.push_back(TxDatagram {
+                                            data: chunk.to_vec(),
+                                            to: peer,
+                                        });
+                                    }
+                                } else {
+                                    self.pending_tx.push_back(slot.take_packet());
+                                }
+                                reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
+                            } else {
+                                self.recycled_tx.push(slot.recycle_buffer());
+                            }
+                        }
+                    }
+                    OP_WAKER => {
+                        self.deferred_woken = true;
+                        reactor_metrics::record_io_uring_wake_completion();
+                        unsafe {
+                            libc::read(
+                                self.eventfd.as_raw_fd(),
+                                self.waker_buf.as_mut_ptr().cast(),
+                                8,
+                            );
+                        }
+                        let _ = self.submit_waker_read();
+                    }
+                    OP_BUNDLE => {
+                        if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                            let (consumed, unsent) = if result > 0 {
+                                tx_ring.complete(result as usize)
+                            } else {
+                                tx_ring.complete(0)
+                            };
+                            reactor_metrics::record_io_uring_tx_datagrams_completed(consumed);
+                            if !unsent.is_empty() {
+                                let retryable = result >= 0
+                                    || matches!(-result, e if e == libc::EAGAIN || e == libc::ENOBUFS || e == libc::EINTR);
+                                if retryable {
+                                    for pkt in unsent {
+                                        self.pending_tx.push_back(pkt);
+                                    }
+                                }
+                                bundle_needs_reset = true;
+                            } else if result <= 0 {
+                                bundle_needs_reset = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            reactor_metrics::record_io_uring_completions(cqe_count);
+            self.rx_ring.flush_buffer_returns();
+
+            if bundle_needs_reset {
+                if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                    let _ = tx_ring.reset(&self.ring.submitter());
+                }
+            }
+
+            if !self.rx_armed {
+                self.arm_multishot_recv()?;
+            }
+
+            log::trace!(
+                "drain_completions_for_tx: CQEs={cqe_count} tx_freed={tx_freed} deferred_rx={} pending={}",
+                self.deferred_rx.len(), self.pending_tx.len(),
+            );
+
+            Ok(tx_freed)
         }
     }
 
