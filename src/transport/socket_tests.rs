@@ -1134,6 +1134,102 @@ mod tests {
         );
     }
 
+    // ── Test: IoUringDriver cross-thread echo (reproduces Node.js benchmark stall) ──
+
+    /// Reproduces the QUIC benchmark stall in pure Rust: client and server
+    /// on separate threads (simulating separate processes), client blasts
+    /// a burst of packets, server echoes. The UDP receive buffer is the
+    /// only coordination — if the client sends faster than the server
+    /// drains, packets drop and the echo never completes.
+    #[test]
+    fn iouring_driver_cross_thread_echo() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client_sock.set_nonblocking(true).unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+        let client_addr = client_sock.local_addr().unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let (mut client, _cw) = IoUringDriver::new(client_sock).unwrap();
+        let (mut server, _sw) = IoUringDriver::new(server_sock).unwrap();
+
+        let total_pkts = 500;
+        let pkt_size = 1200;
+        let total_bytes = total_pkts * pkt_size;
+
+        // Server thread: poll, echo back, repeat.
+        let server_handle = thread::spawn(move || {
+            let _ = server.poll(Some(Instant::now() + Duration::from_millis(1)));
+            let mut rx_bytes = 0usize;
+            let mut tx_bytes = 0usize;
+            let deadline = Instant::now() + Duration::from_secs(5);
+
+            while Instant::now() < deadline {
+                let out = server.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+                if !out.rx.is_empty() {
+                    let mut echo = Vec::new();
+                    for pkt in &out.rx {
+                        rx_bytes += pkt.data.len();
+                        if let Some(seg) = pkt.segment_size {
+                            for chunk in pkt.data.chunks(seg as usize) {
+                                echo.push(TxDatagram { data: chunk.to_vec(), to: client_addr });
+                            }
+                        } else {
+                            echo.push(TxDatagram { data: pkt.data.clone(), to: client_addr });
+                        }
+                    }
+                    tx_bytes += echo.iter().map(|p| p.data.len()).sum::<usize>();
+                    server.submit_sends(echo).unwrap();
+                }
+                // Stop when we've echoed everything.
+                if rx_bytes >= total_bytes {
+                    // One more poll to flush remaining sends.
+                    let _ = server.poll(Some(Instant::now() + Duration::from_millis(100)));
+                    break;
+                }
+            }
+            eprintln!("  server: rx={rx_bytes} tx={tx_bytes}");
+            (rx_bytes, tx_bytes)
+        });
+
+        // Client: enable, then blast ALL packets before server starts polling.
+        // This simulates the separate-process timing gap in Node.js benchmarks.
+        let _ = client.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        // Send entire burst at once — 500 packets in one submit_sends call.
+        let packets: Vec<TxDatagram> = (0..total_pkts)
+            .map(|i| TxDatagram {
+                data: vec![(i % 256) as u8; pkt_size],
+                to: server_addr,
+            })
+            .collect();
+        client.submit_sends(packets).unwrap();
+        // Flush by polling sender briefly.
+        let _ = client.poll(Some(Instant::now() + Duration::from_millis(5)));
+
+        // Poll for echoes.
+        let mut echo_bytes = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while echo_bytes < total_bytes && Instant::now() < deadline {
+            let out = client.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+            for pkt in &out.rx {
+                echo_bytes += pkt.data.len();
+            }
+        }
+
+        let (srv_rx, _srv_tx) = server_handle.join().unwrap();
+        eprintln!(
+            "  cross-thread echo: client_sent={total_bytes} server_rx={srv_rx} client_echo={echo_bytes}/{total_bytes}",
+        );
+        assert_eq!(
+            echo_bytes, total_bytes,
+            "client should receive all echoed bytes (got {echo_bytes}/{total_bytes}, server_rx={srv_rx})",
+        );
+    }
+
     // ── Test: IoUringDriver submit_sends latency (detect stall) ──
 
     /// Measures wall-clock time for submit_sends+poll round-trips.
