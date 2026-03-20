@@ -83,14 +83,25 @@ describe('raw QUIC fast shared worker', () => {
       }
 
       const localPorts = clients.map(localPortForSession);
-      assert.strictEqual(new Set(localPorts).size, 1, `expected a shared client UDP port, got ${localPorts.join(', ')}`);
+      // On Linux each fast-mode QUIC client gets its own dedicated socket
+      // (no shared-per-family topology) for better io_uring isolation.
+      const expectedUniquePorts = process.platform === 'linux' ? clients.length : 1;
+      assert.strictEqual(
+        new Set(localPorts).size,
+        expectedUniquePorts,
+        `expected ${expectedUniquePorts} unique client UDP port(s), got ${localPorts.join(', ')}`,
+      );
 
       const telemetry = binding.runtimeTelemetry();
-      assert.strictEqual(telemetry.rawQuicClientSharedWorkersCreated, 1);
-      assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, 0);
+      if (process.platform === 'linux') {
+        assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, clients.length);
+      } else {
+        assert.strictEqual(telemetry.rawQuicClientSharedWorkersCreated, 1);
+        assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, 0);
+        assert.ok(telemetry.rawQuicClientSharedWorkerReuses >= clients.length - 1);
+        assert.ok(telemetry.clientLocalPortReuseHits >= clients.length - 1);
+      }
       assert.strictEqual(telemetry.rawQuicClientSessionsOpened, clients.length);
-      assert.ok(telemetry.rawQuicClientSharedWorkerReuses >= clients.length - 1);
-      assert.ok(telemetry.clientLocalPortReuseHits >= clients.length - 1);
 
       await Promise.all(clients.map((client) => client.close()));
       clients = [];

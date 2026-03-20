@@ -292,6 +292,7 @@ export interface JsSessionMetrics {
   handshakeTimeMs: number
   rttMs: number
   cwnd: number
+  pmtu: number
 }
 
 export interface JsSetting {
