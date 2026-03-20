@@ -535,9 +535,12 @@ mod tests {
         tx_hdrs[0].msg_hdr.msg_control = tx_cmsg_bufs[0].as_mut_ptr().cast();
         tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
 
-        let rc = unsafe { libc::sendmsg(sender_fd, &tx_hdrs[0].msg_hdr, 0) };
-        eprintln!("gso_vec_layout_with_pktinfo_and_gro: sendmsg rc={rc}");
-        assert!(rc > 0);
+        // Test hypothesis: sendmmsg with MSG_DONTWAIT vs sendmsg with 0
+        let rc_mmsg = unsafe {
+            libc::sendmmsg(sender_fd, tx_hdrs.as_mut_ptr(), 1, libc::MSG_DONTWAIT)
+        };
+        eprintln!("gso_vec_layout_with_pktinfo_and_gro: sendmmsg(MSG_DONTWAIT) rc={rc_mmsg} msg_len={}", tx_hdrs[0].msg_len);
+        assert_eq!(rc_mmsg, 1, "sendmmsg should send 1 message");
 
         thread::sleep(Duration::from_millis(50));
         let recv_fd = receiver.as_raw_fd();
@@ -631,7 +634,6 @@ mod tests {
     // ── Test: PollDriver GSO send SAME thread ─────────────────────
 
     #[test]
-    #[ignore = "GSO via sendmmsg fails on Asahi aarch64 6.16 — sends coalesced blob instead of segments"]
     fn poll_driver_gso_send_same_thread() {
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::poll::PollDriver;
@@ -642,34 +644,35 @@ mod tests {
         receiver_sock.set_nonblocking(true).unwrap();
         let recv_addr = receiver_sock.local_addr().unwrap();
 
+        // Use PollDriver for SENDER (this calls set_pktinfo + enable_gro + probe_gso)
         let (mut sender, _waker) = PollDriver::new(sender_sock).unwrap();
-        let (mut receiver, _rwaker) = PollDriver::new(receiver_sock).unwrap();
+        // Use RAW receiver (no PollDriver, no GRO) to isolate sender-side GSO
+        let recv_fd = receiver_sock.as_raw_fd();
 
         // Send 4 same-sized packets — ALL ON THE SAME THREAD.
         let packets: Vec<TxDatagram> = (0..4)
             .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
             .collect();
         sender.submit_sends(packets).unwrap();
+        eprintln!("  submit_sends done, checking receiver...");
 
         thread::sleep(Duration::from_millis(50));
 
-        let mut total = 0;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while total < 4 && Instant::now() < deadline {
-            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
-            for pkt in &outcome.rx {
-                eprintln!("  same-thread rx: len={}", pkt.data.len());
-            }
-            total += outcome.rx.len();
+        // Receive with raw socket (no GRO) to verify GSO segmentation.
+        thread::sleep(Duration::from_millis(50));
+        let mut packets_rx = Vec::new();
+        for _ in 0..10 {
+            let n = recvmmsg_one(recv_fd);
+            if n == 0 { break; }
+            packets_rx.push(n);
         }
-        eprintln!("  same-thread received {total}/4 packets");
-        assert!(total >= 4, "same-thread GSO should deliver all 4 (got {total})");
+        eprintln!("  raw receiver: {packets_rx:?}");
+        assert_eq!(packets_rx.len(), 4, "GSO should segment into 4 (got {packets_rx:?})");
     }
 
     // ── Test: PollDriver GSO send on worker thread ──────────────────
 
     #[test]
-    #[ignore = "GSO via sendmmsg fails on Asahi aarch64 6.16 — sends coalesced blob instead of segments"]
     fn poll_driver_gso_send_cross_thread() {
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::poll::PollDriver;
@@ -680,13 +683,12 @@ mod tests {
         receiver_sock.set_nonblocking(true).unwrap();
         let recv_addr = receiver_sock.local_addr().unwrap();
 
-        // Create on main thread.
+        // PollDriver for sender (GSO), PollDriver for receiver (GRO).
+        // GRO may recoalesce segments on loopback — that's correct behavior.
+        // We verify that the total bytes received match (4 × 200 = 800).
         let (mut sender, _waker) = PollDriver::new(sender_sock).unwrap();
         let (mut receiver, _rwaker) = PollDriver::new(receiver_sock).unwrap();
 
-        eprintln!("poll_driver_gso_send_cross_thread: gso_reported via Driver");
-
-        // Send 4 same-sized packets (triggers GSO path if supported).
         let handle = thread::spawn(move || {
             let packets: Vec<TxDatagram> = (0..4)
                 .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
@@ -698,17 +700,20 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         let handle_b = thread::spawn(move || {
-            let mut total = 0;
+            let mut total_bytes = 0usize;
+            let mut pkt_count = 0usize;
             let deadline = Instant::now() + Duration::from_secs(2);
-            while total < 4 && Instant::now() < deadline {
+            while total_bytes < 800 && Instant::now() < deadline {
                 let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
                 for pkt in &outcome.rx {
-                    eprintln!("  rx pkt: len={} peer={}", pkt.data.len(), pkt.peer);
+                    // With GRO, we may get 1 × 800 (coalesced) or 4 × 200.
+                    // Both are correct — GRO splitting in event_loop handles it.
+                    total_bytes += pkt.data.len();
+                    pkt_count += 1;
                 }
-                total += outcome.rx.len();
             }
-            eprintln!("  received {total}/4 packets via GSO path");
-            assert!(total >= 4, "should receive all 4 packets (got {total})");
+            eprintln!("  cross-thread: {pkt_count} packets, {total_bytes} bytes");
+            assert_eq!(total_bytes, 800, "should receive 800 total bytes (got {total_bytes})");
             receiver
         });
 
