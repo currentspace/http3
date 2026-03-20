@@ -660,7 +660,7 @@ export class Http3SecureServer extends EventEmitter {
     const stream = this._streams.get(streamKey);
     if (stream && event.data) {
       stream._onActivity();
-      stream.push(Buffer.from(event.data));
+      stream.push(event.data);
     }
   }
 
@@ -743,7 +743,7 @@ export class Http3SecureServer extends EventEmitter {
     if (!event.data) return;
     const session = this._sessions.get(event.connHandle);
     if (session) {
-      session.emit('datagram', Buffer.from(event.data));
+      session.emit('datagram', event.data);
     }
   }
 }
