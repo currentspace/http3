@@ -670,6 +670,91 @@ mod tests {
         assert_eq!(packets_rx.len(), 4, "GSO should segment into 4 (got {packets_rx:?})");
     }
 
+    // ── Test: IoUringDriver GSO send + receive (GRO) ──────────────
+
+    #[test]
+    fn iouring_driver_gso_roundtrip() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender_sock.set_nonblocking(true).unwrap();
+        receiver_sock.set_nonblocking(true).unwrap();
+        let recv_addr = receiver_sock.local_addr().unwrap();
+
+        let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
+        let (mut receiver, _rw) = IoUringDriver::new(receiver_sock).unwrap();
+
+        // Initial poll to arm receive (needed for io_uring enable_on_worker_thread).
+        let _ = receiver.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        // Send 4 same-sized packets (triggers GSO if supported).
+        let packets: Vec<TxDatagram> = (0..4)
+            .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
+            .collect();
+        sender.submit_sends(packets).unwrap();
+
+        // Poll sender to flush SQEs.
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(50)));
+
+        // Receive.
+        let mut total_bytes = 0usize;
+        let mut pkt_count = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while total_bytes < 800 && Instant::now() < deadline {
+            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+            for pkt in &outcome.rx {
+                eprintln!("  iouring rx: len={} gro={:?}", pkt.data.len(), pkt.segment_size);
+                total_bytes += pkt.data.len();
+                pkt_count += 1;
+            }
+        }
+        eprintln!("  iouring GSO roundtrip: {pkt_count} pkts, {total_bytes} bytes");
+        assert_eq!(total_bytes, 800, "should receive 800 total bytes (got {total_bytes})");
+    }
+
+    // ── Test: IoUringDriver GSO multi-round (regression for round 2+ failures)
+
+    #[test]
+    fn iouring_driver_gso_multi_round() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender_sock.set_nonblocking(true).unwrap();
+        receiver_sock.set_nonblocking(true).unwrap();
+        let recv_addr = receiver_sock.local_addr().unwrap();
+
+        let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
+        let (mut receiver, _rw) = IoUringDriver::new(receiver_sock).unwrap();
+
+        let _ = receiver.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        for round in 0..5 {
+            // Send 16 same-sized packets per round.
+            let packets: Vec<TxDatagram> = (0..16)
+                .map(|i| TxDatagram { data: vec![(round * 16 + i) as u8; 200], to: recv_addr })
+                .collect();
+            sender.submit_sends(packets).unwrap();
+            let _ = sender.poll(Some(Instant::now() + Duration::from_millis(50)));
+
+            let mut total_bytes = 0usize;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while total_bytes < 16 * 200 && Instant::now() < deadline {
+                let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+                for pkt in &outcome.rx {
+                    total_bytes += pkt.data.len();
+                }
+            }
+            eprintln!("  round {round}: {total_bytes}/3200 bytes");
+            assert_eq!(total_bytes, 3200, "round {round}: should get 3200 bytes (got {total_bytes})");
+        }
+    }
+
     // ── Test: PollDriver GSO send on worker thread ──────────────────
 
     #[test]
