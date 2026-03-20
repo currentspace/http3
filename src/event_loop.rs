@@ -373,7 +373,6 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 );
             }
             let pkt_local = if use_pktinfo_local { pkt.local } else { local_addr };
-            // GRO: kernel may coalesce multiple datagrams into one buffer.
             // Split by segment_size and call process_packet for each.
             if let Some(seg_size) = pkt.segment_size {
                 let seg = seg_size as usize;
