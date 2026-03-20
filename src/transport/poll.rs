@@ -298,11 +298,6 @@ mod inner {
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
                     let segment_size = parse_gro_cmsg(cmsg_data);
-                    #[cfg(test)]
-                    eprintln!(
-                        "  recv_batch: peer={peer} local_ip={local_ip:?} local={local} cmsg_len={} gro={segment_size:?}",
-                        cmsg_data.len(),
-                    );
                     let mut data = self.recycled_rx.pop()
                         .unwrap_or_else(|| Vec::with_capacity(len));
                     data.clear();
@@ -319,11 +314,6 @@ mod inner {
                 packets.len(), self.gso_supported, std::thread::current().id(),
             );
             if self.gso_supported && packets.len() > 1 {
-                #[cfg(test)]
-                eprintln!(
-                    "send_batch -> send_batch_gso: socket_fd={} socket.as_raw_fd={} pkts={}",
-                    self.socket_fd, self.socket.as_raw_fd(), packets.len(),
-                );
                 self.send_batch_gso(packets);
                 return;
             }
@@ -452,68 +442,26 @@ mod inner {
                 }
             }
 
-            // Use sendmsg per batch instead of sendmmsg. sendmmsg on some
-            // kernels/architectures ignores msg_control (cmsg), causing GSO
-            // coalesced buffers to be sent as single oversized datagrams.
-            let mut sent_count = 0usize;
-            for i in 0..count {
-                let hdr = &self.tx_hdrs[i].msg_hdr;
-                #[cfg(test)]
-                {
-                    let ctrl = if hdr.msg_controllen > 0 {
-                        unsafe { std::slice::from_raw_parts(hdr.msg_control.cast::<u8>(), hdr.msg_controllen) }
-                    } else { &[] as &[u8] };
-                    eprintln!(
-                        "GSO sendmsg[{i}]: iov_len={} controllen={} namelen={} iovlen_field={} flags={} seg_size={} iov_base={:?} control={:?}",
-                        unsafe { (*hdr.msg_iov).iov_len }, hdr.msg_controllen, hdr.msg_namelen,
-                        hdr.msg_iovlen, hdr.msg_flags, batch_seg_sizes[i],
-                        unsafe { (*hdr.msg_iov).iov_base }, hdr.msg_control,
-                    );
-                    eprintln!("  control_bytes={:02x?}", ctrl);
-                    // Check: is the condition batch_data[i].len() > batch_seg_sizes[i] true?
-                    eprintln!(
-                        "  batch_data.len()={} > seg_size {} = {} (should attach cmsg = {})",
-                        batch_data[i].len(), batch_seg_sizes[i],
-                        batch_data[i].len() > batch_seg_sizes[i] as usize,
-                        hdr.msg_controllen > 0,
-                    );
-                }
-                // Build a fresh msghdr with exactly the same pointers for comparison.
-                #[cfg(test)]
-                {
-                    let mut fresh: libc::msghdr = unsafe { std::mem::zeroed() };
-                    fresh.msg_name = hdr.msg_name;
-                    fresh.msg_namelen = hdr.msg_namelen;
-                    fresh.msg_iov = hdr.msg_iov;
-                    fresh.msg_iovlen = hdr.msg_iovlen;
-                    fresh.msg_control = hdr.msg_control;
-                    fresh.msg_controllen = hdr.msg_controllen;
-                    fresh.msg_flags = hdr.msg_flags;
-                    let rc2 = unsafe { libc::sendmsg(self.socket_fd, &fresh, 0) };
-                    eprintln!("  fresh sendmsg rc={rc2}");
-                }
-                let rc = unsafe {
-                    libc::sendmsg(
-                        self.socket_fd,
-                        &self.tx_hdrs[i].msg_hdr,
-                        0,
-                    )
-                };
-                #[cfg(test)]
-                eprintln!("  sendmsg rc={rc} (expected iov_len={})", unsafe { (*self.tx_hdrs[i].msg_hdr.msg_iov).iov_len });
-                if rc >= 0 {
-                    sent_count += 1;
-                } else {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() != std::io::ErrorKind::WouldBlock {
-                        log::trace!("poll::send_batch_gso sendmsg error: {err}");
-                    }
-                    break;
-                }
-            }
-            let sent = sent_count as libc::c_int;
+            // SAFETY: all tx_hdrs/iovs/addrs/cmsg_bufs/batch_data are valid
+            // for the duration of the sendmmsg call.
+            let sent = unsafe {
+                libc::sendmmsg(
+                    self.socket_fd,
+                    self.tx_hdrs.as_mut_ptr(),
+                    count as libc::c_uint,
+                    libc::MSG_DONTWAIT,
+                )
+            };
 
-            let sent_count = sent as usize;
+            let sent_count = if sent < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
+                    0usize
+                } else {
+                    0
+                }
+            } else {
+                sent as usize
+            };
 
             // Recycle sent batch buffers, split unsent batches back to individual packets.
             for (i, data) in batch_data.into_iter().enumerate() {
