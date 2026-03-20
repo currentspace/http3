@@ -121,9 +121,9 @@ mod inner {
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
-            let gso_supported = false; // probe_gso(&socket);
+            let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
-            // enable_gro(&socket);
+            enable_gro(&socket);
             log::info!(
                 "PollDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} tid={:?}",
                 std::thread::current().id(),
@@ -298,6 +298,11 @@ mod inner {
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
                     let segment_size = parse_gro_cmsg(cmsg_data);
+                    #[cfg(test)]
+                    eprintln!(
+                        "  recv_batch: peer={peer} local_ip={local_ip:?} local={local} cmsg_len={} gro={segment_size:?}",
+                        cmsg_data.len(),
+                    );
                     let mut data = self.recycled_rx.pop()
                         .unwrap_or_else(|| Vec::with_capacity(len));
                     data.clear();
@@ -313,7 +318,7 @@ mod inner {
                 "poll::send_batch pkts={} gso={} tid={:?}",
                 packets.len(), self.gso_supported, std::thread::current().id(),
             );
-            if false && self.gso_supported && packets.len() > 1 {
+            if self.gso_supported && packets.len() > 1 {
                 #[cfg(test)]
                 eprintln!(
                     "send_batch -> send_batch_gso: socket_fd={} socket.as_raw_fd={} pkts={}",
