@@ -16,11 +16,6 @@ type ByteBuf = Vec<u8>;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
-/// Loopback-optimized datagram size. macOS loopback MTU is 16384; Linux is
-/// 65536. Using 8192-byte payloads reduces packet count ~6× vs 1350 on
-/// loopback, meaning fewer syscalls and higher throughput.
-const LOOPBACK_DATAGRAM_SIZE: usize = 8192;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportRuntimeMode {
     Fast,
@@ -95,14 +90,22 @@ impl ClientAuthMode {
     }
 }
 
-/// Return the effective max datagram size for `addr`.
-/// Loopback addresses get 8192; everything else gets the standard 1350.
-pub fn effective_max_datagram_size(addr: &std::net::SocketAddr) -> usize {
-    if addr.ip().is_loopback() {
-        LOOPBACK_DATAGRAM_SIZE
-    } else {
-        MAX_DATAGRAM_SIZE
-    }
+/// Apply standard congestion tuning to a quiche `Config`.
+///
+/// `initial_max_data` is the QUIC-layer flow control limit that prevents the
+/// sender from having more data in-flight than the receiver can buffer.  We
+/// set it to match SO_RCVBUF (2 MB) so that QUIC's own flow control —  not
+/// a transport-level hack — prevents receiver buffer overflow.  As the
+/// receiver drains data it sends MAX_DATA updates, so this only limits the
+/// instantaneous in-flight window, not total transfer size.
+///
+/// The initial congestion window is kept aggressive (1000 packets ≈ 1.35 MB)
+/// for fast LAN/loopback startup.  This is safe because `initial_max_data`
+/// caps total in-flight data at 2 MB — even if CC would allow more, QUIC
+/// flow control blocks the sender until the receiver acknowledges.
+fn apply_congestion_tuning(config: &mut quiche::Config) {
+    config.set_send_capacity_factor(20.0);
+    config.set_initial_congestion_window_packets(1000);
 }
 
 /// Write bytes to a temp file and return the path.
@@ -257,21 +260,7 @@ impl Http3Config {
                 .map_err(Http3NativeError::Quiche)?;
         }
 
-        // Congestion tuning: allow quiche to buffer well beyond the congestion
-        // window so burst stream creation doesn't hit StreamBlocked before the
-        // event loop flushes packets and receives ACKs. These are intentional
-        // production tuning values, not workarounds. The large IW (1000 pkts)
-        // suits loopback and datacenter paths; for WAN deployments consider
-        // reducing to ~10.
-        //
-        // Caveat: with these aggressive values, quiche may overshoot
-        // connection-level flow control (initial_max_data) by ~1 MTU on
-        // the first burst, because stream_send accepts all data into the
-        // large send buffer and conn.send generates one extra packet before
-        // the flow control check kicks in. This only matters when
-        // initial_max_data is very small (< ~64KB).
-        config.set_send_capacity_factor(20.0);
-        config.set_initial_congestion_window_packets(1000);
+        apply_congestion_tuning(&mut config);
 
         if options.enable_datagrams.unwrap_or(false) {
             config.enable_dgram(true, 1000, 1000);
@@ -334,9 +323,7 @@ impl Http3Config {
         ));
         config.set_initial_max_streams_uni(1_000);
 
-        // See server config for congestion tuning rationale.
-        config.set_send_capacity_factor(20.0);
-        config.set_initial_congestion_window_packets(1000);
+        apply_congestion_tuning(&mut config);
 
         if options.allow_0rtt.unwrap_or(false) {
             config.enable_early_data();
@@ -502,9 +489,7 @@ pub fn new_quic_server_config(
             .map_err(Http3NativeError::Quiche)?;
     }
 
-    // See Http3Config::new_server_quiche_config for congestion tuning rationale.
-    config.set_send_capacity_factor(20.0);
-    config.set_initial_congestion_window_packets(1000);
+    apply_congestion_tuning(&mut config);
 
     if options.enable_datagrams.unwrap_or(false) {
         config.enable_dgram(true, 1000, 1000);
@@ -597,9 +582,7 @@ pub fn new_quic_client_config(
     ));
     config.set_initial_max_streams_uni(1_000);
 
-    // See Http3Config::new_server_quiche_config for congestion tuning rationale.
-    config.set_send_capacity_factor(20.0);
-    config.set_initial_congestion_window_packets(1000);
+    apply_congestion_tuning(&mut config);
 
     if options.allow_0rtt.unwrap_or(false) {
         config.enable_early_data();

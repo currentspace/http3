@@ -251,7 +251,6 @@ fn run_server(options: ServerOptions) -> Result<(), String> {
         quiche_config,
         server_config,
         options.bind_addr,
-        false,
         batcher,
     )
     .map_err(|err| err.to_string())?;
@@ -331,7 +330,6 @@ fn run_client(options: ClientOptions) -> Result<(), String> {
             None,
             None,
             None,
-            false,
             options.common.runtime_mode,
             batcher,
         )

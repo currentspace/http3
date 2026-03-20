@@ -19,7 +19,6 @@ pub struct NativeWorkerClient {
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
 }
 
@@ -31,7 +30,6 @@ impl NativeWorkerClient {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let user_set_mtu = options.max_udp_payload_size.is_some();
         let quiche_config =
             Http3Config::new_client_quiche_config(&options).map_err(napi::Error::from)?;
 
@@ -42,7 +40,6 @@ impl NativeWorkerClient {
             session_ticket: options.session_ticket.map(|ticket| ticket.to_vec()),
             qlog_dir: options.qlog_dir,
             qlog_level: options.qlog_level,
-            user_set_mtu,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
         })
@@ -74,7 +71,6 @@ impl NativeWorkerClient {
             self.session_ticket.take(),
             self.qlog_dir.clone(),
             self.qlog_level.clone(),
-            self.user_set_mtu,
             self.runtime_mode,
             tsfn,
         )

@@ -19,7 +19,6 @@ pub struct NativeWorkerServer {
     quiche_config: Option<quiche::Config>,
     http3_config: Option<Http3Config>,
     tsfn: Option<crate::worker::EventTsfn>,
-    user_set_mtu: bool,
 }
 
 #[napi]
@@ -30,7 +29,6 @@ impl NativeWorkerServer {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let user_set_mtu = options.max_udp_payload_size.is_some();
         let quiche_config =
             Http3Config::new_server_quiche_config(&options).map_err(napi::Error::from)?;
         let http3_config = Http3Config::from_server_options(&options).map_err(napi::Error::from)?;
@@ -41,7 +39,6 @@ impl NativeWorkerServer {
             quiche_config: Some(quiche_config),
             http3_config: Some(http3_config),
             tsfn: Some(tsfn),
-            user_set_mtu,
         })
     }
 
@@ -72,7 +69,7 @@ impl NativeWorkerServer {
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
 
         let worker_handle =
-            crate::worker::spawn_worker(quiche_config, http3_config, addr, self.user_set_mtu, tsfn)
+            crate::worker::spawn_worker(quiche_config, http3_config, addr, tsfn)
                 .map_err(napi::Error::from)?;
 
         let local = worker_handle.local_addr();
