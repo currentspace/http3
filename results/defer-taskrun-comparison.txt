@@ -1,0 +1,27 @@
+DEFER_TASKRUN comparison (R_DISABLED two-phase init)
+Kernel: 6.16.0-1002-asahi-arm
+Date: 2026-03-20
+
+=== Low-level driver benchmarks (criterion, same-thread) ===
+
+                        Without DEFER_TASKRUN    With DEFER_TASKRUN    Delta
+poll_rx/io_uring/1      1.740 µs                 1.694 µs              -2.7%
+poll_rx/io_uring/16     22.35 µs                 20.65 µs              -7.6%
+poll_rx/io_uring/64     88.29 µs                 82.50 µs              -6.6%
+poll_rx/io_uring/128    176.0 µs                 163.8 µs              -6.9%
+roundtrip/io_uring      7.386 µs                 8.016 µs              +8.5% (variance)
+idle_wake/io_uring      28.37 µs                 27.76 µs              -2.2%
+
+=== NodeJS H3 escalation (cross-thread, multi-process) ===
+
+                        Without DEFER_TASKRUN    With DEFER_TASKRUN
+H3 fast L0 (3K)        11.5 Mbps, 176 s/s       236.0 Mbps, 3601 s/s   ~20x
+                        163 errors               0 errors
+H3 fast L1 (9.5K)      12.0 Mbps, 183 s/s       37.9 Mbps, 579 s/s     ~3x
+                        1117 errors              1 error
+
+=== NodeJS QUIC escalation ===
+
+QUIC fast L0 (3K)       94.8 Mbps, 1446 s/s     timeout (run variance)
+QUIC portable L0        286.6 Mbps               314.1 Mbps
+QUIC portable L1        683.6 Mbps               685.1 Mbps
