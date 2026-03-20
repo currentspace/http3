@@ -1780,17 +1780,9 @@ impl ProtocolHandler for H3ServerHandler {
                     continue;
                 }
                 let handle = self.handles_buf[i];
-                let send_buf = self
-                    .conn_send_buffers
-                    .entry(handle)
-                    .or_insert_with(|| vec![0u8; SEND_BUF_SIZE]);
                 let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
-                    if let Ok((len, send_info)) = conn.send(send_buf.as_mut_slice()) {
-                        let mut tx_buf = self.tx_pool.checkout();
-                        if tx_buf.len() < len {
-                            tx_buf.resize(len, 0);
-                        }
-                        tx_buf[..len].copy_from_slice(&send_buf[..len]);
+                    let mut tx_buf = self.tx_pool.checkout();
+                    if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
                         tx_buf.truncate(len);
                         outbound.push(TxDatagram {
                             data: tx_buf,
@@ -1798,6 +1790,7 @@ impl ProtocolHandler for H3ServerHandler {
                         });
                         true
                     } else {
+                        self.tx_pool.checkin(tx_buf);
                         false
                     }
                 } else {
@@ -2095,17 +2088,14 @@ impl H3ClientHandler {
 
     fn try_send_next_with_pool_parts(
         conn: &mut H3Connection,
-        send_buf: &mut [u8],
+        _send_buf: &mut [u8],
         tx_pool: &mut BufferPool,
     ) -> Option<TxDatagram> {
-        let Ok((len, send_info)) = conn.send(send_buf) else {
+        let mut tx_buf = tx_pool.checkout();
+        let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) else {
+            tx_pool.checkin(tx_buf);
             return None;
         };
-        let mut tx_buf = tx_pool.checkout();
-        if tx_buf.len() < len {
-            tx_buf.resize(len, 0);
-        }
-        tx_buf[..len].copy_from_slice(&send_buf[..len]);
         tx_buf.truncate(len);
         Some(TxDatagram {
             data: tx_buf,
