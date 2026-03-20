@@ -695,13 +695,26 @@ mod inner {
                         self.tx_in_flight -= 1;
                         let slot = &mut self.tx_slots[idx];
                         if result >= 0 {
+                            if slot.gso_segment_size > 0 {
+                                log::trace!(
+                                    "io_uring OP_SEND GSO complete: idx={idx} result={result} seg_size={} data_len={} in_flight={}",
+                                    slot.gso_segment_size, slot.data.len(), self.tx_in_flight,
+                                );
+                            }
                             self.recycled_tx.push(slot.recycle_buffer());
                             reactor_metrics::record_io_uring_tx_datagrams_completed(1);
                         } else {
                             let errno = -result;
-                            if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR {
+                            log::warn!(
+                                "io_uring OP_SEND error: idx={idx} errno={errno} gso_seg={} data_len={} in_flight={} retryable={}",
+                                slot.gso_segment_size, slot.data.len(), self.tx_in_flight,
+                                errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR
+                                    || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0),
+                            );
+                            if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR
+                                || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0) {
                                 reactor_metrics::record_io_uring_retryable_send_completion();
-                                // GSO batch: split back into individual packets for retry.
+                                // GSO batch or retryable: split back into individual packets.
                                 let seg = slot.gso_segment_size;
                                 if seg > 0 {
                                     let peer = slot.peer;
@@ -762,6 +775,12 @@ mod inner {
                 }
             }
             reactor_metrics::record_io_uring_completions(cqe_count);
+            if cqe_count > 0 {
+                log::trace!(
+                    "io_uring::poll CQEs={cqe_count} rx={} tx_in_flight={} pending={}",
+                    outcome.rx.len(), self.tx_in_flight, self.pending_tx.len(),
+                );
+            }
 
             // Single fence to publish all returned buffers to the kernel.
             self.rx_ring.flush_buffer_returns();
@@ -790,6 +809,10 @@ mod inner {
         }
 
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            log::trace!(
+                "io_uring::submit_sends: {} pkts, gso={}, tx_in_flight={}, pending={}",
+                packets.len(), self.gso_supported, self.tx_in_flight, self.pending_tx.len(),
+            );
             // Try send bundles first (connected socket, kernel ≥6.10).
             if let Some(ref mut tx_ring) = self.tx_buf_ring {
                 if !tx_ring.in_flight && !packets.is_empty() {
@@ -799,7 +822,45 @@ mod inner {
                 }
             }
             if self.gso_supported && packets.len() > 1 {
-                self.submit_sends_gso(packets)?;
+                // Group into GSO batches, then route through pending_tx so
+                // the SQE creation path is identical to non-GSO sends.
+                let batches = group_for_gso(packets);
+                for batch in batches {
+                    if batch.data.len() > batch.segment_size as usize {
+                        // Multi-segment batch: needs GSO SQE with cmsg.
+                        // Find a free slot directly (can't go through pending_tx).
+                        let Some(idx) = self.tx_slots.iter().position(|s| !s.in_flight) else {
+                            // No slot: split back to individual packets.
+                            let seg = batch.segment_size as usize;
+                            for chunk in batch.data.chunks(seg) {
+                                self.pending_tx.push_back(TxDatagram { data: chunk.to_vec(), to: batch.to });
+                            }
+                            continue;
+                        };
+                        self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
+                        let slot = &mut self.tx_slots[idx];
+                        let entry = io_uring::opcode::SendMsg::new(
+                            FIXED_SOCKET,
+                            slot.msg.as_mut() as *mut libc::msghdr,
+                        )
+                        .build()
+                        .user_data(OP_SEND | idx as u64);
+                        let push_result = unsafe { self.ring.submission().push(&entry) };
+                        if push_result.is_err() {
+                            let seg = self.tx_slots[idx].gso_segment_size as usize;
+                            let peer = self.tx_slots[idx].peer;
+                            let data = self.tx_slots[idx].recycle_buffer();
+                            for chunk in data.chunks(seg) {
+                                self.pending_tx.push_back(TxDatagram { data: chunk.to_vec(), to: peer });
+                            }
+                        } else {
+                            self.tx_in_flight += 1;
+                        }
+                    } else {
+                        // Single-packet batch: route through pending_tx (no cmsg needed).
+                        self.pending_tx.push_back(TxDatagram { data: batch.data, to: batch.to });
+                    }
+                }
             } else {
                 for pkt in packets {
                     self.pending_tx.push_back(pkt);
@@ -832,6 +893,12 @@ mod inner {
         /// This makes the current thread the SINGLE_ISSUER submitter, allowing
         /// DEFER_TASKRUN to work. Then arms the initial SQEs.
         fn enable_on_worker_thread(&mut self) -> io::Result<()> {
+            // Initialize logging — default to warn level for transport traces.
+            if std::env::var("RUST_LOG").is_err() {
+                // SAFETY: called once before any other threads read RUST_LOG.
+                unsafe { std::env::set_var("RUST_LOG", "http3::transport=warn"); }
+            }
+            let _ = env_logger::try_init();
             log::info!(
                 "IoUringDriver::enable_on_worker_thread tid={:?}",
                 std::thread::current().id(),
@@ -972,6 +1039,14 @@ mod inner {
         /// Packets that don't fit into available slots are put back into pending_tx.
         fn submit_sends_gso(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
             let batches = group_for_gso(packets);
+            log::trace!(
+                "io_uring::submit_sends_gso: {} packets -> {} batches, tx_in_flight={} pending_tx={} tid={:?}",
+                batches.iter().map(|b| b.data.len() / b.segment_size as usize).sum::<usize>(),
+                batches.len(),
+                self.tx_in_flight,
+                self.pending_tx.len(),
+                std::thread::current().id(),
+            );
             for batch in batches {
                 let Some(idx) = self.tx_slots.iter().position(|s| !s.in_flight) else {
                     // No free slot — split batch back into individual packets.
@@ -986,7 +1061,14 @@ mod inner {
                     continue;
                 };
 
-                self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
+                // Only attach UDP_SEGMENT cmsg when the batch has >1 segment.
+                // Single-packet batches sent with UDP_SEGMENT can trigger EMSGSIZE
+                // when the segment size exceeds the path MTU.
+                if batch.data.len() > batch.segment_size as usize {
+                    self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
+                } else {
+                    self.tx_slots[idx].prepare(TxDatagram { data: batch.data, to: batch.to });
+                }
                 let slot = &mut self.tx_slots[idx];
                 let entry = io_uring::opcode::SendMsg::new(
                     FIXED_SOCKET,

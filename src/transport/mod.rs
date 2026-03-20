@@ -41,6 +41,22 @@ pub(crate) struct GsoBatch {
 /// Group consecutive same-(destination, packet-size) packets into GSO batches.
 /// Packets within each batch are concatenated; the kernel segments them using
 /// the `UDP_SEGMENT` cmsg.  Max 64 segments per batch (kernel limit).
+/// Maximum total payload per GSO batch. The kernel rejects sendmsg with
+/// UDP_SEGMENT when the iov exceeds 65535 bytes (max UDP payload).
+#[cfg(target_os = "linux")]
+const GSO_MAX_PAYLOAD: usize = 65535;
+
+/// Maximum segment size for GSO batching. Segments larger than this are not
+/// coalesced because:
+/// 1. Large GSO segments (e.g. 4140 bytes) can trigger EMSGSIZE if the kernel
+///    considers them exceeding the path MTU.
+/// 2. On loopback, the receiver's io_uring multishot recvmsg may not deliver
+///    the UDP_GRO cmsg for coalesced large segments, preventing the event loop
+///    from splitting them — quiche receives an oversized blob it can't parse.
+/// 1472 = 1500 (Ethernet MTU) - 20 (IPv4) - 8 (UDP).
+#[cfg(target_os = "linux")]
+const GSO_MAX_SEGMENT: usize = 1472;
+
 #[cfg(target_os = "linux")]
 pub(crate) fn group_for_gso(packets: Vec<TxDatagram>) -> Vec<GsoBatch> {
     let mut batches: Vec<GsoBatch> = Vec::new();
@@ -49,7 +65,9 @@ pub(crate) fn group_for_gso(packets: Vec<TxDatagram>) -> Vec<GsoBatch> {
         if let Some(last) = batches.last_mut() {
             if last.to == pkt.to
                 && last.segment_size == seg_size
+                && (seg_size as usize) <= GSO_MAX_SEGMENT
                 && (last.data.len() / seg_size as usize) < 64
+                && last.data.len() + pkt.data.len() <= GSO_MAX_PAYLOAD
             {
                 last.data.extend_from_slice(&pkt.data);
                 continue;
