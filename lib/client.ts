@@ -268,7 +268,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const stream = this._streams.get(event.streamId);
     if (stream && event.data) {
       stream._onActivity();
-      stream.push(Buffer.from(event.data));
+      stream.push(event.data);
     }
   }
 
@@ -328,12 +328,12 @@ export class Http3ClientSession extends Http3ClientSessionBase {
 
   private _onSessionTicket(event: NativeEvent): void {
     if (!event.data) return;
-    this.emit('sessionTicket', Buffer.from(event.data));
+    this.emit('sessionTicket', event.data);
   }
 
   private _onDatagram(event: NativeEvent): void {
     if (!event.data) return;
-    this.emit('datagram', Buffer.from(event.data));
+    this.emit('datagram', event.data);
   }
 
   /** @internal */

@@ -420,7 +420,7 @@ export class QuicServer extends EventEmitter {
     const stream = session._getOrCreateStream(event.streamId);
     // Coalesced first data from Rust: push inline to avoid extra TSFN event
     if (event.data) {
-      stream.push(Buffer.from(event.data));
+      stream.push(event.data);
     }
     if (event.fin) {
       stream.push(null);
@@ -432,7 +432,7 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (!session || !event.data) return;
     const stream = session._getOrCreateStream(event.streamId);
-    stream.push(Buffer.from(event.data));
+    stream.push(event.data);
   }
 
   private _onFinished(event: NativeEvent): void {
@@ -493,7 +493,7 @@ export class QuicServer extends EventEmitter {
   private _onDatagram(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
     if (session && event.data) {
-      session.emit('datagram', Buffer.from(event.data));
+      session.emit('datagram', event.data);
     }
   }
 }

@@ -893,11 +893,6 @@ mod inner {
         /// This makes the current thread the SINGLE_ISSUER submitter, allowing
         /// DEFER_TASKRUN to work. Then arms the initial SQEs.
         fn enable_on_worker_thread(&mut self) -> io::Result<()> {
-            // Initialize logging — default to warn level for transport traces.
-            if std::env::var("RUST_LOG").is_err() {
-                // SAFETY: called once before any other threads read RUST_LOG.
-                unsafe { std::env::set_var("RUST_LOG", "http3::transport=warn"); }
-            }
             let _ = env_logger::try_init();
             log::info!(
                 "IoUringDriver::enable_on_worker_thread tid={:?}",
