@@ -1228,7 +1228,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
     let mut sessions: Slab<SharedQuicClientSession> = Slab::new();
     let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut timer_heap = TimerHeap::new();
-    let mut tx_pool = BufferPool::new(64, 65535);
+    let mut tx_pool = BufferPool::new(256, 65535);
     let mut handles_buf = Vec::new();
     let mut outbound = Vec::new();
     let mut closed_sessions = Vec::new();
@@ -1566,7 +1566,7 @@ impl QuicServerHandler {
             ),
             timer_heap: TimerHeap::new(),
             buffer_pool: BufferPool::default(),
-            tx_pool: BufferPool::new(64, 65535),
+            tx_pool: BufferPool::new(256, 65535),
             pending_writes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
             handles_buf: Vec::new(),
@@ -2030,7 +2030,7 @@ impl QuicClientHandler {
             conn,
             pending_writes: HashMap::new(),
             send_buf: vec![0u8; SEND_BUF_SIZE],
-            tx_pool: BufferPool::new(64, 65535),
+            tx_pool: BufferPool::new(256, 65535),
             timer_deadline,
             session_closed_emitted: false,
         })

@@ -14,12 +14,21 @@ type ByteBuf = napi::bindgen_prelude::Buffer;
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
 
-/// Maximum UDP payload size advertised to the peer and used as the DPLPMTUD
-/// probe ceiling.  quiche starts sending at 1200 bytes and probes up to this
-/// limit via RFC 8899 binary search.  On loopback it discovers ~65 KB within
-/// a few RTTs; on Ethernet it settles at ~1472; on WAN paths it finds the
-/// actual PMTU.  65535 is the maximum UDP payload.
-const MAX_PROBE_SIZE: usize = 65535;
+/// Default DPLPMTUD probe ceiling when the user hasn't specified
+/// `max_udp_payload_size`.
+///
+/// 1472 = 1500 (Ethernet MTU) - 20 (IPv4 header) - 8 (UDP header).
+/// This is the largest UDP payload that traverses standard Ethernet without
+/// fragmentation.  quiche's PMTUD probes from 1200 up to this ceiling; on
+/// Ethernet the first probe succeeds immediately, on smaller-MTU paths it
+/// converges via binary search.
+///
+/// For loopback or jumbo-frame paths, the user can set `max_udp_payload_size`
+/// higher (up to 65508) to allow PMTUD to discover the full path MTU.
+/// We don't probe higher by default because failed probes at very large sizes
+/// (e.g. 65 KB) charge the congestion window and trigger loss recovery, which
+/// under concurrent load can cause connection stalls.
+const DEFAULT_MAX_UDP_PAYLOAD: usize = 1472;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportRuntimeMode {
@@ -238,12 +247,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -308,12 +317,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -467,12 +476,12 @@ pub fn new_quic_server_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -567,12 +576,12 @@ pub fn new_quic_client_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
+            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(
