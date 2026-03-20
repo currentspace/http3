@@ -113,7 +113,9 @@ impl QuicConnection {
     pub fn poll_quic_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
         let readable: Vec<u64> = self.quiche_conn.readable().collect();
 
-        let mut recv_buf = [0u8; 65535];
+        // Heap buffer: stream_recv writes into it, then we truncate and move
+        // into the event — no copy. Re-grown if needed between reads.
+        let mut recv_buf = vec![0u8; 65535];
         for stream_id in readable {
             let is_new = self.known_streams.insert(stream_id);
 
@@ -121,10 +123,12 @@ impl QuicConnection {
                 // Coalesce first recv into NEW_STREAM event.
                 match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
                     Ok((len, fin)) => {
+                        let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
+                        data.truncate(len);
                         events.push(JsH3Event::new_stream_with_data(
                             conn_handle,
                             stream_id,
-                            recv_buf[..len].to_vec(),
+                            data,
                             fin,
                         ));
                         if fin {
@@ -163,10 +167,12 @@ impl QuicConnection {
                 match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
                     Ok((len, fin)) => {
                         if len > 0 {
+                            let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
+                            data.truncate(len);
                             events.push(JsH3Event::data(
                                 conn_handle,
                                 stream_id,
-                                recv_buf[..len].to_vec(),
+                                data,
                                 fin,
                             ));
                         }
