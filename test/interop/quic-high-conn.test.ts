@@ -10,6 +10,7 @@ import { generateTestCerts } from '../support/generate-certs.js';
 import { createQuicServer, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServer, QuicServerSession, QuicClientSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { echoStream } from '../support/echo-stream.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -177,7 +178,7 @@ describe('QUIC high-connection tests', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 

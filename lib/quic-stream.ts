@@ -31,6 +31,9 @@ export class QuicStream extends Duplex {
   /** @internal */ _serverLoop: QuicServerEventLoopLike | null = null;
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
   /** @internal */ _drainCallbacks: Array<() => void> = [];
+  /** @internal — buffered data when push() returned false (backpressure). */
+  /** @internal */ _pendingReads: Array<Buffer | null> = [];
+  /** @internal */ _readBackpressure = false;
 
   constructor(opts?: { highWaterMark?: number }) {
     super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
@@ -69,7 +72,32 @@ export class QuicStream extends Duplex {
   }
 
   _read(_size: number): void {
-    // Data is pushed by the event dispatcher — no pull needed
+    // Drain buffered data that was held back when push() returned false.
+    this._readBackpressure = false;
+    while (this._pendingReads.length > 0) {
+      const chunk = this._pendingReads.shift()!;
+      if (!this.push(chunk)) {
+        this._readBackpressure = true;
+        break;
+      }
+      if (chunk === null) break; // EOF
+    }
+  }
+
+  /**
+   * Push data respecting Node.js Readable backpressure.
+   * When the internal buffer is full (push returns false), subsequent
+   * chunks are queued in _pendingReads and drained when _read() fires.
+   * @internal
+   */
+  _pushData(chunk: Buffer | null): void {
+    if (this._readBackpressure) {
+      this._pendingReads.push(chunk);
+      return;
+    }
+    if (!this.push(chunk)) {
+      this._readBackpressure = true;
+    }
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {

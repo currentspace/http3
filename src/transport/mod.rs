@@ -257,7 +257,8 @@ pub(crate) fn create_platform_driver(
                 Err(error) => {
                     reactor_metrics::record_driver_setup_failure(RuntimeDriverKind::IoUring);
                     Err(match error.raw_os_error() {
-                        Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::ENOSYS) => {
+                        Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::ENOSYS)
+                        | Some(libc::ENOMEM) => {
                             Http3NativeError::fast_path_unavailable(
                                 "io_uring",
                                 "io_uring_setup",

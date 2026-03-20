@@ -10,6 +10,7 @@ import { generateTestCerts } from '../support/generate-certs.js';
 import { createQuicServer, connectQuic, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { echoStream } from '../support/echo-stream.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -36,7 +37,7 @@ describe('QUIC protocol verification', () => {
     it('session ticket emitted after handshake', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -73,7 +74,7 @@ describe('QUIC protocol verification', () => {
     it('resumption with stored ticket', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -116,7 +117,7 @@ describe('QUIC protocol verification', () => {
     it('invalid session ticket falls back to full handshake', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -147,7 +148,7 @@ describe('QUIC protocol verification', () => {
         disableRetry: false, // Retry enabled
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -170,7 +171,7 @@ describe('QUIC protocol verification', () => {
         disableRetry: false,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -209,7 +210,7 @@ describe('QUIC protocol verification', () => {
         initialMaxStreamDataBidiLocal: 4096, // Small window
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -248,7 +249,7 @@ describe('QUIC protocol verification', () => {
         initialMaxStreamDataBidiLocal: 8192,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -327,7 +328,7 @@ describe('QUIC protocol verification', () => {
         server.on('session', (session: QuicServerSession) => {
           session.on('stream', (stream: QuicStream) => {
             // Echo via pipe — will get interrupted by reset
-            stream.pipe(stream);
+            echoStream(stream);
             stream.on('error', resolve);
           });
         });
@@ -364,7 +365,7 @@ describe('QUIC protocol verification', () => {
         initialMaxStreamsBidi: 5,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -451,7 +452,7 @@ describe('QUIC protocol verification', () => {
     it('sequential stream lifecycle — ID monotonicity', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -496,7 +497,7 @@ describe('QUIC protocol verification', () => {
           session.sendDatagram(Buffer.concat([Buffer.from('echo:'), data]));
         });
         // Need a stream listener to keep session alive
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
 
       const addr = await server.listen(0, '127.0.0.1');
@@ -540,7 +541,7 @@ describe('QUIC protocol verification', () => {
         session.on('datagram', (data: Buffer) => {
           session.sendDatagram(data);
         });
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
 
       const addr = await server.listen(0, '127.0.0.1');
@@ -587,7 +588,7 @@ describe('QUIC protocol verification', () => {
         maxIdleTimeoutMs: 5000,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -636,7 +637,7 @@ describe('QUIC protocol verification', () => {
         maxIdleTimeoutMs: 1000,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 

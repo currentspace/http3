@@ -10,6 +10,7 @@ import { createQuicServer, connectQuic, connectQuicAsync } from '../../lib/index
 import { ERR_HTTP3_ENDPOINT_RESOLUTION, ERR_HTTP3_TLS_CONFIG_ERROR } from '../../lib/errors.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { echoStream } from '../support/echo-stream.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -61,7 +62,7 @@ describe('QUIC edge cases', () => {
     });
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -224,7 +225,7 @@ describe('QUIC edge cases', () => {
   it('openStream before handshake throws', async () => {
     const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
     server.on('session', (session: QuicServerSession) => {
-      session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+      session.on('stream', (stream: QuicStream) => { echoStream(stream); });
     });
     const addr = await server.listen(0, '127.0.0.1');
 
@@ -288,7 +289,7 @@ describe('QUIC edge cases', () => {
     const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
     const addr = await server.listen(0, '127.0.0.1');
@@ -353,7 +354,7 @@ describe('QUIC edge cases', () => {
     const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
     const addr = await server.listen(0, '127.0.0.1');
@@ -375,7 +376,7 @@ describe('QUIC edge cases', () => {
     const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
     const addr = await server.listen(0, '127.0.0.1');
@@ -442,7 +443,7 @@ describe('QUIC edge cases', () => {
     const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
     const addr = await server.listen(0, '127.0.0.1');

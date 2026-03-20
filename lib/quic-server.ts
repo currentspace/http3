@@ -420,10 +420,10 @@ export class QuicServer extends EventEmitter {
     const stream = session._getOrCreateStream(event.streamId);
     // Coalesced first data from Rust: push inline to avoid extra TSFN event
     if (event.data) {
-      stream.push(event.data);
+      stream._pushData(event.data);
     }
     if (event.fin) {
-      stream.push(null);
+      stream._pushData(null);
     }
     session.emit('stream', stream);
   }
@@ -432,7 +432,7 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (!session || !event.data) return;
     const stream = session._getOrCreateStream(event.streamId);
-    stream.push(event.data);
+    stream._pushData(event.data);
   }
 
   private _onFinished(event: NativeEvent): void {
@@ -440,7 +440,7 @@ export class QuicServer extends EventEmitter {
     if (!session) return;
     const stream = session._streams.get(event.streamId);
     if (stream) {
-      stream.push(null);
+      stream._pushData(null);
       // Don't delete from map yet — drain callbacks may still be pending.
       // The stream will be cleaned up when the session closes.
     }

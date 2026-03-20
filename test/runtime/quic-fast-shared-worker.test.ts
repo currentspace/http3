@@ -10,6 +10,7 @@ import { binding } from '../../lib/event-loop.js';
 import type { QuicClientSession, QuicServer, QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
 import { generateTestCerts } from '../support/generate-certs.js';
+import { echoStream } from '../support/echo-stream.js';
 
 function isFastPathUnavailable(error: unknown): boolean {
   return error instanceof Http3Error && error.code === ERR_HTTP3_FAST_PATH_UNAVAILABLE;
@@ -60,7 +61,7 @@ describe('raw QUIC fast shared worker', () => {
 
       server.on('session', (session: QuicServerSession) => {
         session.on('stream', (stream: QuicStream) => {
-          stream.pipe(stream);
+          echoStream(stream);
         });
       });
 
@@ -149,7 +150,7 @@ describe('raw QUIC fast shared worker', () => {
       });
       server.on('session', (session: QuicServerSession) => {
         session.on('stream', (stream: QuicStream) => {
-          stream.pipe(stream);
+          echoStream(stream);
         });
       });
 
