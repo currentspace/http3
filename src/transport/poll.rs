@@ -392,17 +392,16 @@ mod inner {
             let batches = group_for_gso(packets);
             let count = batches.len();
 
-            self.tx_hdrs.clear();
-            self.tx_iovs.clear();
-            self.tx_addrs.clear();
-            self.tx_cmsg_bufs.clear();
-            self.tx_hdrs.resize(count, unsafe { std::mem::zeroed() });
-            self.tx_iovs.resize(count, libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 0,
-            });
-            self.tx_addrs.resize(count, unsafe { std::mem::zeroed() });
-            self.tx_cmsg_bufs.resize(count, [0u8; 32]);
+            // Allocate fresh each time to avoid stale pointer issues from
+            // Vec reuse (clear+resize can leave prior-cycle pointers in place
+            // if the kernel reads beyond msg_controllen).
+            let mut tx_hdrs: Vec<libc::mmsghdr> =
+                (0..count).map(|_| unsafe { std::mem::zeroed() }).collect();
+            let mut tx_iovs: Vec<libc::iovec> =
+                vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; count];
+            let mut tx_addrs: Vec<libc::sockaddr_storage> =
+                (0..count).map(|_| unsafe { std::mem::zeroed() }).collect();
+            let mut tx_cmsg_bufs: Vec<[u8; 32]> = vec![[0u8; 32]; count];
 
             // Stash batch data so pointers remain valid during sendmmsg.
             let mut batch_data: Vec<Vec<u8>> = Vec::with_capacity(count);
@@ -415,39 +414,34 @@ mod inner {
             }
 
             for i in 0..count {
-                let addrlen = socketaddr_to_sockaddr(batch_addrs[i], &mut self.tx_addrs[i]);
-                self.tx_iovs[i].iov_base = batch_data[i].as_ptr() as *mut libc::c_void;
-                self.tx_iovs[i].iov_len = batch_data[i].len();
-                self.tx_hdrs[i].msg_hdr.msg_name =
-                    (&mut self.tx_addrs[i] as *mut libc::sockaddr_storage).cast();
-                self.tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
-                self.tx_hdrs[i].msg_hdr.msg_iov =
-                    &mut self.tx_iovs[i] as *mut libc::iovec;
-                self.tx_hdrs[i].msg_hdr.msg_iovlen = 1;
+                let addrlen = socketaddr_to_sockaddr(batch_addrs[i], &mut tx_addrs[i]);
+                tx_iovs[i].iov_base = batch_data[i].as_ptr() as *mut libc::c_void;
+                tx_iovs[i].iov_len = batch_data[i].len();
+                tx_hdrs[i].msg_hdr.msg_name =
+                    (&mut tx_addrs[i] as *mut libc::sockaddr_storage).cast();
+                tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
+                tx_hdrs[i].msg_hdr.msg_iov =
+                    &mut tx_iovs[i] as *mut libc::iovec;
+                tx_hdrs[i].msg_hdr.msg_iovlen = 1;
 
                 // Attach UDP_SEGMENT cmsg when the batch holds >1 segment.
                 if batch_data[i].len() > batch_seg_sizes[i] as usize {
                     let cmsg_len = build_gso_cmsg(
-                        &mut self.tx_cmsg_bufs[i],
+                        &mut tx_cmsg_bufs[i],
                         batch_seg_sizes[i],
                     );
-                    self.tx_hdrs[i].msg_hdr.msg_control =
-                        self.tx_cmsg_bufs[i].as_mut_ptr().cast();
-                    self.tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
-                    log::trace!(
-                        "poll::send_batch_gso: batch {i} data_len={} seg_size={} cmsg_controllen={cmsg_len} cmsg_bytes={:02x?}",
-                        batch_data[i].len(), batch_seg_sizes[i],
-                        &self.tx_cmsg_bufs[i][..cmsg_len],
-                    );
+                    tx_hdrs[i].msg_hdr.msg_control =
+                        tx_cmsg_bufs[i].as_mut_ptr().cast();
+                    tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
                 }
             }
 
-            // SAFETY: all tx_hdrs/iovs/addrs/cmsg_bufs/batch_data are valid
+            // SAFETY: all hdrs/iovs/addrs/cmsg_bufs/batch_data are valid
             // for the duration of the sendmmsg call.
             let sent = unsafe {
                 libc::sendmmsg(
                     self.socket_fd,
-                    self.tx_hdrs.as_mut_ptr(),
+                    tx_hdrs.as_mut_ptr(),
                     count as libc::c_uint,
                     libc::MSG_DONTWAIT,
                 )
