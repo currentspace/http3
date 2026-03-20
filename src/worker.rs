@@ -730,13 +730,12 @@ impl Drop for ClientWorkerHandle {
 /// Spawn a client worker thread that owns UDP I/O and QUIC/H3 processing.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_client_worker(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
@@ -748,7 +747,6 @@ pub fn spawn_client_worker(
             session_ticket,
             qlog_dir,
             qlog_level,
-            user_set_mtu,
             runtime_mode,
             tsfn,
         );
@@ -759,13 +757,6 @@ pub fn spawn_client_worker(
     let bind_addr = shared_client_bind_addr(server_addr);
     let (driver, waker, local_addr) =
         transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
-
-    // Loopback MTU auto-detection (check server address)
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&server_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
@@ -862,23 +853,16 @@ fn acquire_shared_client_worker(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_shared_client_worker(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
     let worker = acquire_shared_client_worker(server_addr, runtime_mode)?;
-
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&server_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
     worker
@@ -1316,10 +1300,9 @@ fn run_shared_client_event_loop<D: transport::Driver>(
 /// Spawn a worker thread for the given server configuration.
 /// Events are delivered to JS via the provided `ThreadsafeFunction`.
 pub fn spawn_worker(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     http3_config: Http3Config,
     bind_addr: SocketAddr,
-    user_set_mtu: bool,
     tsfn: EventTsfn,
 ) -> Result<WorkerHandle, Http3NativeError> {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -1330,13 +1313,6 @@ pub fn spawn_worker(
         .map_err(Http3NativeError::Io)?;
     let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
     let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
-
-    // Loopback MTU auto-detection
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&local_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     let (driver, waker) =
         transport::create_platform_driver(std_socket, http3_config.runtime_mode)?;

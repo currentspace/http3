@@ -15,7 +15,6 @@ pub struct NativeQuicServer {
     quiche_config: Option<quiche::Config>,
     server_config: Option<crate::quic_worker::QuicServerConfig>,
     tsfn: Option<crate::worker::EventTsfn>,
-    user_set_mtu: bool,
 }
 
 #[napi]
@@ -26,7 +25,6 @@ impl NativeQuicServer {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let user_set_mtu = options.max_udp_payload_size.is_some();
         let quiche_config = crate::config::new_quic_server_config(&options)
             .map_err(napi::Error::from)?;
         let server_config = crate::quic_worker::QuicServerConfig {
@@ -49,7 +47,6 @@ impl NativeQuicServer {
             quiche_config: Some(quiche_config),
             server_config: Some(server_config),
             tsfn: Some(callback),
-            user_set_mtu,
         })
     }
 
@@ -82,7 +79,6 @@ impl NativeQuicServer {
                 quiche_config,
                 server_config,
                 addr,
-                self.user_set_mtu,
                 tsfn,
             )
             .map_err(napi::Error::from)?;

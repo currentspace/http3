@@ -910,23 +910,20 @@ pub fn spawn_quic_server(
     quiche_config: quiche::Config,
     server_config: QuicServerConfig,
     bind_addr: SocketAddr,
-    user_set_mtu: bool,
     tsfn: EventTsfn,
 ) -> Result<QuicServerHandle, Http3NativeError> {
     spawn_quic_server_with_batcher(
         quiche_config,
         server_config,
         bind_addr,
-        user_set_mtu,
         EventBatcher::new_tsfn(tsfn),
     )
 }
 
 pub(crate) fn spawn_quic_server_with_batcher(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_config: QuicServerConfig,
     bind_addr: SocketAddr,
-    user_set_mtu: bool,
     batcher: EventBatcher,
 ) -> Result<QuicServerHandle, Http3NativeError> {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
@@ -936,13 +933,6 @@ pub(crate) fn spawn_quic_server_with_batcher(
         .map_err(Http3NativeError::Io)?;
     let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
     let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
-
-    // Loopback MTU auto-detection
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&local_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     let (driver, waker) = transport::create_platform_driver(std_socket, server_config.runtime_mode)?;
     spawn_dedicated_quic_server_on_driver(
@@ -966,7 +956,6 @@ pub fn spawn_quic_client(
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<QuicClientHandle, Http3NativeError> {
@@ -977,20 +966,18 @@ pub fn spawn_quic_client(
         session_ticket,
         qlog_dir,
         qlog_level,
-        user_set_mtu,
         runtime_mode,
         EventBatcher::new_tsfn(tsfn),
     )
 }
 
 pub(crate) fn spawn_quic_client_with_batcher(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
     batcher: EventBatcher,
 ) -> Result<QuicClientHandle, Http3NativeError> {
@@ -1002,7 +989,6 @@ pub(crate) fn spawn_quic_client_with_batcher(
             session_ticket,
             qlog_dir,
             qlog_level,
-            user_set_mtu,
             runtime_mode,
             batcher,
         );
@@ -1012,13 +998,6 @@ pub(crate) fn spawn_quic_client_with_batcher(
     let bind_addr = shared_client_bind_addr(server_addr);
     let (driver, waker, local_addr) =
         transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
-
-    // Loopback MTU auto-detection (check server address)
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&server_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     spawn_dedicated_quic_client_on_driver(
         quiche_config,
@@ -1095,23 +1074,16 @@ fn acquire_shared_quic_client_worker(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_shared_quic_client(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
     batcher: EventBatcher,
 ) -> Result<QuicClientHandle, Http3NativeError> {
     let worker = acquire_shared_quic_client_worker(server_addr, runtime_mode)?;
-
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&server_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
     worker
