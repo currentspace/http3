@@ -14,32 +14,25 @@ type ByteBuf = napi::bindgen_prelude::Buffer;
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
 
-/// Default DPLPMTUD probe ceiling when the user hasn't specified
-/// `max_udp_payload_size`.
-///
-/// 1472 = 1500 (Ethernet MTU) - 20 (IPv4 header) - 8 (UDP header).
-/// This is the largest UDP payload that traverses standard Ethernet without
-/// fragmentation.  quiche's PMTUD probes from 1200 up to this ceiling; on
-/// Ethernet the first probe succeeds immediately, on smaller-MTU paths it
-/// converges via binary search.
-///
-/// For loopback or jumbo-frame paths, the user can set `max_udp_payload_size`
-/// higher (up to 65508) to allow PMTUD to discover the full path MTU.
-/// We don't probe higher by default because failed probes at very large sizes
-/// (e.g. 65 KB) charge the congestion window and trigger loss recovery, which
-/// under concurrent load can cause connection stalls.
-/// Default DPLPMTUD probe ceiling when the user hasn't specified
-/// `max_udp_payload_size`.
+/// Fallback DPLPMTUD probe ceiling used when path MTU auto-detection is
+/// unavailable (non-Linux, unresolvable destination, etc.).
 ///
 /// 1472 = 1500 (Ethernet MTU) - 20 (IPv4) - 8 (UDP).  quiche probes from
-/// 1200 up to this ceiling; on Ethernet the first probe succeeds immediately.
-/// For jumbo frames or loopback, set `max_udp_payload_size` higher.
+/// 1200 up to this ceiling; on standard Ethernet the first probe succeeds
+/// immediately.
+pub(crate) const FALLBACK_MAX_UDP_PAYLOAD: usize = 1472;
+
+/// Return the PMTUD probe ceiling for a connection to `peer`.
 ///
-/// We don't default to 65508 (max IPv4 UDP) because failed probes at very
-/// large sizes charge the congestion window and trigger loss recovery.  Under
-/// concurrent load the combination of large failed probes + loss detection
-/// timeouts causes connection stalls that are indistinguishable from deadlocks.
-const DEFAULT_MAX_UDP_PAYLOAD: usize = 1472;
+/// Queries the kernel routing table for the interface MTU on the path to
+/// `peer` and caps at 16383 (quiche's max data packet size, limited by
+/// 2-byte QUIC varint encoding).  On loopback this returns 16383; on
+/// standard Ethernet it returns 1472; on jumbo frames ~8972.
+///
+/// Falls back to `FALLBACK_MAX_UDP_PAYLOAD` (1472) if the query fails.
+pub fn effective_pmtud_ceiling(peer: &std::net::SocketAddr) -> usize {
+    crate::transport::socket::query_path_mtu(peer).unwrap_or(FALLBACK_MAX_UDP_PAYLOAD)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportRuntimeMode {
@@ -118,7 +111,7 @@ impl ClientAuthMode {
 /// Apply standard congestion and PMTU tuning to a quiche `Config`.
 ///
 /// Enables DPLPMTUD (RFC 8899) so quiche discovers the actual path MTU per
-/// connection.  The probe ceiling is `DEFAULT_MAX_UDP_PAYLOAD` (1472, standard
+/// connection.  The probe ceiling is `FALLBACK_MAX_UDP_PAYLOAD` (1472, standard
 /// Ethernet).  On Ethernet the first probe succeeds immediately; the discovery
 /// completes in one RTT with zero wasted probes.
 ///
@@ -260,12 +253,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -330,12 +323,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -489,12 +482,12 @@ pub fn new_quic_server_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -589,12 +582,12 @@ pub fn new_quic_client_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(DEFAULT_MAX_UDP_PAYLOAD as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(

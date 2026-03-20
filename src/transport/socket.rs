@@ -90,6 +90,68 @@ pub(crate) fn bind_worker_socket(
     Ok(socket.into())
 }
 
+// ── Path MTU query ──────────────────────────────────────────────────
+
+/// Maximum QUIC packet size quiche will use for data (2-byte varint limit).
+const QUIC_MAX_PACKET_SIZE: usize = 16383;
+
+/// Query the link-layer MTU for the path to `peer` and return the maximum
+/// useful PMTUD probe ceiling.
+///
+/// Creates a temporary connected UDP socket to `peer`, calls
+/// `getsockopt(IP_MTU)`, and returns `min(mtu - headers, 16383)`.
+/// Returns `None` if the query fails (non-Linux, permission error, etc.),
+/// in which case the caller should fall back to a conservative default.
+///
+/// This is NOT a loopback hack — it queries the kernel routing table for
+/// the actual interface MTU on the path to any destination.
+pub(crate) fn query_path_mtu(peer: &SocketAddr) -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::net::UdpSocket as StdUdpSocket;
+
+        // IP + UDP header overhead
+        let header_overhead: usize = if peer.is_ipv4() { 28 } else { 48 };
+
+        let probe_socket = StdUdpSocket::bind(if peer.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })
+        .ok()?;
+        probe_socket.connect(peer).ok()?;
+
+        // IP_MTU = 14 on Linux
+        let raw_fd = {
+            use std::os::unix::io::AsRawFd;
+            probe_socket.as_raw_fd()
+        };
+        let mut mtu: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                raw_fd,
+                libc::IPPROTO_IP,
+                libc::IP_MTU,
+                &mut mtu as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc != 0 || mtu <= 0 {
+            return None;
+        }
+
+        let max_payload = (mtu as usize).saturating_sub(header_overhead);
+        Some(max_payload.min(QUIC_MAX_PACKET_SIZE))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = peer;
+        None
+    }
+}
+
 // ── Control message (cmsg) utilities ────────────────────────────────
 
 /// Control message buffer size for IP_PKTINFO / IPV6_PKTINFO.
