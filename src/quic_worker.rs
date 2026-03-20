@@ -1017,13 +1017,6 @@ pub(crate) fn spawn_quic_server_with_batcher(
 /// worker.  Connection handles encode the worker index in the upper bits so
 /// commands can be routed to the correct worker.
 ///
-/// `make_batcher` is called once per worker with the worker index.
-/// Spawn `num_workers` server worker threads, each with its own socket bound
-/// to the same address via SO_REUSEPORT.  The kernel distributes incoming
-/// packets by 4-tuple hash, so each connection is handled by exactly one
-/// worker.  Connection handles encode the worker index in the upper bits so
-/// commands can be routed to the correct worker.
-///
 /// `make_quiche_config` is called once per worker (quiche::Config is not Clone).
 /// `make_batcher` is called once per worker with the worker index.
 pub(crate) fn spawn_quic_server_sharded<Q, B>(
@@ -1051,6 +1044,15 @@ where
     };
     let local_addr = first_socket.local_addr().map_err(Http3NativeError::Io)?;
 
+    // Query path MTU from the bound address.  If bound to a specific
+    // interface (e.g. 127.0.0.1), this discovers the interface MTU.
+    // If bound to 0.0.0.0, query_path_mtu returns None → fallback.
+    let server_ceiling = if !local_addr.ip().is_unspecified() {
+        crate::config::effective_pmtud_ceiling(&local_addr)
+    } else {
+        crate::config::FALLBACK_MAX_UDP_PAYLOAD
+    };
+
     let mut workers = Vec::with_capacity(num_workers);
 
     // Worker 0 uses first_socket directly.
@@ -1059,7 +1061,9 @@ where
         let (driver, waker) =
             transport::create_platform_driver(first_socket, server_config.runtime_mode)?;
         let batcher = make_batcher(0);
-        let quiche_config = make_quiche_config()?;
+        let mut quiche_config = make_quiche_config()?;
+        quiche_config.set_max_send_udp_payload_size(server_ceiling);
+        quiche_config.set_max_recv_udp_payload_size(server_ceiling);
         workers.push(spawn_server_worker_on_driver(
             quiche_config,
             QuicServerConfig {
@@ -1088,7 +1092,9 @@ where
         let (driver, waker) =
             transport::create_platform_driver(socket, server_config.runtime_mode)?;
         let batcher = make_batcher(i);
-        let quiche_config = make_quiche_config()?;
+        let mut quiche_config = make_quiche_config()?;
+        quiche_config.set_max_send_udp_payload_size(server_ceiling);
+        quiche_config.set_max_recv_udp_payload_size(server_ceiling);
         workers.push(spawn_server_worker_on_driver(
             quiche_config,
             QuicServerConfig {
@@ -1141,7 +1147,7 @@ pub fn spawn_quic_client(
 }
 
 pub(crate) fn spawn_quic_client_with_batcher(
-    quiche_config: quiche::Config,
+    mut quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
@@ -1150,6 +1156,12 @@ pub(crate) fn spawn_quic_client_with_batcher(
     runtime_mode: TransportRuntimeMode,
     batcher: EventBatcher,
 ) -> Result<QuicClientHandle, Http3NativeError> {
+    // Query the path MTU to the server and raise the PMTUD ceiling if
+    // the path supports larger packets (e.g. loopback = 16383, jumbo = 8972).
+    let ceiling = crate::config::effective_pmtud_ceiling(&server_addr);
+    quiche_config.set_max_send_udp_payload_size(ceiling);
+    quiche_config.set_max_recv_udp_payload_size(ceiling);
+
     if default_quic_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
         return spawn_shared_quic_client(
             quiche_config,
