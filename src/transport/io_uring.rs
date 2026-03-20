@@ -454,6 +454,9 @@ mod inner {
         rx_ring: RxBufferRing,
         /// Whether the multishot recvmsg SQE is currently armed.
         rx_armed: bool,
+        /// True when the ring was created with R_DISABLED and needs
+        /// register_enable_rings() on the worker thread before first use.
+        needs_enable: bool,
         /// TX provided buffer ring for send bundles (None if unsupported).
         tx_buf_ring: Option<TxBufRing>,
         tx_slots: Vec<TxSlot>,
@@ -479,20 +482,36 @@ mod inner {
         type Waker = IoUringWaker;
 
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
-            // DEFER_TASKRUN defers completion task_work to the io_uring_enter
-            // call, which can reduce overhead in tight event loops. However, it
-            // requires SINGLE_ISSUER and mandates that io_uring_enter(GETEVENTS)
-            // is called by the *same thread* that set up the ring — otherwise the
-            // kernel returns EEXIST. Our architecture creates the driver on the
-            // main thread then moves it to a dedicated worker thread, violating
-            // that constraint. Skip DEFER_TASKRUN; the remaining flags are still
-            // beneficial.
-            let ring = io_uring::IoUring::builder()
+            // DEFER_TASKRUN + COOP_TASKRUN + SINGLE_ISSUER reduce overhead by
+            // deferring completion work to io_uring_enter. However, SINGLE_ISSUER
+            // requires the thread calling io_uring_enter(GETEVENTS) to be the same
+            // thread that "enabled" the ring.
+            //
+            // Our architecture creates the driver on the main thread then moves it
+            // to a worker thread. We use R_DISABLED to create the ring without an
+            // owner, then call register_enable_rings() on the first poll() — which
+            // runs on the worker thread, making IT the submitter task.
+            //
+            // Registrations (files, buffer rings) work while the ring is disabled.
+            // SQE submission and io_uring_enter require the ring to be enabled.
+            let (ring, defer_taskrun) = io_uring::IoUring::builder()
+                .setup_coop_taskrun()
+                .setup_single_issuer()
+                .setup_defer_taskrun()
+                .setup_r_disabled()
                 .setup_cqsize(4096)
                 .build(128)
+                .map(|r| (r, true))
                 .or_else(|_| {
-                    // Minimal fallback: no optional flags.
-                    io_uring::IoUring::new(128)
+                    // Fallback: without DEFER_TASKRUN (kernel < 6.1).
+                    io_uring::IoUring::builder()
+                        .setup_cqsize(4096)
+                        .build(128)
+                        .map(|r| (r, false))
+                })
+                .or_else(|_| {
+                    // Minimal fallback.
+                    io_uring::IoUring::new(128).map(|r| (r, false))
                 })?;
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
@@ -500,7 +519,7 @@ mod inner {
             set_pktinfo(&socket);
             enable_gro(&socket);
             log::info!(
-                "IoUringDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} tid={:?}",
+                "IoUringDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} defer_taskrun={defer_taskrun} tid={:?}",
                 std::thread::current().id(),
             );
 
@@ -541,6 +560,7 @@ mod inner {
                 eventfd,
                 rx_ring,
                 rx_armed: false,
+                needs_enable: defer_taskrun,
                 tx_buf_ring,
                 tx_slots,
                 waker_buf: Box::new([0u8; 8]),
@@ -550,11 +570,14 @@ mod inner {
                 cqe_buf: Vec::with_capacity(512),
             };
 
-            // Arm multishot recvmsg and waker read.
-            driver.arm_multishot_recv()?;
-            driver.submit_waker_read()?;
-            reactor_metrics::record_io_uring_submit_call();
-            driver.ring.submit()?;
+            // When R_DISABLED is active, SQE submission is deferred until the
+            // worker thread calls enable_on_worker_thread(). Otherwise, arm now.
+            if !defer_taskrun {
+                driver.arm_multishot_recv()?;
+                driver.submit_waker_read()?;
+                reactor_metrics::record_io_uring_submit_call();
+                driver.ring.submit()?;
+            }
 
             // SAFETY: dup the eventfd for the waker (the driver keeps the original).
             let waker_fd = unsafe { libc::dup(driver.eventfd.as_raw_fd()) };
@@ -571,6 +594,13 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            // First call on the worker thread: enable the ring and arm initial SQEs.
+            // This makes the current (worker) thread the SINGLE_ISSUER submitter task,
+            // allowing DEFER_TASKRUN to work correctly.
+            if self.needs_enable {
+                self.enable_on_worker_thread()?;
+            }
+
             // Queue any pending TX SQEs — submit_with_args will flush them.
             self.submit_pending_tx()?;
 
@@ -798,6 +828,25 @@ mod inner {
     }
 
     impl IoUringDriver {
+        /// Enable the ring on the worker thread. Called once on the first poll().
+        /// This makes the current thread the SINGLE_ISSUER submitter, allowing
+        /// DEFER_TASKRUN to work. Then arms the initial SQEs.
+        fn enable_on_worker_thread(&mut self) -> io::Result<()> {
+            log::info!(
+                "IoUringDriver::enable_on_worker_thread tid={:?}",
+                std::thread::current().id(),
+            );
+            self.ring.submitter().register_enable_rings()?;
+            self.needs_enable = false;
+
+            // Now we can submit SQEs.
+            self.arm_multishot_recv()?;
+            self.submit_waker_read()?;
+            reactor_metrics::record_io_uring_submit_call();
+            self.ring.submit()?;
+            Ok(())
+        }
+
         /// Submit the single multishot recvmsg SQE.
         fn arm_multishot_recv(&mut self) -> io::Result<()> {
             let entry = io_uring::opcode::RecvMsgMulti::new(
