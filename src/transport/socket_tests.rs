@@ -715,6 +715,72 @@ mod tests {
         assert_eq!(total_bytes, 800, "should receive 800 total bytes (got {total_bytes})");
     }
 
+    // ── Test: IoUringDriver GRO cmsg delivery with QUIC-sized packets ──
+
+    /// Verifies that the io_uring multishot recvmsg path delivers the UDP_GRO
+    /// cmsg for GRO-coalesced datagrams. Without segment_size, the event loop
+    /// can't split coalesced packets and quiche gets oversized blobs it can't
+    /// parse — causing stream timeouts in the QUIC benchmark.
+    #[test]
+    fn iouring_driver_gro_cmsg_with_quic_sized_packets() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender_sock.set_nonblocking(true).unwrap();
+        receiver_sock.set_nonblocking(true).unwrap();
+        let recv_addr = receiver_sock.local_addr().unwrap();
+
+        let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
+        let (mut receiver, _rw) = IoUringDriver::new(receiver_sock).unwrap();
+
+        let _ = receiver.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        // Send 4 × 1200B packets (typical QUIC packet size).
+        // GSO coalesces these into one 4800B sendmsg. On loopback, GRO should
+        // coalesce them back into one 4800B recvmsg with UDP_GRO segment_size=1200.
+        let packets: Vec<TxDatagram> = (0..4)
+            .map(|i| TxDatagram { data: vec![i as u8; 1200], to: recv_addr })
+            .collect();
+        sender.submit_sends(packets).unwrap();
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(50)));
+
+        let mut total_bytes = 0usize;
+        let mut gro_seen = false;
+        let mut non_gro_count = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while total_bytes < 4800 && Instant::now() < deadline {
+            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+            for pkt in &outcome.rx {
+                eprintln!(
+                    "  iouring GRO: len={} segment_size={:?}",
+                    pkt.data.len(), pkt.segment_size,
+                );
+                total_bytes += pkt.data.len();
+                if pkt.segment_size.is_some() {
+                    gro_seen = true;
+                } else if pkt.data.len() > 1200 {
+                    // GRO-coalesced but NO segment_size — this is the bug!
+                    eprintln!(
+                        "  BUG: received {}B coalesced datagram with segment_size=None!",
+                        pkt.data.len(),
+                    );
+                    non_gro_count += 1;
+                }
+            }
+        }
+        eprintln!("  GRO test: {total_bytes}B, gro_seen={gro_seen}, non_gro_count={non_gro_count}");
+        assert_eq!(total_bytes, 4800, "should receive 4800 total bytes");
+        // If GRO is active, segment_size MUST be present on coalesced packets.
+        // If it's missing, the event loop won't split them and quiche breaks.
+        assert_eq!(
+            non_gro_count, 0,
+            "coalesced packets must have segment_size (got {non_gro_count} without)",
+        );
+    }
+
     // ── Test: IoUringDriver GSO multi-round (regression for round 2+ failures)
 
     #[test]
@@ -812,6 +878,403 @@ mod tests {
             total_bytes, total_expected,
             "all packets should arrive without poll() between submit_sends() calls \
              (got {total_bytes}/{total_expected})"
+        );
+    }
+
+    // ── Test: IoUringDriver bidirectional echo (mimics QUIC event loop) ──
+
+    /// Simulates a QUIC-like event loop: two io_uring drivers sending and
+    /// receiving in alternating poll cycles. This catches stalls caused by
+    /// unflushed SQEs, stuck completions, or poll/submit ordering issues.
+    #[test]
+    fn iouring_driver_bidirectional_echo() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let sock_a = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock_a.set_nonblocking(true).unwrap();
+        sock_b.set_nonblocking(true).unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        let (mut a, _wa) = IoUringDriver::new(sock_a).unwrap();
+        let (mut b, _wb) = IoUringDriver::new(sock_b).unwrap();
+
+        // Enable both drivers.
+        let _ = a.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = b.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        let rounds = 20;
+        let pkts_per_round = 16;
+        let pkt_size = 200;
+        let mut a_sent = 0usize;
+        let mut b_sent = 0usize;
+        let mut a_received = 0usize;
+        let mut b_received = 0usize;
+        let mut a_rx_bytes = 0usize;
+        let mut b_rx_bytes = 0usize;
+
+        for round in 0..rounds {
+            // A sends to B.
+            let packets: Vec<TxDatagram> = (0..pkts_per_round)
+                .map(|i| TxDatagram {
+                    data: vec![(round * pkts_per_round + i) as u8; pkt_size],
+                    to: addr_b,
+                })
+                .collect();
+            a.submit_sends(packets).unwrap();
+            a_sent += pkts_per_round;
+
+            // B sends to A.
+            let packets: Vec<TxDatagram> = (0..pkts_per_round)
+                .map(|i| TxDatagram {
+                    data: vec![(round * pkts_per_round + i) as u8; pkt_size],
+                    to: addr_a,
+                })
+                .collect();
+            b.submit_sends(packets).unwrap();
+            b_sent += pkts_per_round;
+
+            // Both poll (short timeout — we're testing throughput not blocking).
+            let out_a = a.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            let out_b = b.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+
+            let a_rx_this = out_a.rx.iter().map(|p| p.data.len()).sum::<usize>();
+            let b_rx_this = out_b.rx.iter().map(|p| p.data.len()).sum::<usize>();
+            a_received += out_a.rx.len();
+            b_received += out_b.rx.len();
+            a_rx_bytes += a_rx_this;
+            b_rx_bytes += b_rx_this;
+            if round < 3 || round == rounds - 1 {
+                eprintln!(
+                    "  round {round}: a_rx={} ({a_rx_this}B) b_rx={} ({b_rx_this}B) a_total={a_received} b_total={b_received}",
+                    out_a.rx.len(), out_b.rx.len(),
+                );
+            }
+        }
+
+        // Drain remaining.
+        let a_expected_bytes_for_drain = a_sent * pkt_size;
+        let b_expected_bytes_for_drain = b_sent * pkt_size;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut drain_polls = 0;
+        while (a_rx_bytes < b_expected_bytes_for_drain || b_rx_bytes < a_expected_bytes_for_drain)
+            && Instant::now() < deadline
+        {
+            let out_a = a.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+            let out_b = b.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+            let a_rx_this_bytes: usize = out_a.rx.iter().map(|p| p.data.len()).sum();
+            let b_rx_this_bytes: usize = out_b.rx.iter().map(|p| p.data.len()).sum();
+            a_received += out_a.rx.len();
+            b_received += out_b.rx.len();
+            a_rx_bytes += a_rx_this_bytes;
+            b_rx_bytes += b_rx_this_bytes;
+            drain_polls += 1;
+            if drain_polls <= 3 || a_rx_this_bytes > 0 || b_rx_this_bytes > 0 {
+                eprintln!(
+                    "  drain poll {drain_polls}: a_rx={a_rx_this_bytes}B b_rx={b_rx_this_bytes}B a_bytes={a_rx_bytes}/{b_expected_bytes_for_drain} b_bytes={b_rx_bytes}/{a_expected_bytes_for_drain}",
+                );
+            }
+        }
+
+        let a_expected_bytes = a_sent * pkt_size;
+        let b_expected_bytes = b_sent * pkt_size;
+        eprintln!(
+            "  bidir echo: a_sent={a_sent} b_rx_bytes={b_rx_bytes}/{a_expected_bytes} b_sent={b_sent} a_rx_bytes={a_rx_bytes}/{b_expected_bytes} drain_polls={drain_polls}"
+        );
+        // Compare bytes, not packet counts — GRO coalesces multiple sends into
+        // a single receive datagram on loopback.
+        assert_eq!(b_rx_bytes, a_expected_bytes, "B should receive all of A's bytes (got {b_rx_bytes}/{a_expected_bytes})");
+        assert_eq!(a_rx_bytes, b_expected_bytes, "A should receive all of B's bytes (got {a_rx_bytes}/{b_expected_bytes})");
+    }
+
+    // ── Test: IoUringDriver echo-at-scale (mimics QUIC benchmark server) ──
+
+    /// Simulates the QUIC benchmark pattern: client sends a burst of packets,
+    /// server echoes them back, client receives echoes. This is the pattern
+    /// that triggers the ~30% stall rate in the real benchmark.
+    /// Uses QUIC-sized packets (1200B) and a realistic connection count.
+    #[test]
+    fn iouring_driver_echo_at_scale() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client_sock.set_nonblocking(true).unwrap();
+        server_sock.set_nonblocking(true).unwrap();
+
+        // Enlarge socket buffers to avoid kernel drops under burst load.
+        // The default rmem_default (~208KB) can't absorb a 600KB burst.
+        use std::os::unix::io::AsRawFd;
+        for sock in [&client_sock, &server_sock] {
+            let buf_size: libc::c_int = 2 * 1024 * 1024;
+            unsafe {
+                libc::setsockopt(
+                    sock.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &buf_size as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&buf_size) as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    sock.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &buf_size as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&buf_size) as libc::socklen_t,
+                );
+            }
+        }
+        let client_addr = client_sock.local_addr().unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+
+        let (mut client, _cw) = IoUringDriver::new(client_sock).unwrap();
+        let (mut server, _sw) = IoUringDriver::new(server_sock).unwrap();
+
+        let _ = client.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = server.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        // Simulates a QUIC server handling 500 streams: client sends in bursts,
+        // server receives + echoes, client receives echoes. Interleaved like the
+        // real event loop — not a single giant burst.
+        let total_client_pkts = 500;
+        let pkt_size = 1200;
+        let total_bytes = total_client_pkts * pkt_size;
+        let batch_size = 50; // ~50 streams per connection worth of packets
+        let t0 = Instant::now();
+
+        // Echo loop: client sends in batches, server echoes, client receives.
+        let mut server_rx_bytes = 0usize;
+        let mut server_tx_bytes = 0usize;
+        let mut client_echo_bytes = 0usize;
+        let mut client_sent = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let mut loop_count = 0usize;
+        let mut stall_count = 0usize;
+        while client_echo_bytes < total_bytes && Instant::now() < deadline {
+            // Client: send next batch if available.
+            if client_sent < total_client_pkts {
+                let batch_end = (client_sent + batch_size).min(total_client_pkts);
+                let packets: Vec<TxDatagram> = (client_sent..batch_end)
+                    .map(|i| TxDatagram {
+                        data: vec![(i % 256) as u8; pkt_size],
+                        to: server_addr,
+                    })
+                    .collect();
+                client.submit_sends(packets).unwrap();
+                client_sent = batch_end;
+            }
+            loop_count += 1;
+            // Server: poll, echo back anything received.
+            let s_out = server.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            let s_rx_this = s_out.rx.len();
+            if !s_out.rx.is_empty() {
+                let mut echo_packets = Vec::new();
+                for pkt in &s_out.rx {
+                    server_rx_bytes += pkt.data.len();
+                    // Split GRO-coalesced packets for echo (like event_loop does).
+                    if let Some(seg) = pkt.segment_size {
+                        for chunk in pkt.data.chunks(seg as usize) {
+                            echo_packets.push(TxDatagram {
+                                data: chunk.to_vec(),
+                                to: client_addr,
+                            });
+                        }
+                    } else {
+                        echo_packets.push(TxDatagram {
+                            data: pkt.data.clone(),
+                            to: client_addr,
+                        });
+                    }
+                }
+                let echo_count = echo_packets.len();
+                server_tx_bytes += echo_packets.iter().map(|p| p.data.len()).sum::<usize>();
+                server.submit_sends(echo_packets).unwrap();
+                if loop_count <= 10 || loop_count % 50 == 0 {
+                    eprintln!(
+                        "  loop {loop_count}: server_rx={s_rx_this} echo={echo_count} pending={} srx_total={server_rx_bytes}",
+                        server.pending_tx_count(),
+                    );
+                }
+            } else {
+                stall_count += 1;
+                if stall_count <= 3 || stall_count % 20 == 0 {
+                    eprintln!(
+                        "  loop {loop_count}: EMPTY server poll, server_rx_total={server_rx_bytes}/{total_bytes} client_echo={client_echo_bytes}/{total_bytes} server_pending={}",
+                        server.pending_tx_count(),
+                    );
+                }
+            }
+
+            // Client: poll to receive echoes.
+            let c_out = client.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            for pkt in &c_out.rx {
+                client_echo_bytes += pkt.data.len();
+            }
+        }
+
+        let elapsed = t0.elapsed();
+        let mbps = (client_echo_bytes as f64 * 8.0) / (elapsed.as_secs_f64() * 1_000_000.0);
+        eprintln!(
+            "  echo-at-scale: server_rx={server_rx_bytes} server_tx={server_tx_bytes} client_echo={client_echo_bytes}/{total_bytes} in {:?} ({mbps:.1} Mbps)",
+            elapsed,
+        );
+        assert_eq!(
+            client_echo_bytes, total_bytes,
+            "client should receive all echoed bytes (got {client_echo_bytes}/{total_bytes} in {:?})",
+            elapsed,
+        );
+        assert!(
+            elapsed.as_secs() < 3,
+            "echo at scale took {:?} — stall detected",
+            elapsed,
+        );
+    }
+
+    // ── Test: IoUringDriver submit_sends latency (detect stall) ──
+
+    /// Measures wall-clock time for submit_sends+poll round-trips.
+    /// Detects the stall bug: if any single round takes >500ms, something
+    /// is blocking (unflushed SQEs, stuck completions, etc).
+    #[test]
+    fn iouring_driver_no_latency_spikes() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender_sock.set_nonblocking(true).unwrap();
+        receiver_sock.set_nonblocking(true).unwrap();
+        let recv_addr = receiver_sock.local_addr().unwrap();
+
+        let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
+        let (mut receiver, _rw) = IoUringDriver::new(receiver_sock).unwrap();
+
+        let _ = receiver.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        let mut round_times = Vec::new();
+
+        for round in 0..30 {
+            let t0 = Instant::now();
+
+            // Send 32 packets.
+            let packets: Vec<TxDatagram> = (0..32)
+                .map(|i| TxDatagram {
+                    data: vec![(round * 32 + i) as u8; 200],
+                    to: recv_addr,
+                })
+                .collect();
+            sender.submit_sends(packets).unwrap();
+            let _ = sender.poll(Some(Instant::now() + Duration::from_millis(20)));
+
+            // Receive.
+            let mut got = 0usize;
+            let inner_deadline = Instant::now() + Duration::from_millis(500);
+            while got < 32 * 200 && Instant::now() < inner_deadline {
+                let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+                for pkt in &outcome.rx {
+                    got += pkt.data.len();
+                }
+            }
+
+            let elapsed = t0.elapsed();
+            round_times.push(elapsed);
+
+            if got < 32 * 200 {
+                eprintln!("  round {round}: STALL — only {got}/{} bytes in {:?}", 32 * 200, elapsed);
+            }
+        }
+
+        let max_round = round_times.iter().max().unwrap();
+        let avg_ms = round_times.iter().map(|d| d.as_millis()).sum::<u128>() / round_times.len() as u128;
+        eprintln!(
+            "  latency: avg={avg_ms}ms max={:?} rounds={}",
+            max_round,
+            round_times.len(),
+        );
+
+        // No round should take more than 500ms on loopback.
+        assert!(
+            max_round.as_millis() < 500,
+            "latency spike detected: max round took {:?} (avg {avg_ms}ms) — likely a stall",
+            max_round,
+        );
+    }
+
+    // ── Test: IoUringDriver high-volume multi-round stress ──
+
+    /// Stress test: 50 rounds × 64 packets with interleaved send/poll.
+    /// Verifies no packet loss or stalls under sustained load.
+    #[test]
+    fn iouring_driver_stress_multi_round() {
+        use crate::transport::{Driver, TxDatagram};
+        use crate::transport::io_uring::IoUringDriver;
+
+        let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender_sock.set_nonblocking(true).unwrap();
+        receiver_sock.set_nonblocking(true).unwrap();
+        let recv_addr = receiver_sock.local_addr().unwrap();
+
+        let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
+        let (mut receiver, _rw) = IoUringDriver::new(receiver_sock).unwrap();
+
+        let _ = receiver.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
+
+        let rounds = 50;
+        let pkts_per_round = 64;
+        let pkt_size = 200;
+        let total_expected = rounds * pkts_per_round * pkt_size;
+        let mut total_received = 0usize;
+        let t0 = Instant::now();
+
+        for round in 0..rounds {
+            let packets: Vec<TxDatagram> = (0..pkts_per_round)
+                .map(|i| TxDatagram {
+                    data: vec![((round * pkts_per_round + i) % 256) as u8; pkt_size],
+                    to: recv_addr,
+                })
+                .collect();
+            sender.submit_sends(packets).unwrap();
+
+            // Poll both sides every round.
+            let _ = sender.poll(Some(Instant::now() + Duration::from_millis(5)));
+            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            for pkt in &outcome.rx {
+                total_received += pkt.data.len();
+            }
+        }
+
+        // Drain remaining.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while total_received < total_expected && Instant::now() < deadline {
+            let _ = sender.poll(Some(Instant::now() + Duration::from_millis(10)));
+            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+            for pkt in &outcome.rx {
+                total_received += pkt.data.len();
+            }
+        }
+
+        let elapsed = t0.elapsed();
+        let mbps = (total_received as f64 * 8.0) / (elapsed.as_secs_f64() * 1_000_000.0);
+        eprintln!(
+            "  stress: {total_received}/{total_expected} bytes in {:?} ({mbps:.1} Mbps)",
+            elapsed,
+        );
+        assert_eq!(
+            total_received, total_expected,
+            "all bytes should arrive (got {total_received}/{total_expected})"
+        );
+        // Should complete in under 10 seconds on loopback.
+        assert!(
+            elapsed.as_secs() < 10,
+            "stress test took {:?} — likely stalled",
+            elapsed,
         );
     }
 
