@@ -74,6 +74,7 @@ pub struct JsSessionMetrics {
     pub handshake_time_ms: f64,
     pub rtt_ms: f64,
     pub cwnd: i64,
+    pub pmtu: i64,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]

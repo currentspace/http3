@@ -414,6 +414,13 @@ impl H3Connection {
             .next()
             .map_or(0, |s| s.cwnd as u64)
     }
+
+    pub fn pmtu(&self) -> usize {
+        self.quiche_conn
+            .path_stats()
+            .next()
+            .map_or(0, |s| s.pmtu)
+    }
 }
 
 fn maybe_enable_qlog(

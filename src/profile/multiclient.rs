@@ -50,6 +50,7 @@ struct LatencySummary {
 struct CongestionSnapshot {
     cwnd: u64,
     rtt_ms: f64,
+    pmtu: i64,
 }
 
 #[derive(Serialize)]
@@ -395,6 +396,7 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
                 CongestionSnapshot {
                     cwnd: metrics.cwnd as u64,
                     rtt_ms: metrics.rtt_ms,
+                    pmtu: metrics.pmtu,
                 },
             );
         }

@@ -42,12 +42,13 @@ pub(crate) fn default_quic_client_socket_strategy(
 
 #[cfg(target_os = "linux")]
 pub(crate) fn default_quic_client_socket_strategy(
-    runtime_mode: TransportRuntimeMode,
+    _runtime_mode: TransportRuntimeMode,
 ) -> ClientSocketStrategy {
-    match runtime_mode {
-        TransportRuntimeMode::Fast => ClientSocketStrategy::SharedPerFamily,
-        TransportRuntimeMode::Portable => ClientSocketStrategy::Dedicated,
-    }
+    // Each client gets its own socket + io_uring instance.  Sharing a single
+    // UDP socket across multiple QUIC connections adds head-of-line blocking
+    // in the io_uring send path and doesn't match real-world usage where each
+    // client session owns its own socket.
+    ClientSocketStrategy::Dedicated
 }
 
 pub(crate) fn shared_client_worker_key(
