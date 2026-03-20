@@ -26,7 +26,7 @@ use crate::h3_event::{
 use crate::profile::event_sink::{TaggedEventBatch, channel_batcher};
 use crate::quic_worker::{
     QuicClientHandle, QuicServerCommand, QuicServerConfig, spawn_quic_client_with_batcher,
-    spawn_quic_server_with_batcher,
+    spawn_quic_server_sharded,
 };
 use crate::reactor_metrics::{self, JsReactorTelemetrySnapshot};
 
@@ -228,6 +228,7 @@ struct BenchOptions {
     streams_per_client: usize,
     payload_bytes: usize,
     timeout: Duration,
+    server_workers: usize,
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
 }
@@ -246,7 +247,7 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
 
     // ── Start server ────────────────────────────────────────────────
     let (server_event_tx, server_event_rx) = unbounded();
-    let (server_batcher, server_sink_stats) = channel_batcher("server", server_event_tx);
+    let server_event_tx_clone = server_event_tx.clone();
     let server_config = QuicServerConfig {
         qlog_dir: None,
         qlog_level: None,
@@ -256,16 +257,28 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
         cid_encoding: CidEncoding::random(),
         runtime_mode: options.runtime_mode,
     };
-    let server_quiche_config = build_server_quiche_config(&options)?;
-    let mut server = spawn_quic_server_with_batcher(
-        server_quiche_config,
+    let num_workers = options.server_workers;
+    let mut server_sink_stats_list = Vec::new();
+    let mut server = spawn_quic_server_sharded(
+        || build_server_quiche_config(&options).map_err(|e| crate::error::Http3NativeError::Config(e)),
         server_config,
         "127.0.0.1:0".parse().expect("valid addr"),
-        server_batcher,
+        num_workers,
+        |worker_idx| {
+            let source = format!("server-{worker_idx}");
+            let (batcher, stats) = channel_batcher(source, server_event_tx_clone.clone());
+            server_sink_stats_list.push(stats);
+            batcher
+        },
     )
     .map_err(|err| err.to_string())?;
+    drop(server_event_tx_clone);
+    let server_sink_stats = server_sink_stats_list.into_iter().next().unwrap_or_else(|| {
+        let (_, s) = channel_batcher("server", server_event_tx.clone());
+        s
+    });
     let server_addr = server.local_addr();
-    eprintln!("server listening on {server_addr}");
+    eprintln!("server listening on {server_addr} with {num_workers} worker(s)");
 
     // ── Start clients ───────────────────────────────────────────────
     let (client_event_tx, client_event_rx) = unbounded();
@@ -616,6 +629,7 @@ fn parse_cli(args: Vec<String>) -> Result<BenchOptions, String> {
     let mut streams_per_client = 100usize;
     let mut payload_bytes = 16 * 1024usize;
     let mut timeout_ms = DEFAULT_TIMEOUT_MS;
+    let mut server_workers = 1usize;
     let mut cert_path: Option<String> = None;
     let mut key_path: Option<String> = None;
 
@@ -650,6 +664,11 @@ fn parse_cli(args: Vec<String>) -> Result<BenchOptions, String> {
                 timeout_ms = next_value(&args, &mut index, "--timeout-ms")?
                     .parse()
                     .map_err(|err| format!("invalid --timeout-ms value: {err}"))?;
+            }
+            "--server-workers" => {
+                server_workers = next_value(&args, &mut index, "--server-workers")?
+                    .parse()
+                    .map_err(|err| format!("invalid --server-workers value: {err}"))?;
             }
             "--cert-path" => {
                 cert_path = Some(next_value(&args, &mut index, "--cert-path")?);
@@ -688,6 +707,7 @@ fn parse_cli(args: Vec<String>) -> Result<BenchOptions, String> {
         streams_per_client,
         payload_bytes,
         timeout: Duration::from_millis(timeout_ms),
+        server_workers,
         cert_pem,
         key_pem,
     })
