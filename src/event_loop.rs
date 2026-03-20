@@ -277,8 +277,14 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     cmd_rx: Receiver<P::Command>,
     handler: &mut P,
     mut batcher: EventBatcher,
-    _local_addr: SocketAddr,
+    local_addr: SocketAddr,
 ) {
+    // Use pkt.local (from IP_PKTINFO) only when the socket is bound to a
+    // specific address.  When bound to a wildcard (0.0.0.0 / [::]), quiche
+    // creates connections with that wildcard as the local addr.  Passing a
+    // more-specific pktinfo addr (e.g. 127.0.0.1) causes a mismatch and
+    // quiche rejects the packet.  This flag gates pkt.local usage.
+    let use_pktinfo_local = !local_addr.ip().is_unspecified();
     let mut outbound: Vec<TxDatagram> = Vec::new();
     let mut pending_outbound: Vec<TxDatagram> = Vec::new();
 
@@ -366,6 +372,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                     pkt.data.len(), pkt.peer, pkt.local, pkt.segment_size, std::thread::current().id(),
                 );
             }
+            let pkt_local = if use_pktinfo_local { pkt.local } else { local_addr };
             // GRO: kernel may coalesce multiple datagrams into one buffer.
             // Split by segment_size and call process_packet for each.
             if let Some(seg_size) = pkt.segment_size {
@@ -375,7 +382,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                     handler.process_packet(
                         &mut buf,
                         pkt.peer,
-                        pkt.local,
+                        pkt_local,
                         &mut pending_outbound,
                         &mut batcher.batch,
                     );
@@ -384,7 +391,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 handler.process_packet(
                     &mut pkt.data,
                     pkt.peer,
-                    pkt.local,
+                    pkt_local,
                     &mut pending_outbound,
                     &mut batcher.batch,
                 );
