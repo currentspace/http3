@@ -34,14 +34,37 @@ pub(crate) fn set_socket_buffers(socket: &UdpSocket, hint: usize) -> Result<(), 
 }
 
 /// Bind a UDP socket, optionally with `SO_REUSEPORT`.
+/// Target UDP socket buffer size (2 MB). QUIC implementations typically need
+/// large buffers to absorb packet bursts without kernel drops.  The kernel may
+/// cap this at `net.core.rmem_max` / `net.core.wmem_max`, but `setsockopt`
+/// silently clamps — it never fails.
+const SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
+
+/// Try to enlarge the socket's receive and send buffers.  Best-effort: if the
+/// kernel clamps the value we still proceed with whatever size we got.
+/// Logs the effective sizes so operators can diagnose buffer-related drops.
+fn set_socket_buffer_sizes(socket: &socket2::Socket) {
+    let _ = socket.set_recv_buffer_size(SOCKET_BUF_SIZE);
+    let _ = socket.set_send_buffer_size(SOCKET_BUF_SIZE);
+    let effective_rcv = socket.recv_buffer_size().unwrap_or(0);
+    let effective_snd = socket.send_buffer_size().unwrap_or(0);
+    if effective_rcv < SOCKET_BUF_SIZE || effective_snd < SOCKET_BUF_SIZE {
+        log::warn!(
+            "UDP socket buffer sizes clamped by kernel: rcvbuf={}KB (wanted {}KB) sndbuf={}KB (wanted {}KB). \
+             Raise net.core.rmem_max / net.core.wmem_max to at least {} for best QUIC performance.",
+            effective_rcv / 1024,
+            SOCKET_BUF_SIZE / 1024,
+            effective_snd / 1024,
+            SOCKET_BUF_SIZE / 1024,
+            SOCKET_BUF_SIZE,
+        );
+    }
+}
+
 pub(crate) fn bind_worker_socket(
     bind_addr: SocketAddr,
     reuse_port: bool,
 ) -> Result<UdpSocket, Http3NativeError> {
-    if !reuse_port {
-        return UdpSocket::bind(bind_addr).map_err(Http3NativeError::Io);
-    }
-
     use socket2::{Domain, Protocol, Socket, Type};
 
     let domain = if bind_addr.is_ipv4() {
@@ -51,11 +74,16 @@ pub(crate) fn bind_worker_socket(
     };
     let socket =
         Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(Http3NativeError::Io)?;
-    socket
-        .set_reuse_address(true)
-        .map_err(Http3NativeError::Io)?;
-    #[cfg(unix)]
-    set_unix_reuse_port(&socket).map_err(Http3NativeError::Io)?;
+
+    set_socket_buffer_sizes(&socket);
+
+    if reuse_port {
+        socket
+            .set_reuse_address(true)
+            .map_err(Http3NativeError::Io)?;
+        #[cfg(unix)]
+        set_unix_reuse_port(&socket).map_err(Http3NativeError::Io)?;
+    }
     socket
         .bind(&bind_addr.into())
         .map_err(Http3NativeError::Io)?;
