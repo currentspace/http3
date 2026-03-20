@@ -14,7 +14,12 @@ type ByteBuf = napi::bindgen_prelude::Buffer;
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
 
-const MAX_DATAGRAM_SIZE: usize = 1350;
+/// Maximum UDP payload size advertised to the peer and used as the DPLPMTUD
+/// probe ceiling.  quiche starts sending at 1200 bytes and probes up to this
+/// limit via RFC 8899 binary search.  On loopback it discovers ~65 KB within
+/// a few RTTs; on Ethernet it settles at ~1472; on WAN paths it finds the
+/// actual PMTU.  65535 is the maximum UDP payload.
+const MAX_PROBE_SIZE: usize = 65535;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportRuntimeMode {
@@ -90,22 +95,22 @@ impl ClientAuthMode {
     }
 }
 
-/// Apply standard congestion tuning to a quiche `Config`.
+/// Apply standard congestion and PMTU tuning to a quiche `Config`.
 ///
-/// `initial_max_data` is the QUIC-layer flow control limit that prevents the
-/// sender from having more data in-flight than the receiver can buffer.  We
-/// set it to match SO_RCVBUF (2 MB) so that QUIC's own flow control —  not
-/// a transport-level hack — prevents receiver buffer overflow.  As the
-/// receiver drains data it sends MAX_DATA updates, so this only limits the
-/// instantaneous in-flight window, not total transfer size.
+/// Enables DPLPMTUD (RFC 8899) so quiche discovers the actual path MTU per
+/// connection — no static loopback/ethernet heuristics needed.  The probe
+/// ceiling is set to 65535 (max UDP payload); on loopback quiche discovers
+/// the full MTU within a few RTTs, on Ethernet it settles at ~1472.
 ///
-/// The initial congestion window is kept aggressive (1000 packets ≈ 1.35 MB)
-/// for fast LAN/loopback startup.  This is safe because `initial_max_data`
-/// caps total in-flight data at 2 MB — even if CC would allow more, QUIC
-/// flow control blocks the sender until the receiver acknowledges.
+/// The initial congestion window is 1000 packets.  At the minimum MTU
+/// (1200 bytes before discovery) this is 1.2 MB, which fits within the
+/// 2 MB SO_RCVBUF.  As PMTUD grows the packet size, quiche's CC adjusts
+/// the cwnd in bytes accordingly — the packet count decreases but the byte
+/// budget stays proportional.
 fn apply_congestion_tuning(config: &mut quiche::Config) {
     config.set_send_capacity_factor(20.0);
     config.set_initial_congestion_window_packets(1000);
+    config.discover_pmtu(true);
 }
 
 /// Write bytes to a temp file and return the path.
@@ -233,12 +238,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -303,12 +308,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -462,12 +467,12 @@ pub fn new_quic_server_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -562,12 +567,12 @@ pub fn new_quic_client_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(MAX_PROBE_SIZE as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(

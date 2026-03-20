@@ -978,7 +978,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
     let mut sessions: Slab<SharedClientSession> = Slab::new();
     let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut timer_heap = TimerHeap::new();
-    let mut tx_pool = BufferPool::new(512, 1350);
+    let mut tx_pool = BufferPool::new(64, 65535);
     let mut handles_buf = Vec::new();
     let mut outbound = Vec::new();
     let mut closed_sessions = Vec::new();
@@ -1371,7 +1371,7 @@ impl H3ServerHandler {
             ),
             timer_heap: TimerHeap::new(),
             buffer_pool: BufferPool::default(),
-            tx_pool: BufferPool::new(512, 1350),
+            tx_pool: BufferPool::new(64, 65535),
             pending_writes: HashMap::new(),
             pending_session_closes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
@@ -1893,7 +1893,7 @@ impl H3ClientHandler {
             conn,
             pending_writes: HashMap::new(),
             send_buf: vec![0u8; SEND_BUF_SIZE],
-            tx_pool: BufferPool::new(256, 1350),
+            tx_pool: BufferPool::new(64, 65535),
             timer_deadline,
             session_closed_emitted: false,
         })
@@ -2267,6 +2267,7 @@ fn snapshot_metrics(conn: &H3Connection) -> JsSessionMetrics {
         handshake_time_ms: conn.handshake_time_ms(),
         rtt_ms: conn.rtt_ms(),
         cwnd: conn.cwnd() as i64,
+        pmtu: conn.pmtu() as i64,
     }
 }
 
