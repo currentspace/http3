@@ -28,6 +28,17 @@ type ByteBuf = Vec<u8>;
 /// We don't probe higher by default because failed probes at very large sizes
 /// (e.g. 65 KB) charge the congestion window and trigger loss recovery, which
 /// under concurrent load can cause connection stalls.
+/// Default DPLPMTUD probe ceiling when the user hasn't specified
+/// `max_udp_payload_size`.
+///
+/// 1472 = 1500 (Ethernet MTU) - 20 (IPv4) - 8 (UDP).  quiche probes from
+/// 1200 up to this ceiling; on Ethernet the first probe succeeds immediately.
+/// For jumbo frames or loopback, set `max_udp_payload_size` higher.
+///
+/// We don't default to 65508 (max IPv4 UDP) because failed probes at very
+/// large sizes charge the congestion window and trigger loss recovery.  Under
+/// concurrent load the combination of large failed probes + loss detection
+/// timeouts causes connection stalls that are indistinguishable from deadlocks.
 const DEFAULT_MAX_UDP_PAYLOAD: usize = 1472;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -107,19 +118,21 @@ impl ClientAuthMode {
 /// Apply standard congestion and PMTU tuning to a quiche `Config`.
 ///
 /// Enables DPLPMTUD (RFC 8899) so quiche discovers the actual path MTU per
-/// connection — no static loopback/ethernet heuristics needed.  The probe
-/// ceiling is set to 65535 (max UDP payload); on loopback quiche discovers
-/// the full MTU within a few RTTs, on Ethernet it settles at ~1472.
+/// connection.  The probe ceiling is `DEFAULT_MAX_UDP_PAYLOAD` (1472, standard
+/// Ethernet).  On Ethernet the first probe succeeds immediately; the discovery
+/// completes in one RTT with zero wasted probes.
 ///
-/// The initial congestion window is 1000 packets.  At the minimum MTU
-/// (1200 bytes before discovery) this is 1.2 MB, which fits within the
-/// 2 MB SO_RCVBUF.  As PMTUD grows the packet size, quiche's CC adjusts
-/// the cwnd in bytes accordingly — the packet count decreases but the byte
-/// budget stays proportional.
+/// `max_probes = 1`: each probe size is abandoned after a single loss instead
+/// of the RFC default of 3.  This prevents the stall pattern where a large
+/// failed probe charges the congestion window, waits for 3× PTO loss timeout,
+/// and blocks all subsequent probes via the `in_flight` flag.  With max_probes=1
+/// the binary search converges in O(log2(ceiling - 1200)) RTTs with one
+/// loss-detection delay per level instead of three.
 fn apply_congestion_tuning(config: &mut quiche::Config) {
     config.set_send_capacity_factor(20.0);
     config.set_initial_congestion_window_packets(1000);
     config.discover_pmtu(true);
+    config.set_pmtud_max_probes(1);
 }
 
 /// Write bytes to a temp file and return the path.

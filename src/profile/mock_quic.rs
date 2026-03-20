@@ -27,8 +27,8 @@ use crate::profile::event_sink::{
 use crate::profile::event_sink::channel_and_tsfn_batcher;
 use crate::profile::mock_trace::MockReplayTrace;
 use crate::quic_worker::{
-    QuicClientHandle, QuicServerCommand, QuicServerConfig, spawn_dedicated_quic_client_on_driver,
-    spawn_dedicated_quic_server_on_driver,
+    QuicClientHandle, QuicServerCommand, QuicServerConfig, QuicServerHandle, QuicServerWorker,
+    spawn_dedicated_quic_client_on_driver, spawn_server_worker_on_driver,
 };
 use crate::reactor_metrics::{self, JsReactorTelemetrySnapshot};
 use crate::transport::mock::{MockDriver, MockTraceRecorder};
@@ -360,17 +360,18 @@ fn run_mock_quic_profile(
 
     let (server_cmd_tx, server_cmd_rx) = unbounded();
     let (client_cmd_tx, client_cmd_rx) = unbounded();
-    let mut server = spawn_dedicated_quic_server_on_driver(
+    let server_worker = spawn_server_worker_on_driver(
         server_quiche,
         server_config,
+        0,
         server_driver,
         server_waker,
         server_addr,
         server_cmd_tx,
         server_cmd_rx,
         server_batcher,
-    )
-    .map_err(|err| err.to_string())?;
+    );
+    let mut server = QuicServerHandle::from_workers(vec![server_worker], server_addr);
     let client = spawn_dedicated_quic_client_on_driver(
         client_quiche,
         server_addr,
