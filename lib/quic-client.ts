@@ -289,10 +289,10 @@ export class QuicClientSession extends EventEmitter {
     const stream = this._getOrCreateStream(event.streamId);
     // Coalesced first data from Rust: push inline to avoid extra TSFN event
     if (event.data) {
-      stream.push(event.data);
+      stream._pushData(event.data);
     }
     if (event.fin) {
-      stream.push(null);
+      stream._pushData(null);
     }
     this.emit('stream', stream);
   }
@@ -300,13 +300,13 @@ export class QuicClientSession extends EventEmitter {
   private _onData(event: NativeEvent): void {
     if (!event.data) return;
     const stream = this._getOrCreateStream(event.streamId);
-    stream.push(event.data);
+    stream._pushData(event.data);
   }
 
   private _onFinished(event: NativeEvent): void {
     const stream = this._streams.get(event.streamId);
     if (stream) {
-      stream.push(null);
+      stream._pushData(null);
     }
   }
 

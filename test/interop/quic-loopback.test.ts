@@ -9,6 +9,7 @@ import { generateMutualTlsTestCerts, generateTestCerts } from '../support/genera
 import { createQuicServer, connectQuic, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { echoStream } from '../support/echo-stream.js';
 
 let certs: { key: Buffer; cert: Buffer };
 let mtlsCerts: ReturnType<typeof generateMutualTlsTestCerts>;
@@ -54,7 +55,7 @@ describe('QUIC loopback', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -95,7 +96,7 @@ describe('QUIC loopback', () => {
     });
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -138,7 +139,7 @@ describe('QUIC loopback', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -206,7 +207,7 @@ describe('QUIC loopback', () => {
     });
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -304,7 +305,7 @@ describe('QUIC loopback', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -338,7 +339,7 @@ describe('QUIC loopback', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -421,7 +422,7 @@ describe('QUIC loopback', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -457,7 +458,7 @@ describe('QUIC loopback', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -494,7 +495,7 @@ describe('QUIC loopback', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
