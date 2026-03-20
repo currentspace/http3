@@ -148,18 +148,18 @@ impl H3Connection {
                     }
                     Ok((stream_id, quiche::h3::Event::Data)) => {
                         self.last_peer_stream_id = stream_id;
-                        // Read data — use a moderately-sized stack buffer.
-                        // H3 body chunks are typically small; quiche will return Done
-                        // when no more data is available and we'll loop to read more.
-                        let mut recv_buf = [0u8; 16384];
+                        // Read data into a heap buffer — move into event without copying.
+                        let mut recv_buf = vec![0u8; 16384];
                         loop {
                             match h3_conn.recv_body(&mut self.quiche_conn, stream_id, &mut recv_buf)
                             {
                                 Ok(len) => {
+                                    let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 16384]);
+                                    data.truncate(len);
                                     events.push(JsH3Event::data(
                                         conn_handle,
                                         stream_id,
-                                        recv_buf[..len].to_vec(),
+                                        data,
                                         false,
                                     ));
                                 }
