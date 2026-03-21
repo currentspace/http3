@@ -209,6 +209,48 @@ impl EventSink for TsfnEventSink {
     }
 }
 
+#[cfg(feature = "node-api")]
+pub(crate) struct SharedTsfnEventSink {
+    tsfn: Arc<EventTsfn>,
+}
+
+#[cfg(feature = "node-api")]
+impl SharedTsfnEventSink {
+    pub(crate) fn new(tsfn: Arc<EventTsfn>) -> Self {
+        Self { tsfn }
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl EventSink for SharedTsfnEventSink {
+    fn kind(&self) -> &'static str {
+        "tsfn-shared"
+    }
+
+    fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool {
+        let count = events.len();
+        match self
+            .tsfn
+            .call(Ok(events), ThreadsafeFunctionCallMode::NonBlocking)
+        {
+            napi::Status::Ok => true,
+            napi::Status::Closing => {
+                stats.record_drop(count);
+                false
+            }
+            status => {
+                stats.record_sink_error();
+                stats.record_drop(count);
+                log::warn!(
+                    "shared TSFN call failed ({status:?}), dropped {count} events (total dropped: {})",
+                    stats.snapshot().dropped_events
+                );
+                true
+            }
+        }
+    }
+}
+
 pub struct EventBatcher {
     pub batch: Vec<JsH3Event>,
     sink: Box<dyn EventSink>,
@@ -236,6 +278,11 @@ impl EventBatcher {
     #[cfg(feature = "node-api")]
     pub fn new_tsfn(tsfn: EventTsfn) -> Self {
         Self::with_sink(TsfnEventSink::new(tsfn))
+    }
+
+    #[cfg(feature = "node-api")]
+    pub fn new_shared_tsfn(tsfn: Arc<EventTsfn>) -> Self {
+        Self::with_sink(SharedTsfnEventSink::new(tsfn))
     }
 
     pub fn with_sink<S: EventSink + 'static>(sink: S) -> Self {

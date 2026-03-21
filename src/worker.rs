@@ -19,7 +19,7 @@ use crate::client_topology::{
     default_h3_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
     ClientSocketStrategy, SharedClientWorkerKey as SharedH3ClientWorkerKey,
 };
-use crate::config::{Http3Config, TransportRuntimeMode};
+use crate::config::{Http3Config, JsServerOptions, TransportRuntimeMode};
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::connection_map::ConnectionMap;
 use crate::error::Http3NativeError;
@@ -1345,49 +1345,157 @@ fn run_shared_client_event_loop<D: transport::Driver>(
     }
 }
 
-/// Spawn a worker thread for the given server configuration.
-/// Events are delivered to JS via the provided `ThreadsafeFunction`.
+/// Spawn server worker thread(s) for the given configuration.
+///
+/// When `reuse_port` is enabled in the config, spawns multiple workers
+/// (one per available CPU, capped at 8) each with its own socket bound
+/// to the same address via SO_REUSEPORT.  The kernel distributes incoming
+/// packets by 4-tuple hash.  All workers share the same TSFN for event
+/// delivery to JS.
+///
+/// When `reuse_port` is disabled (default), spawns a single worker.
 pub fn spawn_worker(
     quiche_config: quiche::Config,
     http3_config: Http3Config,
     bind_addr: SocketAddr,
     tsfn: EventTsfn,
+    stored_options: crate::server::StoredServerOptions,
 ) -> Result<WorkerHandle, Http3NativeError> {
-    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+    let num_workers = std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(1);
 
-    let std_socket = transport::socket::bind_worker_socket(bind_addr, http3_config.reuse_port)?;
-    std_socket
+    let mut config_slot = Some(quiche_config);
+    spawn_worker_sharded(
+        move || {
+            if let Some(config) = config_slot.take() {
+                return Ok(config);
+            }
+            // Workers 1..N: rebuild config from the stored snapshot
+            // which preserves all original options (datagrams, TLS, etc).
+            Http3Config::new_server_quiche_config(&stored_options.to_js_server_options())
+        },
+        http3_config,
+        bind_addr,
+        num_workers,
+        tsfn,
+    )
+}
+
+/// Spawn N H3 server workers with SO_REUSEPORT.  `make_quiche_config` is
+/// called once per worker since `quiche::Config` is not `Clone`.
+pub(crate) fn spawn_worker_sharded<F>(
+    mut make_quiche_config: F,
+    http3_config: Http3Config,
+    bind_addr: SocketAddr,
+    num_workers: usize,
+    tsfn: EventTsfn,
+) -> Result<WorkerHandle, Http3NativeError>
+where
+    F: FnMut() -> Result<quiche::Config, Http3NativeError>,
+{
+    let num_workers = num_workers.max(1);
+    let use_reuse_port = num_workers > 1;
+
+    // Bind the first socket to discover the actual local address.
+    let first_socket = transport::socket::bind_worker_socket(bind_addr, use_reuse_port)?;
+    first_socket
         .set_nonblocking(true)
         .map_err(Http3NativeError::Io)?;
-    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
-    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+    let _ = transport::socket::set_socket_buffers(&first_socket, 2 * 1024 * 1024);
+    let local_addr = first_socket.local_addr().map_err(Http3NativeError::Io)?;
 
-    let (driver, waker) =
-        transport::create_platform_driver(std_socket, http3_config.runtime_mode)?;
-    let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
-    let waker_clone = waker_arc.clone();
+    // Query path MTU once for all workers on this address.
+    let ceiling = if !local_addr.ip().is_unspecified() {
+        crate::config::effective_pmtud_ceiling(&local_addr)
+    } else {
+        crate::config::FALLBACK_MAX_UDP_PAYLOAD
+    };
 
-    reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
-    let join_handle = thread::spawn(move || {
-        let mut driver = driver;
-        let mut handler = H3ServerHandler::new(quiche_config, http3_config, 0);
-        event_loop::run_event_loop(
-            &mut driver,
-            cmd_rx,
-            &mut handler,
-            EventBatcher::new_tsfn(tsfn),
-            local_addr,
-        );
-    });
+    let tsfn = Arc::new(tsfn);
+    let mut workers = Vec::with_capacity(num_workers);
 
-    Ok(WorkerHandle {
-        workers: vec![H3ServerWorker {
+    // Worker 0 uses the already-bound first socket.
+    {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let mut config = make_quiche_config()?;
+        config.set_max_send_udp_payload_size(ceiling);
+        config.set_max_recv_udp_payload_size(ceiling);
+        let (driver, waker) =
+            transport::create_platform_driver(first_socket, http3_config.runtime_mode)?;
+        let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+        let tsfn_ref = Arc::clone(&tsfn);
+        let http3_clone = Http3Config {
+            qlog_dir: http3_config.qlog_dir.clone(),
+            qlog_level: http3_config.qlog_level.clone(),
+            qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
+            qpack_blocked_streams: http3_config.qpack_blocked_streams,
+            max_connections: http3_config.max_connections,
+            disable_retry: http3_config.disable_retry,
+            reuse_port: http3_config.reuse_port,
+            cid_encoding: http3_config.cid_encoding.clone(),
+            runtime_mode: http3_config.runtime_mode,
+        };
+
+        reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        let join_handle = thread::spawn(move || {
+            let mut driver = driver;
+            let mut handler = H3ServerHandler::new(config, http3_clone, 0);
+            event_loop::run_event_loop(
+                &mut driver, cmd_rx, &mut handler,
+                EventBatcher::new_shared_tsfn(tsfn_ref), local_addr,
+            );
+        });
+        workers.push(H3ServerWorker {
             cmd_tx,
             join_handle: Some(join_handle),
-            waker: waker_clone,
-        }],
-        local_addr,
-    })
+            waker: waker_arc,
+        });
+    }
+
+    // Workers 1..N bind new sockets to the same address via SO_REUSEPORT.
+    for i in 1..num_workers {
+        let socket = transport::socket::bind_worker_socket(local_addr, true)?;
+        socket.set_nonblocking(true).map_err(Http3NativeError::Io)?;
+        let _ = transport::socket::set_socket_buffers(&socket, 2 * 1024 * 1024);
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let mut config = make_quiche_config()?;
+        config.set_max_send_udp_payload_size(ceiling);
+        config.set_max_recv_udp_payload_size(ceiling);
+        let (driver, waker) =
+            transport::create_platform_driver(socket, http3_config.runtime_mode)?;
+        let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+        let tsfn_ref = Arc::clone(&tsfn);
+        let http3_clone = Http3Config {
+            qlog_dir: http3_config.qlog_dir.clone(),
+            qlog_level: http3_config.qlog_level.clone(),
+            qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
+            qpack_blocked_streams: http3_config.qpack_blocked_streams,
+            max_connections: http3_config.max_connections,
+            disable_retry: http3_config.disable_retry,
+            reuse_port: http3_config.reuse_port,
+            cid_encoding: http3_config.cid_encoding.clone(),
+            runtime_mode: http3_config.runtime_mode,
+        };
+        let worker_index = i as u32;
+
+        reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        let join_handle = thread::spawn(move || {
+            let mut driver = driver;
+            let mut handler = H3ServerHandler::new(config, http3_clone, worker_index);
+            event_loop::run_event_loop(
+                &mut driver, cmd_rx, &mut handler,
+                EventBatcher::new_shared_tsfn(tsfn_ref), local_addr,
+            );
+        });
+        workers.push(H3ServerWorker {
+            cmd_tx,
+            join_handle: Some(join_handle),
+            waker: waker_arc,
+        });
+    }
+
+    Ok(WorkerHandle { workers, local_addr })
 }
 
 // ── H3 Server Protocol Handler ──────────────────────────────────────
