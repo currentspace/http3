@@ -6,6 +6,9 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+/** Sentinel event emitted by each Rust worker thread before exit. */
+export const EVENT_SHUTDOWN_COMPLETE = 15;
+
 // ----- Native binding type definitions -----
 
 /**
@@ -389,9 +392,23 @@ export interface ServerEventLoopLike {
 export class WorkerEventLoop implements ServerEventLoopLike {
   private readonly worker: NativeWorkerServerBinding;
   private closed = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeWorkerServerBinding) {
     this.worker = worker;
+  }
+
+  /**
+   * Called by the TSFN callback when a SHUTDOWN_COMPLETE sentinel arrives.
+   * Resolves the promise that close() is awaiting.
+   * @internal
+   */
+  _onShutdownSentinel(): void {
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
   }
 
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): void {
@@ -450,8 +467,13 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.worker.shutdown();
-    await Promise.resolve();
+    // Wire up sentinel promise BEFORE shutdown so no race.
+    const settled = new Promise<void>((resolve) => {
+      this._shutdownResolve = resolve;
+    });
+    this.worker.shutdown(); // sync N-API: joins all Rust worker threads
+    // All TSFN callbacks (including sentinels) are now queued in libuv.
+    await settled;
   }
 }
 
@@ -464,9 +486,19 @@ export class WorkerEventLoop implements ServerEventLoopLike {
 export class ClientEventLoop {
   private readonly worker: NativeWorkerClientBinding;
   private closed = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeWorkerClientBinding) {
     this.worker = worker;
+  }
+
+  /** @internal */
+  _onShutdownSentinel(): void {
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
   }
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
@@ -518,12 +550,11 @@ export class ClientEventLoop {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const queued = this.worker.close(0, 'client close');
-    if (queued) {
-      // Give the worker a brief chance to flush CONNECTION_CLOSE packets
-      // before forcing shutdown.
-      await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
-    }
+    this.worker.close(0, 'client close');
+    const settled = new Promise<void>((resolve) => {
+      this._shutdownResolve = resolve;
+    });
     this.worker.shutdown();
+    await settled;
   }
 }

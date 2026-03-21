@@ -23,6 +23,7 @@ pub const EVENT_HANDSHAKE_COMPLETE: u8 = 11;
 pub const EVENT_SESSION_TICKET: u8 = 12;
 pub const EVENT_METRICS: u8 = 13;
 pub const EVENT_DATAGRAM: u8 = 14;
+pub const EVENT_SHUTDOWN_COMPLETE: u8 = 15;
 
 #[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
@@ -410,6 +411,21 @@ impl JsH3Event {
             stream_id: -1,
             headers: None,
             data: Some(data.into()),
+            fin: None,
+            meta: None,
+            metrics: None,
+        }
+    }
+
+    /// Sentinel event emitted as the last event before a worker thread exits.
+    /// JS awaits this to guarantee all prior events have been delivered.
+    pub fn shutdown_complete() -> Self {
+        Self {
+            event_type: EVENT_SHUTDOWN_COMPLETE,
+            conn_handle: 0,
+            stream_id: -1,
+            headers: None,
+            data: None,
             fin: None,
             meta: None,
             metrics: None,

@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { Http2ServerSessionAdapter, Http3ServerSession } from './session.js';
 import { ServerHttp2StreamAdapter, ServerHttp3Stream, normalizeIncomingHeaders } from './stream.js';
 import type { IncomingHeaders, StreamFlags } from './stream.js';
-import { WorkerEventLoop, binding } from './event-loop.js';
+import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from './event-loop.js';
 import {
   Http3Error,
@@ -223,7 +223,18 @@ export class Http3SecureServer extends EventEmitter {
           disableRetry: this._options.disableRetry,
           reusePort: this._options.reusePort,
         }, (_err: Error | null, events: NativeEvent[]) => {
-          this._dispatchEvents(events);
+          let hasShutdown = false;
+          for (const event of events) {
+            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+              hasShutdown = true;
+            }
+          }
+          if (!hasShutdown) {
+            this._dispatchEvents(events);
+          } else {
+            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+            eventLoop._onShutdownSentinel();
+          }
         });
 
         const eventLoop = new WorkerEventLoop(workerServer);
