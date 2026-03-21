@@ -84,6 +84,8 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal */ _eventLoop: ServerEventLoopLike | null = null;
   /** @internal */ _headersSent = false;
   /** @internal */ _drainCallbacks: Array<() => void> = [];
+  /** @internal */ _pendingReads: Array<Buffer | null> = [];
+  /** @internal */ _readBackpressure = false;
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
 
@@ -166,8 +168,27 @@ export class ServerHttp3Stream extends Duplex {
   }
 
   _read(_size: number): void {
-    // Data is pushed by the event dispatcher — no pull needed
     this._onActivity();
+    this._readBackpressure = false;
+    while (this._pendingReads.length > 0) {
+      const chunk = this._pendingReads.shift()!;
+      if (!this.push(chunk)) {
+        this._readBackpressure = true;
+        break;
+      }
+      if (chunk === null) break;
+    }
+  }
+
+  /** @internal — push data respecting Readable backpressure. */
+  _pushData(chunk: Buffer | null): void {
+    if (this._readBackpressure) {
+      this._pendingReads.push(chunk);
+      return;
+    }
+    if (!this.push(chunk)) {
+      this._readBackpressure = true;
+    }
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -273,6 +294,8 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _eventLoop: ClientEventLoop | null = null;
   /** @internal */ _drainCallbacks: Array<() => void> = [];
+  /** @internal */ _pendingReads: Array<Buffer | null> = [];
+  /** @internal */ _readBackpressure = false;
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
 
@@ -321,8 +344,27 @@ export class ClientHttp3Stream extends Duplex {
   }
 
   _read(_size: number): void {
-    // Data is pushed by the event dispatcher
     this._onActivity();
+    this._readBackpressure = false;
+    while (this._pendingReads.length > 0) {
+      const chunk = this._pendingReads.shift()!;
+      if (!this.push(chunk)) {
+        this._readBackpressure = true;
+        break;
+      }
+      if (chunk === null) break;
+    }
+  }
+
+  /** @internal — push data respecting Readable backpressure. */
+  _pushData(chunk: Buffer | null): void {
+    if (this._readBackpressure) {
+      this._pendingReads.push(chunk);
+      return;
+    }
+    if (!this.push(chunk)) {
+      this._readBackpressure = true;
+    }
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {

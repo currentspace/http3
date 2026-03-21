@@ -268,14 +268,14 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const stream = this._streams.get(event.streamId);
     if (stream && event.data) {
       stream._onActivity();
-      stream.push(event.data);
+      stream._pushData(event.data);
     }
   }
 
   private _onFinished(event: NativeEvent): void {
     const stream = this._streams.get(event.streamId);
     if (stream) {
-      stream.push(null);
+      stream._pushData(null);
       this._streams.delete(event.streamId);
     }
   }
