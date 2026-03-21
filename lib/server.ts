@@ -660,7 +660,7 @@ export class Http3SecureServer extends EventEmitter {
     const stream = this._streams.get(streamKey);
     if (stream && event.data) {
       stream._onActivity();
-      stream.push(event.data);
+      stream._pushData(event.data);
     }
   }
 
@@ -668,7 +668,7 @@ export class Http3SecureServer extends EventEmitter {
     const streamKey = `${event.connHandle}:${event.streamId}`;
     const stream = this._streams.get(streamKey);
     if (stream) {
-      stream.push(null); // EOF on readable side
+      stream._pushData(null); // EOF on readable side
       // Don't remove from _streams yet — the writable side may still
       // have pending drain callbacks. Stream is cleaned up on session close
       // or when both sides complete naturally via 'close' event.
