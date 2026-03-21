@@ -92,27 +92,35 @@ struct PendingWrite {
     fin: bool,
 }
 
-/// Handle returned to the JS side for sending commands to the worker.
-pub struct WorkerHandle {
+/// Per-worker state inside a `WorkerHandle`.
+struct H3ServerWorker {
     cmd_tx: Sender<WorkerCommand>,
     join_handle: Option<thread::JoinHandle<()>>,
-    local_addr: SocketAddr,
     waker: Arc<dyn ErasedWaker>,
 }
 
+/// Handle returned to the JS side for sending commands to the worker(s).
+/// Supports multiple sharded workers via SO_REUSEPORT — commands are
+/// routed to the correct worker by the worker index encoded in conn_handle.
+pub struct WorkerHandle {
+    workers: Vec<H3ServerWorker>,
+    local_addr: SocketAddr,
+}
+
 impl WorkerHandle {
-    /// Send a command to the worker thread.
-    /// The channel is unbounded so this only fails if the worker has disconnected.
+    /// Route a command to the worker that owns `conn_handle`.
     pub fn send_command(&self, cmd: WorkerCommand) -> bool {
-        if self.cmd_tx.send(cmd).is_ok() {
-            let _ = self.waker.wake();
+        let ch = command_conn_handle(&cmd);
+        let worker = &self.workers[crate::server_sharding::worker_index(ch)];
+        let local = remap_command_handle(cmd);
+        if worker.cmd_tx.send(local).is_ok() {
+            let _ = worker.waker.wake();
             true
         } else {
             false
         }
     }
 
-    /// Get the bound local address.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -121,29 +129,26 @@ impl WorkerHandle {
         &self,
         conn_handle: u32,
     ) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(WorkerCommand::GetSessionMetrics {
-                conn_handle,
-                resp_tx,
-            })
+        worker.cmd_tx
+            .send(WorkerCommand::GetSessionMetrics { conn_handle: local, resp_tx })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server metrics".into())
         })
     }
 
     pub fn send_datagram(&self, conn_handle: u32, data: Vec<u8>) -> Result<bool, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(WorkerCommand::SendDatagram {
-                conn_handle,
-                data,
-                resp_tx,
-            })
+        worker.cmd_tx
+            .send(WorkerCommand::SendDatagram { conn_handle: local, data, resp_tx })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server datagram send".into())
         })
@@ -153,53 +158,53 @@ impl WorkerHandle {
         &self,
         conn_handle: u32,
     ) -> Result<Vec<(u64, u64)>, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(WorkerCommand::GetRemoteSettings {
-                conn_handle,
-                resp_tx,
-            })
+        worker.cmd_tx
+            .send(WorkerCommand::GetRemoteSettings { conn_handle: local, resp_tx })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server settings".into())
         })
     }
 
     pub fn ping_session(&self, conn_handle: u32) -> Result<bool, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(WorkerCommand::PingSession {
-                conn_handle,
-                resp_tx,
-            })
+        worker.cmd_tx
+            .send(WorkerCommand::PingSession { conn_handle: local, resp_tx })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for server ping".into()))
     }
 
     pub fn get_qlog_path(&self, conn_handle: u32) -> Result<Option<String>, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
-            .send(WorkerCommand::GetQlogPath {
-                conn_handle,
-                resp_tx,
-            })
+        worker.cmd_tx
+            .send(WorkerCommand::GetQlogPath { conn_handle: local, resp_tx })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server qlog path".into())
         })
     }
 
-    /// Shut down the worker thread and wait for it to finish.
     pub fn shutdown(&mut self) {
-        let _ = self.cmd_tx.send(WorkerCommand::Shutdown);
-        let _ = self.waker.wake();
-        if let Some(handle) = self.join_handle.take() {
-            let _ = handle.join();
+        for worker in &self.workers {
+            let _ = worker.cmd_tx.send(WorkerCommand::Shutdown);
+            let _ = worker.waker.wake();
+        }
+        for worker in &mut self.workers {
+            if let Some(handle) = worker.join_handle.take() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -207,6 +212,49 @@ impl WorkerHandle {
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+fn command_conn_handle(cmd: &WorkerCommand) -> u32 {
+    match cmd {
+        WorkerCommand::SendResponseHeaders { conn_handle, .. }
+        | WorkerCommand::StreamSend { conn_handle, .. }
+        | WorkerCommand::StreamClose { conn_handle, .. }
+        | WorkerCommand::SendTrailers { conn_handle, .. }
+        | WorkerCommand::CloseSession { conn_handle, .. }
+        | WorkerCommand::SendDatagram { conn_handle, .. }
+        | WorkerCommand::GetSessionMetrics { conn_handle, .. }
+        | WorkerCommand::GetRemoteSettings { conn_handle, .. }
+        | WorkerCommand::GetQlogPath { conn_handle, .. }
+        | WorkerCommand::PingSession { conn_handle, .. } => *conn_handle,
+        WorkerCommand::Shutdown => 0,
+    }
+}
+
+fn remap_command_handle(cmd: WorkerCommand) -> WorkerCommand {
+    use crate::server_sharding::local_conn_handle;
+    match cmd {
+        WorkerCommand::SendResponseHeaders { conn_handle, stream_id, headers, fin } =>
+            WorkerCommand::SendResponseHeaders { conn_handle: local_conn_handle(conn_handle), stream_id, headers, fin },
+        WorkerCommand::StreamSend { conn_handle, stream_id, data, fin } =>
+            WorkerCommand::StreamSend { conn_handle: local_conn_handle(conn_handle), stream_id, data, fin },
+        WorkerCommand::StreamClose { conn_handle, stream_id, error_code } =>
+            WorkerCommand::StreamClose { conn_handle: local_conn_handle(conn_handle), stream_id, error_code },
+        WorkerCommand::SendTrailers { conn_handle, stream_id, headers } =>
+            WorkerCommand::SendTrailers { conn_handle: local_conn_handle(conn_handle), stream_id, headers },
+        WorkerCommand::CloseSession { conn_handle, error_code, reason } =>
+            WorkerCommand::CloseSession { conn_handle: local_conn_handle(conn_handle), error_code, reason },
+        WorkerCommand::SendDatagram { conn_handle, data, resp_tx } =>
+            WorkerCommand::SendDatagram { conn_handle: local_conn_handle(conn_handle), data, resp_tx },
+        WorkerCommand::GetSessionMetrics { conn_handle, resp_tx } =>
+            WorkerCommand::GetSessionMetrics { conn_handle: local_conn_handle(conn_handle), resp_tx },
+        WorkerCommand::GetRemoteSettings { conn_handle, resp_tx } =>
+            WorkerCommand::GetRemoteSettings { conn_handle: local_conn_handle(conn_handle), resp_tx },
+        WorkerCommand::GetQlogPath { conn_handle, resp_tx } =>
+            WorkerCommand::GetQlogPath { conn_handle: local_conn_handle(conn_handle), resp_tx },
+        WorkerCommand::PingSession { conn_handle, resp_tx } =>
+            WorkerCommand::PingSession { conn_handle: local_conn_handle(conn_handle), resp_tx },
+        WorkerCommand::Shutdown => WorkerCommand::Shutdown,
     }
 }
 
@@ -1322,7 +1370,7 @@ pub fn spawn_worker(
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
-        let mut handler = H3ServerHandler::new(quiche_config, http3_config);
+        let mut handler = H3ServerHandler::new(quiche_config, http3_config, 0);
         event_loop::run_event_loop(
             &mut driver,
             cmd_rx,
@@ -1332,14 +1380,14 @@ pub fn spawn_worker(
         );
     });
 
-    let handle = WorkerHandle {
-        cmd_tx,
-        join_handle: Some(join_handle),
+    Ok(WorkerHandle {
+        workers: vec![H3ServerWorker {
+            cmd_tx,
+            join_handle: Some(join_handle),
+            waker: waker_clone,
+        }],
         local_addr,
-        waker: waker_clone,
-    };
-
-    Ok(handle)
+    })
 }
 
 // ── H3 Server Protocol Handler ──────────────────────────────────────
@@ -1359,10 +1407,11 @@ struct H3ServerHandler {
     /// Handles that were expired in the most recent process_timers call.
     /// Used by poll_drain_events and cleanup_closed to avoid duplicate events.
     last_expired: Vec<usize>,
+    handle_offset: u32,
 }
 
 impl H3ServerHandler {
-    fn new(quiche_config: quiche::Config, http3_config: Http3Config) -> Self {
+    fn new(quiche_config: quiche::Config, http3_config: Http3Config, worker_index: u32) -> Self {
         let disable_retry = http3_config.disable_retry;
         Self {
             conn_map: ConnectionMap::with_max_connections_and_cid(
@@ -1380,6 +1429,7 @@ impl H3ServerHandler {
             quiche_config,
             disable_retry,
             last_expired: Vec::new(),
+            handle_offset: crate::server_sharding::handle_offset(worker_index),
         }
     }
 }
@@ -1544,6 +1594,7 @@ impl ProtocolHandler for H3ServerHandler {
         pending_outbound: &mut Vec<TxDatagram>,
         batch: &mut Vec<JsH3Event>,
     ) {
+        let offset = self.handle_offset;
         let Ok(hdr) = quiche::Header::from_slice(buf, crate::connection_map::SCID_LEN) else {
             return;
         };
@@ -1575,7 +1626,7 @@ impl ProtocolHandler for H3ServerHandler {
                         self.conn_map.add_dcid(h, client_dcid);
                         reactor_metrics::record_session_open(SessionKind::H3Server);
                         batch.push(JsH3Event::new_session(
-                            h as u32,
+                            offset | (h as u32),
                             peer.ip().to_string(),
                             peer.port(),
                             String::new(),
@@ -1604,7 +1655,7 @@ impl ProtocolHandler for H3ServerHandler {
                                 self.conn_map.add_dcid(h, odcid);
                                 reactor_metrics::record_session_open(SessionKind::H3Server);
                                 batch.push(JsH3Event::new_session(
-                                    h as u32,
+                                    offset | (h as u32),
                                     peer.ip().to_string(),
                                     peer.port(),
                                     String::new(),
@@ -1662,7 +1713,7 @@ impl ProtocolHandler for H3ServerHandler {
             }
             if conn.quiche_conn.is_established() && !conn.handshake_complete_emitted {
                 conn.handshake_complete_emitted = true;
-                batch.push(JsH3Event::handshake_complete(handle as u32));
+                batch.push(JsH3Event::handshake_complete(offset | (handle as u32)));
             }
 
             let current_scid: Vec<u8> = conn.quiche_conn.source_id().into_owned().to_vec();
@@ -1671,7 +1722,7 @@ impl ProtocolHandler for H3ServerHandler {
                 conn.conn_id = current_scid.clone();
             }
 
-            conn.poll_h3_events(handle as u32, batch);
+            conn.poll_h3_events(offset | (handle as u32), batch);
 
             let mut retired_scids = Vec::new();
             while let Some(retired) = conn.quiche_conn.retired_scid_next() {
@@ -1702,6 +1753,7 @@ impl ProtocolHandler for H3ServerHandler {
     }
 
     fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
         self.last_expired = self.timer_heap.pop_expired(now);
         self.last_expired.sort_unstable();
         self.last_expired.dedup();
@@ -1710,9 +1762,9 @@ impl ProtocolHandler for H3ServerHandler {
                 conn.on_timeout();
                 if conn.is_closed() {
                     reactor_metrics::record_session_close(SessionKind::H3Server);
-                    batch.push(JsH3Event::session_close(handle as u32));
+                    batch.push(JsH3Event::session_close(offset | (handle as u32)));
                 } else {
-                    conn.poll_h3_events(handle as u32, batch);
+                    conn.poll_h3_events(offset | (handle as u32), batch);
                     if let Some(timeout) = conn.timeout() {
                         self.timer_heap.schedule(handle, Instant::now() + timeout);
                     }
@@ -1781,13 +1833,15 @@ impl ProtocolHandler for H3ServerHandler {
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
         let flushed = flush_pending_writes(&mut self.conn_map, &mut self.pending_writes);
-        for (conn_handle, stream_id) in flushed {
-            batch.push(JsH3Event::drain(conn_handle, stream_id));
+        for (local_handle, stream_id) in flushed {
+            batch.push(JsH3Event::drain(offset | local_handle, stream_id));
         }
     }
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
         self.conn_map.fill_handles(&mut self.handles_buf);
         for i in 0..self.handles_buf.len() {
             let handle = self.handles_buf[i];
@@ -1796,7 +1850,7 @@ impl ProtocolHandler for H3ServerHandler {
             }
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 if !conn.blocked_set.is_empty() {
-                    conn.poll_drain_events(handle as u32, batch);
+                    conn.poll_drain_events(offset | (handle as u32), batch);
                 }
             }
         }
@@ -1810,16 +1864,17 @@ impl ProtocolHandler for H3ServerHandler {
     }
 
     fn cleanup_closed(&mut self, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
         let closed = self.conn_map.drain_closed();
         for handle in &closed {
             self.timer_heap.remove_connection(*handle);
             self.conn_send_buffers.remove(handle);
             self.pending_session_closes.remove(&(*handle as u32));
             self.pending_writes
-                .retain(|&(ch, _), _| ch != *handle as u32);
+                .retain(|&(ch, _), _| ch as usize != *handle);
             if !self.last_expired.contains(handle) {
                 reactor_metrics::record_session_close(SessionKind::H3Server);
-                batch.push(JsH3Event::session_close(*handle as u32));
+                batch.push(JsH3Event::session_close(offset | (*handle as u32)));
             }
         }
         self.last_expired.clear();
