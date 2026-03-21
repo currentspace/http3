@@ -1,4 +1,12 @@
 import { Duplex } from 'node:stream';
+import {
+  type BackpressureState,
+  createBackpressureState,
+  pushData,
+  drainPendingReads,
+  fireDrainCallbacks,
+  flushDrainCallbacks,
+} from './stream-backpressure.js';
 
 /**
  * Event loop interface for QUIC server-side stream commands.
@@ -30,10 +38,7 @@ export class QuicStream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _serverLoop: QuicServerEventLoopLike | null = null;
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
-  /** @internal */ _drainCallbacks: Array<() => void> = [];
-  /** @internal — buffered data when push() returned false (backpressure). */
-  /** @internal */ _pendingReads: Array<Buffer | null> = [];
-  /** @internal */ _readBackpressure = false;
+  /** @internal */ _bp: BackpressureState = createBackpressureState();
 
   constructor(opts?: { highWaterMark?: number }) {
     super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
@@ -56,48 +61,22 @@ export class QuicStream extends Duplex {
     } else if (this._clientLoop) {
       this._clientLoop.streamClose(this._streamId, errorCode);
     }
-    for (const cb of this._drainCallbacks) {
-      cb();
-    }
-    this._drainCallbacks.length = 0;
+    flushDrainCallbacks(this._bp);
     this.destroy();
   }
 
   /** @internal — called by event dispatcher when flow control window opens */
   _onNativeDrain(): void {
-    const cbs = this._drainCallbacks.splice(0);
-    for (const cb of cbs) {
-      cb();
-    }
+    fireDrainCallbacks(this._bp);
   }
 
   _read(_size: number): void {
-    // Drain buffered data that was held back when push() returned false.
-    this._readBackpressure = false;
-    while (this._pendingReads.length > 0) {
-      const chunk = this._pendingReads.shift()!;
-      if (!this.push(chunk)) {
-        this._readBackpressure = true;
-        break;
-      }
-      if (chunk === null) break; // EOF
-    }
+    drainPendingReads(this, this._bp);
   }
 
-  /**
-   * Push data respecting Node.js Readable backpressure.
-   * When the internal buffer is full (push returns false), subsequent
-   * chunks are queued in _pendingReads and drained when _read() fires.
-   * @internal
-   */
+  /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
-    if (this._readBackpressure) {
-      this._pendingReads.push(chunk);
-      return;
-    }
-    if (!this.push(chunk)) {
-      this._readBackpressure = true;
-    }
+    pushData(this, this._bp, chunk);
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -110,7 +89,7 @@ export class QuicStream extends Duplex {
       callback();
     } else {
       const remaining = chunk.subarray(written);
-      this._drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push(() => {
         this._writeChunk(remaining, callback);
       });
     }
@@ -119,7 +98,7 @@ export class QuicStream extends Duplex {
   _final(callback: (error?: Error | null) => void): void {
     const written = this._doSend(Buffer.alloc(0), true);
     if (written === 0) {
-      this._drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push(() => {
         this._doSend(Buffer.alloc(0), true);
         callback();
       });
