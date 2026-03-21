@@ -1394,7 +1394,14 @@ pub(crate) fn spawn_worker_sharded<F>(
 where
     F: FnMut() -> Result<quiche::Config, Http3NativeError>,
 {
-    let num_workers = num_workers.max(1);
+    // With SO_REUSEPORT, per-worker connection limits are approximate since
+    // the kernel distributes packets by 4-tuple hash.  For exact enforcement
+    // of small limits (e.g. maxConnections=2), use a single worker.
+    let num_workers = if http3_config.max_connections <= num_workers {
+        1
+    } else {
+        num_workers.max(1)
+    };
     let use_reuse_port = num_workers > 1;
 
     // Bind the first socket to discover the actual local address.
