@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { X509Certificate } from 'node:crypto';
-import { binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
@@ -84,9 +84,19 @@ export interface QuicServerOptions {
 class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   private readonly worker: NativeQuicServerBinding;
   private closed = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeQuicServerBinding) {
     this.worker = worker;
+  }
+
+  /** @internal */
+  _onShutdownSentinel(): void {
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
@@ -121,8 +131,11 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    const settled = new Promise<void>((resolve) => {
+      this._shutdownResolve = resolve;
+    });
     this.worker.shutdown();
-    await Promise.resolve();
+    await settled;
   }
 }
 
@@ -318,7 +331,18 @@ export class QuicServer extends EventEmitter {
           keylog: opts.keylog,
         },
         (_err: Error | null, events: NativeEvent[]) => {
-          this._dispatchEvents(events);
+          let hasShutdown = false;
+          for (const event of events) {
+            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+              hasShutdown = true;
+            }
+          }
+          if (!hasShutdown) {
+            this._dispatchEvents(events);
+          } else {
+            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+            eventLoop._onShutdownSentinel();
+          }
         },
       );
 

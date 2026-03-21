@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { resolveConnectionEndpoint } from './endpoint.js';
@@ -74,9 +74,19 @@ interface NormalizedQuicClientTlsOptions {
 class QuicClientEventLoop implements QuicClientEventLoopLike {
   private readonly worker: NativeQuicClientBinding;
   private closed = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeQuicClientBinding) {
     this.worker = worker;
+  }
+
+  /** @internal */
+  _onShutdownSentinel(): void {
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
   }
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
@@ -112,11 +122,12 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const queued = this.worker.close(0, 'client close');
-    if (queued) {
-      await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
-    }
+    this.worker.close(0, 'client close');
+    const settled = new Promise<void>((resolve) => {
+      this._shutdownResolve = resolve;
+    });
     this.worker.shutdown();
+    await settled;
   }
 }
 
@@ -553,7 +564,18 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
             qlogLevel: options?.qlogLevel,
           },
           (_err: Error | null, events: NativeEvent[]) => {
-            session._dispatchEvents(events);
+            let hasShutdown = false;
+            for (const event of events) {
+              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                hasShutdown = true;
+              }
+            }
+            if (!hasShutdown) {
+              session._dispatchEvents(events);
+            } else {
+              session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+              eventLoop._onShutdownSentinel();
+            }
           },
         );
 

@@ -271,6 +271,9 @@ fn flush_runtime_error<D: Driver>(
         reason_code,
         err,
     ));
+    let _ = batcher.flush();
+    // Emit shutdown sentinel so JS close() can resolve.
+    batcher.batch.push(JsH3Event::shutdown_complete());
     batcher.flush()
 }
 
@@ -385,6 +388,11 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                         );
                     }
                 }
+                // Deliver any accumulated events, then a sentinel so JS
+                // knows all worker events have been delivered.
+                let _ = batcher.flush();
+                batcher.batch.push(JsH3Event::shutdown_complete());
+                let _ = batcher.flush();
                 return;
             }
         }
@@ -519,11 +527,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 
         // 9. Flush events to JS
         if !batcher.flush() {
+            batcher.batch.push(JsH3Event::shutdown_complete());
+            let _ = batcher.flush();
             return;
         }
 
         // 10. Client exit: handler done and all packets drained
         if handler.is_done() && driver.pending_tx_count() == 0 {
+            batcher.batch.push(JsH3Event::shutdown_complete());
+            let _ = batcher.flush();
             return;
         }
     }
