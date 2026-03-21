@@ -30,7 +30,10 @@ pub(crate) fn default_h3_client_socket_strategy(
 pub(crate) fn default_h3_client_socket_strategy(
     _runtime_mode: TransportRuntimeMode,
 ) -> ClientSocketStrategy {
-    ClientSocketStrategy::SharedPerFamily
+    // Each H3 client gets its own socket + io_uring instance, matching
+    // the QUIC client strategy.  Shared workers bottleneck under high
+    // concurrent connection counts (50+ TLS handshakes on one thread).
+    ClientSocketStrategy::Dedicated
 }
 
 #[cfg(target_os = "macos")]

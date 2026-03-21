@@ -1405,6 +1405,10 @@ where
     let _ = transport::socket::set_socket_buffers(&first_socket, 2 * 1024 * 1024);
     let local_addr = first_socket.local_addr().map_err(Http3NativeError::Io)?;
 
+    // Divide max_connections across workers so the total stays correct.
+    let per_worker_max_connections =
+        (http3_config.max_connections + num_workers - 1) / num_workers;
+
     // Query path MTU once for all workers on this address.
     let ceiling = if !local_addr.ip().is_unspecified() {
         crate::config::effective_pmtud_ceiling(&local_addr)
@@ -1430,7 +1434,7 @@ where
             qlog_level: http3_config.qlog_level.clone(),
             qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
             qpack_blocked_streams: http3_config.qpack_blocked_streams,
-            max_connections: http3_config.max_connections,
+            max_connections: per_worker_max_connections,
             disable_retry: http3_config.disable_retry,
             reuse_port: http3_config.reuse_port,
             cid_encoding: http3_config.cid_encoding.clone(),
@@ -1471,7 +1475,7 @@ where
             qlog_level: http3_config.qlog_level.clone(),
             qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
             qpack_blocked_streams: http3_config.qpack_blocked_streams,
-            max_connections: http3_config.max_connections,
+            max_connections: per_worker_max_connections,
             disable_retry: http3_config.disable_retry,
             reuse_port: http3_config.reuse_port,
             cid_encoding: http3_config.cid_encoding.clone(),

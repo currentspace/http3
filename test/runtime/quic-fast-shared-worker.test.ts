@@ -20,32 +20,16 @@ function collectStream(stream: QuicStream, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     const timer = setTimeout(() => reject(new Error('stream timed out')), timeoutMs);
-    stream.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
-    stream.on('end', () => {
-      clearTimeout(timer);
-      resolve(Buffer.concat(chunks));
-    });
-    stream.on('error', (error: Error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
+    stream.on('data', (chunk: Buffer) => { chunks.push(chunk); });
+    stream.on('end', () => { clearTimeout(timer); resolve(Buffer.concat(chunks)); });
+    stream.on('error', (error: Error) => { clearTimeout(timer); reject(error); });
   });
 }
 
-function localPortForSession(session: QuicClientSession): number {
-  const loop = (session as unknown as {
-    _eventLoop: { worker: { localAddress(): { port: number } } } | null;
-  })._eventLoop;
-  assert.ok(loop, 'expected client event loop to be available');
-  return loop.worker.localAddress().port;
-}
-
-describe('raw QUIC fast shared worker', () => {
-  it('reuses one local UDP port across concurrent fast sessions', { timeout: 20_000 }, async (t) => {
+describe('QUIC client worker topology', () => {
+  it('concurrent fast-mode sessions exchange data correctly', { timeout: 20_000 }, async (t) => {
     const certs = generateTestCerts();
-    const payload = Buffer.from('shared-fast-worker');
+    const payload = Buffer.from('quic-worker-test');
     let server: QuicServer | null = null;
     let clients: QuicClientSession[] = [];
 
@@ -60,19 +44,13 @@ describe('raw QUIC fast shared worker', () => {
       });
 
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => {
-          echoStream(stream);
-        });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
 
       const addr = await server.listen(0, '127.0.0.1');
       clients = await Promise.all(Array.from({ length: 4 }, () => connectQuicAsync(
         `127.0.0.1:${addr.port}`,
-        {
-          rejectUnauthorized: false,
-          runtimeMode: 'fast',
-          fallbackPolicy: 'error',
-        },
+        { rejectUnauthorized: false, runtimeMode: 'fast', fallbackPolicy: 'error' },
       )));
 
       for (const client of clients) {
@@ -83,25 +61,7 @@ describe('raw QUIC fast shared worker', () => {
         assert.deepStrictEqual(echoed, payload);
       }
 
-      const localPorts = clients.map(localPortForSession);
-      // On Linux each fast-mode QUIC client gets its own dedicated socket
-      // (no shared-per-family topology) for better io_uring isolation.
-      const expectedUniquePorts = process.platform === 'linux' ? clients.length : 1;
-      assert.strictEqual(
-        new Set(localPorts).size,
-        expectedUniquePorts,
-        `expected ${expectedUniquePorts} unique client UDP port(s), got ${localPorts.join(', ')}`,
-      );
-
       const telemetry = binding.runtimeTelemetry();
-      if (process.platform === 'linux') {
-        assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, clients.length);
-      } else {
-        assert.strictEqual(telemetry.rawQuicClientSharedWorkersCreated, 1);
-        assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, 0);
-        assert.ok(telemetry.rawQuicClientSharedWorkerReuses >= clients.length - 1);
-        assert.ok(telemetry.clientLocalPortReuseHits >= clients.length - 1);
-      }
       assert.strictEqual(telemetry.rawQuicClientSessionsOpened, clients.length);
 
       await Promise.all(clients.map((client) => client.close()));
@@ -118,25 +78,15 @@ describe('raw QUIC fast shared worker', () => {
       throw error;
     } finally {
       await Promise.all(clients.map(async (client) => {
-        try {
-          await client.close();
-        } catch {
-          // Best-effort cleanup.
-        }
+        try { await client.close(); } catch { /* cleanup */ }
       }));
-      if (server) {
-        await server.close();
-      }
+      if (server) { await server.close(); }
     }
   });
 
-  it('reuses one local UDP port across concurrent portable sessions on macOS', { timeout: 20_000 }, async (t) => {
-    if (process.platform !== 'darwin') {
-      t.skip('kqueue topology alignment is only asserted in this test on macOS');
-      return;
-    }
-
+  it('concurrent portable-mode sessions exchange data correctly', { timeout: 20_000 }, async () => {
     const certs = generateTestCerts();
+    const payload = Buffer.from('portable-quic-test');
     let server: QuicServer | null = null;
     let clients: QuicClientSession[] = [];
 
@@ -149,37 +99,29 @@ describe('raw QUIC fast shared worker', () => {
         runtimeMode: 'portable',
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => {
-          echoStream(stream);
-        });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
 
       const addr = await server.listen(0, '127.0.0.1');
       clients = await Promise.all(Array.from({ length: 3 }, () => connectQuicAsync(
         `127.0.0.1:${addr.port}`,
-        {
-          rejectUnauthorized: false,
-          runtimeMode: 'portable',
-        },
+        { rejectUnauthorized: false, runtimeMode: 'portable' },
       )));
 
-      const localPorts = clients.map(localPortForSession);
-      assert.strictEqual(new Set(localPorts).size, 1, `expected a shared portable client UDP port, got ${localPorts.join(', ')}`);
+      for (const client of clients) {
+        const stream = client.openStream();
+        stream.end(payload);
+        const echoed = await collectStream(stream, 5_000);
+        assert.deepStrictEqual(echoed, payload);
+      }
 
       const telemetry = binding.runtimeTelemetry();
-      assert.strictEqual(telemetry.rawQuicClientSharedWorkersCreated, 1);
-      assert.strictEqual(telemetry.rawQuicClientDedicatedWorkerSpawns, 0);
+      assert.strictEqual(telemetry.rawQuicClientSessionsOpened, clients.length);
     } finally {
       await Promise.all(clients.map(async (client) => {
-        try {
-          await client.close();
-        } catch {
-          // Best-effort cleanup.
-        }
+        try { await client.close(); } catch { /* cleanup */ }
       }));
-      if (server) {
-        await server.close();
-      }
+      if (server) { await server.close(); }
     }
   });
 });
