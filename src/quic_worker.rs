@@ -83,11 +83,7 @@ pub(crate) struct QuicServerWorker {
     pub(crate) waker: Arc<dyn ErasedWaker>,
 }
 
-/// Bits reserved for the worker index in connection handles.
-/// worker_index = conn_handle >> WORKER_SHIFT
-/// local_handle = conn_handle & WORKER_MASK
-const WORKER_SHIFT: u32 = 20;
-const WORKER_MASK: u32 = (1 << WORKER_SHIFT) - 1;
+use crate::server_sharding::{self, WORKER_SHIFT};
 
 pub struct QuicServerHandle {
     workers: Vec<QuicServerWorker>,
@@ -102,7 +98,7 @@ impl QuicServerHandle {
     /// Route a command to the worker that owns `conn_handle`.
     pub fn send_command(&self, cmd: QuicServerCommand) -> bool {
         let conn_handle = command_conn_handle(&cmd);
-        let worker = &self.workers[worker_index(conn_handle)];
+        let worker = &self.workers[server_sharding::worker_index(conn_handle)];
         let local = remap_command_handle(cmd);
         if worker.cmd_tx.send(local).is_ok() {
             let _ = worker.waker.wake();
@@ -120,8 +116,8 @@ impl QuicServerHandle {
         &self,
         conn_handle: u32,
     ) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
-        let worker = &self.workers[worker_index(conn_handle)];
-        let local_handle = local_conn_handle(conn_handle);
+        let worker = &self.workers[server_sharding::worker_index(conn_handle)];
+        let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
         worker.cmd_tx
             .send(QuicServerCommand::GetSessionMetrics {
@@ -140,8 +136,8 @@ impl QuicServerHandle {
         conn_handle: u32,
         data: Vec<u8>,
     ) -> Result<bool, Http3NativeError> {
-        let worker = &self.workers[worker_index(conn_handle)];
-        let local_handle = local_conn_handle(conn_handle);
+        let worker = &self.workers[server_sharding::worker_index(conn_handle)];
+        let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
         worker.cmd_tx
             .send(QuicServerCommand::SendDatagram {
@@ -157,8 +153,8 @@ impl QuicServerHandle {
     }
 
     pub fn ping_session(&self, conn_handle: u32) -> Result<bool, Http3NativeError> {
-        let worker = &self.workers[worker_index(conn_handle)];
-        let local_handle = local_conn_handle(conn_handle);
+        let worker = &self.workers[server_sharding::worker_index(conn_handle)];
+        let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
         worker.cmd_tx
             .send(QuicServerCommand::PingSession {
@@ -173,8 +169,8 @@ impl QuicServerHandle {
     }
 
     pub fn get_qlog_path(&self, conn_handle: u32) -> Result<Option<String>, Http3NativeError> {
-        let worker = &self.workers[worker_index(conn_handle)];
-        let local_handle = local_conn_handle(conn_handle);
+        let worker = &self.workers[server_sharding::worker_index(conn_handle)];
+        let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
         worker.cmd_tx
             .send(QuicServerCommand::GetQlogPath {
@@ -207,14 +203,6 @@ impl Drop for QuicServerHandle {
     }
 }
 
-fn worker_index(conn_handle: u32) -> usize {
-    (conn_handle >> WORKER_SHIFT) as usize
-}
-
-fn local_conn_handle(conn_handle: u32) -> u32 {
-    conn_handle & WORKER_MASK
-}
-
 /// Extract the conn_handle from a command for routing purposes.
 fn command_conn_handle(cmd: &QuicServerCommand) -> u32 {
     match cmd {
@@ -233,19 +221,19 @@ fn command_conn_handle(cmd: &QuicServerCommand) -> u32 {
 fn remap_command_handle(cmd: QuicServerCommand) -> QuicServerCommand {
     match cmd {
         QuicServerCommand::StreamSend { conn_handle, stream_id, data, fin } =>
-            QuicServerCommand::StreamSend { conn_handle: local_conn_handle(conn_handle), stream_id, data, fin },
+            QuicServerCommand::StreamSend { conn_handle: server_sharding::local_conn_handle(conn_handle), stream_id, data, fin },
         QuicServerCommand::StreamClose { conn_handle, stream_id, error_code } =>
-            QuicServerCommand::StreamClose { conn_handle: local_conn_handle(conn_handle), stream_id, error_code },
+            QuicServerCommand::StreamClose { conn_handle: server_sharding::local_conn_handle(conn_handle), stream_id, error_code },
         QuicServerCommand::CloseSession { conn_handle, error_code, reason } =>
-            QuicServerCommand::CloseSession { conn_handle: local_conn_handle(conn_handle), error_code, reason },
+            QuicServerCommand::CloseSession { conn_handle: server_sharding::local_conn_handle(conn_handle), error_code, reason },
         QuicServerCommand::SendDatagram { conn_handle, data, resp_tx } =>
-            QuicServerCommand::SendDatagram { conn_handle: local_conn_handle(conn_handle), data, resp_tx },
+            QuicServerCommand::SendDatagram { conn_handle: server_sharding::local_conn_handle(conn_handle), data, resp_tx },
         QuicServerCommand::GetSessionMetrics { conn_handle, resp_tx } =>
-            QuicServerCommand::GetSessionMetrics { conn_handle: local_conn_handle(conn_handle), resp_tx },
+            QuicServerCommand::GetSessionMetrics { conn_handle: server_sharding::local_conn_handle(conn_handle), resp_tx },
         QuicServerCommand::PingSession { conn_handle, resp_tx } =>
-            QuicServerCommand::PingSession { conn_handle: local_conn_handle(conn_handle), resp_tx },
+            QuicServerCommand::PingSession { conn_handle: server_sharding::local_conn_handle(conn_handle), resp_tx },
         QuicServerCommand::GetQlogPath { conn_handle, resp_tx } =>
-            QuicServerCommand::GetQlogPath { conn_handle: local_conn_handle(conn_handle), resp_tx },
+            QuicServerCommand::GetQlogPath { conn_handle: server_sharding::local_conn_handle(conn_handle), resp_tx },
         QuicServerCommand::Shutdown => QuicServerCommand::Shutdown,
     }
 }
@@ -1759,7 +1747,7 @@ impl QuicServerHandler {
             quiche_config,
             disable_retry,
             last_expired: Vec::new(),
-            handle_offset: worker_index << WORKER_SHIFT,
+            handle_offset: server_sharding::handle_offset(worker_index),
         }
     }
 

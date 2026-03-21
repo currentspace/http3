@@ -24,6 +24,7 @@ mod quic_connection;
 mod quic_server;
 mod quic_worker;
 mod reactor_metrics;
+mod server_sharding;
 mod shared_client_reactor;
 #[cfg(feature = "node-api")]
 mod server;
