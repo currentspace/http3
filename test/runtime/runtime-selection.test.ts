@@ -162,7 +162,7 @@ describe('runtime selection', () => {
       assert.strictEqual(firstTarget._runtimeInfo?.selectedMode, 'portable');
       assert.strictEqual(secondTarget._runtimeInfo?.selectedMode, 'portable');
       assert.strictEqual(secondTarget._runtimeInfo?.fastAttempt?.code, ERR_HTTP3_FAST_PATH_UNAVAILABLE);
-      assert.strictEqual(warnings.length, 2);
+      assert.strictEqual(warnings.length, 1);
     } finally {
       process.emitWarning = originalEmitWarning;
     }

@@ -556,6 +556,27 @@ export class Http3SecureServer extends EventEmitter {
     if (!this._h2Server) return;
     const h2Server = this._h2Server;
     this._h2Server = null;
+    const closeAllConnections = (h2Server as Http2SecureServer & {
+      closeAllConnections?: () => void;
+      closeIdleConnections?: () => void;
+      unref?: () => void;
+    }).closeAllConnections;
+    const closeIdleConnections = (h2Server as Http2SecureServer & {
+      closeAllConnections?: () => void;
+      closeIdleConnections?: () => void;
+      unref?: () => void;
+    }).closeIdleConnections;
+    const unref = (h2Server as Http2SecureServer & {
+      closeAllConnections?: () => void;
+      closeIdleConnections?: () => void;
+      unref?: () => void;
+    }).unref;
+
+    // Best-effort: once shutdown begins, don't let stale H2 sockets pin the
+    // process if Node keeps the TLS server referenced longer than expected.
+    try { closeAllConnections?.call(h2Server); } catch { /* ignore */ }
+    try { closeIdleConnections?.call(h2Server); } catch { /* ignore */ }
+    try { unref?.call(h2Server); } catch { /* ignore */ }
     await new Promise<void>((resolve, reject) => {
       try {
         h2Server.close((err?: Error) => {

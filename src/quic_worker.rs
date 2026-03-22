@@ -197,6 +197,18 @@ impl QuicServerHandle {
     }
 }
 
+fn shutdown_spawned_quic_server_workers(workers: &mut Vec<QuicServerWorker>) {
+    for worker in workers.iter() {
+        let _ = worker.cmd_tx.send(QuicServerCommand::Shutdown);
+        let _ = worker.waker.wake();
+    }
+    for worker in workers.iter_mut() {
+        if let Some(handle) = worker.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Drop for QuicServerHandle {
     fn drop(&mut self) {
         self.shutdown();
@@ -1075,12 +1087,30 @@ where
 
     // Workers 1..N bind new sockets to the same address via SO_REUSEPORT.
     for i in 1..num_workers {
-        let socket = transport::socket::bind_worker_socket(local_addr, true)?;
+        let socket = match transport::socket::bind_worker_socket(local_addr, true) {
+            Ok(socket) => socket,
+            Err(err) => {
+                shutdown_spawned_quic_server_workers(&mut workers);
+                return Err(err);
+            }
+        };
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let (driver, waker) =
-            transport::create_platform_driver(socket, server_config.runtime_mode)?;
+            match transport::create_platform_driver(socket, server_config.runtime_mode) {
+                Ok(driver_and_waker) => driver_and_waker,
+                Err(err) => {
+                    shutdown_spawned_quic_server_workers(&mut workers);
+                    return Err(err);
+                }
+            };
         let batcher = make_batcher(i);
-        let mut quiche_config = make_quiche_config()?;
+        let mut quiche_config = match make_quiche_config() {
+            Ok(config) => config,
+            Err(err) => {
+                shutdown_spawned_quic_server_workers(&mut workers);
+                return Err(err);
+            }
+        };
         quiche_config.set_max_send_udp_payload_size(server_ceiling);
         quiche_config.set_max_recv_udp_payload_size(server_ceiling);
         workers.push(spawn_server_worker_on_driver(
