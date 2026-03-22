@@ -37,6 +37,11 @@ pub struct QuicConnectionInit<'a> {
 }
 
 impl QuicConnection {
+    fn is_local_stream(&self, stream_id: u64) -> bool {
+        let local_initiator_bit = u64::from(self.quiche_conn.is_server());
+        (stream_id & 0x1) == local_initiator_bit
+    }
+
     pub fn new(
         mut quiche_conn: quiche::Connection,
         conn_id: Vec<u8>,
@@ -123,9 +128,6 @@ impl QuicConnection {
                 // Coalesce first recv into NEW_STREAM event.
                 match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
                     Ok((len, fin)) => {
-                        log::debug!(
-                            "stream {stream_id} NEW: recv {len} bytes, fin={fin}"
-                        );
                         let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
                         data.truncate(len);
                         events.push(JsH3Event::new_stream_with_data(
@@ -136,9 +138,6 @@ impl QuicConnection {
                         ));
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
-                            log::debug!(
-                                "stream {stream_id} FIN on NEW_STREAM (coalesced), {len} bytes"
-                            );
                             // Don't emit separate FINISHED — the NEW_STREAM event
                             // carries fin=true and TS handler will push(null).
                             self.known_streams.remove(&stream_id);
@@ -172,9 +171,6 @@ impl QuicConnection {
             loop {
                 match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
                     Ok((len, fin)) => {
-                        log::debug!(
-                            "stream {stream_id} DRAIN: recv {len} bytes, fin={fin}"
-                        );
                         if len > 0 {
                             let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
                             data.truncate(len);
@@ -188,12 +184,8 @@ impl QuicConnection {
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
                             reactor_metrics::record_raw_quic_finished_event();
-                            log::debug!(
-                                "stream {stream_id} FIN on DATA, {len} bytes, emitting FINISHED"
-                            );
                             events.push(JsH3Event::finished(conn_handle, stream_id));
                             self.known_streams.remove(&stream_id);
-                            // Change 8: proactive stream_shutdown on FIN
                             self.quiche_conn
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .ok();
@@ -208,9 +200,6 @@ impl QuicConnection {
                         // packet that was processed after our last recv.
                         // Check stream_finished() to catch this case.
                         if self.quiche_conn.stream_finished(stream_id) {
-                            log::debug!(
-                                "stream {stream_id} FIN detected via stream_finished() after Done"
-                            );
                             reactor_metrics::record_raw_quic_fin_observed();
                             reactor_metrics::record_raw_quic_finished_event();
                             events.push(JsH3Event::finished(conn_handle, stream_id));
@@ -249,10 +238,6 @@ impl QuicConnection {
         if self.known_streams.is_empty() {
             return;
         }
-        log::debug!(
-            "sweep_finished_streams: {} known streams",
-            self.known_streams.len()
-        );
         let mut newly_finished = Vec::new();
         for &stream_id in &self.known_streams {
             // stream_finished(): peer sent FIN on this stream's read side.
@@ -271,9 +256,6 @@ impl QuicConnection {
             if !self.known_streams.remove(&stream_id) {
                 continue;
             }
-            log::debug!(
-                "stream {stream_id} FIN detected via sweep_finished_streams"
-            );
             reactor_metrics::record_raw_quic_fin_observed();
             reactor_metrics::record_raw_quic_finished_event();
             events.push(JsH3Event::finished(conn_handle, stream_id));
@@ -335,7 +317,14 @@ impl QuicConnection {
                     self.blocked_queue.push_back(stream_id);
                     reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
-                self.known_streams.insert(stream_id);
+                // Track locally-opened streams so their inbound peer response is
+                // treated as DATA on an existing stream rather than NEW_STREAM.
+                // Do not reinsert peer-initiated streams here: doing so causes
+                // duplicate FINISHED events after their receive side is already
+                // complete and we begin writing the response.
+                if self.is_local_stream(stream_id) {
+                    self.known_streams.insert(stream_id);
+                }
                 // Signal progress for FIN-only sends (0 data bytes written
                 // but FIN was accepted). Without this, callers can't
                 // distinguish a successful FIN from a blocked one.
