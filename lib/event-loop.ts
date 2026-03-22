@@ -260,6 +260,18 @@ export interface ReactorTelemetrySnapshot {
   kqueueDriverSetupSuccesses: number;
   kqueueDriverSetupFailures: number;
   workerThreadSpawnsTotal: number;
+  workerThreadStopsTotal: number;
+  workerLoopExitByCommandTotal: number;
+  workerLoopExitByHandlerDoneTotal: number;
+  workerLoopExitBySinkCloseTotal: number;
+  workerLoopExitByRuntimeErrorTotal: number;
+  shutdownCompleteEmittedTotal: number;
+  eventBatchFlushesTotal: number;
+  eventBatchAttemptedEventsTotal: number;
+  eventBatchDeliveredEventsTotal: number;
+  eventBatchDroppedEventsTotal: number;
+  eventBatchSinkErrorsTotal: number;
+  eventBatchMaxSizeHighWatermark: number;
   rawQuicServerWorkerSpawns: number;
   rawQuicClientDedicatedWorkerSpawns: number;
   rawQuicClientSharedWorkersCreated: number;
@@ -311,6 +323,25 @@ export interface ReactorTelemetrySnapshot {
   txBuffersRecycled: number;
 }
 
+export interface LifecycleTraceEvent {
+  seq: number;
+  timestampMs: number;
+  component: string;
+  action: string;
+  driver?: string;
+  batchSize?: number;
+  pendingTx?: number;
+  note?: string;
+}
+
+export interface LifecycleTraceSnapshot {
+  enabled: boolean;
+  capacity: number;
+  droppedEvents: number;
+  eventCount: number;
+  events: LifecycleTraceEvent[];
+}
+
 interface NativeBinding {
   NativeWorkerServer: new (
     options: NativeServerOptions,
@@ -331,6 +362,9 @@ interface NativeBinding {
   version(): string;
   runtimeTelemetry(): ReactorTelemetrySnapshot;
   resetRuntimeTelemetry(): void;
+  setLifecycleTraceEnabled(enabled: boolean): void;
+  resetLifecycleTrace(): void;
+  lifecycleTraceSnapshot(): LifecycleTraceSnapshot;
 }
 
 // ----- Binding loader -----

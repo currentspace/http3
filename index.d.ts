@@ -134,6 +134,25 @@ export interface JsHeader {
   value: string
 }
 
+export interface JsLifecycleTraceEvent {
+  seq: number
+  timestampMs: number
+  component: string
+  action: string
+  driver?: string
+  batchSize?: number
+  pendingTx?: number
+  note?: string
+}
+
+export interface JsLifecycleTraceSnapshot {
+  enabled: boolean
+  capacity: number
+  droppedEvents: number
+  eventCount: number
+  events: Array<JsLifecycleTraceEvent>
+}
+
 export interface JsMockQuicProfileOptions {
   key: Buffer
   cert: Buffer
@@ -206,6 +225,18 @@ export interface JsReactorTelemetrySnapshot {
   kqueueDriverSetupSuccesses: number
   kqueueDriverSetupFailures: number
   workerThreadSpawnsTotal: number
+  workerThreadStopsTotal: number
+  workerLoopExitByCommandTotal: number
+  workerLoopExitByHandlerDoneTotal: number
+  workerLoopExitBySinkCloseTotal: number
+  workerLoopExitByRuntimeErrorTotal: number
+  shutdownCompleteEmittedTotal: number
+  eventBatchFlushesTotal: number
+  eventBatchAttemptedEventsTotal: number
+  eventBatchDeliveredEventsTotal: number
+  eventBatchDroppedEventsTotal: number
+  eventBatchSinkErrorsTotal: number
+  eventBatchMaxSizeHighWatermark: number
   rawQuicServerWorkerSpawns: number
   rawQuicClientDedicatedWorkerSpawns: number
   rawQuicClientSharedWorkersCreated: number
@@ -300,8 +331,14 @@ export interface JsSetting {
   value: number
 }
 
+export declare function lifecycleTraceSnapshot(): JsLifecycleTraceSnapshot
+
+export declare function resetLifecycleTrace(): void
+
 export declare function resetRuntimeTelemetry(): void
 
 export declare function runtimeTelemetry(): JsReactorTelemetrySnapshot
+
+export declare function setLifecycleTraceEnabled(enabled: boolean): void
 
 export declare function version(): string

@@ -1,6 +1,9 @@
 #![allow(non_snake_case)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "node-api")]
 use napi_derive::napi;
@@ -24,6 +27,18 @@ pub struct JsReactorTelemetrySnapshot {
     pub kqueueDriverSetupSuccesses: i64,
     pub kqueueDriverSetupFailures: i64,
     pub workerThreadSpawnsTotal: i64,
+    pub workerThreadStopsTotal: i64,
+    pub workerLoopExitByCommandTotal: i64,
+    pub workerLoopExitByHandlerDoneTotal: i64,
+    pub workerLoopExitBySinkCloseTotal: i64,
+    pub workerLoopExitByRuntimeErrorTotal: i64,
+    pub shutdownCompleteEmittedTotal: i64,
+    pub eventBatchFlushesTotal: i64,
+    pub eventBatchAttemptedEventsTotal: i64,
+    pub eventBatchDeliveredEventsTotal: i64,
+    pub eventBatchDroppedEventsTotal: i64,
+    pub eventBatchSinkErrorsTotal: i64,
+    pub eventBatchMaxSizeHighWatermark: i64,
     pub rawQuicServerWorkerSpawns: i64,
     pub rawQuicClientDedicatedWorkerSpawns: i64,
     pub rawQuicClientSharedWorkersCreated: i64,
@@ -75,6 +90,29 @@ pub struct JsReactorTelemetrySnapshot {
     pub txBuffersRecycled: i64,
 }
 
+#[cfg_attr(feature = "node-api", napi(object))]
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct JsLifecycleTraceEvent {
+    pub seq: i64,
+    pub timestampMs: i64,
+    pub component: String,
+    pub action: String,
+    pub driver: Option<String>,
+    pub batchSize: Option<i64>,
+    pub pendingTx: Option<i64>,
+    pub note: Option<String>,
+}
+
+#[cfg_attr(feature = "node-api", napi(object))]
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct JsLifecycleTraceSnapshot {
+    pub enabled: bool,
+    pub capacity: i64,
+    pub droppedEvents: i64,
+    pub eventCount: i64,
+    pub events: Vec<JsLifecycleTraceEvent>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WorkerSpawnKind {
     RawQuicServer,
@@ -101,6 +139,14 @@ pub(crate) enum RawQuicClientCloseCause {
     Release,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WorkerLoopExitCause {
+    Command,
+    HandlerDone,
+    SinkClose,
+    RuntimeError,
+}
+
 static DRIVER_SETUP_ATTEMPTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DRIVER_SETUP_SUCCESS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DRIVER_SETUP_FAILURE_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -118,6 +164,17 @@ static KQUEUE_DRIVER_SETUP_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_DRIVER_SETUP_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 static WORKER_THREAD_SPAWNS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WORKER_THREAD_STOPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_COMMAND: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_HANDLER_DONE: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_SINK_CLOSE: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_RUNTIME_ERROR: AtomicU64 = AtomicU64::new(0);
+static SHUTDOWN_COMPLETE_EMITTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_FLUSHES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_DROPPED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_SINK_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_SERVER_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED: AtomicU64 = AtomicU64::new(0);
@@ -171,6 +228,12 @@ static KQUEUE_WRITE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
 
 static TX_BUFFERS_RECYCLED: AtomicU64 = AtomicU64::new(0);
 
+const LIFECYCLE_TRACE_CAPACITY: usize = 512;
+static LIFECYCLE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+static LIFECYCLE_TRACE_DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static LIFECYCLE_TRACE_NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
+static LIFECYCLE_TRACE_EVENTS: OnceLock<Mutex<VecDeque<JsLifecycleTraceEvent>>> = OnceLock::new();
+
 fn load(counter: &AtomicU64) -> i64 {
     counter.load(Ordering::Relaxed) as i64
 }
@@ -185,6 +248,17 @@ fn bump(counter: &AtomicU64) {
 
 fn observe_max(counter: &AtomicU64, value: usize) {
     counter.fetch_max(value as u64, Ordering::Relaxed);
+}
+
+fn lifecycle_trace_events() -> &'static Mutex<VecDeque<JsLifecycleTraceEvent>> {
+    LIFECYCLE_TRACE_EVENTS.get_or_init(|| Mutex::new(VecDeque::with_capacity(LIFECYCLE_TRACE_CAPACITY)))
+}
+
+fn lifecycle_trace_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 pub(crate) fn record_driver_setup_attempt(kind: RuntimeDriverKind) {
@@ -229,6 +303,97 @@ pub(crate) fn record_worker_thread_spawn(kind: WorkerSpawnKind) {
         WorkerSpawnKind::H3ClientDedicated => bump(&H3_CLIENT_DEDICATED_WORKER_SPAWNS),
         WorkerSpawnKind::H3ClientShared => bump(&H3_CLIENT_SHARED_WORKERS_CREATED),
     }
+}
+
+pub(crate) fn record_worker_thread_stop() {
+    bump(&WORKER_THREAD_STOPS_TOTAL);
+}
+
+pub(crate) fn record_worker_loop_exit(cause: WorkerLoopExitCause) {
+    match cause {
+        WorkerLoopExitCause::Command => bump(&WORKER_LOOP_EXIT_BY_COMMAND),
+        WorkerLoopExitCause::HandlerDone => bump(&WORKER_LOOP_EXIT_BY_HANDLER_DONE),
+        WorkerLoopExitCause::SinkClose => bump(&WORKER_LOOP_EXIT_BY_SINK_CLOSE),
+        WorkerLoopExitCause::RuntimeError => bump(&WORKER_LOOP_EXIT_BY_RUNTIME_ERROR),
+    }
+}
+
+pub(crate) fn record_shutdown_complete_emitted() {
+    bump(&SHUTDOWN_COMPLETE_EMITTED_TOTAL);
+}
+
+pub(crate) fn record_event_batch_flush(count: usize) {
+    bump(&EVENT_BATCH_FLUSHES_TOTAL);
+    EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+    observe_max(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK, count);
+}
+
+pub(crate) fn record_event_batch_drop(count: usize) {
+    EVENT_BATCH_DROPPED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_event_batch_sink_error() {
+    bump(&EVENT_BATCH_SINK_ERRORS_TOTAL);
+}
+
+pub fn set_lifecycle_trace_enabled(enabled: bool) {
+    LIFECYCLE_TRACE_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn reset_lifecycle_trace() {
+    LIFECYCLE_TRACE_DROPPED_EVENTS.store(0, Ordering::Relaxed);
+    LIFECYCLE_TRACE_NEXT_SEQ.store(0, Ordering::Relaxed);
+    let mut events = lifecycle_trace_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    events.clear();
+}
+
+pub fn lifecycle_trace_snapshot() -> JsLifecycleTraceSnapshot {
+    let events = lifecycle_trace_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let snapshot_events = events.iter().cloned().collect::<Vec<_>>();
+    JsLifecycleTraceSnapshot {
+        enabled: LIFECYCLE_TRACE_ENABLED.load(Ordering::Relaxed),
+        capacity: LIFECYCLE_TRACE_CAPACITY as i64,
+        droppedEvents: load(&LIFECYCLE_TRACE_DROPPED_EVENTS),
+        eventCount: snapshot_events.len() as i64,
+        events: snapshot_events,
+    }
+}
+
+pub(crate) fn record_lifecycle_trace(
+    component: &'static str,
+    action: &'static str,
+    driver: Option<RuntimeDriverKind>,
+    batch_size: Option<usize>,
+    pending_tx: Option<usize>,
+    note: Option<String>,
+) {
+    if !LIFECYCLE_TRACE_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let event = JsLifecycleTraceEvent {
+        seq: LIFECYCLE_TRACE_NEXT_SEQ.fetch_add(1, Ordering::Relaxed) as i64,
+        timestampMs: lifecycle_trace_timestamp_ms(),
+        component: component.to_string(),
+        action: action.to_string(),
+        driver: driver.map(|kind| kind.as_str().to_string()),
+        batchSize: batch_size.map(|count| count as i64),
+        pendingTx: pending_tx.map(|count| count as i64),
+        note,
+    };
+
+    let mut events = lifecycle_trace_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if events.len() == LIFECYCLE_TRACE_CAPACITY {
+        events.pop_front();
+        LIFECYCLE_TRACE_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+    }
+    events.push_back(event);
 }
 
 pub(crate) fn record_shared_worker_reuse(kind: WorkerSpawnKind) {
@@ -399,6 +564,8 @@ pub(crate) fn record_tx_buffers_recycled(count: usize) {
 }
 
 pub fn snapshot() -> JsReactorTelemetrySnapshot {
+    let event_batch_attempted_events_total = load(&EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL);
+    let event_batch_dropped_events_total = load(&EVENT_BATCH_DROPPED_EVENTS_TOTAL);
     JsReactorTelemetrySnapshot {
         driverSetupAttemptsTotal: load(&DRIVER_SETUP_ATTEMPTS_TOTAL),
         driverSetupSuccessTotal: load(&DRIVER_SETUP_SUCCESS_TOTAL),
@@ -413,6 +580,19 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         kqueueDriverSetupSuccesses: load(&KQUEUE_DRIVER_SETUP_SUCCESSES),
         kqueueDriverSetupFailures: load(&KQUEUE_DRIVER_SETUP_FAILURES),
         workerThreadSpawnsTotal: load(&WORKER_THREAD_SPAWNS_TOTAL),
+        workerThreadStopsTotal: load(&WORKER_THREAD_STOPS_TOTAL),
+        workerLoopExitByCommandTotal: load(&WORKER_LOOP_EXIT_BY_COMMAND),
+        workerLoopExitByHandlerDoneTotal: load(&WORKER_LOOP_EXIT_BY_HANDLER_DONE),
+        workerLoopExitBySinkCloseTotal: load(&WORKER_LOOP_EXIT_BY_SINK_CLOSE),
+        workerLoopExitByRuntimeErrorTotal: load(&WORKER_LOOP_EXIT_BY_RUNTIME_ERROR),
+        shutdownCompleteEmittedTotal: load(&SHUTDOWN_COMPLETE_EMITTED_TOTAL),
+        eventBatchFlushesTotal: load(&EVENT_BATCH_FLUSHES_TOTAL),
+        eventBatchAttemptedEventsTotal: event_batch_attempted_events_total,
+        eventBatchDeliveredEventsTotal: event_batch_attempted_events_total
+            .saturating_sub(event_batch_dropped_events_total),
+        eventBatchDroppedEventsTotal: event_batch_dropped_events_total,
+        eventBatchSinkErrorsTotal: load(&EVENT_BATCH_SINK_ERRORS_TOTAL),
+        eventBatchMaxSizeHighWatermark: load(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK),
         rawQuicServerWorkerSpawns: load(&RAW_QUIC_SERVER_WORKER_SPAWNS),
         rawQuicClientDedicatedWorkerSpawns: load(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         rawQuicClientSharedWorkersCreated: load(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
@@ -482,6 +662,17 @@ pub fn reset() {
         &KQUEUE_DRIVER_SETUP_SUCCESSES,
         &KQUEUE_DRIVER_SETUP_FAILURES,
         &WORKER_THREAD_SPAWNS_TOTAL,
+        &WORKER_THREAD_STOPS_TOTAL,
+        &WORKER_LOOP_EXIT_BY_COMMAND,
+        &WORKER_LOOP_EXIT_BY_HANDLER_DONE,
+        &WORKER_LOOP_EXIT_BY_SINK_CLOSE,
+        &WORKER_LOOP_EXIT_BY_RUNTIME_ERROR,
+        &SHUTDOWN_COMPLETE_EMITTED_TOTAL,
+        &EVENT_BATCH_FLUSHES_TOTAL,
+        &EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL,
+        &EVENT_BATCH_DROPPED_EVENTS_TOTAL,
+        &EVENT_BATCH_SINK_ERRORS_TOTAL,
+        &EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK,
         &RAW_QUIC_SERVER_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED,

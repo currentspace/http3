@@ -63,3 +63,18 @@ pub fn runtime_telemetry() -> reactor_metrics::JsReactorTelemetrySnapshot {
 pub fn reset_runtime_telemetry() {
     reactor_metrics::reset();
 }
+
+#[cfg_attr(feature = "node-api", napi)]
+pub fn set_lifecycle_trace_enabled(enabled: bool) {
+    reactor_metrics::set_lifecycle_trace_enabled(enabled);
+}
+
+#[cfg_attr(feature = "node-api", napi)]
+pub fn reset_lifecycle_trace() {
+    reactor_metrics::reset_lifecycle_trace();
+}
+
+#[cfg_attr(feature = "node-api", napi)]
+pub fn lifecycle_trace_snapshot() -> reactor_metrics::JsLifecycleTraceSnapshot {
+    reactor_metrics::lifecycle_trace_snapshot()
+}

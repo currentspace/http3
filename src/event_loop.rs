@@ -20,6 +20,7 @@ use serde::Serialize;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
 use crate::h3_event::JsH3Event;
+use crate::reactor_metrics::{self, WorkerLoopExitCause};
 use crate::transport::{Driver, TxDatagram};
 
 /// TSFN type for delivering event batches to the JS main thread.
@@ -69,16 +70,19 @@ impl EventBatcherStatsHandle {
         self.inner
             .max_batch_size
             .fetch_max(count, Ordering::Relaxed);
+        reactor_metrics::record_event_batch_flush(count);
     }
 
     pub(crate) fn record_drop(&self, count: usize) {
         self.inner
             .dropped_events
             .fetch_add(count as u64, Ordering::Relaxed);
+        reactor_metrics::record_event_batch_drop(count);
     }
 
     pub(crate) fn record_sink_error(&self) {
         self.inner.sink_errors.fetch_add(1, Ordering::Relaxed);
+        reactor_metrics::record_event_batch_sink_error();
     }
 
     pub(crate) fn snapshot(&self) -> EventBatcherStatsSnapshot {
@@ -193,12 +197,28 @@ impl EventSink for TsfnEventSink {
             napi::Status::Ok => true,
             napi::Status::Closing => {
                 stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "tsfn-closing",
+                    None,
+                    Some(count),
+                    None,
+                    Some("tsfn".to_string()),
+                );
                 log::debug!("TSFN closing, dropped {count} events");
                 false
             }
             status => {
                 stats.record_sink_error();
                 stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "tsfn-call-failed",
+                    None,
+                    Some(count),
+                    None,
+                    Some(format!("{status:?}")),
+                );
                 log::warn!(
                     "TSFN call failed ({status:?}), dropped {count} events (total dropped: {})",
                     stats.snapshot().dropped_events
@@ -236,11 +256,27 @@ impl EventSink for SharedTsfnEventSink {
             napi::Status::Ok => true,
             napi::Status::Closing => {
                 stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "shared-tsfn-closing",
+                    None,
+                    Some(count),
+                    None,
+                    Some("tsfn-shared".to_string()),
+                );
                 false
             }
             status => {
                 stats.record_sink_error();
                 stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "shared-tsfn-call-failed",
+                    None,
+                    Some(count),
+                    None,
+                    Some(format!("{status:?}")),
+                );
                 log::warn!(
                     "shared TSFN call failed ({status:?}), dropped {count} events (total dropped: {})",
                     stats.snapshot().dropped_events
@@ -257,6 +293,27 @@ pub struct EventBatcher {
     stats: EventBatcherStatsHandle,
 }
 
+struct WorkerLoopStopGuard;
+
+impl Drop for WorkerLoopStopGuard {
+    fn drop(&mut self) {
+        reactor_metrics::record_worker_thread_stop();
+    }
+}
+
+fn push_shutdown_complete(batcher: &mut EventBatcher) {
+    reactor_metrics::record_shutdown_complete_emitted();
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "shutdown-complete-emitted",
+        None,
+        None,
+        None,
+        None,
+    );
+    batcher.batch.push(JsH3Event::shutdown_complete());
+}
+
 fn flush_runtime_error<D: Driver>(
     batcher: &mut EventBatcher,
     driver: &D,
@@ -264,6 +321,15 @@ fn flush_runtime_error<D: Driver>(
     reason_code: &str,
     err: &io::Error,
 ) -> bool {
+    reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::RuntimeError);
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "runtime-error",
+        Some(driver.driver_kind()),
+        None,
+        Some(driver.pending_tx_count()),
+        Some(format!("{syscall}:{reason_code}:{err}")),
+    );
     batcher.batch.push(JsH3Event::runtime_error(
         0,
         driver.driver_kind().as_str(),
@@ -273,7 +339,7 @@ fn flush_runtime_error<D: Driver>(
     ));
     let _ = batcher.flush();
     // Emit shutdown sentinel so JS close() can resolve.
-    batcher.batch.push(JsH3Event::shutdown_complete());
+    push_shutdown_complete(batcher);
     batcher.flush()
 }
 
@@ -313,6 +379,14 @@ impl EventBatcher {
         }
         let to_send = std::mem::take(&mut self.batch);
         self.stats.record_flush(to_send.len());
+        reactor_metrics::record_lifecycle_trace(
+            "event-batcher",
+            "flush",
+            None,
+            Some(to_send.len()),
+            None,
+            Some(self.stats.sink_kind.to_string()),
+        );
         self.sink.emit(to_send, &self.stats)
     }
 }
@@ -329,6 +403,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     mut batcher: EventBatcher,
     local_addr: SocketAddr,
 ) {
+    let _stop_guard = WorkerLoopStopGuard;
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "worker-loop-start",
+        Some(driver.driver_kind()),
+        None,
+        Some(driver.pending_tx_count()),
+        None,
+    );
     // Use pkt.local (from IP_PKTINFO) only when the socket is bound to a
     // specific address.  When bound to a wildcard (0.0.0.0 / [::]), quiche
     // creates connections with that wildcard as the local addr.  Passing a
@@ -386,12 +469,22 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                             "driver-submit-sends-failed",
                             &err,
                         );
+                        return;
                     }
                 }
                 // Deliver any accumulated events, then a sentinel so JS
                 // knows all worker events have been delivered.
                 let _ = batcher.flush();
-                batcher.batch.push(JsH3Event::shutdown_complete());
+                reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::Command);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-loop",
+                    "exit-command",
+                    Some(driver.driver_kind()),
+                    None,
+                    Some(driver.pending_tx_count()),
+                    None,
+                );
+                push_shutdown_complete(&mut batcher);
                 let _ = batcher.flush();
                 return;
             }
@@ -482,6 +575,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             }
             // Mid-batch flush if needed
             if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
+                reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-loop",
+                    "exit-sink-close",
+                    Some(driver.driver_kind()),
+                    None,
+                    Some(driver.pending_tx_count()),
+                    None,
+                );
                 return;
             }
         }
@@ -498,6 +600,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 
         // Mid-batch flush if timer/drain processing pushed us over the cap
         if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
+            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+            reactor_metrics::record_lifecycle_trace(
+                "event-loop",
+                "exit-sink-close",
+                Some(driver.driver_kind()),
+                None,
+                Some(driver.pending_tx_count()),
+                None,
+            );
             return;
         }
 
@@ -527,14 +638,32 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 
         // 9. Flush events to JS
         if !batcher.flush() {
-            batcher.batch.push(JsH3Event::shutdown_complete());
+            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+            reactor_metrics::record_lifecycle_trace(
+                "event-loop",
+                "exit-sink-close",
+                Some(driver.driver_kind()),
+                None,
+                Some(driver.pending_tx_count()),
+                None,
+            );
+            push_shutdown_complete(&mut batcher);
             let _ = batcher.flush();
             return;
         }
 
         // 10. Client exit: handler done and all packets drained
         if handler.is_done() && driver.pending_tx_count() == 0 {
-            batcher.batch.push(JsH3Event::shutdown_complete());
+            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::HandlerDone);
+            reactor_metrics::record_lifecycle_trace(
+                "event-loop",
+                "exit-handler-done",
+                Some(driver.driver_kind()),
+                None,
+                Some(driver.pending_tx_count()),
+                None,
+            );
+            push_shutdown_complete(&mut batcher);
             let _ = batcher.flush();
             return;
         }

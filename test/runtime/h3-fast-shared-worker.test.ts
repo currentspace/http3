@@ -9,6 +9,12 @@ import {
 import { binding } from '../../lib/event-loop.js';
 import type { Http3ClientSession, Http3SecureServer } from '../../lib/index.js';
 import { generateTestCerts } from '../support/generate-certs.js';
+import {
+  appendLifecycleArtifacts,
+  beginLifecycleCapture,
+  captureLifecycleFailureArtifacts,
+  endLifecycleCapture,
+} from '../support/failure-artifacts.js';
 
 function isFastPathUnavailable(error: unknown): boolean {
   return error instanceof Http3Error && error.code === ERR_HTTP3_FAST_PATH_UNAVAILABLE;
@@ -48,7 +54,7 @@ describe('H3 client worker topology', () => {
     let clients: Http3ClientSession[] = [];
 
     try {
-      binding.resetRuntimeTelemetry();
+      beginLifecycleCapture();
       server = createSecureServer({
         key: certs.key,
         cert: certs.cert,
@@ -92,14 +98,36 @@ describe('H3 client worker topology', () => {
       await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
       const closedTelemetry = binding.runtimeTelemetry();
       assert.ok(closedTelemetry.h3ClientSessionsClosed >= 1);
+      assert.ok(closedTelemetry.workerThreadStopsTotal >= 1);
+      assert.ok(
+        closedTelemetry.workerLoopExitByCommandTotal + closedTelemetry.workerLoopExitByHandlerDoneTotal >= 1,
+      );
+      assert.ok(closedTelemetry.shutdownCompleteEmittedTotal >= 1);
+      assert.ok(closedTelemetry.eventBatchFlushesTotal >= 1);
+      assert.ok(closedTelemetry.eventBatchAttemptedEventsTotal >= 1);
+      assert.ok(closedTelemetry.eventBatchDeliveredEventsTotal >= 1);
+      assert.strictEqual(closedTelemetry.eventBatchDroppedEventsTotal, 0);
+      assert.strictEqual(closedTelemetry.eventBatchSinkErrorsTotal, 0);
+      const artifacts = captureLifecycleFailureArtifacts('h3-fast-worker-close');
+      assert.ok(artifacts.lifecycleTrace.eventCount >= 1);
+      assert.ok(
+        artifacts.lifecycleTrace.events.some((event) => event.action === 'worker-loop-start'),
+        'lifecycle trace should include worker-loop-start',
+      );
+      assert.ok(
+        artifacts.lifecycleTrace.events.some((event) => event.action === 'shutdown-complete-emitted'),
+        'lifecycle trace should include shutdown-complete-emitted',
+      );
     } catch (error: unknown) {
       if (isFastPathUnavailable(error)) {
         const message = error instanceof Error ? error.message : String(error);
         t.skip(`fast path unavailable on this host: ${message}`);
         return;
       }
+      appendLifecycleArtifacts(error, 'h3-fast-worker-topology');
       throw error;
     } finally {
+      endLifecycleCapture();
       await Promise.all(clients.map(async (client) => {
         try { await client.close(); } catch { /* cleanup */ }
       }));
@@ -114,7 +142,7 @@ describe('H3 client worker topology', () => {
     let clients: Http3ClientSession[] = [];
 
     try {
-      binding.resetRuntimeTelemetry();
+      beginLifecycleCapture();
       server = createSecureServer({
         key: certs.key,
         cert: certs.cert,
@@ -150,7 +178,14 @@ describe('H3 client worker topology', () => {
 
       const telemetry = binding.runtimeTelemetry();
       assert.strictEqual(telemetry.h3ClientSessionsOpened, clients.length);
+      assert.ok(telemetry.eventBatchFlushesTotal >= 1);
+      assert.ok(telemetry.eventBatchAttemptedEventsTotal >= 1);
+      assert.strictEqual(telemetry.eventBatchDroppedEventsTotal, 0);
+      assert.strictEqual(telemetry.eventBatchSinkErrorsTotal, 0);
+      const artifacts = captureLifecycleFailureArtifacts('h3-portable-worker-topology');
+      assert.ok(artifacts.lifecycleTrace.eventCount >= 1);
     } finally {
+      endLifecycleCapture();
       await Promise.all(clients.map(async (client) => {
         try { await client.close(); } catch { /* cleanup */ }
       }));
