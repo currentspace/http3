@@ -209,6 +209,18 @@ impl WorkerHandle {
     }
 }
 
+fn shutdown_spawned_h3_server_workers(workers: &mut Vec<H3ServerWorker>) {
+    for worker in workers.iter() {
+        let _ = worker.cmd_tx.send(WorkerCommand::Shutdown);
+        let _ = worker.waker.wake();
+    }
+    for worker in workers.iter_mut() {
+        if let Some(handle) = worker.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
         self.shutdown();
@@ -1478,15 +1490,36 @@ where
 
     // Workers 1..N bind new sockets to the same address via SO_REUSEPORT.
     for i in 1..num_workers {
-        let socket = transport::socket::bind_worker_socket(local_addr, true)?;
-        socket.set_nonblocking(true).map_err(Http3NativeError::Io)?;
+        let socket = match transport::socket::bind_worker_socket(local_addr, true) {
+            Ok(socket) => socket,
+            Err(err) => {
+                shutdown_spawned_h3_server_workers(&mut workers);
+                return Err(err);
+            }
+        };
+        if let Err(err) = socket.set_nonblocking(true).map_err(Http3NativeError::Io) {
+            shutdown_spawned_h3_server_workers(&mut workers);
+            return Err(err);
+        }
         let _ = transport::socket::set_socket_buffers(&socket, 2 * 1024 * 1024);
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-        let mut config = make_quiche_config()?;
+        let mut config = match make_quiche_config() {
+            Ok(config) => config,
+            Err(err) => {
+                shutdown_spawned_h3_server_workers(&mut workers);
+                return Err(err);
+            }
+        };
         config.set_max_send_udp_payload_size(ceiling);
         config.set_max_recv_udp_payload_size(ceiling);
         let (driver, waker) =
-            transport::create_platform_driver(socket, http3_config.runtime_mode)?;
+            match transport::create_platform_driver(socket, http3_config.runtime_mode) {
+                Ok(driver_and_waker) => driver_and_waker,
+                Err(err) => {
+                    shutdown_spawned_h3_server_workers(&mut workers);
+                    return Err(err);
+                }
+            };
         let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
         let tsfn_ref = Arc::clone(&tsfn);
         let http3_clone = Http3Config {
