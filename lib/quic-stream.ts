@@ -39,6 +39,7 @@ export class QuicStream extends Duplex {
   /** @internal */ _serverLoop: QuicServerEventLoopLike | null = null;
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
   /** @internal */ _bp: BackpressureState = createBackpressureState();
+  private _finalChunk: Buffer | null = null;
 
   constructor(opts?: { highWaterMark?: number }) {
     super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
@@ -83,6 +84,34 @@ export class QuicStream extends Duplex {
     this._writeChunk(chunk, callback);
   }
 
+  override end(chunk?: any, encoding?: any, callback?: any): this {
+    let finalChunk = chunk;
+    let finalEncoding = encoding;
+    let finalCallback = callback;
+
+    if (typeof finalChunk === 'function') {
+      finalCallback = finalChunk;
+      finalChunk = undefined;
+      finalEncoding = undefined;
+    } else if (typeof finalEncoding === 'function') {
+      finalCallback = finalEncoding;
+      finalEncoding = undefined;
+    }
+
+    if (finalChunk != null) {
+      if (Buffer.isBuffer(finalChunk)) {
+        this._finalChunk = finalChunk;
+      } else if (finalChunk instanceof Uint8Array) {
+        this._finalChunk = Buffer.from(finalChunk);
+      } else {
+        this._finalChunk = Buffer.from(String(finalChunk), finalEncoding);
+      }
+      return (super.end as any)(undefined, undefined, finalCallback);
+    }
+
+    return (super.end as any)(undefined, undefined, finalCallback);
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     const written = this._doSend(chunk, false);
     if (written >= chunk.length) {
@@ -95,16 +124,31 @@ export class QuicStream extends Duplex {
     }
   }
 
-  _final(callback: (error?: Error | null) => void): void {
-    const written = this._doSend(Buffer.alloc(0), true);
-    if (written === 0) {
-      this._bp.drainCallbacks.push(() => {
-        this._doSend(Buffer.alloc(0), true);
+  private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const written = this._doSend(chunk, true);
+    if (chunk.length === 0) {
+      if (written > 0) {
         callback();
-      });
-    } else {
-      callback();
+      } else {
+        this._bp.drainCallbacks.push(() => {
+          this._writeFinalChunk(chunk, callback);
+        });
+      }
+      return;
     }
+    if (written >= chunk.length) {
+      callback();
+    } else {
+      this._bp.drainCallbacks.push(() => {
+        this._writeFinalChunk(chunk.subarray(written), callback);
+      });
+    }
+  }
+
+  _final(callback: (error?: Error | null) => void): void {
+    const finalChunk = this._finalChunk ?? Buffer.alloc(0);
+    this._finalChunk = null;
+    this._writeFinalChunk(finalChunk, callback);
   }
 
   private _doSend(data: Buffer, fin: boolean): number {

@@ -13,13 +13,69 @@ const STREAMS = 200;
 const TIMEOUT_MS = 10_000;
 const MAX_RUNS = 100;
 const sizes = [0, 1, 100, 1024, 4096, 16384, 65536];
+const EVENT_NAMES = {
+  1: 'NEW_SESSION',
+  2: 'NEW_STREAM',
+  4: 'DATA',
+  5: 'FINISHED',
+  6: 'RESET',
+  7: 'SESSION_CLOSE',
+  8: 'DRAIN',
+  10: 'ERROR',
+  11: 'HANDSHAKE_COMPLETE',
+  12: 'SESSION_TICKET',
+  14: 'DATAGRAM',
+  15: 'SHUTDOWN_COMPLETE',
+};
+
+function recordNativeEvents(target, events) {
+  for (const event of events) {
+    if (event.streamId == null || event.streamId < 0) continue;
+    const list = target.get(event.streamId) ?? [];
+    list.push({
+      type: EVENT_NAMES[event.eventType] ?? `EVENT_${event.eventType}`,
+      len: event.data?.length ?? 0,
+      fin: event.fin ?? null,
+    });
+    target.set(event.streamId, list);
+  }
+}
+
+function attachNativeRecorder(target, map) {
+  const originalDispatch = target._dispatchEvents?.bind(target);
+  if (!originalDispatch) return;
+  target._dispatchEvents = (events) => {
+    recordNativeEvents(map, events);
+    return originalDispatch(events);
+  };
+}
+
+function attachSendRecorder(loop, map, withConnHandle = false) {
+  if (!loop?.streamSend) return;
+  const originalStreamSend = loop.streamSend.bind(loop);
+  loop.streamSend = (...args) => {
+    const [arg0, arg1, arg2, arg3] = args;
+    const streamId = withConnHandle ? arg1 : arg0;
+    const data = withConnHandle ? arg2 : arg1;
+    const fin = withConnHandle ? arg3 : arg2;
+    const list = map.get(streamId) ?? [];
+    list.push({ len: data.length, fin });
+    map.set(streamId, list);
+    return originalStreamSend(...args);
+  };
+}
 
 async function runOnce(runIndex) {
   const certs = generateTestCerts();
+  const serverNativeEvents = new Map();
+  const clientNativeEvents = new Map();
+  const serverSendCalls = new Map();
+  const clientSendCalls = new Map();
   const server = createQuicServer({
     key: certs.key, cert: certs.cert, disableRetry: true,
     initialMaxStreamsBidi: 100_000,
   });
+  attachNativeRecorder(server, serverNativeEvents);
 
   // Track which streams the server saw
   const serverStreams = new Map(); // streamId -> { bytesIn, echoed }
@@ -42,6 +98,9 @@ async function runOnce(runIndex) {
 
   const addr = await server.listen(0, '127.0.0.1');
   const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+  attachNativeRecorder(client, clientNativeEvents);
+  attachSendRecorder(server._eventLoop, serverSendCalls, true);
+  attachSendRecorder(client._eventLoop, clientSendCalls, false);
 
   const clientStreams = new Map(); // streamId -> { size, bytesOut, bytesIn, finished, timedOut }
 
@@ -92,6 +151,10 @@ async function runOnce(runIndex) {
         } else {
           console.log(`    server: NEVER SEEN`);
         }
+        console.log(`    client send calls: ${JSON.stringify(clientSendCalls.get(sid) || [])}`);
+        console.log(`    server send calls: ${JSON.stringify(serverSendCalls.get(sid) || [])}`);
+        console.log(`    client native: ${JSON.stringify(clientNativeEvents.get(sid) || [])}`);
+        console.log(`    server native: ${JSON.stringify(serverNativeEvents.get(sid) || [])}`);
       }
     }
   }

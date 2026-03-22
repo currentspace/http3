@@ -2417,6 +2417,7 @@ impl QuicClientHandler {
     }
 
     fn poll_drain_events_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
+        self.conn.sweep_finished_streams(conn_handle, batch);
         if !self.conn.blocked_set.is_empty() {
             self.conn.poll_drain_events(conn_handle, batch);
         }
@@ -2512,7 +2513,6 @@ impl ProtocolHandler for QuicClientHandler {
     }
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
-        self.conn.sweep_finished_streams(0, batch);
         self.poll_drain_events_for_handle(batch, 0);
     }
 
