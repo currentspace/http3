@@ -123,6 +123,9 @@ impl QuicConnection {
                 // Coalesce first recv into NEW_STREAM event.
                 match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
                     Ok((len, fin)) => {
+                        log::debug!(
+                            "stream {stream_id} NEW: recv {len} bytes, fin={fin}"
+                        );
                         let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
                         data.truncate(len);
                         events.push(JsH3Event::new_stream_with_data(
@@ -133,6 +136,9 @@ impl QuicConnection {
                         ));
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
+                            log::debug!(
+                                "stream {stream_id} FIN on NEW_STREAM (coalesced), {len} bytes"
+                            );
                             // Don't emit separate FINISHED — the NEW_STREAM event
                             // carries fin=true and TS handler will push(null).
                             self.known_streams.remove(&stream_id);
@@ -166,6 +172,9 @@ impl QuicConnection {
             loop {
                 match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
                     Ok((len, fin)) => {
+                        log::debug!(
+                            "stream {stream_id} DRAIN: recv {len} bytes, fin={fin}"
+                        );
                         if len > 0 {
                             let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
                             data.truncate(len);
@@ -179,6 +188,9 @@ impl QuicConnection {
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
                             reactor_metrics::record_raw_quic_finished_event();
+                            log::debug!(
+                                "stream {stream_id} FIN on DATA, {len} bytes, emitting FINISHED"
+                            );
                             events.push(JsH3Event::finished(conn_handle, stream_id));
                             self.known_streams.remove(&stream_id);
                             // Change 8: proactive stream_shutdown on FIN
@@ -191,7 +203,24 @@ impl QuicConnection {
                             break;
                         }
                     }
-                    Err(quiche::Error::Done) => break,
+                    Err(quiche::Error::Done) => {
+                        // The stream may have received FIN in a separate
+                        // packet that was processed after our last recv.
+                        // Check stream_finished() to catch this case.
+                        if self.quiche_conn.stream_finished(stream_id) {
+                            log::debug!(
+                                "stream {stream_id} FIN detected via stream_finished() after Done"
+                            );
+                            reactor_metrics::record_raw_quic_fin_observed();
+                            reactor_metrics::record_raw_quic_finished_event();
+                            events.push(JsH3Event::finished(conn_handle, stream_id));
+                            self.known_streams.remove(&stream_id);
+                            self.quiche_conn
+                                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .ok();
+                        }
+                        break;
+                    }
                     Err(e) => {
                         events.push(JsH3Event::error(
                             conn_handle,
@@ -206,8 +235,52 @@ impl QuicConnection {
             }
         }
 
+        self.sweep_finished_streams(conn_handle, events);
         self.poll_datagram_events(conn_handle, events);
         self.poll_drain_events(conn_handle, events);
+    }
+
+    /// Scan known_streams for streams where quiche received FIN in a separate
+    /// packet after we already drained all data via `stream_recv`.  quiche
+    /// doesn't re-report these as readable, so we scan on every event loop
+    /// cycle.  O(N) in known_streams size — acceptable for typical stream
+    /// counts; profile if this becomes a bottleneck.
+    pub fn sweep_finished_streams(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
+        if self.known_streams.is_empty() {
+            return;
+        }
+        log::debug!(
+            "sweep_finished_streams: {} known streams",
+            self.known_streams.len()
+        );
+        let mut newly_finished = Vec::new();
+        for &stream_id in &self.known_streams {
+            // stream_finished(): peer sent FIN on this stream's read side.
+            // stream_readable(): there is still unread data buffered.
+            // Only emit FINISHED when FIN was received AND all data has
+            // been read — otherwise the data would be lost.
+            if self.quiche_conn.stream_finished(stream_id)
+                && !self.quiche_conn.stream_readable(stream_id)
+            {
+                newly_finished.push(stream_id);
+            }
+        }
+        for stream_id in newly_finished {
+            // Guard: poll_quic_events may have already handled this stream
+            // in the same cycle (data+FIN read in the drain loop).
+            if !self.known_streams.remove(&stream_id) {
+                continue;
+            }
+            log::debug!(
+                "stream {stream_id} FIN detected via sweep_finished_streams"
+            );
+            reactor_metrics::record_raw_quic_fin_observed();
+            reactor_metrics::record_raw_quic_finished_event();
+            events.push(JsH3Event::finished(conn_handle, stream_id));
+            self.quiche_conn
+                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                .ok();
+        }
     }
 
     pub fn poll_drain_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
