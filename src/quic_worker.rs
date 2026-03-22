@@ -1318,6 +1318,19 @@ fn remove_shared_quic_client_session(
             session.handler.conn.blocked_queue.len(),
             session.handler.conn.known_streams.len(),
         );
+        reactor_metrics::record_lifecycle_trace(
+            "quic-client",
+            "shared-session-release",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle={handle} pending_writes={} blocked_streams={} known_streams={}",
+                session.handler.pending_writes.len(),
+                session.handler.conn.blocked_queue.len(),
+                session.handler.conn.known_streams.len()
+            )),
+        );
         if !session.handler.session_closed_emitted {
             reactor_metrics::record_raw_quic_client_close_cause(
                 RawQuicClientCloseCause::Release,
@@ -1813,6 +1826,19 @@ impl ProtocolHandler for QuicServerHandler {
                 reason,
             } => {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+                    reactor_metrics::record_lifecycle_trace(
+                        "quic-server",
+                        "close-session-requested",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={conn_handle} error_code={error_code} blocked_streams={} known_streams={} reason={}",
+                            conn.blocked_set.len(),
+                            conn.known_streams.len(),
+                            reason.as_str()
+                        )),
+                    );
                     let _ = conn
                         .quiche_conn
                         .close(true, u64::from(error_code), reason.as_bytes());
@@ -2055,6 +2081,19 @@ impl ProtocolHandler for QuicServerHandler {
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 conn.on_timeout();
                 if conn.is_closed() {
+                    reactor_metrics::record_lifecycle_trace(
+                        "quic-server",
+                        "session-close-timeout",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={} blocked_streams={} known_streams={}",
+                            offset | (handle as u32),
+                            conn.blocked_set.len(),
+                            conn.known_streams.len()
+                        )),
+                    );
                     reactor_metrics::record_session_close(SessionKind::RawQuicServer);
                     batch.push(JsH3Event::session_close(offset | (handle as u32)));
                 } else {
@@ -2163,6 +2202,14 @@ impl ProtocolHandler for QuicServerHandler {
             self.pending_writes
                 .retain(|&(ch, _), _| ch as usize != *handle);
             if !self.last_expired.contains(handle) {
+                reactor_metrics::record_lifecycle_trace(
+                    "quic-server",
+                    "session-close-cleanup",
+                    None,
+                    None,
+                    None,
+                    Some(format!("conn_handle={}", offset | (*handle as u32))),
+                );
                 reactor_metrics::record_session_close(SessionKind::RawQuicServer);
                 batch.push(JsH3Event::session_close(offset | (*handle as u32)));
             }
@@ -2251,6 +2298,19 @@ impl QuicClientHandler {
     }
 
     fn close_session(&mut self, error_code: u32, reason: &str) {
+        reactor_metrics::record_lifecycle_trace(
+            "quic-client",
+            "close-session-requested",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle=0 error_code={error_code} pending_writes={} blocked_streams={} known_streams={} reason={reason}",
+                self.pending_writes.len(),
+                self.conn.blocked_set.len(),
+                self.conn.known_streams.len()
+            )),
+        );
         let _ = self
             .conn
             .quiche_conn
@@ -2319,6 +2379,19 @@ impl QuicClientHandler {
         if self.session_closed_emitted {
             return;
         }
+        reactor_metrics::record_lifecycle_trace(
+            "quic-client",
+            "session-close-emitted",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle={conn_handle} cause={cause:?} pending_writes={} blocked_streams={} known_streams={}",
+                self.pending_writes.len(),
+                self.conn.blocked_set.len(),
+                self.conn.known_streams.len()
+            )),
+        );
         reactor_metrics::record_raw_quic_client_close_cause(cause);
         reactor_metrics::record_session_close(SessionKind::RawQuicClient);
         batch.push(JsH3Event::session_close(conn_handle));
@@ -2446,6 +2519,19 @@ impl ProtocolHandler for QuicClientHandler {
         match cmd {
             QuicClientCommand::Shutdown => {
                 if !self.session_closed_emitted {
+                    reactor_metrics::record_lifecycle_trace(
+                        "quic-client",
+                        "shutdown-command",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle=0 pending_writes={} blocked_streams={} known_streams={}",
+                            self.pending_writes.len(),
+                            self.conn.blocked_set.len(),
+                            self.conn.known_streams.len()
+                        )),
+                    );
                     reactor_metrics::record_raw_quic_client_close_cause(
                         RawQuicClientCloseCause::Shutdown,
                     );

@@ -4,11 +4,11 @@ import type { IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
 import {
   type BackpressureState,
+  cancelDrainCallbacks,
   createBackpressureState,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
-  flushDrainCallbacks,
 } from './stream-backpressure.js';
 
 /** HTTP header map where each value is a string or string array. */
@@ -138,7 +138,7 @@ export class ServerHttp3Stream extends Duplex {
    */
   close(code?: number): void {
     this._eventLoop?.streamClose(this._connHandle, this._streamId, code ?? 0);
-    flushDrainCallbacks(this._bp);
+    cancelDrainCallbacks(this._bp);
     this._clearTimeout();
     this.destroy();
   }
@@ -251,6 +251,12 @@ export class ServerHttp3Stream extends Duplex {
     clearTimeout(this._timeout);
     this._timeout = null;
   }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    cancelDrainCallbacks(this._bp);
+    this._clearTimeout();
+    callback(error);
+  }
 }
 
 /**
@@ -292,7 +298,7 @@ export class ClientHttp3Stream extends Duplex {
   close(code?: number): void {
     const closeCode = code ?? 0;
     this._eventLoop?.streamClose(this._streamId, closeCode);
-    flushDrainCallbacks(this._bp);
+    cancelDrainCallbacks(this._bp);
     this._clearTimeout();
     this.destroy();
   }
@@ -388,6 +394,12 @@ export class ClientHttp3Stream extends Duplex {
     clearTimeout(this._timeout);
     this._timeout = null;
   }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    cancelDrainCallbacks(this._bp);
+    this._clearTimeout();
+    callback(error);
+  }
 }
 
 /**
@@ -466,7 +478,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
     } catch {
       // Ignore close errors while cleaning up.
     }
-    flushDrainCallbacks(this._bp);
+    cancelDrainCallbacks(this._bp);
     this.destroy();
   }
 

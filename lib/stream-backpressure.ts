@@ -87,3 +87,11 @@ export function flushDrainCallbacks(state: BackpressureState): void {
   }
   state.drainCallbacks.length = 0;
 }
+
+/**
+ * Drop any queued drain callbacks without replaying writes.
+ * Used when a stream is being destroyed and retrying writes would race teardown.
+ */
+export function cancelDrainCallbacks(state: BackpressureState): void {
+  state.drainCallbacks.length = 0;
+}

@@ -37,3 +37,27 @@ export function appendLifecycleArtifacts(error: unknown, label: string): void {
   const artifacts = captureLifecycleFailureArtifacts(label);
   error.message = `${error.message}\nLifecycle artifacts:\n${formatLifecycleFailureArtifacts(artifacts)}`;
 }
+
+export async function withLifecycleTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+          appendLifecycleArtifacts(error, label);
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}

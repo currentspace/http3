@@ -969,6 +969,18 @@ fn remove_shared_client_session(
         return;
     }
     if let Some(session) = sessions.get(handle) {
+        reactor_metrics::record_lifecycle_trace(
+            "h3-client",
+            "shared-session-release",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle={handle} pending_writes={} blocked_streams={}",
+                session.handler.pending_writes.len(),
+                session.handler.conn.blocked_set.len()
+            )),
+        );
         if !session.handler.session_closed_emitted {
             reactor_metrics::record_session_close(SessionKind::H3Client);
         }
@@ -1633,6 +1645,19 @@ impl ProtocolHandler for H3ServerHandler {
                 reason,
             } => {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-server",
+                        "close-session-requested",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={conn_handle} error_code={error_code} blocked_streams={} pending_graceful_closes={} reason={}",
+                            conn.blocked_set.len(),
+                            self.pending_session_closes.len(),
+                            reason.as_str()
+                        )),
+                    );
                     if conn.send_goaway().is_ok() {
                         self.pending_session_closes.insert(
                             conn_handle,
@@ -1642,7 +1667,31 @@ impl ProtocolHandler for H3ServerHandler {
                                 Instant::now() + Duration::from_millis(25),
                             ),
                         );
+                        reactor_metrics::record_lifecycle_trace(
+                            "h3-server",
+                            "close-session-deferred",
+                            None,
+                            None,
+                            None,
+                            Some(format!(
+                                "conn_handle={conn_handle} error_code={error_code} blocked_streams={} pending_graceful_closes={}",
+                                conn.blocked_set.len(),
+                                self.pending_session_closes.len()
+                            )),
+                        );
                     } else {
+                        reactor_metrics::record_lifecycle_trace(
+                            "h3-server",
+                            "close-session-direct",
+                            None,
+                            None,
+                            None,
+                            Some(format!(
+                                "conn_handle={conn_handle} error_code={error_code} blocked_streams={} reason={}",
+                                conn.blocked_set.len(),
+                                reason.as_str()
+                            )),
+                        );
                         let _ = conn.quiche_conn.close(
                             true,
                             u64::from(error_code),
@@ -1880,6 +1929,18 @@ impl ProtocolHandler for H3ServerHandler {
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 conn.on_timeout();
                 if conn.is_closed() {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-server",
+                        "session-close-timeout",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={} blocked_streams={}",
+                            offset | (handle as u32),
+                            conn.blocked_set.len()
+                        )),
+                    );
                     reactor_metrics::record_session_close(SessionKind::H3Server);
                     batch.push(JsH3Event::session_close(offset | (handle as u32)));
                 } else {
@@ -1902,6 +1963,19 @@ impl ProtocolHandler for H3ServerHandler {
                 self.pending_session_closes.remove(&conn_handle)
             {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-server",
+                        "close-session-deadline",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={conn_handle} error_code={error_code} blocked_streams={} pending_graceful_closes={} reason={}",
+                            conn.blocked_set.len(),
+                            self.pending_session_closes.len(),
+                            reason.as_str()
+                        )),
+                    );
                     let _ = conn
                         .quiche_conn
                         .close(true, u64::from(error_code), reason.as_bytes());
@@ -1992,6 +2066,18 @@ impl ProtocolHandler for H3ServerHandler {
             self.pending_writes
                 .retain(|&(ch, _), _| ch as usize != *handle);
             if !self.last_expired.contains(handle) {
+                reactor_metrics::record_lifecycle_trace(
+                    "h3-server",
+                    "session-close-cleanup",
+                    None,
+                    None,
+                    None,
+                    Some(format!(
+                        "conn_handle={} pending_graceful_closes={}",
+                        offset | (*handle as u32),
+                        self.pending_session_closes.len()
+                    )),
+                );
                 reactor_metrics::record_session_close(SessionKind::H3Server);
                 batch.push(JsH3Event::session_close(offset | (*handle as u32)));
             }
@@ -2091,6 +2177,18 @@ impl H3ClientHandler {
     }
 
     fn close_session(&mut self, error_code: u32, reason: &str) {
+        reactor_metrics::record_lifecycle_trace(
+            "h3-client",
+            "close-session-requested",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle=0 error_code={error_code} pending_writes={} blocked_streams={} reason={reason}",
+                self.pending_writes.len(),
+                self.conn.blocked_set.len()
+            )),
+        );
         let _ = self
             .conn
             .quiche_conn
@@ -2167,6 +2265,18 @@ impl H3ClientHandler {
         if self.session_closed_emitted {
             return;
         }
+        reactor_metrics::record_lifecycle_trace(
+            "h3-client",
+            "session-close-emitted",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle={conn_handle} pending_writes={} blocked_streams={}",
+                self.pending_writes.len(),
+                self.conn.blocked_set.len()
+            )),
+        );
         reactor_metrics::record_session_close(SessionKind::H3Client);
         batch.push(JsH3Event::session_close(conn_handle));
         self.session_closed_emitted = true;
@@ -2293,6 +2403,18 @@ impl ProtocolHandler for H3ClientHandler {
         match cmd {
             ClientWorkerCommand::Shutdown => {
                 if !self.session_closed_emitted {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-client",
+                        "shutdown-command",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle=0 pending_writes={} blocked_streams={}",
+                            self.pending_writes.len(),
+                            self.conn.blocked_set.len()
+                        )),
+                    );
                     reactor_metrics::record_session_close(SessionKind::H3Client);
                     self.session_closed_emitted = true;
                 }

@@ -10,6 +10,7 @@ use quiche::h3::NameValue;
 
 use crate::error::Http3NativeError;
 use crate::h3_event::{JsH3Event, JsHeader};
+use crate::reactor_metrics;
 
 pub struct H3Connection {
     pub quiche_conn: quiche::Connection,
@@ -316,6 +317,17 @@ impl H3Connection {
         stream_id: u64,
         error_code: u64,
     ) -> Result<(), Http3NativeError> {
+        reactor_metrics::record_lifecycle_trace(
+            "h3-connection",
+            "stream-close",
+            None,
+            None,
+            None,
+            Some(format!(
+                "stream_id={stream_id} error_code={error_code} blocked_streams={}",
+                self.blocked_set.len()
+            )),
+        );
         self.quiche_conn
             .stream_shutdown(stream_id, quiche::Shutdown::Read, error_code)
             .ok(); // Ignore errors if already closed
@@ -353,6 +365,18 @@ impl H3Connection {
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
+        reactor_metrics::record_lifecycle_trace(
+            "h3-connection",
+            "send-goaway",
+            None,
+            None,
+            None,
+            Some(format!(
+                "last_peer_stream_id={} blocked_streams={}",
+                self.last_peer_stream_id,
+                self.blocked_set.len()
+            )),
+        );
         h3.send_goaway(&mut self.quiche_conn, self.last_peer_stream_id)
             .map_err(Http3NativeError::H3)
     }

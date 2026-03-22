@@ -1,11 +1,11 @@
 import { Duplex } from 'node:stream';
 import {
   type BackpressureState,
+  cancelDrainCallbacks,
   createBackpressureState,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
-  flushDrainCallbacks,
 } from './stream-backpressure.js';
 
 /**
@@ -62,7 +62,7 @@ export class QuicStream extends Duplex {
     } else if (this._clientLoop) {
       this._clientLoop.streamClose(this._streamId, errorCode);
     }
-    flushDrainCallbacks(this._bp);
+    cancelDrainCallbacks(this._bp);
     this.destroy();
   }
 
@@ -159,5 +159,10 @@ export class QuicStream extends Duplex {
       return this._clientLoop.streamSend(this._streamId, data, fin);
     }
     return 0;
+  }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    cancelDrainCallbacks(this._bp);
+    callback(error);
   }
 }
