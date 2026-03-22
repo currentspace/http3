@@ -1,0 +1,895 @@
+   Compiling http3 v0.6.0 (/home/brianmeek/scratch/http3-repo)
+warning: usage of an `unsafe` block
+   --> src/transport/socket.rs:107:13
+    |
+107 |             unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-W unsafe-code`
+
+warning: usage of an `unsafe` block
+   --> src/transport/socket.rs:116:21
+    |
+116 |                     unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/socket.rs:125:21
+    |
+125 |                     unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/socket.rs:243:13
+    |
+243 |             unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/socket.rs:252:21
+    |
+252 |                     unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: implementation of an `unsafe` trait
+  --> src/transport/io_uring.rs:68:5
+   |
+68 |     unsafe impl Send for RxBufferRing {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+  --> src/transport/io_uring.rs:79:23
+   |
+79 |               let ptr = unsafe {
+   |  _______________________^
+80 | |                 libc::mmap(
+81 | |                     std::ptr::null_mut(),
+82 | |                     total_size,
+...  |
+88 | |             };
+   | |_____________^
+
+warning: usage of an `unsafe` block
+  --> src/transport/io_uring.rs:93:28
+   |
+93 |             let buf_base = unsafe { ring_ptr.add(ring_header_size) };
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+  --> src/transport/io_uring.rs:98:29
+   |
+98 |                 let entry = unsafe { &mut *entries.add(i) };
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+  --> src/transport/io_uring.rs:99:32
+   |
+99 |                 let buf_addr = unsafe { buf_base.add(i * RX_BUF_SIZE) };
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:107:13
+    |
+107 | /             unsafe {
+108 | |                 submitter.register_buf_ring(
+109 | |                     ring_ptr as u64,
+110 | |                     RX_RING_SIZE,
+111 | |                     BUF_GROUP,
+112 | |                 )?;
+113 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:117:13
+    |
+117 | /             unsafe {
+118 | |                 let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+119 | |                 std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+120 | |                 tail_ptr.write(RX_RING_SIZE);
+121 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:126:55
+    |
+126 |             let mut msg: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
+    |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:144:25
+    |
+144 |             let entry = unsafe { &mut *entries.add(slot) };
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:146:28
+    |
+146 |             let buf_addr = unsafe { self.buf_base.add((bid as usize) * RX_BUF_SIZE) };
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:158:13
+    |
+158 | /             unsafe {
+159 | |                 let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+160 | |                 std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+161 | |                 tail_ptr.write(self.tail);
+162 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:169:13
+    |
+169 |             unsafe { std::slice::from_raw_parts(self.buf_base.add(offset), RX_BUF_SIZE) }
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:176:13
+    |
+176 | /             unsafe {
+177 | |                 libc::munmap(self.ring_ptr.cast(), self.ring_layout_size);
+178 | |             }
+    | |_____________^
+
+warning: implementation of an `unsafe` trait
+   --> src/transport/io_uring.rs:201:5
+    |
+201 |     unsafe impl Send for TxBufRing {}
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:211:23
+    |
+211 |               let ptr = unsafe {
+    |  _______________________^
+212 | |                 libc::mmap(
+213 | |                     std::ptr::null_mut(),
+214 | |                     total_size,
+...   |
+220 | |             };
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:225:28
+    |
+225 |             let buf_base = unsafe { ring_ptr.add(ring_header_size) };
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:230:29
+    |
+230 |                 let entry = unsafe { &mut *entries.add(i) };
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:231:32
+    |
+231 |                 let buf_addr = unsafe { buf_base.add(i * TX_BUF_ENTRY_SIZE) };
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:239:13
+    |
+239 | /             unsafe {
+240 | |                 submitter.register_buf_ring(ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP)?;
+241 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:244:13
+    |
+244 | /             unsafe {
+245 | |                 let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+246 | |                 tail_ptr.write(0);
+247 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:274:17
+    |
+274 | /                 unsafe {
+275 | |                     std::ptr::copy_nonoverlapping(
+276 | |                         packets[i].data.as_ptr(),
+277 | |                         self.buf_base.add(buf_offset),
+...   |
+283 | |                     entry.set_bid(slot as u16);
+284 | |                 }
+    | |_________________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:291:13
+    |
+291 | /             unsafe {
+292 | |                 let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+293 | |                 std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+294 | |                 tail_ptr.write(self.tail);
+295 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:326:28
+    |
+326 |                   let data = unsafe {
+    |  ____________________________^
+327 | |                     std::slice::from_raw_parts(self.buf_base.add(buf_offset), len).to_vec()
+328 | |                 };
+    | |_________________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:345:13
+    |
+345 | /             unsafe {
+346 | |                 submitter.register_buf_ring(self.ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP)?;
+347 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:350:13
+    |
+350 | /             unsafe {
+351 | |                 let tail_ptr = io_uring::types::BufRingEntry::tail(entries) as *mut u16;
+352 | |                 tail_ptr.write(0);
+353 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:361:13
+    |
+361 | /             unsafe {
+362 | |                 libc::munmap(self.ring_ptr.cast(), self.ring_layout_size);
+363 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:387:32
+    |
+387 |                 addr: Box::new(unsafe { std::mem::zeroed() }),
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:393:31
+    |
+393 |                 msg: Box::new(unsafe { std::mem::zeroed() }),
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: implementation of an `unsafe` trait
+   --> src/transport/io_uring.rs:479:5
+    |
+479 |     unsafe impl Send for IoUringDriver {}
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:533:23
+    |
+533 |             let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:538:27
+    |
+538 |             let eventfd = unsafe { OwnedFd::from_raw_fd(efd) };
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:590:28
+    |
+590 |             let waker_fd = unsafe { libc::dup(driver.eventfd.as_raw_fd()) };
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:595:33
+    |
+595 |             let waker_eventfd = unsafe { OwnedFd::from_raw_fd(waker_fd) };
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:749:25
+    |
+749 | /                         unsafe {
+750 | |                             libc::read(
+751 | |                                 self.eventfd.as_raw_fd(),
+752 | |                                 self.waker_buf.as_mut_ptr().cast(),
+753 | |                                 8,
+754 | |                             );
+755 | |                         }
+    | |_________________________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:856:43
+    |
+856 |                         let push_result = unsafe { self.ring.submission().push(&entry) };
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:953:13
+    |
+953 | /             unsafe {
+954 | |                 self.ring.submission().push(&entry).map_err(|_| {
+955 | |                     reactor_metrics::record_io_uring_sq_full_event();
+956 | |                     io::Error::new(io::ErrorKind::Other, "SQ full")
+957 | |                 })?;
+958 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:974:13
+    |
+974 | /             unsafe {
+975 | |                 self.ring.submission().push(&entry).map_err(|_| {
+976 | |                     reactor_metrics::record_io_uring_sq_full_event();
+977 | |                     io::Error::new(io::ErrorKind::Other, "SQ full")
+978 | |                 })?;
+979 | |             }
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/io_uring.rs:997:35
+    |
+997 |                 let push_result = unsafe { self.ring.submission().push(&entry) };
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1115:35
+     |
+1115 |                 let push_result = unsafe { self.ring.submission().push(&entry) };
+     |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1160:35
+     |
+1160 |                 let push_result = unsafe { self.ring.submission().push(&entry) };
+     |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1201:13
+     |
+1201 | /             unsafe {
+1202 | |                 self.ring.submitter().enter::<libc::sigset_t>(
+1203 | |                     0,
+1204 | |                     0,
+...    |
+1207 | |                 )?;
+1208 | |             }
+     | |_____________^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1302:25
+     |
+1302 | /                         unsafe {
+1303 | |                             libc::read(
+1304 | |                                 self.eventfd.as_raw_fd(),
+1305 | |                                 self.waker_buf.as_mut_ptr().cast(),
+1306 | |                                 8,
+1307 | |                             );
+1308 | |                         }
+     | |_________________________^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1363:22
+     |
+1363 |               let rc = unsafe {
+     |  ______________________^
+1364 | |                 libc::write(
+1365 | |                     self.eventfd.as_raw_fd(),
+1366 | |                     &val as *const u64 as *const libc::c_void,
+...    |
+1369 | |             };
+     | |_____________^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1390:42
+     |
+1390 |               let sin: libc::sockaddr_in = unsafe {
+     |  __________________________________________^
+1391 | |                 std::ptr::read_unaligned(data.as_ptr().cast())
+1392 | |             };
+     | |_____________^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1400:44
+     |
+1400 |               let sin6: libc::sockaddr_in6 = unsafe {
+     |  ____________________________________________^
+1401 | |                 std::ptr::read_unaligned(data.as_ptr().cast())
+1402 | |             };
+     | |_____________^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1427:17
+     |
+1427 | /                 unsafe {
+1428 | |                     std::ptr::write(storage as *mut _ as *mut libc::sockaddr_in, sockaddr);
+1429 | |                 }
+     | |_________________^
+
+warning: usage of an `unsafe` block
+    --> src/transport/io_uring.rs:1444:17
+     |
+1444 | /                 unsafe {
+1445 | |                     std::ptr::write(storage as *mut _ as *mut libc::sockaddr_in6, sockaddr);
+1446 | |                 }
+     | |_________________^
+
+warning: usage of an `unsafe` block
+  --> src/transport/poll.rs:46:27
+   |
+46 |                     addr: unsafe { std::mem::zeroed() },
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+  --> src/transport/poll.rs:57:46
+   |
+57 |                 (0..MAX_RX_PER_POLL).map(|_| unsafe { std::mem::zeroed() }).collect();
+   |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: implementation of an `unsafe` trait
+   --> src/transport/poll.rs:111:5
+    |
+111 |     unsafe impl Send for PollDriver {}
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:132:23
+    |
+132 |             let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:137:27
+    |
+137 |             let eventfd = unsafe { OwnedFd::from_raw_fd(efd) };
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:157:28
+    |
+157 |             let waker_fd = unsafe { libc::dup(driver.eventfd.as_raw_fd()) };
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:162:33
+    |
+162 |             let waker_eventfd = unsafe { OwnedFd::from_raw_fd(waker_fd) };
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:196:22
+    |
+196 |             let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:266:25
+    |
+266 |               let count = unsafe {
+    |  _________________________^
+267 | |                 libc::recvmmsg(
+268 | |                     self.socket_fd,
+269 | |                     self.rx_batch.hdrs.as_mut_ptr(),
+...   |
+274 | |             };
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:326:40
+    |
+326 |             self.tx_hdrs.resize(count, unsafe { std::mem::zeroed() });
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:332:41
+    |
+332 |             self.tx_addrs.resize(count, unsafe { std::mem::zeroed() });
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:356:24
+    |
+356 |               let sent = unsafe {
+    |  ________________________^
+357 | |                 libc::sendmmsg(
+358 | |                     self.socket_fd,
+359 | |                     self.tx_hdrs.as_mut_ptr(),
+...   |
+363 | |             };
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:399:36
+    |
+399 |                 (0..count).map(|_| unsafe { std::mem::zeroed() }).collect();
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:403:36
+    |
+403 |                 (0..count).map(|_| unsafe { std::mem::zeroed() }).collect();
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:441:24
+    |
+441 |               let sent = unsafe {
+    |  ________________________^
+442 | |                 libc::sendmmsg(
+443 | |                     self.socket_fd,
+444 | |                     tx_hdrs.as_mut_ptr(),
+...   |
+448 | |             };
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:500:26
+    |
+500 |                   let rc = unsafe {
+    |  __________________________^
+501 | |                     libc::read(
+502 | |                         self.eventfd.as_raw_fd(),
+503 | |                         self.waker_buf.as_mut_ptr().cast(),
+...   |
+506 | |                 };
+    | |_________________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:525:22
+    |
+525 |               let rc = unsafe {
+    |  ______________________^
+526 | |                 libc::write(
+527 | |                     self.eventfd.as_raw_fd(),
+528 | |                     &value as *const u64 as *const libc::c_void,
+...   |
+531 | |             };
+    | |_____________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:548:43
+    |
+548 |             let sin: &libc::sockaddr_in = unsafe { &*(addr as *const _ as *const _) };
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:556:45
+    |
+556 |             let sin6: &libc::sockaddr_in6 = unsafe { &*(addr as *const _ as *const _) };
+    |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:580:17
+    |
+580 | /                 unsafe {
+581 | |                     std::ptr::write(storage as *mut _ as *mut libc::sockaddr_in, sockaddr);
+582 | |                 }
+    | |_________________^
+
+warning: usage of an `unsafe` block
+   --> src/transport/poll.rs:596:17
+    |
+596 | /                 unsafe {
+597 | |                     std::ptr::write(storage as *mut _ as *mut libc::sockaddr_in6, sockaddr);
+598 | |                 }
+    | |_________________^
+
+warning: use of deprecated method `io_uring::Submitter::<'a>::register_buf_ring`: please use `register_buf_ring_with_flags` instead
+   --> src/transport/io_uring.rs:108:27
+    |
+108 |                 submitter.register_buf_ring(
+    |                           ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `io_uring::Submitter::<'a>::register_buf_ring`: please use `register_buf_ring_with_flags` instead
+   --> src/transport/io_uring.rs:240:27
+    |
+240 |                 submitter.register_buf_ring(ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP)?;
+    |                           ^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `io_uring::Submitter::<'a>::register_buf_ring`: please use `register_buf_ring_with_flags` instead
+   --> src/transport/io_uring.rs:346:27
+    |
+346 |                 submitter.register_buf_ring(self.ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP)?;
+    |                           ^^^^^^^^^^^^^^^^^
+
+warning: function `record_io_uring_rx_in_flight` is never used
+   --> src/reactor_metrics.rs:307:15
+    |
+307 | pub(crate) fn record_io_uring_rx_in_flight(count: usize) {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: field `socket_fd` is never read
+   --> src/transport/io_uring.rs:449:9
+    |
+447 |     pub struct IoUringDriver {
+    |                ------------- field in this struct
+448 |         ring: io_uring::IoUring,
+449 |         socket_fd: RawFd,
+    |         ^^^^^^^^^
+
+warning: field `tx_cmsg_bufs` is never read
+   --> src/transport/poll.rs:104:9
+    |
+89  |     pub struct PollDriver {
+    |                ---------- field in this struct
+...
+104 |         tx_cmsg_bufs: Vec<[u8; 32]>,
+    |         ^^^^^^^^^^^^
+
+warning: `http3` (lib) generated 79 warnings
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "/tmp/rustcNlYugc/symbols.o" "<17 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "/home/brianmeek/scratch/http3-repo/target/release/deps/{libhttp3.rlib,libenv_logger-fc59a221b9b581bb.rlib,libjiff-7e948635f9e0d860.rlib,libanstream-cb7b207e0d6c7a2b.rlib,libanstyle_query-8b6f8c789521e08d.rlib,libis_terminal_polyfill-5203b8ed23317d3a.rlib,libcolorchoice-1a12085c14b79b70.rlib,libanstyle_parse-32d3875a13c4c52d.rlib,libutf8parse-2445c3820f403bac.rlib,libenv_filter-51e7125c89b41512.rlib,libio_uring-aec6dc5e606f1aff.rlib,libsocket2-03249023833e9858.rlib,libcrossbeam_channel-c9753fcab838c7f0.rlib,libnapi-76fe04a5ce10c37b.rlib,libnapi_sys-49fa468c46baf6d5.rlib,libbitflags-b226cdd31b2c0070.rlib,librustc_hash-1569074497ec8fcc.rlib,libnohash_hasher-55c8948649225718.rlib,libctor-1e2d956b791ae7ee.rlib,libdtor-649f839556dec936.rlib,libquiche-e7acf24f2c3472bc.rlib,liblibm-55c3b68156aaaf10.rlib,liboctets-4d52f54bd7db89f1.rlib,libintrusive_collections-90c4520529182f4a.rlib,libmemoffset-1979ab9764a5eac2.rlib,libslab-9b328556d50fb65a.rlib,libqlog-f2a84262dc804979.rlib,libserde_with-c563b084aaa0b317.rlib,libsmallvec-b09d0c5dfe300b43.rlib,liblog-c32f00489096f252.rlib,libring-2ca43a68b6cbf2d0.rlib,libgetrandom-8018deb9e718365d.rlib,libuntrusted-109a43c223aa7ee1.rlib,libcriterion-787c663d612dee65.rlib,libciborium-2a569bcc35b749b5.rlib,libciborium_ll-b4f3c7264a4bd8a3.rlib,libhalf-57d6ef4cfa5197e8.rlib,libcfg_if-fa8a492d6c20dc79.rlib,libzerocopy-45f49b081816e34e.rlib,libciborium_io-c30eb935968ef98a.rlib,libclap-3beca1143f2dbfa7.rlib,libclap_builder-3052c302082405d4.rlib,libclap_lex-ff10a4e42aa61010.rlib,libanstyle-832ead8beda3c026.rlib,libonce_cell-bf03579fbb55bf5d.rlib,liboorandom-e6b815d5f7da19d4.rlib,librayon-5a808677a87d7c39.rlib,librayon_core-785e2997a952102a.rlib,libcrossbeam_deque-64da66b48aaced83.rlib,libcrossbeam_epoch-8f2d1212ef550ef0.rlib,libcrossbeam_utils-eb8e6907214c9427.rlib,libanes-c45f4899c1deda33.rlib,libplotters-0e1ed80e4ccb5280.rlib,libplotters_svg-05ec8811fbacb63d.rlib,libnum_traits-6c0b267cfe20d188.rlib,libplotters_backend-d212729721033b58.rlib,libtinytemplate-702e0bb5d0013ab2.rlib,libcriterion_plot-f81060b56d1fefb3.rlib,libitertools-370aab992206b374.rlib,libeither-7785791bfa680600.rlib,libcast-e7ee39b14c730af2.rlib,libwalkdir-fc3276786b323b16.rlib,libsame_file-b583d43bb79b3a3f.rlib,libserde-1995bfc08c88746c.rlib,libserde_json-13881406de85f69e.rlib,libitoa-f6fccccfb89990ba.rlib,libzmij-ca7e199fc3818ea0.rlib,libindexmap-9186dd16cd7ff488.rlib,libequivalent-cb249dfe9faeeb3c.rlib,libhashbrown-9b3c96e68d7d0ad6.rlib,libserde_core-592ec9ee716ca0b0.rlib,libregex-96f165c799304c55.rlib,libregex_automata-aec040bffc02658d.rlib,libaho_corasick-71f19d9ba76aba66.rlib,libmemchr-299d31e71a724e35.rlib,libregex_syntax-970f7fd4c2c58107.rlib,libis_terminal-e127e6a585ccd076.rlib,liblibc-2fab5083062e8562.rlib}.rlib" "<sysroot>/lib/rustlib/aarch64-unknown-linux-gnu/lib/{libstd-*,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,libcfg_if-*,liblibc-*,liballoc-*,librustc_std_workspace_core-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "/home/brianmeek/scratch/http3-repo/target/release/build/quiche-a60907434b628248/out/build/" "-L" "/home/brianmeek/scratch/http3-repo/target/release/build/ring-cfc25935035c0634/out" "-L" "<sysroot>/lib/rustlib/aarch64-unknown-linux-gnu/lib" "-o" "/home/brianmeek/scratch/http3-repo/target/release/deps/driver_udp-310bf1087834ef93" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-Wl,-O1" "-Wl,--strip-debug" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `<core::option::Option<T> as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN95_$LT$core..option..Option$LT$T$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h00aae725dead751dE+0x28): undefined reference to `napi_get_null'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `<core::option::Option<T> as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN95_$LT$core..option..Option$LT$T$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h3366dec9a5c9ea98E+0x28): undefined reference to `napi_get_null'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `<core::option::Option<T> as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN95_$LT$core..option..Option$LT$T$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h6e94e355cea18a99E+0x28): undefined reference to `napi_get_null'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `<core::option::Option<T> as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN95_$LT$core..option..Option$LT$T$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h711ba4a5e76d39b8E+0x2c): undefined reference to `napi_get_null'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `<core::option::Option<T> as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN95_$LT$core..option..Option$LT$T$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17ha583571348e8ee67E+0x24): undefined reference to `napi_get_null'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o):http3.26906cad73ad8167-cgu.00:(.text._ZN95_$LT$core..option..Option$LT$T$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17hde83b4c3253cdde8E+0x34): more undefined references to `napi_get_null' follow
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `http3::server::__napi_impl_helper_NativeWorkerServer_4::listen_c_callback':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN5http36server39__napi_impl_helper_NativeWorkerServer_417listen_c_callback17h5f18136ac4c04bceE+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `http3::server::__napi_impl_helper_NativeWorkerServer_4::send_response_headers_c_callback':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN5http36server39__napi_impl_helper_NativeWorkerServer_432send_response_headers_c_callback17h0dfdebfba8d2f68dE+0x70): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `http3::server::__napi_impl_helper_NativeWorkerServer_4::stream_send_c_callback':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN5http36server39__napi_impl_helper_NativeWorkerServer_422stream_send_c_callback17hc17e4ba2ecb7d675E+0x70): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `http3::server::__napi_impl_helper_NativeWorkerServer_4::send_trailers_c_callback':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN5http36server39__napi_impl_helper_NativeWorkerServer_424send_trailers_c_callback17h4172fc34e995930eE+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o): in function `http3::server::__napi_impl_helper_NativeWorkerServer_4::stream_close_c_callback':
+          http3.26906cad73ad8167-cgu.00:(.text._ZN5http36server39__napi_impl_helper_NativeWorkerServer_423stream_close_c_callback17ha559d35c84c17c57E+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.00.rcgu.o):http3.26906cad73ad8167-cgu.00:(.text._ZN5http36server39__napi_impl_helper_NativeWorkerServer_424close_session_c_callback17hf9c3462dd413475eE+0x50): more undefined references to `napi_unwrap' follow
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.01.rcgu.o): in function `napi::bindgen_runtime::raw_finalize_unchecked':
+          http3.26906cad73ad8167-cgu.01:(.text._ZN4napi15bindgen_runtime22raw_finalize_unchecked17h0b7c32946db70d1aE+0xec): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.01.rcgu.o): in function `napi::bindgen_runtime::raw_finalize_unchecked':
+          http3.26906cad73ad8167-cgu.01:(.text._ZN4napi15bindgen_runtime22raw_finalize_unchecked17h1326ca474a63bc38E+0xec): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.01.rcgu.o): in function `napi::bindgen_runtime::raw_finalize_unchecked':
+          http3.26906cad73ad8167-cgu.01:(.text._ZN4napi15bindgen_runtime22raw_finalize_unchecked17h3d654e0d81b6bf55E+0xfc): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.01.rcgu.o): in function `napi::bindgen_runtime::raw_finalize_unchecked':
+          http3.26906cad73ad8167-cgu.01:(.text._ZN4napi15bindgen_runtime22raw_finalize_unchecked17h50a32f1f890073f7E+0xec): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.01.rcgu.o): in function `napi::bindgen_runtime::raw_finalize_unchecked':
+          http3.26906cad73ad8167-cgu.01:(.text._ZN4napi15bindgen_runtime22raw_finalize_unchecked17ha97c02432b85196eE+0xec): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `napi::threadsafe_function::call_js_cb':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function10call_js_cb17h7d6c8a8554fe341bE+0x64): undefined reference to `napi_get_undefined'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function10call_js_cb17h7d6c8a8554fe341bE+0x114): undefined reference to `napi_call_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function10call_js_cb17h7d6c8a8554fe341bE+0x1f8): undefined reference to `napi_get_null'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function10call_js_cb17h7d6c8a8554fe341bE+0x240): undefined reference to `napi_call_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function10call_js_cb17h7d6c8a8554fe341bE+0x260): undefined reference to `napi_get_and_clear_last_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function10call_js_cb17h7d6c8a8554fe341bE+0x27c): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function10call_js_cb17h7d6c8a8554fe341bE+0x37c): undefined reference to `napi_fatal_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `napi::threadsafe_function::ThreadsafeFunctionHandle::with_read_aborted':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function24ThreadsafeFunctionHandle17with_read_aborted17h759066a9b47f2a1dE+0x17c): undefined reference to `napi_call_threadsafe_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `napi::threadsafe_function::ThreadsafeFunction<T,Return,CallJsBackArgs,ErrorStatus,_,_,_>::create':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function79ThreadsafeFunction$LT$T$C$Return$C$CallJsBackArgs$C$ErrorStatus$C$_$C$_$C$_$GT$6create17h7e69a73fdc3119e1E+0x38): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.02:(.text._ZN4napi19threadsafe_function79ThreadsafeFunction$LT$T$C$Return$C$CallJsBackArgs$C$ErrorStatus$C$_$C$_$C$_$GT$6create17h7e69a73fdc3119e1E+0x188): undefined reference to `napi_create_threadsafe_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `http3::quic_client::__napi_impl_helper_NativeQuicClient_2::connect_c_callback':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN5http311quic_client37__napi_impl_helper_NativeQuicClient_218connect_c_callback17hd5c3a70299742711E+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `http3::quic_client::__napi_impl_helper_NativeQuicClient_2::stream_send_c_callback':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN5http311quic_client37__napi_impl_helper_NativeQuicClient_222stream_send_c_callback17h9bb826b7f33bf350E+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `http3::quic_client::__napi_impl_helper_NativeQuicClient_2::stream_close_c_callback':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN5http311quic_client37__napi_impl_helper_NativeQuicClient_223stream_close_c_callback17ha3cdeb15c51716d2E+0x4c): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `http3::quic_client::__napi_impl_helper_NativeQuicClient_2::close_c_callback':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN5http311quic_client37__napi_impl_helper_NativeQuicClient_216close_c_callback17h24469a09403c2f76E+0x4c): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o): in function `http3::quic_client::__napi_impl_helper_NativeQuicClient_2::send_datagram_c_callback':
+          http3.26906cad73ad8167-cgu.02:(.text._ZN5http311quic_client37__napi_impl_helper_NativeQuicClient_224send_datagram_c_callback17hd19cd6263daae71dE+0x48): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.02.rcgu.o):http3.26906cad73ad8167-cgu.02:(.text._ZN5http311quic_client37__napi_impl_helper_NativeQuicClient_224local_address_c_callback17h8c5af5bfbd98202eE+0x48): more undefined references to `napi_unwrap' follow
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.04.rcgu.o): in function `napi::bindgen_runtime::js_values::array::Array::get':
+          http3.26906cad73ad8167-cgu.04:(.text._ZN4napi15bindgen_runtime9js_values5array5Array3get17h1fa3aa9a9acd1307E+0x34): undefined reference to `napi_get_element'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.04.rcgu.o): in function `napi::bindgen_runtime::js_values::array::Array::get':
+          http3.26906cad73ad8167-cgu.04:(.text._ZN4napi15bindgen_runtime9js_values5array5Array3get17h44aa3a57320fa81fE+0x34): undefined reference to `napi_get_element'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.04.rcgu.o): in function `napi::bindgen_runtime::js_values::array::Array::set':
+          http3.26906cad73ad8167-cgu.04:(.text._ZN4napi15bindgen_runtime9js_values5array5Array3set17h0ed84ad738b24197E+0x54): undefined reference to `napi_set_element'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.04.rcgu.o): in function `napi::bindgen_runtime::js_values::array::Array::set':
+          http3.26906cad73ad8167-cgu.04:(.text._ZN4napi15bindgen_runtime9js_values5array5Array3set17h5792b7a787b3955cE+0x50): undefined reference to `napi_set_element'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.04.rcgu.o): in function `napi::bindgen_runtime::js_values::array::Array::set':
+          http3.26906cad73ad8167-cgu.04:(.text._ZN4napi15bindgen_runtime9js_values5array5Array3set17h72462cf635dd9577E+0x50): undefined reference to `napi_set_element'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.04.rcgu.o): in function `napi::bindgen_runtime::js_values::array::Array::set':
+          http3.26906cad73ad8167-cgu.04:(.text._ZN4napi15bindgen_runtime9js_values5array5Array3set17hc3b309d574fc269aE+0x50): undefined reference to `napi_set_element'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.08.rcgu.o): in function `napi::error::JsError<S>::into_value':
+          http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x44): undefined reference to `napi_get_reference_value'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x58): undefined reference to `napi_reference_unref'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x6c): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x84): undefined reference to `napi_is_error'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0xc4): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0xd8): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0xe8): undefined reference to `napi_create_error'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x134): undefined reference to `napi_get_reference_value'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x274): undefined reference to `napi_set_named_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x2cc): undefined reference to `napi_reference_unref'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17hab44507bb5c1d366E+0x398): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.08.rcgu.o): in function `napi::error::JsError<S>::throw_into':
+          http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hdc696a6f6b17d22bE+0xcc): undefined reference to `napi_is_exception_pending'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hdc696a6f6b17d22bE+0xec): undefined reference to `napi_get_and_clear_last_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hdc696a6f6b17d22bE+0x100): undefined reference to `napi_throw'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hdc696a6f6b17d22bE+0x154): undefined reference to `napi_throw'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.08.rcgu.o): in function `<napi::error::Error<S> as core::ops::drop::Drop>::drop':
+          http3.26906cad73ad8167-cgu.08:(.text._ZN69_$LT$napi..error..Error$LT$S$GT$$u20$as$u20$core..ops..drop..Drop$GT$4drop17hd36f9a1fc5275276E+0x28): undefined reference to `napi_reference_unref'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.08:(.text._ZN69_$LT$napi..error..Error$LT$S$GT$$u20$as$u20$core..ops..drop..Drop$GT$4drop17hd36f9a1fc5275276E+0x98): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.14.rcgu.o): in function `napi::bindgen_runtime::module_register::PersistedPerInstanceHashMap<K,V,S>::borrow_mut':
+          http3.26906cad73ad8167-cgu.14:(.text._ZN4napi15bindgen_runtime15module_register44PersistedPerInstanceHashMap$LT$K$C$V$C$S$GT$10borrow_mut17h28eba9fc7a5bafa8E+0x8c): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::_construct':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$10_construct17h339d4893bd61b2f2E+0xac): undefined reference to `napi_wrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::_construct':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$10_construct17h5ef15d65e949011fE+0xac): undefined reference to `napi_wrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::_construct':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$10_construct17he5b87acaecf4624fE+0xac): undefined reference to `napi_wrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::new':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17h3421382874bae230E+0x4c): undefined reference to `napi_get_cb_info'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17h3421382874bae230E+0x1b4): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::new':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17h36d283f3d349a781E+0x3c): undefined reference to `napi_get_cb_info'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17h36d283f3d349a781E+0x194): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::new':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17hae2bc4f89398de4aE+0x48): undefined reference to `napi_get_cb_info'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17hae2bc4f89398de4aE+0x1a0): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::new':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17hbd29e56121c22f73E+0x44): undefined reference to `napi_get_cb_info'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17hbd29e56121c22f73E+0x19c): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `napi::bindgen_runtime::callback_info::CallbackInfo<_>::new':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17he566f0f58430431aE+0x44): undefined reference to `napi_get_cb_info'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: http3.26906cad73ad8167-cgu.06:(.text._ZN4napi15bindgen_runtime13callback_info21CallbackInfo$LT$_$GT$3new17he566f0f58430431aE+0x19c): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::client::__napi_impl_helper_NativeWorkerClient_0::new_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http36client39__napi_impl_helper_NativeWorkerClient_014new_c_callback17hb66a442ead5f481dE+0x364): undefined reference to `napi_wrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::client::__napi_impl_helper_NativeWorkerClient_0::connect_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http36client39__napi_impl_helper_NativeWorkerClient_018connect_c_callback17h26bf0222e5f37a8eE+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::client::__napi_impl_helper_NativeWorkerClient_0::send_request_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http36client39__napi_impl_helper_NativeWorkerClient_023send_request_c_callback17h8e7d483b4bbbfd39E+0x4c): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::client::__napi_impl_helper_NativeWorkerClient_0::stream_send_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http36client39__napi_impl_helper_NativeWorkerClient_022stream_send_c_callback17he2a64e7ea5334e1bE+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::client::__napi_impl_helper_NativeWorkerClient_0::stream_close_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http36client39__napi_impl_helper_NativeWorkerClient_023stream_close_c_callback17h26f410f22216b97cE+0x4c): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::client::__napi_impl_helper_NativeWorkerClient_0::close_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http36client39__napi_impl_helper_NativeWorkerClient_016close_c_callback17ha15b6f6beb0756eeE+0x4c): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o):http3.26906cad73ad8167-cgu.06:(.text._ZN5http36client39__napi_impl_helper_NativeWorkerClient_024send_datagram_c_callback17h3d6b5438a9dda2e9E+0x48): more undefined references to `napi_unwrap' follow
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::mock_quic_profile::__napi_impl_helper_NativeMockQuicProfiler_1::new_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http317mock_quic_profile43__napi_impl_helper_NativeMockQuicProfiler_114new_c_callback17hcda8a2d65ad1245bE+0x31c): undefined reference to `napi_wrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::mock_quic_profile::__napi_impl_helper_NativeMockQuicProfiler_1::poll_result_json_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http317mock_quic_profile43__napi_impl_helper_NativeMockQuicProfiler_127poll_result_json_c_callback17hd2cdfbce4b387fb7E+0x44): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.06.rcgu.o): in function `http3::mock_quic_profile::__napi_impl_helper_NativeMockQuicProfiler_1::shutdown_c_callback':
+          http3.26906cad73ad8167-cgu.06:(.text._ZN5http317mock_quic_profile43__napi_impl_helper_NativeMockQuicProfiler_119shutdown_c_callback17hcceaeaa6e1587e4fE+0x44): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.13.rcgu.o): in function `http3::quic_server::__napi_impl_helper_NativeQuicServer_3::listen_c_callback':
+          http3.26906cad73ad8167-cgu.13:(.text._ZN5http311quic_server37__napi_impl_helper_NativeQuicServer_317listen_c_callback17h03f64196c27019f3E+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.13.rcgu.o): in function `http3::quic_server::__napi_impl_helper_NativeQuicServer_3::stream_send_c_callback':
+          http3.26906cad73ad8167-cgu.13:(.text._ZN5http311quic_server37__napi_impl_helper_NativeQuicServer_322stream_send_c_callback17h5d2a21fd9cd70260E+0x70): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.13.rcgu.o): in function `http3::quic_server::__napi_impl_helper_NativeQuicServer_3::stream_close_c_callback':
+          http3.26906cad73ad8167-cgu.13:(.text._ZN5http311quic_server37__napi_impl_helper_NativeQuicServer_323stream_close_c_callback17h2cabcf27fded5f18E+0x50): undefined reference to `napi_unwrap'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.13.rcgu.o):http3.26906cad73ad8167-cgu.13:(.text._ZN5http311quic_server37__napi_impl_helper_NativeQuicServer_324close_session_c_callback17hc5bb8e058e7cc958E+0x50): more undefined references to `napi_unwrap' follow
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.13.rcgu.o): in function `http3::_napi_rs_internal_register_version':
+          http3.26906cad73ad8167-cgu.13:(.text._ZN5http334_napi_rs_internal_register_version17hf193bb06c0317cefE+0x30): undefined reference to `napi_create_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.13.rcgu.o): in function `http3::_napi_rs_internal_register_runtime_telemetry':
+          http3.26906cad73ad8167-cgu.13:(.text._ZN5http344_napi_rs_internal_register_runtime_telemetry17he9c99bc80fae8926E+0x30): undefined reference to `napi_create_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libhttp3.rlib(http3.http3.26906cad73ad8167-cgu.13.rcgu.o): in function `http3::_napi_rs_internal_register_reset_runtime_telemetry':
+          http3.26906cad73ad8167-cgu.13:(.text._ZN5http350_napi_rs_internal_register_reset_runtime_telemetry17h96101402014950e6E+0x30): undefined reference to `napi_create_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::ToNapiValue for u8>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number78_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$u8$GT$13to_napi_value17h0843c4f546c07aa6E+0x1c): undefined reference to `napi_create_uint32'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::ToNapiValue for u16>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number79_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$u16$GT$13to_napi_value17h74358200a0a670c6E+0x1c): undefined reference to `napi_create_uint32'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::ToNapiValue for u32>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number79_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$u32$GT$13to_napi_value17h4caec9755b7e3d97E+0x18): undefined reference to `napi_create_uint32'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::FromNapiValue for u32>::from_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number81_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$u32$GT$15from_napi_value17h84a8ef37de94eb36E+0x24): undefined reference to `napi_get_value_uint32'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number81_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$u32$GT$15from_napi_value17h84a8ef37de94eb36E+0x60): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number81_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$u32$GT$15from_napi_value17h84a8ef37de94eb36E+0x120): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::ToNapiValue for i32>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number79_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$i32$GT$13to_napi_value17hfb6a80477d474bf8E+0x18): undefined reference to `napi_create_int32'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::ToNapiValue for i64>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number79_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$i64$GT$13to_napi_value17h05d4bd5d148bb76dE+0x18): undefined reference to `napi_create_int64'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::FromNapiValue for i64>::from_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number81_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$i64$GT$15from_napi_value17h5c5eeacf08697988E+0x24): undefined reference to `napi_get_value_int64'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number81_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$i64$GT$15from_napi_value17h5c5eeacf08697988E+0x60): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number81_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$i64$GT$15from_napi_value17h5c5eeacf08697988E+0x11c): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.02.rcgu.o): in function `napi::bindgen_runtime::js_values::number::<impl napi::bindgen_runtime::js_values::ToNapiValue for f64>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.02:(.text._ZN4napi15bindgen_runtime9js_values6number79_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$f64$GT$13to_napi_value17h3063d9ac18f7dfe6E+0x18): undefined reference to `napi_create_double'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.03.rcgu.o): in function `napi::js_values::string::JsString::utf8_len':
+          napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi9js_values6string8JsString8utf8_len17h187264e999f28097E+0x24): undefined reference to `napi_get_value_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.03.rcgu.o): in function `napi::js_values::string::JsString::into_utf8':
+          napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi9js_values6string8JsString9into_utf817h0738da1b3cb1841fE+0x74): undefined reference to `napi_get_value_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi9js_values6string8JsString9into_utf817h0738da1b3cb1841fE+0x12c): undefined reference to `napi_get_value_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.03.rcgu.o): in function `napi::js_values::value::JsValue::coerce_to_string':
+          napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi9js_values5value7JsValue16coerce_to_string17h098a228b05d34320E+0x20): undefined reference to `napi_coerce_to_string'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.03.rcgu.o): in function `<napi::threadsafe_function::ThreadsafeFunctionHandle as core::ops::drop::Drop>::drop':
+          napi.ff17b37bbaa707ce-cgu.03:(.text._ZN93_$LT$napi..threadsafe_function..ThreadsafeFunctionHandle$u20$as$u20$core..ops..drop..Drop$GT$4drop17hd07c8137e2465565E+0x64): undefined reference to `napi_release_threadsafe_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.03.rcgu.o): in function `napi::threadsafe_function::handle_call_js_cb_status':
+          napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi19threadsafe_function24handle_call_js_cb_status17h6f2ca09819a91043E+0x1a0): undefined reference to `napi_get_and_clear_last_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi19threadsafe_function24handle_call_js_cb_status17h6f2ca09819a91043E+0x1b4): undefined reference to `napi_fatal_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi19threadsafe_function24handle_call_js_cb_status17h6f2ca09819a91043E+0x230): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi19threadsafe_function24handle_call_js_cb_status17h6f2ca09819a91043E+0x254): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi19threadsafe_function24handle_call_js_cb_status17h6f2ca09819a91043E+0x270): undefined reference to `napi_create_error'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.03:(.text._ZN4napi19threadsafe_function24handle_call_js_cb_status17h6f2ca09819a91043E+0x284): undefined reference to `napi_fatal_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.05.rcgu.o): in function `<napi::error::Error<S> as core::ops::drop::Drop>::drop':
+          napi.ff17b37bbaa707ce-cgu.05:(.text._ZN69_$LT$napi..error..Error$LT$S$GT$$u20$as$u20$core..ops..drop..Drop$GT$4drop17he6cd16a1e90a48b8E+0x28): undefined reference to `napi_reference_unref'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN69_$LT$napi..error..Error$LT$S$GT$$u20$as$u20$core..ops..drop..Drop$GT$4drop17he6cd16a1e90a48b8E+0x98): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.05.rcgu.o): in function `<napi::error::Error<S> as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.05:(.text._ZN93_$LT$napi..error..Error$LT$S$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17hfe74eb850ef91af5E+0x40): undefined reference to `napi_get_reference_value'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN93_$LT$napi..error..Error$LT$S$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17hfe74eb850ef91af5E+0x114): undefined reference to `napi_reference_unref'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN93_$LT$napi..error..Error$LT$S$GT$$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17hfe74eb850ef91af5E+0x1f8): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.05.rcgu.o): in function `<napi::error::Error as core::convert::From<napi::js_values::unknown::Unknown>>::from':
+          napi.ff17b37bbaa707ce-cgu.05:(.text._ZN99_$LT$napi..error..Error$u20$as$u20$core..convert..From$LT$napi..js_values..unknown..Unknown$GT$$GT$4from17he2e2348e8c96d91eE+0x34): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN99_$LT$napi..error..Error$u20$as$u20$core..convert..From$LT$napi..js_values..unknown..Unknown$GT$$GT$4from17he2e2348e8c96d91eE+0x100): undefined reference to `napi_coerce_to_string'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN99_$LT$napi..error..Error$u20$as$u20$core..convert..From$LT$napi..js_values..unknown..Unknown$GT$$GT$4from17he2e2348e8c96d91eE+0x1e8): undefined reference to `napi_coerce_to_object'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.05.rcgu.o): in function `napi::error::get_error_message_and_stack_trace':
+          napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error33get_error_message_and_stack_trace17hafb4a5d298bcae6cE+0x28): undefined reference to `napi_coerce_to_string'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error33get_error_message_and_stack_trace17hafb4a5d298bcae6cE+0x130): undefined reference to `napi_get_named_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error33get_error_message_and_stack_trace17hafb4a5d298bcae6cE+0x200): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.05.rcgu.o): in function `napi::error::JsError<S>::into_value':
+          napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0x34): undefined reference to `napi_get_reference_value'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0x48): undefined reference to `napi_reference_unref'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0x5c): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0x74): undefined reference to `napi_is_error'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0xb4): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0xc8): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0xd8): undefined reference to `napi_create_error'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10into_value17h7edad21af09642d5E+0x13c): undefined reference to `napi_set_named_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.05.rcgu.o): in function `napi::error::JsError<S>::throw_into':
+          napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hf8545b1b62b3ef92E+0xcc): undefined reference to `napi_is_exception_pending'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hf8545b1b62b3ef92E+0xec): undefined reference to `napi_get_and_clear_last_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hf8545b1b62b3ef92E+0x100): undefined reference to `napi_throw'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.05:(.text._ZN4napi5error16JsError$LT$S$GT$10throw_into17hf8545b1b62b3ef92E+0x154): undefined reference to `napi_throw'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.06.rcgu.o): in function `napi::bindgen_runtime::js_values::function::Function<Args,Return>::name':
+          napi.ff17b37bbaa707ce-cgu.06:(.text._ZN4napi15bindgen_runtime9js_values8function29Function$LT$Args$C$Return$GT$4name17h000c4f8998ebf9e8E+0x28): undefined reference to `napi_get_named_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.06.rcgu.o): in function `napi::bindgen_runtime::js_values::function::Function<Args,Return>::call':
+          napi.ff17b37bbaa707ce-cgu.06:(.text._ZN4napi15bindgen_runtime9js_values8function29Function$LT$Args$C$Return$GT$4call17ha257956dd66ba298E+0x30): undefined reference to `napi_get_undefined'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.06:(.text._ZN4napi15bindgen_runtime9js_values8function29Function$LT$Args$C$Return$GT$4call17ha257956dd66ba298E+0x130): undefined reference to `napi_call_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.06:(.text._ZN4napi15bindgen_runtime9js_values8function29Function$LT$Args$C$Return$GT$4call17ha257956dd66ba298E+0x14c): undefined reference to `napi_get_and_clear_last_exception'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.07.rcgu.o): in function `napi::bindgen_runtime::js_values::string::<impl napi::bindgen_runtime::js_values::ToNapiValue for &alloc::string::String>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string101_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$$RF$alloc..string..String$GT$13to_napi_value17h50faacdcb29cbff5E+0x20): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.07.rcgu.o): in function `napi::bindgen_runtime::js_values::string::<impl napi::bindgen_runtime::js_values::FromNapiValue for alloc::string::String>::from_napi_value':
+          napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string99_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$alloc..string..String$GT$15from_napi_value17h2555b05ec557afedE+0x44): undefined reference to `napi_get_value_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string99_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$alloc..string..String$GT$15from_napi_value17h2555b05ec557afedE+0x70): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string99_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$alloc..string..String$GT$15from_napi_value17h2555b05ec557afedE+0x130): undefined reference to `napi_coerce_to_string'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string99_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$alloc..string..String$GT$15from_napi_value17h2555b05ec557afedE+0x5b4): undefined reference to `napi_get_value_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string99_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$alloc..string..String$GT$15from_napi_value17h2555b05ec557afedE+0x5d0): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string99_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$alloc..string..String$GT$15from_napi_value17h2555b05ec557afedE+0x69c): undefined reference to `napi_coerce_to_string'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.07:(.text._ZN4napi15bindgen_runtime9js_values6string99_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$alloc..string..String$GT$15from_napi_value17h2555b05ec557afedE+0xaa8): undefined reference to `napi_coerce_to_string'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.08.rcgu.o): in function `napi::bindgen_runtime::js_values::nil::<impl napi::bindgen_runtime::js_values::ToNapiValue for ()>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.08:(.text._ZN4napi15bindgen_runtime9js_values3nil84_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$$LP$$RP$$GT$13to_napi_value17h63e4932d341876b5E+0x18): undefined reference to `napi_get_undefined'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.10.rcgu.o): in function `napi::bindgen_runtime::env::<impl napi::env::Env>::get_global':
+          napi.ff17b37bbaa707ce-cgu.10:(.text._ZN4napi15bindgen_runtime3env32_$LT$impl$u20$napi..env..Env$GT$10get_global17hc988be558e3963bdE+0x20): undefined reference to `napi_get_global'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.11.rcgu.o): in function `napi::bindgen_runtime::js_values::object::JsObjectValue::get_named_property_unchecked':
+          napi.ff17b37bbaa707ce-cgu.11:(.text._ZN4napi15bindgen_runtime9js_values6object13JsObjectValue28get_named_property_unchecked17h7abe65119dabde6cE+0x50): undefined reference to `napi_get_named_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.11.rcgu.o): in function `napi::js_values::global::JSON::stringify':
+          napi.ff17b37bbaa707ce-cgu.11:(.text._ZN4napi9js_values6global4JSON9stringify17hb1878823c9852a5bE+0x60): undefined reference to `napi_get_named_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.13.rcgu.o): in function `napi::bindgen_runtime::js_values::object::JsObjectValue::get_named_property':
+          napi.ff17b37bbaa707ce-cgu.13:(.text._ZN4napi15bindgen_runtime9js_values6object13JsObjectValue18get_named_property17h8336f89ea977c1b0E+0x50): undefined reference to `napi_get_named_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.13.rcgu.o): in function `napi::bindgen_runtime::js_values::object::Object::new':
+          napi.ff17b37bbaa707ce-cgu.13:(.text._ZN4napi15bindgen_runtime9js_values6object6Object3new17h6d0d3e7faac1fb14E+0x20): undefined reference to `napi_create_object'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.13.rcgu.o): in function `napi::bindgen_runtime::js_values::object::Object::get_inner':
+          napi.ff17b37bbaa707ce-cgu.13:(.text._ZN4napi15bindgen_runtime9js_values6object6Object9get_inner17hcb34b134f6135e07E+0x2c): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.13:(.text._ZN4napi15bindgen_runtime9js_values6object6Object9get_inner17hcb34b134f6135e07E+0xfc): undefined reference to `napi_get_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.13:(.text._ZN4napi15bindgen_runtime9js_values6object6Object9get_inner17hcb34b134f6135e07E+0x1b8): undefined reference to `napi_typeof'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.13.rcgu.o): in function `napi::bindgen_runtime::js_values::object::Object::set_inner':
+          napi.ff17b37bbaa707ce-cgu.13:(.text._ZN4napi15bindgen_runtime9js_values6object6Object9set_inner17h5362094cfbbebc72E+0x30): undefined reference to `napi_create_string_utf8'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.13:(.text._ZN4napi15bindgen_runtime9js_values6object6Object9set_inner17h5362094cfbbebc72E+0xfc): undefined reference to `napi_set_property'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.14.rcgu.o): in function `napi::bindgen_runtime::js_values::array::Array::new':
+          napi.ff17b37bbaa707ce-cgu.14:(.text._ZN4napi15bindgen_runtime9js_values5array5Array3new17h9189709287a1dc1fE+0x24): undefined reference to `napi_create_array_with_length'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.14.rcgu.o): in function `<napi::bindgen_runtime::js_values::array::Array as napi::bindgen_runtime::js_values::FromNapiValue>::from_napi_value':
+          napi.ff17b37bbaa707ce-cgu.14:(.text._ZN114_$LT$napi..bindgen_runtime..js_values..array..Array$u20$as$u20$napi..bindgen_runtime..js_values..FromNapiValue$GT$15from_napi_value17h831ca512701e1c9eE+0x24): undefined reference to `napi_is_array'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN114_$LT$napi..bindgen_runtime..js_values..array..Array$u20$as$u20$napi..bindgen_runtime..js_values..FromNapiValue$GT$15from_napi_value17h831ca512701e1c9eE+0xf4): undefined reference to `napi_get_array_length'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.14.rcgu.o): in function `napi::bindgen_runtime::js_values::boolean::<impl napi::bindgen_runtime::js_values::ToNapiValue for bool>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.14:(.text._ZN4napi15bindgen_runtime9js_values7boolean80_$LT$impl$u20$napi..bindgen_runtime..js_values..ToNapiValue$u20$for$u20$bool$GT$13to_napi_value17h6900f5fa666ffcb3E+0x18): undefined reference to `napi_get_boolean'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.14.rcgu.o): in function `napi::bindgen_runtime::js_values::boolean::<impl napi::bindgen_runtime::js_values::FromNapiValue for bool>::from_napi_value':
+          napi.ff17b37bbaa707ce-cgu.14:(.text._ZN4napi15bindgen_runtime9js_values7boolean82_$LT$impl$u20$napi..bindgen_runtime..js_values..FromNapiValue$u20$for$u20$bool$GT$15from_napi_value17h386a4d58507f8848E+0x18): undefined reference to `napi_get_value_bool'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.14.rcgu.o): in function `<napi::bindgen_runtime::js_values::buffer::Buffer as core::ops::drop::Drop>::drop':
+          napi.ff17b37bbaa707ce-cgu.14:(.text._ZN90_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$core..ops..drop..Drop$GT$4drop17h7383ce1635c52324E+0xac): undefined reference to `napi_reference_unref'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN90_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$core..ops..drop..Drop$GT$4drop17h7383ce1635c52324E+0x180): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN90_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$core..ops..drop..Drop$GT$4drop17h7383ce1635c52324E+0x278): undefined reference to `napi_call_threadsafe_function'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.14.rcgu.o): in function `<napi::bindgen_runtime::js_values::buffer::Buffer as napi::bindgen_runtime::js_values::FromNapiValue>::from_napi_value':
+          napi.ff17b37bbaa707ce-cgu.14:(.text._ZN116_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$napi..bindgen_runtime..js_values..FromNapiValue$GT$15from_napi_value17h254c205e0ae95f17E+0x28): undefined reference to `napi_create_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN116_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$napi..bindgen_runtime..js_values..FromNapiValue$GT$15from_napi_value17h254c205e0ae95f17E+0xf0): undefined reference to `napi_get_buffer_info'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: /home/brianmeek/scratch/http3-repo/target/release/deps/libnapi-76fe04a5ce10c37b.rlib(napi-76fe04a5ce10c37b.napi.ff17b37bbaa707ce-cgu.14.rcgu.o): in function `<napi::bindgen_runtime::js_values::buffer::Buffer as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value':
+          napi.ff17b37bbaa707ce-cgu.14:(.text._ZN114_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h74ad484c4e107071E+0x44): undefined reference to `napi_get_reference_value'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN114_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h74ad484c4e107071E+0x120): undefined reference to `napi_create_external_buffer'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN114_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h74ad484c4e107071E+0x140): undefined reference to `napi_create_buffer_copy'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN114_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h74ad484c4e107071E+0x194): undefined reference to `napi_delete_reference'
+          /usr/bin/aarch64-linux-gnu-ld.bfd: napi.ff17b37bbaa707ce-cgu.14:(.text._ZN114_$LT$napi..bindgen_runtime..js_values..buffer..Buffer$u20$as$u20$napi..bindgen_runtime..js_values..ToNapiValue$GT$13to_napi_value17h74ad484c4e107071E+0x250): undefined reference to `napi_create_buffer'
+          collect2: error: ld returned 1 exit status
+          
+  = note: some `extern` functions couldn't be found; some native libraries may need to be installed or have their path specified
+  = note: use the `-l` flag to specify native libraries to link
+  = note: use the `cargo:rustc-link-lib` directive to specify the native libraries to link with Cargo (see https://doc.rust-lang.org/cargo/reference/build-scripts.html#rustc-link-lib)
+
+error: could not compile `http3` (bench "driver_udp") due to 1 previous error
