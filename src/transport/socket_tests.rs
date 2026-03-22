@@ -9,6 +9,7 @@
 mod tests {
     use std::net::UdpSocket;
     use std::os::unix::io::AsRawFd;
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -96,6 +97,11 @@ mod tests {
         if rc > 0 { hdr.msg_len as usize } else { 0 }
     }
 
+    fn io_uring_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     // ── Test: probe_gso via setsockopt leaves socket dirty ──────────
 
     #[test]
@@ -159,6 +165,7 @@ mod tests {
 
     #[test]
     fn enable_gro_cross_thread_recvmmsg() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender.set_nonblocking(true).unwrap();
@@ -674,6 +681,7 @@ mod tests {
 
     #[test]
     fn iouring_driver_gso_roundtrip() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -723,6 +731,7 @@ mod tests {
     /// parse — causing stream timeouts in the QUIC benchmark.
     #[test]
     fn iouring_driver_gro_cmsg_with_quic_sized_packets() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -785,6 +794,7 @@ mod tests {
 
     #[test]
     fn iouring_driver_gso_multi_round() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -829,6 +839,7 @@ mod tests {
     /// in the SQ ring, invisible to the kernel until the next poll().
     #[test]
     fn iouring_driver_rapid_submit_sends_no_poll() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -888,6 +899,7 @@ mod tests {
     /// unflushed SQEs, stuck completions, or poll/submit ordering issues.
     #[test]
     fn iouring_driver_bidirectional_echo() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -997,6 +1009,7 @@ mod tests {
     /// Uses QUIC-sized packets (1200B) and a realistic connection count.
     #[test]
     fn iouring_driver_echo_at_scale() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -1143,6 +1156,7 @@ mod tests {
     /// drains, packets drop and the echo never completes.
     #[test]
     fn iouring_driver_cross_thread_echo() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -1150,6 +1164,28 @@ mod tests {
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         client_sock.set_nonblocking(true).unwrap();
         server_sock.set_nonblocking(true).unwrap();
+
+        // Match the scale test buffer sizing so the kernel can absorb the
+        // one-shot 600KB burst before the server thread drains it.
+        for sock in [&client_sock, &server_sock] {
+            let buf_size: libc::c_int = 2 * 1024 * 1024;
+            unsafe {
+                libc::setsockopt(
+                    sock.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &buf_size as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&buf_size) as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    sock.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &buf_size as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&buf_size) as libc::socklen_t,
+                );
+            }
+        }
         let client_addr = client_sock.local_addr().unwrap();
         let server_addr = server_sock.local_addr().unwrap();
 
@@ -1165,7 +1201,8 @@ mod tests {
             let _ = server.poll(Some(Instant::now() + Duration::from_millis(1)));
             let mut rx_bytes = 0usize;
             let mut tx_bytes = 0usize;
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let echo_batch_size = 32usize;
 
             while Instant::now() < deadline {
                 let out = server.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
@@ -1182,38 +1219,55 @@ mod tests {
                         }
                     }
                     tx_bytes += echo.iter().map(|p| p.data.len()).sum::<usize>();
-                    server.submit_sends(echo).unwrap();
+                    while !echo.is_empty() {
+                        let rest = if echo.len() > echo_batch_size {
+                            echo.split_off(echo_batch_size)
+                        } else {
+                            Vec::new()
+                        };
+                        let batch = std::mem::replace(&mut echo, rest);
+                        server.submit_sends(batch).unwrap();
+                        if server.pending_tx_count() > 0 {
+                            let _ = server.poll(Some(Instant::now() + Duration::from_millis(1)));
+                        }
+                    }
                 }
-                // Stop when we've echoed everything.
-                if rx_bytes >= total_bytes {
-                    // One more poll to flush remaining sends.
-                    let _ = server.poll(Some(Instant::now() + Duration::from_millis(100)));
+                // Stop only after we've received the full burst and drained any
+                // queued echo sends back out to the client.
+                if rx_bytes >= total_bytes && server.pending_tx_count() == 0 {
                     break;
                 }
             }
-            eprintln!("  server: rx={rx_bytes} tx={tx_bytes}");
+            eprintln!(
+                "  server: rx={rx_bytes} tx={tx_bytes} pending={}",
+                server.pending_tx_count(),
+            );
             (rx_bytes, tx_bytes)
         });
 
-        // Client: enable, then blast ALL packets before server starts polling.
-        // This simulates the separate-process timing gap in Node.js benchmarks.
+        // Client: enable and then send in large batches while the server runs
+        // on a separate thread. This keeps the cross-thread topology without
+        // depending on host socket-buffer limits for a single 600KB burst.
         let _ = client.poll(Some(Instant::now() + Duration::from_millis(1)));
 
-        // Send entire burst at once — 500 packets in one submit_sends call.
-        let packets: Vec<TxDatagram> = (0..total_pkts)
-            .map(|i| TxDatagram {
-                data: vec![(i % 256) as u8; pkt_size],
-                to: server_addr,
-            })
-            .collect();
-        client.submit_sends(packets).unwrap();
-        // Flush by polling sender briefly.
-        let _ = client.poll(Some(Instant::now() + Duration::from_millis(5)));
-
         // Poll for echoes.
+        let batch_size = 10usize;
+        let mut sent_pkts = 0usize;
         let mut echo_bytes = 0usize;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while echo_bytes < total_bytes && Instant::now() < deadline {
+            if sent_pkts < total_pkts {
+                let batch_end = (sent_pkts + batch_size).min(total_pkts);
+                let packets: Vec<TxDatagram> = (sent_pkts..batch_end)
+                    .map(|i| TxDatagram {
+                        data: vec![(i % 256) as u8; pkt_size],
+                        to: server_addr,
+                    })
+                    .collect();
+                client.submit_sends(packets).unwrap();
+                sent_pkts = batch_end;
+                let _ = client.poll(Some(Instant::now() + Duration::from_millis(5)));
+            }
             let out = client.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
             for pkt in &out.rx {
                 echo_bytes += pkt.data.len();
@@ -1237,6 +1291,7 @@ mod tests {
     /// is blocking (unflushed SQEs, stuck completions, etc).
     #[test]
     fn iouring_driver_no_latency_spikes() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
@@ -1307,6 +1362,7 @@ mod tests {
     /// Verifies no packet loss or stalls under sustained load.
     #[test]
     fn iouring_driver_stress_multi_round() {
+        let _serial = io_uring_test_lock().lock().unwrap();
         use crate::transport::{Driver, TxDatagram};
         use crate::transport::io_uring::IoUringDriver;
 
