@@ -73,6 +73,8 @@ export class Http3EventSource extends EventEmitter {
   private readonly _maxRetryMs: number;
   private _reconnectTimer: NodeJS.Timeout | null = null;
   private _closed = false;
+  private _closePromise: Promise<void> | null = null;
+  private _sessionClosePromise: Promise<void> | null = null;
 
   constructor(url: string, options?: EventSourceInit) {
     super();
@@ -101,14 +103,15 @@ export class Http3EventSource extends EventEmitter {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
-    void this._closeSession();
-    this.emit('close');
+    this._closePromise = this._finalizeClose();
+    void this._closePromise;
   }
 
   private async _startConnection(): Promise<void> {
     if (this._closed) return;
     this.readyState = CONNECTING;
     await this._closeSession();
+    if (this._closed) return;
 
     const authority = `${this._url.hostname}:${this._url.port || '443'}`;
     this._session = connect(authority, {
@@ -278,19 +281,46 @@ export class Http3EventSource extends EventEmitter {
   }
 
   private async _closeSession(): Promise<void> {
-    const stream = this._stream;
-    this._stream = null;
-    if (stream) {
-      stream.removeAllListeners();
-      if (!stream.destroyed) {
-        stream.destroy();
-      }
+    if (this._sessionClosePromise) {
+      await this._sessionClosePromise;
+      return;
     }
 
+    const stream = this._stream;
+    this._stream = null;
     const session = this._session;
     this._session = null;
-    if (session) {
-      await session.close();
+    if (!stream && !session) {
+      return;
+    }
+
+    this._sessionClosePromise = (async () => {
+      if (stream) {
+        stream.removeAllListeners();
+        if (!stream.destroyed) {
+          stream.destroy();
+        }
+      }
+
+      if (session) {
+        await session.close();
+      }
+    })();
+
+    try {
+      await this._sessionClosePromise;
+    } finally {
+      this._sessionClosePromise = null;
+    }
+  }
+
+  private async _finalizeClose(): Promise<void> {
+    try {
+      await this._closeSession();
+    } catch (error: unknown) {
+      this._emitError(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      this.emit('close');
     }
   }
 }
