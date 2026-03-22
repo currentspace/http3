@@ -84,6 +84,7 @@ export interface QuicServerOptions {
 class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   private readonly worker: NativeQuicServerBinding;
   private closed = false;
+  private _shutdownObserved = false;
   private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeQuicServerBinding) {
@@ -92,6 +93,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
 
   /** @internal */
   _onShutdownSentinel(): void {
+    this._shutdownObserved = true;
     if (this._shutdownResolve) {
       const resolve = this._shutdownResolve;
       this._shutdownResolve = null;
@@ -131,7 +133,12 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this._shutdownObserved) return;
     const settled = new Promise<void>((resolve) => {
+      if (this._shutdownObserved) {
+        resolve();
+        return;
+      }
       this._shutdownResolve = resolve;
     });
     this.worker.shutdown();

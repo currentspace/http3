@@ -11,6 +11,12 @@ import { createQuicServer, connectQuic, connectQuicAsync } from '../../lib/index
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
 import { echoStream } from '../support/echo-stream.js';
+import {
+  appendLifecycleArtifacts,
+  beginLifecycleCapture,
+  endLifecycleCapture,
+  withLifecycleTimeout,
+} from '../support/failure-artifacts.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -666,58 +672,76 @@ describe('QUIC protocol verification', () => {
     });
 
     it('server graceful close with active streams', async () => {
+      beginLifecycleCapture();
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
-
-      const serverSessions: QuicServerSession[] = [];
-      server.on('session', (session: QuicServerSession) => {
-        serverSessions.push(session);
-        session.on('stream', (stream: QuicStream) => {
-          // Don't complete the echo — keep streams "active"
-          stream.on('data', () => { /* swallow */ });
+      const clients: Awaited<ReturnType<typeof connectQuicAsync>>[] = [];
+      try {
+        const serverSessions: QuicServerSession[] = [];
+        server.on('session', (session: QuicServerSession) => {
+          serverSessions.push(session);
+          session.on('stream', (stream: QuicStream) => {
+            // Don't complete the echo — keep streams "active"
+            stream.on('data', () => { /* swallow */ });
+          });
         });
-      });
 
-      const addr = await server.listen(0, '127.0.0.1');
+        const addr = await server.listen(0, '127.0.0.1');
 
-      // Connect 3 clients with active streams
-      const clients = await Promise.all(
-        Array.from({ length: 3 }, () =>
-          connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false }),
-        ),
-      );
+        // Connect 3 clients with active streams
+        clients.push(...await withLifecycleTimeout(
+          Promise.all(
+            Array.from({ length: 3 }, () =>
+              connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false }),
+            ),
+          ),
+          5000,
+          'quic-protocol/active-streams/connect-clients',
+        ));
 
-      // Open a stream on each
-      for (const client of clients) {
-        const stream = client.openStream();
-        stream.write(Buffer.from('active'));
+        // Open a stream on each
+        for (const client of clients) {
+          const stream = client.openStream();
+          stream.write(Buffer.from('active'));
+        }
+
+        // Give streams time to reach server
+        await new Promise<void>((r) => { setTimeout(r, 100); });
+
+        // Gracefully close each server session
+        for (const session of serverSessions) {
+          session.close(0, 'shutdown');
+        }
+
+        // All clients should receive close events, no crash, no hang
+        const closeResults = await Promise.all(
+          clients.map((client) =>
+            Promise.race([
+              new Promise<boolean>((resolve) => {
+                client.on('close', () => resolve(true));
+                client.on('error', () => resolve(true)); // error before close is also acceptable
+              }),
+              new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 3000); }),
+            ]),
+          ),
+        );
+
+        assert.ok(closeResults.every(Boolean),
+          'all clients should receive close/error events after graceful shutdown');
+
+        await withLifecycleTimeout(
+          Promise.all(clients.map(async (client) => { try { await client.close(); } catch { /* cleanup */ } })),
+          5000,
+          'quic-protocol/active-streams/client-cleanup-close',
+        );
+        await withLifecycleTimeout(server.close(), 5000, 'quic-protocol/active-streams/server-close');
+      } catch (error: unknown) {
+        appendLifecycleArtifacts(error, 'quic-protocol-active-streams-close');
+        throw error;
+      } finally {
+        await Promise.all(clients.map(async (client) => { try { await client.close(); } catch { /* cleanup */ } }));
+        try { await server.close(); } catch { /* cleanup */ }
+        endLifecycleCapture();
       }
-
-      // Give streams time to reach server
-      await new Promise<void>((r) => { setTimeout(r, 100); });
-
-      // Gracefully close each server session
-      for (const session of serverSessions) {
-        session.close(0, 'shutdown');
-      }
-
-      // All clients should receive close events, no crash, no hang
-      const closeResults = await Promise.all(
-        clients.map((client) =>
-          Promise.race([
-            new Promise<boolean>((resolve) => {
-              client.on('close', () => resolve(true));
-              client.on('error', () => resolve(true)); // error before close is also acceptable
-            }),
-            new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 3000); }),
-          ]),
-        ),
-      );
-
-      assert.ok(closeResults.every(Boolean),
-        'all clients should receive close/error events after graceful shutdown');
-
-      await Promise.all(clients.map(async (c) => { try { await c.close(); } catch { /* */ } }));
-      await server.close();
     });
   });
 });

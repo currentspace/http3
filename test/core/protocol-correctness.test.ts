@@ -2,6 +2,12 @@ import { before, describe, it } from 'node:test';
 import assert from 'node:assert';
 import { createSecureServer, connect } from '../../lib/index.js';
 import { generateTestCerts } from '../support/generate-certs.js';
+import {
+  appendLifecycleArtifacts,
+  beginLifecycleCapture,
+  endLifecycleCapture,
+  withLifecycleTimeout,
+} from '../support/failure-artifacts.js';
 
 async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {
   const start = Date.now();
@@ -30,58 +36,70 @@ describe('Protocol correctness regressions', () => {
   });
 
   it('client receives GOAWAY before close on graceful server session close', async () => {
-    let serverSession: unknown = null;
-    const server = createSecureServer({
-      key: certs.key,
-      cert: certs.cert,
-      disableRetry: true,
-    }, (stream) => {
-      stream.respond({ ':status': '200' });
-      stream.end('ok');
-    });
-    server.on('session', (session) => {
-      serverSession = session;
-    });
-
-    const port = await new Promise<number>((resolve) => {
-      server.on('listening', () => {
-        const addr = server.address();
-        assert.ok(addr);
-        resolve(addr.port);
+    beginLifecycleCapture();
+    try {
+      let serverSession: unknown = null;
+      const server = createSecureServer({
+        key: certs.key,
+        cert: certs.cert,
+        disableRetry: true,
+      }, (stream) => {
+        stream.respond({ ':status': '200' });
+        stream.end('ok');
       });
-      server.listen(0, '127.0.0.1');
-    });
+      server.on('session', (session) => {
+        serverSession = session;
+      });
 
-    const client = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
-    let connected = false;
-    client.on('connect', () => { connected = true; });
-    await waitFor(() => connected, 3000);
+      const port = await new Promise<number>((resolve) => {
+        server.on('listening', () => {
+          const addr = server.address();
+          assert.ok(addr);
+          resolve(addr.port);
+        });
+        server.listen(0, '127.0.0.1');
+      });
 
-    const stream = client.request({
-      ':method': 'GET',
-      ':path': '/goaway',
-      ':authority': 'localhost',
-      ':scheme': 'https',
-    }, { endStream: true });
-    await readBody(stream);
+      const client = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+      let connected = false;
+      client.on('connect', () => { connected = true; });
+      await waitFor(() => connected, 3000);
 
-    await waitFor(() => serverSession !== null, 2000);
-    const events: string[] = [];
-    client.on('goaway', () => { events.push('goaway'); });
-    client.on('close', () => { events.push('close'); });
+      const stream = client.request({
+        ':method': 'GET',
+        ':path': '/goaway',
+        ':authority': 'localhost',
+        ':scheme': 'https',
+      }, { endStream: true });
+      await withLifecycleTimeout(readBody(stream), 3000, 'protocol-correctness/read-body');
 
-    const activeSession = serverSession as { close: (code?: number) => Promise<void> };
-    await activeSession.close(0);
-    await waitFor(() => events.includes('goaway'), 3000);
+      await waitFor(() => serverSession !== null, 2000);
+      const events: string[] = [];
+      client.on('goaway', () => { events.push('goaway'); });
+      client.on('close', () => { events.push('close'); });
 
-    const goawayIdx = events.indexOf('goaway');
-    const closeIdx = events.indexOf('close');
-    if (closeIdx >= 0) {
-      assert.ok(goawayIdx >= 0 && goawayIdx < closeIdx, 'GOAWAY should arrive before close');
+      const activeSession = serverSession as { close: (code?: number) => Promise<void> };
+      await withLifecycleTimeout(
+        activeSession.close(0),
+        5000,
+        'protocol-correctness/server-session-close',
+      );
+      await waitFor(() => events.includes('goaway'), 3000);
+
+      const goawayIdx = events.indexOf('goaway');
+      const closeIdx = events.indexOf('close');
+      if (closeIdx >= 0) {
+        assert.ok(goawayIdx >= 0 && goawayIdx < closeIdx, 'GOAWAY should arrive before close');
+      }
+
+      await withLifecycleTimeout(client.close(), 3000, 'protocol-correctness/client-close');
+      await withLifecycleTimeout(server.close(), 3000, 'protocol-correctness/server-close');
+    } catch (error: unknown) {
+      appendLifecycleArtifacts(error, 'protocol-correctness-goaway-before-close');
+      throw error;
+    } finally {
+      endLifecycleCapture();
     }
-
-    await client.close();
-    await server.close();
   });
 
 });

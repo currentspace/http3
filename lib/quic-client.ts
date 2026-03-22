@@ -74,6 +74,7 @@ interface NormalizedQuicClientTlsOptions {
 class QuicClientEventLoop implements QuicClientEventLoopLike {
   private readonly worker: NativeQuicClientBinding;
   private closed = false;
+  private _shutdownObserved = false;
   private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeQuicClientBinding) {
@@ -82,6 +83,7 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
 
   /** @internal */
   _onShutdownSentinel(): void {
+    this._shutdownObserved = true;
     if (this._shutdownResolve) {
       const resolve = this._shutdownResolve;
       this._shutdownResolve = null;
@@ -122,8 +124,13 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this._shutdownObserved) return;
     this.worker.close(0, 'client close');
     const settled = new Promise<void>((resolve) => {
+      if (this._shutdownObserved) {
+        resolve();
+        return;
+      }
       this._shutdownResolve = resolve;
     });
     this.worker.shutdown();

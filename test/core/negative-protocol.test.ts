@@ -133,6 +133,7 @@ describe('Negative Protocol', () => {
       cert: certs.cert,
       disableRetry: true,
     }, (stream) => {
+      stream.on('error', () => { /* teardown noise is irrelevant to this case */ });
       stream.respond({ ':status': '200' });
       stream.end('finished');
     });
@@ -184,6 +185,7 @@ describe('Negative Protocol', () => {
 
     await session.close();
     await server.close();
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
   });
 
   it('should error cleanly when requesting on a closed session', async () => {

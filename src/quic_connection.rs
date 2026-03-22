@@ -350,6 +350,18 @@ impl QuicConnection {
         stream_id: u64,
         error_code: u64,
     ) -> Result<(), Http3NativeError> {
+        reactor_metrics::record_lifecycle_trace(
+            "quic-connection",
+            "stream-close",
+            None,
+            None,
+            None,
+            Some(format!(
+                "stream_id={stream_id} error_code={error_code} blocked_streams={} known_streams={}",
+                self.blocked_set.len(),
+                self.known_streams.len()
+            )),
+        );
         // .ok() intentional: shutdown may fail with Done (already closed) or
         // InvalidStreamState (peer reset). Either way we want to clean up
         // our tracking state — the stream is going away.
