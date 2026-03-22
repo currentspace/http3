@@ -2065,6 +2065,14 @@ impl ProtocolHandler for QuicServerHandler {
                 }
             }
         }
+        // Sweep ALL connections for late FINs (not just expired ones).
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        for i in 0..self.handles_buf.len() {
+            let handle = self.handles_buf[i];
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                conn.sweep_finished_streams(offset | (handle as u32), batch);
+            }
+        }
     }
 
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>) {
@@ -2122,6 +2130,12 @@ impl ProtocolHandler for QuicServerHandler {
         self.conn_map.fill_handles(&mut self.handles_buf);
         for i in 0..self.handles_buf.len() {
             let handle = self.handles_buf[i];
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                // Sweep for FIN events that arrived in a separate packet
+                // after data was already drained.  Run unconditionally —
+                // process_timers doesn't sweep non-expired connections.
+                conn.sweep_finished_streams(offset | (handle as u32), batch);
+            }
             if self.last_expired.contains(&handle) {
                 continue;
             }
@@ -2498,6 +2512,7 @@ impl ProtocolHandler for QuicClientHandler {
     }
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
+        self.conn.sweep_finished_streams(0, batch);
         self.poll_drain_events_for_handle(batch, 0);
     }
 

@@ -298,7 +298,6 @@ export class QuicClientSession extends EventEmitter {
 
   private _onNewStream(event: NativeEvent): void {
     const stream = this._getOrCreateStream(event.streamId);
-    // Coalesced first data from Rust: push inline to avoid extra TSFN event
     if (event.data) {
       stream._pushData(event.data);
     }

@@ -442,7 +442,6 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (!session) return;
     const stream = session._getOrCreateStream(event.streamId);
-    // Coalesced first data from Rust: push inline to avoid extra TSFN event
     if (event.data) {
       stream._pushData(event.data);
     }
