@@ -18,7 +18,22 @@ use mio::{Events, Interest, Poll, Token};
 use quiche::h3::NameValue;
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::OnceLock;
 const MAX_DATAGRAM_SIZE: usize = 1350;
+
+fn has_curl_http3() -> bool {
+    static HAS_HTTP3: OnceLock<bool> = OnceLock::new();
+    *HAS_HTTP3.get_or_init(|| {
+        let Ok(output) = Command::new("curl").arg("--version").output() else {
+            return false;
+        };
+        if !output.status.success() {
+            return false;
+        }
+        let version = String::from_utf8_lossy(&output.stdout);
+        version.contains("HTTP3") || version.contains("http3")
+    })
+}
 
 fn generate_certs() -> (std::path::PathBuf, std::path::PathBuf) {
     use rcgen::{CertificateParams, KeyPair};
@@ -43,6 +58,10 @@ fn generate_certs() -> (std::path::PathBuf, std::path::PathBuf) {
 /// Modeled exactly after the quiche http3-server example.
 #[test]
 fn test_standalone_h3_server_with_curl() {
+    if !has_curl_http3() {
+        eprintln!("skipping standalone curl test: curl with HTTP/3 support not available");
+        return;
+    }
     let (cert_path, key_path) = generate_certs();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -377,6 +396,10 @@ fn test_standalone_h3_server_with_curl() {
 /// Same test but WITH stateless retry (matching worker thread mode).
 #[test]
 fn test_standalone_h3_server_with_curl_retry() {
+    if !has_curl_http3() {
+        eprintln!("skipping standalone curl retry test: curl with HTTP/3 support not available");
+        return;
+    }
     let (cert_path, key_path) = generate_certs();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -771,6 +794,10 @@ fn test_standalone_h3_server_with_curl_retry() {
 /// simulating the JS command channel round-trip.
 #[test]
 fn test_standalone_h3_delayed_response() {
+    if !has_curl_http3() {
+        eprintln!("skipping standalone curl delayed-response test: curl with HTTP/3 support not available");
+        return;
+    }
     let (cert_path, key_path) = generate_certs();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
