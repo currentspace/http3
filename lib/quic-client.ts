@@ -210,6 +210,7 @@ export class QuicClientSession extends EventEmitter {
     stream._streamId = streamId;
     stream._clientLoop = this._eventLoop;
     this._streams.set(streamId, stream);
+    this._trackStreamLifecycle(streamId, stream);
     return stream;
   }
 
@@ -378,15 +379,24 @@ export class QuicClientSession extends EventEmitter {
       stream._streamId = streamId;
       stream._clientLoop = this._eventLoop;
       this._streams.set(streamId, stream);
+      this._trackStreamLifecycle(streamId, stream);
     }
     return stream;
   }
 
   private _cleanupStreams(): void {
-    for (const stream of this._streams.values()) {
+    for (const stream of [...this._streams.values()]) {
       stream.destroy();
     }
     this._streams.clear();
+  }
+
+  private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
+    stream.once('close', () => {
+      if (this._streams.get(streamId) === stream) {
+        this._streams.delete(streamId);
+      }
+    });
   }
 
   private _scheduleHandshakeReady(): void {

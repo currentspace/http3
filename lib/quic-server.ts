@@ -193,6 +193,7 @@ export class QuicServerSession extends EventEmitter {
     stream._streamId = streamId;
     stream._serverLoop = this._eventLoop;
     this._streams.set(streamId, stream);
+    this._trackStreamLifecycle(streamId, stream);
     return stream;
   }
 
@@ -253,16 +254,25 @@ export class QuicServerSession extends EventEmitter {
       stream._streamId = streamId;
       stream._serverLoop = this._eventLoop;
       this._streams.set(streamId, stream);
+      this._trackStreamLifecycle(streamId, stream);
     }
     return stream;
   }
 
   /** @internal */
   _cleanup(): void {
-    for (const stream of this._streams.values()) {
+    for (const stream of [...this._streams.values()]) {
       stream.destroy();
     }
     this._streams.clear();
+  }
+
+  private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
+    stream.once('close', () => {
+      if (this._streams.get(streamId) === stream) {
+        this._streams.delete(streamId);
+      }
+    });
   }
 }
 
@@ -471,8 +481,6 @@ export class QuicServer extends EventEmitter {
     const stream = session._streams.get(event.streamId);
     if (stream) {
       stream._pushData(null);
-      // Don't delete from map yet — drain callbacks may still be pending.
-      // The stream will be cleaned up when the session closes.
     }
   }
 

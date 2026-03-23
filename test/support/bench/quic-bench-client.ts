@@ -86,19 +86,59 @@ function createLatencyTracker(): LatencyTracker {
   };
 }
 
-function collectStream(stream: QuicStream, timeoutMs: number): Promise<Buffer> {
+function collectStreamLength(stream: QuicStream, timeoutMs: number): Promise<number> {
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    const timer = setTimeout(() => reject(new Error('stream timed out')), timeoutMs);
-    stream.on('data', (chunk: Buffer) => { chunks.push(chunk); });
-    stream.on('end', () => {
+    let settled = false;
+    let totalLength = 0;
+
+    const cleanup = (): void => {
       clearTimeout(timer);
-      resolve(Buffer.concat(chunks));
-    });
-    stream.on('error', (err: Error) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+      stream.off('data', onData);
+      stream.off('end', onEnd);
+      stream.off('error', onError);
+    };
+
+    const settle = (fn: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    const onData = (chunk: Buffer): void => {
+      totalLength += chunk.length;
+    };
+
+    const onEnd = (): void => {
+      settle(() => {
+        resolve(totalLength);
+      });
+    };
+
+    const onError = (err: Error): void => {
+      settle(() => {
+        reject(err);
+      });
+    };
+
+    const timer = setTimeout(() => {
+      settle(() => {
+        try {
+          stream.close();
+        } catch {
+          if (!stream.destroyed) {
+            stream.destroy();
+          }
+        }
+        reject(new Error('stream timed out'));
+      });
+    }, timeoutMs);
+
+    stream.on('data', onData);
+    stream.once('end', onEnd);
+    stream.once('error', onError);
   });
 }
 
@@ -213,13 +253,13 @@ async function main(): Promise<void> {
         try {
           const stream = client.openStream();
           stream.end(payload);
-          const echoed = await collectStream(stream, config.timeoutMs);
+          const echoedLength = await collectStreamLength(stream, config.timeoutMs);
           const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
-          if (echoed.length === payload.length) {
-            recordCompletion(phase, echoed.length * 2, streamMs);
+          if (echoedLength === payload.length) {
+            recordCompletion(phase, echoedLength * 2, streamMs);
           } else {
             errors++;
-            process.stderr.write(`Stream length mismatch: expected ${payload.length}, got ${echoed.length}\n`);
+            process.stderr.write(`Stream length mismatch: expected ${payload.length}, got ${echoedLength}\n`);
           }
         } catch (err) {
           errors++;
@@ -248,15 +288,15 @@ async function main(): Promise<void> {
             try {
               const stream = client.openStream();
               stream.end(payload);
-              const echoed = await collectStream(stream, config.timeoutMs);
+              const echoedLength = await collectStreamLength(stream, config.timeoutMs);
               const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
-              if (echoed.length === payload.length) {
+              if (echoedLength === payload.length) {
                 totalStreams++;
-                totalBytes += echoed.length * 2;
+                totalBytes += echoedLength * 2;
                 streamLatency.add(streamMs);
               } else {
                 errors++;
-                process.stderr.write(`Stream length mismatch: expected ${payload.length}, got ${echoed.length}\n`);
+                process.stderr.write(`Stream length mismatch: expected ${payload.length}, got ${echoedLength}\n`);
               }
             } catch (err) {
               errors++;

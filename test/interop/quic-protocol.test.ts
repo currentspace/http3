@@ -485,6 +485,39 @@ describe('QUIC protocol verification', () => {
       await client.close();
       await server.close();
     });
+
+    it('releases finished streams before session shutdown', async () => {
+      const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
+      const sessions: QuicServerSession[] = [];
+      server.on('session', (session: QuicServerSession) => {
+        sessions.push(session);
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
+      });
+      const addr = await server.listen(0, '127.0.0.1');
+
+      const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+
+      for (let i = 0; i < 32; i++) {
+        const payload = Buffer.from(`cleanup-${i}`);
+        const stream = client.openStream();
+        stream.end(payload);
+        const echoed = await collect(stream, 5000);
+        assert.deepStrictEqual(echoed, payload);
+      }
+
+      await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
+      assert.strictEqual((client as unknown as { _streams: Map<number, QuicStream> })._streams.size, 0);
+      assert.strictEqual(sessions.length, 1);
+      assert.strictEqual(
+        (sessions[0] as unknown as { _streams: Map<number, QuicStream> })._streams.size,
+        0,
+      );
+
+      await client.close();
+      await server.close();
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
