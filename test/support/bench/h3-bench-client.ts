@@ -14,10 +14,15 @@ interface BenchConfig {
   streamsPerConnection: number;
   messageSize: number;
   timeoutMs: number;
+  warmupMs?: number;
+  durationMs?: number;
+  maxInflightPerConnection?: number;
   runtimeMode?: 'auto' | 'fast' | 'portable';
   fallbackPolicy?: 'error' | 'warn-and-fallback';
   clientId?: number;
 }
+
+type MeasurementPhase = 'warmup' | 'measured' | 'cooldown';
 
 function formatRuntimeSelection(runtimeInfo: {
   selectedMode?: string | null;
@@ -56,8 +61,25 @@ function createLatencyTracker(): LatencyTracker {
       if (values.length === 0) return 0;
       return values.reduce((a, b) => a + b, 0) / values.length;
     },
-    max(): number { return values.length > 0 ? Math.max(...values) : 0; },
-    min(): number { return values.length > 0 ? Math.min(...values) : 0; },
+    max(): number {
+      let max = 0;
+      for (const value of values) {
+        if (value > max) {
+          max = value;
+        }
+      }
+      return max;
+    },
+    min(): number {
+      if (values.length === 0) return 0;
+      let min = values[0];
+      for (let i = 1; i < values.length; i += 1) {
+        if (values[i] < min) {
+          min = values[i];
+        }
+      }
+      return min;
+    },
   };
 }
 
@@ -96,6 +118,48 @@ function doRequest(
   });
 }
 
+async function doRetriedRequest(
+  session: Http3ClientSession,
+  payload: Buffer,
+  timeoutMs: number,
+): Promise<Buffer> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try {
+      return await doRequest(session, payload, Math.min(timeoutMs, 15_000));
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message.includes('StreamBlocked') && attempt < 49) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 5); });
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('h3 request remained StreamBlocked after retries');
+}
+
+function hasSteadyStateWindow(config: BenchConfig): boolean {
+  return Number.isFinite(config.durationMs) && (config.durationMs ?? 0) > 0;
+}
+
+function classifyMeasurementPhase(
+  loadElapsedMs: number,
+  warmupMs: number,
+  durationMs: number,
+): MeasurementPhase {
+  if (loadElapsedMs < warmupMs) {
+    return 'warmup';
+  }
+  if (loadElapsedMs < warmupMs + durationMs) {
+    return 'measured';
+  }
+  return 'cooldown';
+}
+
+function computeMeasuredWindowMs(loadElapsedMs: number, warmupMs: number, durationMs: number): number {
+  const measurementEndMs = Math.min(loadElapsedMs, warmupMs + durationMs);
+  return Math.max(0, measurementEndMs - warmupMs);
+}
+
 async function main(): Promise<void> {
   const configStr = process.argv[2];
   if (!configStr) {
@@ -115,6 +179,10 @@ async function main(): Promise<void> {
 
   let totalStreams = 0;
   let totalBytes = 0;
+  let warmupStreams = 0;
+  let warmupBytes = 0;
+  let cooldownStreams = 0;
+  let cooldownBytes = 0;
   let errors = 0;
 
   const payload = Buffer.alloc(config.messageSize, 0xcc);
@@ -142,16 +210,73 @@ async function main(): Promise<void> {
     }
   }
 
-  // Phase 2: Run streams with StreamBlocked retry
-  const allStreams: Promise<void>[] = [];
-  for (const client of clients) {
-    for (let s = 0; s < config.streamsPerConnection; s++) {
-      allStreams.push(
-        (async () => {
-          const streamStart = process.hrtime.bigint();
-          for (let attempt = 0; attempt < 50; attempt++) {
+  // Phase 2: Run streams
+  const steadyState = hasSteadyStateWindow(config);
+  const warmupMs = steadyState ? Math.max(0, config.warmupMs ?? 0) : 0;
+  const durationMs = steadyState ? Math.max(1, config.durationMs ?? 0) : 0;
+  const maxInflightPerConnection = steadyState ? Math.max(1, config.maxInflightPerConnection ?? 1) : null;
+  const loadStart = process.hrtime.bigint();
+  let loadElapsedMs = 0;
+
+  if (steadyState) {
+    const stopAfterMs = warmupMs + durationMs;
+    const recordCompletion = (phase: MeasurementPhase, responseBytes: number, streamMs: number) => {
+      if (phase === 'warmup') {
+        warmupStreams++;
+        warmupBytes += responseBytes;
+        return;
+      }
+      if (phase === 'cooldown') {
+        cooldownStreams++;
+        cooldownBytes += responseBytes;
+        return;
+      }
+      totalStreams++;
+      totalBytes += responseBytes;
+      streamLatency.add(streamMs);
+    };
+
+    async function runSteadyStateWorker(client: Http3ClientSession): Promise<void> {
+      for (;;) {
+        const streamStart = process.hrtime.bigint();
+        const loadElapsedAtStartMs = Number(streamStart - loadStart) / 1e6;
+        if (loadElapsedAtStartMs >= stopAfterMs) {
+          return;
+        }
+        const phase = classifyMeasurementPhase(loadElapsedAtStartMs, warmupMs, durationMs);
+
+        try {
+          const echoed = await doRetriedRequest(client, payload, config.timeoutMs);
+          const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
+          if (echoed.length === payload.length) {
+            recordCompletion(phase, echoed.length * 2, streamMs);
+          } else {
+            errors++;
+          }
+        } catch {
+          errors++;
+        }
+      }
+    }
+
+    await Promise.all(
+      clients.flatMap((client) =>
+        Array.from(
+          { length: maxInflightPerConnection ?? 1 },
+          () => runSteadyStateWorker(client),
+        ),
+      ),
+    );
+    loadElapsedMs = Number(process.hrtime.bigint() - loadStart) / 1e6;
+  } else {
+    const allStreams: Promise<void>[] = [];
+    for (const client of clients) {
+      for (let s = 0; s < config.streamsPerConnection; s++) {
+        allStreams.push(
+          (async () => {
+            const streamStart = process.hrtime.bigint();
             try {
-              const echoed = await doRequest(client, payload, Math.min(config.timeoutMs, 15_000));
+              const echoed = await doRetriedRequest(client, payload, config.timeoutMs);
               const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
               if (echoed.length === payload.length) {
                 totalStreams++;
@@ -160,23 +285,17 @@ async function main(): Promise<void> {
               } else {
                 errors++;
               }
-              return;
-            } catch (err: unknown) {
-              if (err instanceof Error && err.message.includes('StreamBlocked') && attempt < 49) {
-                await new Promise<void>((r) => { setTimeout(r, 5); });
-                continue;
-              }
+            } catch {
               errors++;
-              return;
             }
-          }
-          errors++;
-        })(),
-      );
+          })(),
+        );
+      }
     }
-  }
 
-  await Promise.all(allStreams);
+    await Promise.all(allStreams);
+    loadElapsedMs = Number(process.hrtime.bigint() - loadStart) / 1e6;
+  }
 
   // Phase 3: Close
   await Promise.all(clients.map((c) => c.close()));
@@ -185,6 +304,11 @@ async function main(): Promise<void> {
   const elapsedMs = Number(hrEnd - hrStart) / 1e6;
   const cpuEnd = process.cpuUsage(cpuStart);
   const memEnd = process.memoryUsage();
+  const measuredElapsedMs = steadyState
+    ? computeMeasuredWindowMs(loadElapsedMs, warmupMs, durationMs)
+    : elapsedMs;
+  const overallStreams = totalStreams + warmupStreams + cooldownStreams;
+  const overallBytes = totalBytes + warmupBytes + cooldownBytes;
 
   const result = {
     type: 'result',
@@ -198,8 +322,8 @@ async function main(): Promise<void> {
     totalBytes,
     errors,
     elapsedMs: Math.round(elapsedMs),
-    throughputMbps: Number(((totalBytes * 8) / (elapsedMs / 1000) / 1e6).toFixed(1)),
-    streamsPerSecond: Number((totalStreams / (elapsedMs / 1000)).toFixed(0)),
+    throughputMbps: Number((measuredElapsedMs > 0 ? ((totalBytes * 8) / (measuredElapsedMs / 1000) / 1e6) : 0).toFixed(1)),
+    streamsPerSecond: Number((measuredElapsedMs > 0 ? (totalStreams / (measuredElapsedMs / 1000)) : 0).toFixed(0)),
     connEstablish: {
       count: connLatency.values.length,
       meanMs: Number(connLatency.mean().toFixed(2)),
@@ -229,6 +353,20 @@ async function main(): Promise<void> {
       heapDeltaMB: Number(((memEnd.heapUsed - memStart.heapUsed) / 1e6).toFixed(1)),
       rssEnd: memEnd.rss,
       rssMB: Number((memEnd.rss / 1e6).toFixed(1)),
+    },
+    measurement: {
+      mode: steadyState ? 'steady-state' : 'fixed-workload',
+      warmupMs,
+      targetDurationMs: steadyState ? durationMs : null,
+      measuredMs: Math.round(measuredElapsedMs),
+      loadElapsedMs: Math.round(steadyState ? loadElapsedMs : elapsedMs),
+      maxInflightPerConnection,
+      warmupStreams,
+      warmupBytes,
+      cooldownStreams,
+      cooldownBytes,
+      overallStreams,
+      overallBytes,
     },
     reactorTelemetry: binding.runtimeTelemetry(),
   };

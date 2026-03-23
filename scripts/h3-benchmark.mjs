@@ -140,6 +140,14 @@ function rangeOf(values) {
   return { min: Math.min(...values), max: Math.max(...values) };
 }
 
+function maxDefinedNumber(values, fallback = null) {
+  const finite = values.filter((value) => typeof value === 'number' && Number.isFinite(value));
+  if (finite.length === 0) {
+    return fallback;
+  }
+  return Math.max(...finite);
+}
+
 function formatBytes(bytes) {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
@@ -191,6 +199,38 @@ function formatCountSummary(counts) {
   return entries.map(([key, value]) => `${key} x${value}`).join(', ');
 }
 
+function formatBufferReuseSummary(telemetry) {
+  if (!telemetry) {
+    return null;
+  }
+  const hasSignals = [
+    telemetry.rxBufferReuses ?? 0,
+    telemetry.rxBufferAllocations ?? 0,
+    telemetry.groSegmentBufferReuses ?? 0,
+    telemetry.groSegmentBufferAllocations ?? 0,
+    telemetry.pendingWriteBufferReuses ?? 0,
+    telemetry.pendingWriteBufferAllocations ?? 0,
+    telemetry.pendingWriteTailAllocations ?? 0,
+    telemetry.pendingWriteGrowthReallocations ?? 0,
+  ].some((value) => value > 0);
+  if (!hasSignals) {
+    return null;
+  }
+  return [
+    `rx=reuse:${telemetry.rxBufferReuses ?? 0}/alloc:${telemetry.rxBufferAllocations ?? 0}` +
+      `/in:${telemetry.rxBufferCheckins ?? 0}/drop:${telemetry.rxBufferDrops ?? 0}` +
+      `/bytes:${telemetry.rxBufferCopiedBytes ?? 0}`,
+    `gro=reuse:${telemetry.groSegmentBufferReuses ?? 0}/alloc:${telemetry.groSegmentBufferAllocations ?? 0}` +
+      `/in:${telemetry.groSegmentBufferCheckins ?? 0}/drop:${telemetry.groSegmentBufferDrops ?? 0}` +
+      `/bytes:${telemetry.groSegmentBufferCopiedBytes ?? 0}`,
+    `pw=reuse:${telemetry.pendingWriteBufferReuses ?? 0}/alloc:${telemetry.pendingWriteBufferAllocations ?? 0}` +
+      `/in:${telemetry.pendingWriteBufferCheckins ?? 0}/drop:${telemetry.pendingWriteBufferDrops ?? 0}` +
+      `/bytes:${telemetry.pendingWriteCopiedBytes ?? 0}` +
+      `/tail:${telemetry.pendingWriteTailAllocations ?? 0}` +
+      `/grow:${telemetry.pendingWriteGrowthReallocations ?? 0}`,
+  ].join(', ');
+}
+
 function formatClientReactorSummary(telemetry) {
   if (!telemetry) {
     return 'unavailable';
@@ -228,6 +268,7 @@ Examples:
   npm run bench:h3:stress
   npm run bench:h3 -- --profile throughput --connections 25 --streams-per-connection 40 --message-size 16KB
   npm run bench:h3 -- --client-processes 2 --rounds 3 --runtime-mode portable
+  npm run bench:h3 -- --runtime-mode fast --duration-ms 60000 --warmup-ms 5000 --max-inflight-per-connection 8
 
 Options:
   --profile smoke|balanced|throughput|stress  Named preset (default: balanced)
@@ -235,6 +276,9 @@ Options:
   --connections N                             H3 sessions opened per client process
   --streams-per-connection N                  Requests sent on each H3 session
   --message-size SIZE                         Payload bytes per request (e.g. 4096, 16k, 64KB)
+  --warmup-ms N                               Warmup before steady-state measurement begins
+  --duration-ms N                             Run one steady-state wall-clock window instead of a fixed stream batch
+  --max-inflight-per-connection N             Bound steady-state concurrent requests per connection
   --rounds N                                  Re-run the same load against one server
   --pause-ms N                                Delay between rounds (default from profile)
   --timeout-ms N                              Per-client timeout budget
@@ -274,6 +318,22 @@ function resolveSettings(argv) {
   const serverFallbackPolicy = parseEnum('server fallback policy', options.get('--server-fallback-policy') ?? sharedFallbackPolicy, FALLBACK_POLICIES);
   const clientFallbackPolicy = parseEnum('client fallback policy', options.get('--client-fallback-policy') ?? sharedFallbackPolicy, FALLBACK_POLICIES);
   const clientProcesses = options.get('--client-processes') ?? options.get('--clients');
+  const rounds = options.get('--rounds') === undefined ? profile.rounds : parseInteger('--rounds', options.get('--rounds'), { min: 1 });
+  const warmupMs = options.get('--warmup-ms') === undefined ? 0 : parseInteger('--warmup-ms', options.get('--warmup-ms'), { min: 0 });
+  const durationMs = options.get('--duration-ms') === undefined ? null : parseInteger('--duration-ms', options.get('--duration-ms'), { min: 1 });
+  const maxInflightPerConnection = options.get('--max-inflight-per-connection') === undefined
+    ? null
+    : parseInteger('--max-inflight-per-connection', options.get('--max-inflight-per-connection'), { min: 1 });
+
+  if (durationMs === null && warmupMs > 0) {
+    throw new Error('--warmup-ms requires --duration-ms');
+  }
+  if (durationMs === null && maxInflightPerConnection !== null) {
+    throw new Error('--max-inflight-per-connection requires --duration-ms');
+  }
+  if (durationMs !== null && rounds !== 1) {
+    throw new Error('--duration-ms steady-state mode requires --rounds 1');
+  }
 
   return {
     profileName,
@@ -282,7 +342,10 @@ function resolveSettings(argv) {
     connections: options.get('--connections') === undefined ? profile.connections : parseInteger('--connections', options.get('--connections'), { min: 1 }),
     streamsPerConnection: options.get('--streams-per-connection') === undefined ? profile.streamsPerConnection : parseInteger('--streams-per-connection', options.get('--streams-per-connection'), { min: 1 }),
     messageSize: options.get('--message-size') === undefined ? profile.messageSize : parseByteSize('--message-size', options.get('--message-size')),
-    rounds: options.get('--rounds') === undefined ? profile.rounds : parseInteger('--rounds', options.get('--rounds'), { min: 1 }),
+    warmupMs,
+    durationMs,
+    maxInflightPerConnection,
+    rounds,
     pauseMs: options.get('--pause-ms') === undefined ? profile.pauseMs : parseInteger('--pause-ms', options.get('--pause-ms'), { min: 0 }),
     timeoutMs: options.get('--timeout-ms') === undefined ? profile.timeoutMs : parseInteger('--timeout-ms', options.get('--timeout-ms'), { min: 1 }),
     statsIntervalMs: options.get('--stats-interval-ms') === undefined ? 1000 : parseInteger('--stats-interval-ms', options.get('--stats-interval-ms'), { min: 50 }),
@@ -450,10 +513,11 @@ function runClient(config) {
     let stderrBuffer = '';
     let result = null;
 
+    const timeoutBudgetMs = config.timeoutMs + 10_000 + (config.warmupMs ?? 0) + (config.durationMs ?? 0);
     const timeout = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));
-    }, config.timeoutMs + 10_000);
+    }, timeoutBudgetMs);
 
     child.stdout.on('data', (data) => {
       stdoutBuffer += data.toString();
@@ -509,12 +573,32 @@ function aggregateProcessResults(results, wallElapsedMs) {
   const streamP99s = results.map((result) => result.streamLatency.p99Ms);
   const runtimeSelections = {};
   const reactorTelemetry = {};
+  const steadyState = results.some((result) => result.measurement?.mode === 'steady-state');
+  const measuredWallElapsedMs = steadyState
+    ? maxDefinedNumber(results.map((result) => result.measurement?.measuredMs ?? null), 0)
+    : wallElapsedMs;
+  const loadElapsedMs = steadyState
+    ? maxDefinedNumber(results.map((result) => result.measurement?.loadElapsedMs ?? null), wallElapsedMs)
+    : wallElapsedMs;
+  const warmupMs = steadyState
+    ? maxDefinedNumber(results.map((result) => result.measurement?.warmupMs ?? null), 0)
+    : 0;
+  const targetDurationMs = steadyState
+    ? maxDefinedNumber(results.map((result) => result.measurement?.targetDurationMs ?? null), 0)
+    : null;
+  const maxInflightPerConnection = steadyState
+    ? maxDefinedNumber(results.map((result) => result.measurement?.maxInflightPerConnection ?? null), null)
+    : null;
 
   const totalStreams = sumBy(results, (result) => result.totalStreams);
   const totalBytes = sumBy(results, (result) => result.totalBytes);
   const errors = sumBy(results, (result) => result.errors);
   const totalCpuUserMs = sumBy(results, (result) => result.cpu.userMs);
   const totalCpuSystemMs = sumBy(results, (result) => result.cpu.systemMs);
+  const warmupStreams = sumBy(results, (result) => result.measurement?.warmupStreams ?? 0);
+  const warmupBytes = sumBy(results, (result) => result.measurement?.warmupBytes ?? 0);
+  const cooldownStreams = sumBy(results, (result) => result.measurement?.cooldownStreams ?? 0);
+  const cooldownBytes = sumBy(results, (result) => result.measurement?.cooldownBytes ?? 0);
 
   for (const result of results) {
     mergeCountObjects(runtimeSelections, result.runtimeSelections);
@@ -525,9 +609,10 @@ function aggregateProcessResults(results, wallElapsedMs) {
     totalStreams,
     totalBytes,
     errors,
-    wallElapsedMs,
-    throughputMbps: wallElapsedMs > 0 ? (totalBytes * 8) / (wallElapsedMs / 1000) / 1_000_000 : 0,
-    streamsPerSecond: wallElapsedMs > 0 ? totalStreams / (wallElapsedMs / 1000) : 0,
+    wallElapsedMs: measuredWallElapsedMs,
+    processWallElapsedMs: wallElapsedMs,
+    throughputMbps: measuredWallElapsedMs > 0 ? (totalBytes * 8) / (measuredWallElapsedMs / 1000) / 1_000_000 : 0,
+    streamsPerSecond: measuredWallElapsedMs > 0 ? totalStreams / (measuredWallElapsedMs / 1000) : 0,
     connectionCount: sumBy(results, (result) => result.connEstablish.count),
     connectionMeanMs: weightedMean(results, (result) => result.connEstablish.meanMs, (result) => result.connEstablish.count),
     connectionP95s,
@@ -537,29 +622,61 @@ function aggregateProcessResults(results, wallElapsedMs) {
     streamP99s,
     runtimeSelections,
     reactorTelemetry,
+    measurement: {
+      mode: steadyState ? 'steady-state' : 'fixed-workload',
+      warmupMs,
+      targetDurationMs,
+      measuredWallElapsedMs,
+      loadElapsedMs,
+      maxInflightPerConnection,
+      warmupStreams,
+      warmupBytes,
+      cooldownStreams,
+      cooldownBytes,
+      overallStreams: totalStreams + warmupStreams + cooldownStreams,
+      overallBytes: totalBytes + warmupBytes + cooldownBytes,
+    },
     totalCpuUserMs,
     totalCpuSystemMs,
-    totalCpuUtilizationPct: wallElapsedMs > 0 ? ((totalCpuUserMs + totalCpuSystemMs) / wallElapsedMs) * 100 : 0,
+    totalCpuUtilizationPct: measuredWallElapsedMs > 0 ? ((totalCpuUserMs + totalCpuSystemMs) / measuredWallElapsedMs) * 100 : 0,
   };
 }
 
 function printSummary(summary) {
   const { settings, requestedStreams, totalStreams, errors, wallElapsedMs, throughputMbps, streamsPerSecond, clientStats, rounds, serverStats } = summary;
+  const measurement = clientStats.measurement;
 
   console.log('HTTP/3 benchmark');
   console.log(`  Profile: ${settings.profileName}`);
-  console.log(
-    `  Load: ${settings.clientProcesses} client processes x ${settings.connections} connections` +
-    ` x ${settings.streamsPerConnection} requests x ${formatBytes(settings.messageSize)} x ${settings.rounds} rounds`,
-  );
+  if (measurement.mode === 'steady-state') {
+    console.log(
+      `  Load: ${settings.clientProcesses} client processes x ${settings.connections} connections` +
+      ` x ${measurement.maxInflightPerConnection ?? 1} inflight requests x ${formatBytes(settings.messageSize)}` +
+      ` for ${measurement.measuredWallElapsedMs}ms after ${measurement.warmupMs}ms warmup`,
+    );
+  } else {
+    console.log(
+      `  Load: ${settings.clientProcesses} client processes x ${settings.connections} connections` +
+      ` x ${settings.streamsPerConnection} requests x ${formatBytes(settings.messageSize)} x ${settings.rounds} rounds`,
+    );
+  }
   console.log(
     `  Runtime: server=${settings.serverRuntimeMode ?? 'default'}/${settings.serverFallbackPolicy ?? 'default'}` +
     ` client=${settings.clientRuntimeMode ?? 'default'}/${settings.clientFallbackPolicy ?? 'default'}`,
   );
-  console.log(`  Requested requests: ${requestedStreams}`);
+  console.log(`  Requested requests: ${requestedStreams ?? 'steady-state window'}`);
   console.log(`  Completed requests: ${totalStreams}`);
   console.log(`  Errors: ${errors}`);
-  console.log(`  Wall time: ${wallElapsedMs}ms`);
+  if (measurement.mode === 'steady-state') {
+    console.log(`  Process wall time: ${wallElapsedMs}ms`);
+    console.log(`  Measured window: ${measurement.measuredWallElapsedMs}ms (load phase ${measurement.loadElapsedMs}ms)`);
+    console.log(
+      `  Warmup/cooldown completions: ${measurement.warmupStreams}/${measurement.cooldownStreams}` +
+      ` (${measurement.overallStreams} total across all phases)`,
+    );
+  } else {
+    console.log(`  Wall time: ${wallElapsedMs}ms`);
+  }
   console.log(`  Throughput: ${throughputMbps.toFixed(1)} Mbps`);
   console.log(`  Requests/sec: ${streamsPerSecond.toFixed(0)}`);
   console.log(`  Connection setup mean: ${clientStats.connectionMeanMs.toFixed(2)}ms weighted`);
@@ -574,6 +691,10 @@ function printSummary(summary) {
   );
   console.log(`  Client runtime selections: ${formatCountSummary(clientStats.runtimeSelections)}`);
   console.log(`  Client reactor: ${formatClientReactorSummary(clientStats.reactorTelemetry)}`);
+  const clientBufferReuse = formatBufferReuseSummary(clientStats.reactorTelemetry);
+  if (clientBufferReuse) {
+    console.log(`  Client buffer reuse: ${clientBufferReuse}`);
+  }
 
   if (serverStats) {
     console.log(`  Server runtime selected: ${formatRuntimeInfo(serverStats.runtimeInfo)}`);
@@ -593,14 +714,26 @@ function printSummary(summary) {
       ` util=${serverStats.cpuUtilizationPct.toFixed(1)}%`,
     );
     console.log(`  Server reactor: ${formatServerReactorSummary(serverStats.reactorTelemetry)}`);
+    const serverBufferReuse = formatBufferReuseSummary(serverStats.reactorTelemetry);
+    if (serverBufferReuse) {
+      console.log(`  Server buffer reuse: ${serverBufferReuse}`);
+    }
   }
 
   console.log('  Rounds:');
   for (const round of rounds) {
-    console.log(
-      `    ${round.round}. ${round.elapsedMs}ms, ${round.totalStreams}/${round.expectedStreams} ok,` +
-      ` ${round.errors} err, ${round.throughputMbps.toFixed(1)} Mbps, ${round.streamsPerSecond.toFixed(0)} req/s`,
-    );
+    if (measurement.mode === 'steady-state') {
+      console.log(
+        `    ${round.round}. process ${round.elapsedMs}ms, measured ${round.measuredElapsedMs}ms,` +
+        ` ${round.totalStreams} ok, ${round.errors} err, ${round.throughputMbps.toFixed(1)} Mbps,` +
+        ` ${round.streamsPerSecond.toFixed(0)} req/s`,
+      );
+    } else {
+      console.log(
+        `    ${round.round}. ${round.elapsedMs}ms, ${round.totalStreams}/${round.expectedStreams} ok,` +
+        ` ${round.errors} err, ${round.throughputMbps.toFixed(1)} Mbps, ${round.streamsPerSecond.toFixed(0)} req/s`,
+      );
+    }
   }
 }
 
@@ -621,6 +754,9 @@ async function main() {
     streamsPerConnection: settings.streamsPerConnection,
     messageSize: settings.messageSize,
     timeoutMs: settings.timeoutMs,
+    warmupMs: settings.warmupMs,
+    durationMs: settings.durationMs,
+    maxInflightPerConnection: settings.maxInflightPerConnection,
     runtimeMode: settings.clientRuntimeMode,
     fallbackPolicy: settings.clientFallbackPolicy,
   };
@@ -629,7 +765,9 @@ async function main() {
   const wallStart = Date.now();
   const roundSummaries = [];
   const allResults = [];
-  const requestedStreamsPerRound = settings.clientProcesses * settings.connections * settings.streamsPerConnection;
+  const requestedStreamsPerRound = settings.durationMs === null
+    ? settings.clientProcesses * settings.connections * settings.streamsPerConnection
+    : null;
 
   try {
     for (let round = 0; round < settings.rounds; round += 1) {
@@ -650,6 +788,7 @@ async function main() {
         totalStreams: aggregate.totalStreams,
         errors: aggregate.errors,
         elapsedMs: roundElapsedMs,
+        measuredElapsedMs: aggregate.measurement.measuredWallElapsedMs,
         throughputMbps: aggregate.throughputMbps,
         streamsPerSecond: aggregate.streamsPerSecond,
       });
@@ -663,7 +802,7 @@ async function main() {
 
   const wallElapsedMs = Date.now() - wallStart;
   const clientStats = aggregateProcessResults(allResults, wallElapsedMs);
-  const requestedStreams = requestedStreamsPerRound * settings.rounds;
+  const requestedStreams = requestedStreamsPerRound === null ? null : requestedStreamsPerRound * settings.rounds;
   const finalServerSnapshot = server.telemetry.summary ?? server.telemetry.latest;
   const serverRuntimeInfo = finalServerSnapshot?.runtimeInfo ?? server.telemetry.runtimeInfo ?? null;
 
@@ -688,6 +827,7 @@ async function main() {
     totalStreams: clientStats.totalStreams,
     errors: clientStats.errors,
     wallElapsedMs,
+    measuredElapsedMs: clientStats.measurement.measuredWallElapsedMs,
     throughputMbps: clientStats.throughputMbps,
     streamsPerSecond: clientStats.streamsPerSecond,
     clientStats,

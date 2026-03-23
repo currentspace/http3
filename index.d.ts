@@ -285,6 +285,23 @@ export interface JsReactorTelemetrySnapshot {
   kqueueUnsentHighWatermark: number
   kqueueWouldBlockSends: number
   kqueueWriteWakeups: number
+  rxBufferReuses: number
+  rxBufferAllocations: number
+  rxBufferCheckins: number
+  rxBufferDrops: number
+  rxBufferCopiedBytes: number
+  groSegmentBufferReuses: number
+  groSegmentBufferAllocations: number
+  groSegmentBufferCheckins: number
+  groSegmentBufferDrops: number
+  groSegmentBufferCopiedBytes: number
+  pendingWriteBufferReuses: number
+  pendingWriteBufferAllocations: number
+  pendingWriteBufferCheckins: number
+  pendingWriteBufferDrops: number
+  pendingWriteCopiedBytes: number
+  pendingWriteTailAllocations: number
+  pendingWriteGrowthReallocations: number
   txBuffersRecycled: number
 }
 

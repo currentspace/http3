@@ -87,6 +87,23 @@ pub struct JsReactorTelemetrySnapshot {
     pub kqueueUnsentHighWatermark: i64,
     pub kqueueWouldBlockSends: i64,
     pub kqueueWriteWakeups: i64,
+    pub rxBufferReuses: i64,
+    pub rxBufferAllocations: i64,
+    pub rxBufferCheckins: i64,
+    pub rxBufferDrops: i64,
+    pub rxBufferCopiedBytes: i64,
+    pub groSegmentBufferReuses: i64,
+    pub groSegmentBufferAllocations: i64,
+    pub groSegmentBufferCheckins: i64,
+    pub groSegmentBufferDrops: i64,
+    pub groSegmentBufferCopiedBytes: i64,
+    pub pendingWriteBufferReuses: i64,
+    pub pendingWriteBufferAllocations: i64,
+    pub pendingWriteBufferCheckins: i64,
+    pub pendingWriteBufferDrops: i64,
+    pub pendingWriteCopiedBytes: i64,
+    pub pendingWriteTailAllocations: i64,
+    pub pendingWriteGrowthReallocations: i64,
     pub txBuffersRecycled: i64,
 }
 
@@ -225,6 +242,23 @@ static IO_URING_SQ_FULL_EVENTS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_UNSENT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WOULD_BLOCK_SENDS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WRITE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_DROPS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_DROPS: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_DROPS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_TAIL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_GROWTH_REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
 static TX_BUFFERS_RECYCLED: AtomicU64 = AtomicU64::new(0);
 
@@ -559,6 +593,69 @@ pub(crate) fn record_kqueue_write_wakeup() {
     bump(&KQUEUE_WRITE_WAKEUPS);
 }
 
+pub(crate) fn record_rx_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&RX_BUFFER_REUSES);
+    } else {
+        bump(&RX_BUFFER_ALLOCATIONS);
+    }
+    RX_BUFFER_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_rx_buffer_checkin(retained: bool) {
+    if retained {
+        bump(&RX_BUFFER_CHECKINS);
+    } else {
+        bump(&RX_BUFFER_DROPS);
+    }
+}
+
+pub(crate) fn record_gro_segment_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&GRO_SEGMENT_BUFFER_REUSES);
+    } else {
+        bump(&GRO_SEGMENT_BUFFER_ALLOCATIONS);
+    }
+    GRO_SEGMENT_BUFFER_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_gro_segment_buffer_checkin(retained: bool) {
+    if retained {
+        bump(&GRO_SEGMENT_BUFFER_CHECKINS);
+    } else {
+        bump(&GRO_SEGMENT_BUFFER_DROPS);
+    }
+}
+
+pub(crate) fn record_pending_write_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&PENDING_WRITE_BUFFER_REUSES);
+    } else {
+        bump(&PENDING_WRITE_BUFFER_ALLOCATIONS);
+    }
+    PENDING_WRITE_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_pending_write_buffer_checkin(retained: bool) {
+    if retained {
+        bump(&PENDING_WRITE_BUFFER_CHECKINS);
+    } else {
+        bump(&PENDING_WRITE_BUFFER_DROPS);
+    }
+}
+
+pub(crate) fn record_pending_write_copy(bytes: usize) {
+    PENDING_WRITE_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_pending_write_tail_allocation() {
+    bump(&PENDING_WRITE_TAIL_ALLOCATIONS);
+}
+
+pub(crate) fn record_pending_write_growth_reallocation() {
+    bump(&PENDING_WRITE_GROWTH_REALLOCATIONS);
+}
+
 pub(crate) fn record_tx_buffers_recycled(count: usize) {
     TX_BUFFERS_RECYCLED.fetch_add(count as u64, Ordering::Relaxed);
 }
@@ -643,6 +740,23 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         kqueueUnsentHighWatermark: load(&KQUEUE_UNSENT_HIGH_WATERMARK),
         kqueueWouldBlockSends: load(&KQUEUE_WOULD_BLOCK_SENDS),
         kqueueWriteWakeups: load(&KQUEUE_WRITE_WAKEUPS),
+        rxBufferReuses: load(&RX_BUFFER_REUSES),
+        rxBufferAllocations: load(&RX_BUFFER_ALLOCATIONS),
+        rxBufferCheckins: load(&RX_BUFFER_CHECKINS),
+        rxBufferDrops: load(&RX_BUFFER_DROPS),
+        rxBufferCopiedBytes: load(&RX_BUFFER_COPIED_BYTES),
+        groSegmentBufferReuses: load(&GRO_SEGMENT_BUFFER_REUSES),
+        groSegmentBufferAllocations: load(&GRO_SEGMENT_BUFFER_ALLOCATIONS),
+        groSegmentBufferCheckins: load(&GRO_SEGMENT_BUFFER_CHECKINS),
+        groSegmentBufferDrops: load(&GRO_SEGMENT_BUFFER_DROPS),
+        groSegmentBufferCopiedBytes: load(&GRO_SEGMENT_BUFFER_COPIED_BYTES),
+        pendingWriteBufferReuses: load(&PENDING_WRITE_BUFFER_REUSES),
+        pendingWriteBufferAllocations: load(&PENDING_WRITE_BUFFER_ALLOCATIONS),
+        pendingWriteBufferCheckins: load(&PENDING_WRITE_BUFFER_CHECKINS),
+        pendingWriteBufferDrops: load(&PENDING_WRITE_BUFFER_DROPS),
+        pendingWriteCopiedBytes: load(&PENDING_WRITE_COPIED_BYTES),
+        pendingWriteTailAllocations: load(&PENDING_WRITE_TAIL_ALLOCATIONS),
+        pendingWriteGrowthReallocations: load(&PENDING_WRITE_GROWTH_REALLOCATIONS),
         txBuffersRecycled: load(&TX_BUFFERS_RECYCLED),
     }
 }
@@ -721,6 +835,23 @@ pub fn reset() {
         &KQUEUE_UNSENT_HIGH_WATERMARK,
         &KQUEUE_WOULD_BLOCK_SENDS,
         &KQUEUE_WRITE_WAKEUPS,
+        &RX_BUFFER_REUSES,
+        &RX_BUFFER_ALLOCATIONS,
+        &RX_BUFFER_CHECKINS,
+        &RX_BUFFER_DROPS,
+        &RX_BUFFER_COPIED_BYTES,
+        &GRO_SEGMENT_BUFFER_REUSES,
+        &GRO_SEGMENT_BUFFER_ALLOCATIONS,
+        &GRO_SEGMENT_BUFFER_CHECKINS,
+        &GRO_SEGMENT_BUFFER_DROPS,
+        &GRO_SEGMENT_BUFFER_COPIED_BYTES,
+        &PENDING_WRITE_BUFFER_REUSES,
+        &PENDING_WRITE_BUFFER_ALLOCATIONS,
+        &PENDING_WRITE_BUFFER_CHECKINS,
+        &PENDING_WRITE_BUFFER_DROPS,
+        &PENDING_WRITE_COPIED_BYTES,
+        &PENDING_WRITE_TAIL_ALLOCATIONS,
+        &PENDING_WRITE_GROWTH_REALLOCATIONS,
         &TX_BUFFERS_RECYCLED,
     ] {
         reset_counter(counter);

@@ -18,6 +18,7 @@ mod inner {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso};
     use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg, probe_gso, build_gso_cmsg, enable_gro, parse_gro_cmsg};
@@ -29,6 +30,7 @@ mod inner {
     const RX_BUF_OVERHEAD: usize = std::mem::size_of::<libc::sockaddr_storage>()
         + 16 // io_uring_recvmsg_out header
         + CMSG_CONTROL_LEN;
+    const USER_RX_BUF_SIZE: usize = 65535;
     const RX_BUF_SIZE: usize = 65535 + RX_BUF_OVERHEAD;
     const TX_SLOTS: usize = 256;
 
@@ -470,6 +472,7 @@ mod inner {
         tx_bytes_cap: usize,
         pending_tx: VecDeque<TxDatagram>,
         recycled_tx: Vec<Vec<u8>>,
+        rx_pool: AdaptiveBufferPool,
         cqe_buf: Vec<io_uring::cqueue::Entry>,
         /// RX datagrams harvested during process_cqes_inline(), prepended
         /// to the next poll() outcome so they aren't lost.
@@ -607,6 +610,7 @@ mod inner {
                 tx_bytes_cap,
                 pending_tx: VecDeque::new(),
                 recycled_tx: Vec::new(),
+                rx_pool: AdaptiveBufferPool::new(RX_RING_SIZE as usize, USER_RX_BUF_SIZE),
                 cqe_buf: Vec::with_capacity(512),
                 deferred_rx: Vec::new(),
                 deferred_woken: false,
@@ -715,8 +719,14 @@ mod inner {
                                             .unwrap_or(self.local_addr);
                                         let segment_size = parse_gro_cmsg(control);
                                         let payload = parsed.payload_data();
+                                        let (data, reused) =
+                                            self.rx_pool.copy_from_slice(payload);
+                                        reactor_metrics::record_rx_buffer_checkout(
+                                            reused,
+                                            payload.len(),
+                                        );
                                         outcome.rx.push(RxDatagram {
-                                            data: payload.to_vec(),
+                                            data,
                                             peer,
                                             local,
                                             segment_size,
@@ -1025,6 +1035,13 @@ mod inner {
 
         fn driver_kind(&self) -> RuntimeDriverKind {
             RuntimeDriverKind::IoUring
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            for buf in buffers {
+                let retained = self.rx_pool.checkin(buf);
+                reactor_metrics::record_rx_buffer_checkin(retained);
+            }
         }
     }
 
@@ -1344,8 +1361,14 @@ mod inner {
                                             .unwrap_or(self.local_addr);
                                         let segment_size = parse_gro_cmsg(control);
                                         let payload = parsed.payload_data();
+                                        let (data, reused) =
+                                            self.rx_pool.copy_from_slice(payload);
+                                        reactor_metrics::record_rx_buffer_checkout(
+                                            reused,
+                                            payload.len(),
+                                        );
                                         self.deferred_rx.push(RxDatagram {
-                                            data: payload.to_vec(),
+                                            data,
                                             peer,
                                             local,
                                             segment_size,
@@ -1521,8 +1544,14 @@ mod inner {
                                             .unwrap_or(self.local_addr);
                                         let segment_size = parse_gro_cmsg(control);
                                         let payload = parsed.payload_data();
+                                        let (data, reused) =
+                                            self.rx_pool.copy_from_slice(payload);
+                                        reactor_metrics::record_rx_buffer_checkout(
+                                            reused,
+                                            payload.len(),
+                                        );
                                         self.deferred_rx.push(RxDatagram {
-                                            data: payload.to_vec(),
+                                            data,
                                             peer,
                                             local,
                                             segment_size,

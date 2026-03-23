@@ -13,10 +13,12 @@ mod inner {
 
     use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
 
+    use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
 
     const WAKER_IDENT: usize = 0xCAFE;
+    const RX_BUF_SIZE: usize = 65535;
 
     /// Max datagrams to recv per poll iteration.  Prevents the recv loop from
     /// starving the send path under fan-out: after this many packets the loop
@@ -28,10 +30,12 @@ mod inner {
         kq: Kqueue,
         socket: std::net::UdpSocket,
         socket_fd: RawFd,
+        local_addr: SocketAddr,
         unsent: VecDeque<TxDatagram>,
         write_interest_registered: bool,
         event_buf: Vec<KEvent>,
         recv_buf: Vec<u8>,
+        rx_pool: AdaptiveBufferPool,
         /// Buffers from successfully sent packets, ready for pool recycling.
         recycled_tx: Vec<Vec<u8>>,
     }
@@ -56,6 +60,7 @@ mod inner {
         fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
             let kq = Kqueue::new().map_err(nix_to_io)?;
             let socket_fd = socket.as_raw_fd();
+            let local_addr = socket.local_addr()?;
 
             // Register EVFILT_READ permanently (EV_ADD | EV_CLEAR = edge-triggered, auto-rearm)
             let read_ev = KEvent::new(
@@ -86,6 +91,7 @@ mod inner {
                     kq,
                     socket,
                     socket_fd,
+                    local_addr,
                     unsent: VecDeque::new(),
                     write_interest_registered: false,
                     recycled_tx: Vec::new(),
@@ -100,7 +106,8 @@ mod inner {
                         );
                         32
                     ],
-                    recv_buf: vec![0u8; 65535],
+                    recv_buf: vec![0u8; RX_BUF_SIZE],
+                    rx_pool: AdaptiveBufferPool::new(MAX_RX_PER_POLL, RX_BUF_SIZE),
                 },
                 waker,
             ))
@@ -189,9 +196,13 @@ mod inner {
             for _ in 0..MAX_RX_PER_POLL {
                 match self.socket.recv_from(&mut self.recv_buf) {
                     Ok((len, peer)) => {
+                        let (data, reused) = self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
+                        reactor_metrics::record_rx_buffer_checkout(reused, len);
                         outcome.rx.push(RxDatagram {
-                            data: self.recv_buf[..len].to_vec(),
+                            data,
                             peer,
+                            local: self.local_addr,
+                            segment_size: None,
                         });
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -227,11 +238,18 @@ mod inner {
         }
 
         fn local_addr(&self) -> io::Result<SocketAddr> {
-            self.socket.local_addr()
+            Ok(self.local_addr)
         }
 
         fn driver_kind(&self) -> RuntimeDriverKind {
             RuntimeDriverKind::Kqueue
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            for buf in buffers {
+                let retained = self.rx_pool.checkin(buf);
+                reactor_metrics::record_rx_buffer_checkin(retained);
+            }
         }
     }
 
