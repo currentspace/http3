@@ -16,7 +16,7 @@ use ring::hmac;
 use ring::rand::SecureRandom;
 use slab::Slab;
 
-use crate::buffer_pool::BufferPool;
+use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
 use crate::cid::CidEncoding;
 use crate::client_topology::{
     default_quic_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
@@ -884,6 +884,50 @@ impl QuicConnectionMap {
 struct PendingWrite {
     data: Vec<u8>,
     fin: bool,
+}
+
+const PENDING_WRITE_POOL_SIZE: usize = 256;
+const PENDING_WRITE_MIN_CAPACITY: usize = 4 * 1024;
+
+fn checkout_pending_write_tail(pool: &mut AdaptiveBufferPool, data: &[u8]) -> Vec<u8> {
+    reactor_metrics::record_pending_write_tail_allocation();
+    let (buf, reused) = pool.copy_from_slice(data);
+    reactor_metrics::record_pending_write_buffer_checkout(reused, data.len());
+    buf
+}
+
+fn recycle_pending_write_buffer(pool: &mut AdaptiveBufferPool, buf: Vec<u8>) {
+    if buf.capacity() == 0 {
+        return;
+    }
+
+    let retained = pool.checkin(buf);
+    reactor_metrics::record_pending_write_buffer_checkin(retained);
+}
+
+fn append_pending_write(pool: &mut AdaptiveBufferPool, pending: &mut PendingWrite, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+
+    if pending.data.capacity().saturating_sub(pending.data.len()) >= data.len() {
+        pending.data.extend_from_slice(data);
+        reactor_metrics::record_pending_write_copy(data.len());
+        return;
+    }
+
+    reactor_metrics::record_pending_write_growth_reallocation();
+    let old = std::mem::take(&mut pending.data);
+    let old_len = old.len();
+    let new_len = old_len + data.len();
+    let (mut new_buf, reused) = pool.checkout(new_len);
+    reactor_metrics::record_pending_write_buffer_checkout(reused, new_len);
+    if old_len > 0 {
+        new_buf[..old_len].copy_from_slice(&old);
+    }
+    new_buf[old_len..].copy_from_slice(data);
+    recycle_pending_write_buffer(pool, old);
+    pending.data = new_buf;
 }
 
 // ── Spawn functions ────────────────────────────────────────────────
@@ -1759,6 +1803,7 @@ struct QuicServerHandler {
     timer_heap: TimerHeap,
     buffer_pool: BufferPool,
     tx_pool: BufferPool,
+    pending_write_pool: AdaptiveBufferPool,
     pending_writes: HashMap<(u32, u64), PendingWrite>,
     conn_send_buffers: HashMap<usize, Vec<u8>>,
     handles_buf: Vec<usize>,
@@ -1783,6 +1828,10 @@ impl QuicServerHandler {
             timer_heap: TimerHeap::new(),
             buffer_pool: BufferPool::default(),
             tx_pool: BufferPool::new(256, 65535),
+            pending_write_pool: AdaptiveBufferPool::new(
+                PENDING_WRITE_POOL_SIZE,
+                PENDING_WRITE_MIN_CAPACITY,
+            ),
             pending_writes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
             handles_buf: Vec::new(),
@@ -1818,7 +1867,7 @@ impl ProtocolHandler for QuicServerHandler {
             } => {
                 let key = (conn_handle, stream_id);
                 if let Some(pw) = self.pending_writes.get_mut(&key) {
-                    pw.data.extend_from_slice(&data);
+                    append_pending_write(&mut self.pending_write_pool, pw, &data);
                     pw.fin = pw.fin || fin;
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
                     let written = conn.stream_send(stream_id, &data, fin).unwrap_or(0);
@@ -1826,7 +1875,10 @@ impl ProtocolHandler for QuicServerHandler {
                         self.pending_writes.insert(
                             key,
                             PendingWrite {
-                                data: data[written..].to_vec(),
+                                data: checkout_pending_write_tail(
+                                    &mut self.pending_write_pool,
+                                    &data[written..],
+                                ),
                                 fin,
                             },
                         );
@@ -2187,7 +2239,11 @@ impl ProtocolHandler for QuicServerHandler {
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
-        let flushed = flush_quic_pending_writes(&mut self.conn_map, &mut self.pending_writes);
+        let flushed = flush_quic_pending_writes(
+            &mut self.conn_map,
+            &mut self.pending_writes,
+            &mut self.pending_write_pool,
+        );
         for (local_handle, stream_id) in flushed {
             reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(local_handle | self.handle_offset, stream_id));
@@ -2259,6 +2315,7 @@ struct QuicClientHandler {
     pending_writes: HashMap<u64, PendingWrite>,
     send_buf: Vec<u8>,
     tx_pool: BufferPool,
+    pending_write_pool: AdaptiveBufferPool,
     timer_deadline: Option<Instant>,
     session_closed_emitted: bool,
 }
@@ -2305,6 +2362,10 @@ impl QuicClientHandler {
             pending_writes: HashMap::new(),
             send_buf: vec![0u8; SEND_BUF_SIZE],
             tx_pool: BufferPool::new(256, 65535),
+            pending_write_pool: AdaptiveBufferPool::new(
+                PENDING_WRITE_POOL_SIZE,
+                PENDING_WRITE_MIN_CAPACITY,
+            ),
             timer_deadline,
             session_closed_emitted: false,
         })
@@ -2353,7 +2414,7 @@ impl QuicClientHandler {
 
     fn queue_stream_send(&mut self, stream_id: u64, data: Vec<u8>, fin: bool) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
-            pw.data.extend_from_slice(&data);
+            append_pending_write(&mut self.pending_write_pool, pw, &data);
             pw.fin = pw.fin || fin;
             return;
         }
@@ -2363,7 +2424,10 @@ impl QuicClientHandler {
             self.pending_writes.insert(
                 stream_id,
                 PendingWrite {
-                    data: data[written..].to_vec(),
+                    data: checkout_pending_write_tail(
+                        &mut self.pending_write_pool,
+                        &data[written..],
+                    ),
                     fin,
                 },
             );
@@ -2512,7 +2576,11 @@ impl QuicClientHandler {
         batch: &mut Vec<JsH3Event>,
         conn_handle: u32,
     ) {
-        let flushed = flush_quic_client_pending_writes(&mut self.conn, &mut self.pending_writes);
+        let flushed = flush_quic_client_pending_writes(
+            &mut self.conn,
+            &mut self.pending_writes,
+            &mut self.pending_write_pool,
+        );
         for stream_id in flushed {
             reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(conn_handle, stream_id));
@@ -2706,10 +2774,12 @@ fn snapshot_quic_metrics(conn: &QuicConnection) -> JsSessionMetrics {
 fn flush_quic_pending_writes(
     conn_map: &mut QuicConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
+    pool: &mut AdaptiveBufferPool,
 ) -> Vec<(u32, u64)> {
     let mut flushed = Vec::new();
     pending.retain(|&(conn_handle, stream_id), pw| {
         let Some(conn) = conn_map.get_mut(conn_handle as usize) else {
+            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
             return false;
         };
         let written = conn.stream_send(stream_id, &pw.data, pw.fin).unwrap_or(0);
@@ -2717,6 +2787,7 @@ fn flush_quic_pending_writes(
             true
         } else if written >= pw.data.len() {
             flushed.push((conn_handle, stream_id));
+            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
             false
         } else {
             if written > 0 {
@@ -2731,6 +2802,7 @@ fn flush_quic_pending_writes(
 fn flush_quic_client_pending_writes(
     conn: &mut QuicConnection,
     pending: &mut HashMap<u64, PendingWrite>,
+    pool: &mut AdaptiveBufferPool,
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
@@ -2739,6 +2811,7 @@ fn flush_quic_client_pending_writes(
             true
         } else if written >= pw.data.len() {
             flushed.push(stream_id);
+            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
             false
         } else {
             if written > 0 {

@@ -70,13 +70,26 @@ async function main(): Promise<void> {
     });
     session.on('stream', (stream: QuicStream) => {
       streamCount++;
-      const chunks: Buffer[] = [];
+      let singleChunk: Buffer | null = null;
+      let chunks: Buffer[] | null = null;
+      let totalLength = 0;
       stream.on('data', (chunk: Buffer) => {
         bytesEchoed += chunk.length;
-        chunks.push(chunk);
+        totalLength += chunk.length;
+        if (singleChunk === null && chunks === null) {
+          singleChunk = chunk;
+        } else {
+          if (chunks === null) {
+            chunks = [singleChunk!];
+            singleChunk = null;
+          }
+          chunks.push(chunk);
+        }
       });
       stream.on('end', () => {
-        const body = Buffer.concat(chunks);
+        const body = chunks
+          ? Buffer.concat(chunks, totalLength)
+          : (singleChunk ?? Buffer.alloc(0));
         stream.end(body);
       });
     });

@@ -19,6 +19,7 @@ use serde::Serialize;
 #[cfg(feature = "node-api")]
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
+use crate::buffer_pool::AdaptiveBufferPool;
 use crate::h3_event::JsH3Event;
 use crate::reactor_metrics::{self, WorkerLoopExitCause};
 use crate::transport::{Driver, TxDatagram};
@@ -420,6 +421,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     let use_pktinfo_local = !local_addr.ip().is_unspecified();
     let mut outbound: Vec<TxDatagram> = Vec::new();
     let mut pending_outbound: Vec<TxDatagram> = Vec::new();
+    let mut gro_segment_pool = AdaptiveBufferPool::new(256, 4 * 1024);
 
     // Initial flush — sends Client Hello for client handlers, no-op for servers.
     handler.flush_sends(&mut outbound);
@@ -525,7 +527,8 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             if let Some(seg_size) = pkt.segment_size {
                 let seg = seg_size as usize;
                 for chunk in pkt.data.chunks(seg) {
-                    let mut buf = chunk.to_vec();
+                    let (mut buf, reused) = gro_segment_pool.copy_from_slice(chunk);
+                    reactor_metrics::record_gro_segment_buffer_checkout(reused, chunk.len());
                     handler.process_packet(
                         &mut buf,
                         pkt.peer,
@@ -533,6 +536,8 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                         &mut pending_outbound,
                         &mut batcher.batch,
                     );
+                    let retained = gro_segment_pool.checkin(buf);
+                    reactor_metrics::record_gro_segment_buffer_checkin(retained);
                 }
             } else {
                 handler.process_packet(

@@ -11,6 +11,8 @@ mod inner {
     use std::sync::Arc;
     use std::time::Instant;
 
+    use crate::buffer_pool::AdaptiveBufferPool;
+    use crate::reactor_metrics;
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
         group_for_gso,
@@ -94,7 +96,7 @@ mod inner {
         eventfd: OwnedFd,
         unsent: VecDeque<TxDatagram>,
         recycled_tx: Vec<Vec<u8>>,
-        recycled_rx: Vec<Vec<u8>>,
+        rx_pool: AdaptiveBufferPool,
         waker_buf: [u8; 8],
         rx_batch: RxBatch,
         /// Pre-allocated mmsghdr + iovec + sockaddr arrays for sendmmsg.
@@ -144,7 +146,7 @@ mod inner {
                 eventfd,
                 unsent: VecDeque::new(),
                 recycled_tx: Vec::new(),
-                recycled_rx: Vec::with_capacity(MAX_RX_PER_POLL),
+                rx_pool: AdaptiveBufferPool::new(MAX_RX_PER_POLL, RX_BUF_SIZE),
                 waker_buf: [0u8; 8],
                 rx_batch: RxBatch::new(),
                 tx_hdrs: Vec::with_capacity(256),
@@ -253,7 +255,10 @@ mod inner {
         }
 
         fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
-            self.recycled_rx.extend(buffers);
+            for buf in buffers {
+                let retained = self.rx_pool.checkin(buf);
+                reactor_metrics::record_rx_buffer_checkin(retained);
+            }
         }
     }
 
@@ -298,10 +303,9 @@ mod inner {
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
                     let segment_size = parse_gro_cmsg(cmsg_data);
-                    let mut data = self.recycled_rx.pop()
-                        .unwrap_or_else(|| Vec::with_capacity(len));
-                    data.clear();
-                    data.extend_from_slice(&self.rx_batch.slots[i].buf[..len]);
+                    let (data, reused) =
+                        self.rx_pool.copy_from_slice(&self.rx_batch.slots[i].buf[..len]);
+                    reactor_metrics::record_rx_buffer_checkout(reused, len);
                     outcome.rx.push(RxDatagram { data, peer, local, segment_size });
                 }
             }
