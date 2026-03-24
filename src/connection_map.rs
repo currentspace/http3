@@ -377,4 +377,43 @@ mod tests {
         assert!(map.route_packet(&[4, 5, 6]).is_none());
         assert_eq!(map.route_packet(&[7, 8, 9]), Some(99));
     }
+
+    #[test]
+    fn test_token_roundtrip_ipv6() {
+        let map = ConnectionMap::new();
+        let peer: SocketAddr = "[::1]:12345".parse().expect("valid addr");
+        let odcid = vec![0xcd; 16];
+        let token = map.mint_token(&peer, &odcid);
+
+        let result = map.validate_token(&token, &peer);
+        assert_eq!(result, Some(odcid));
+    }
+
+    #[test]
+    fn test_token_too_short_rejected() {
+        let map = ConnectionMap::new();
+        let peer: SocketAddr = "127.0.0.1:1234".parse().expect("valid addr");
+        assert!(map.validate_token(&[0u8; 16], &peer).is_none());
+    }
+
+    #[test]
+    fn test_add_dcid_for_nonexistent_handle() {
+        let mut map = ConnectionMap::new();
+        map.add_dcid(999, vec![1, 2, 3]);
+        assert!(map.route_packet(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn test_fill_handles_empty_map() {
+        let map = ConnectionMap::new();
+        let mut buf = Vec::<usize>::new();
+        map.fill_handles(&mut buf);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_remove_nonexistent_handle_returns_none() {
+        let mut map = ConnectionMap::new();
+        assert!(map.remove(999).is_none());
+    }
 }

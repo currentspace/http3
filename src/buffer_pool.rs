@@ -169,4 +169,69 @@ mod tests {
         assert!(pool.checkin(vec![0u8; 16]));
         assert!(!pool.checkin(vec![0u8; 16]));
     }
+
+    #[test]
+    fn test_exhaustion_checkout_still_allocates() {
+        let mut pool = BufferPool::new(2, 1500);
+        let buf1 = pool.checkout();
+        let buf2 = pool.checkout();
+        let buf3 = pool.checkout(); // fallback allocation
+        assert_eq!(buf1.len(), 1500);
+        assert_eq!(buf2.len(), 1500);
+        assert_eq!(buf3.len(), 1500);
+    }
+
+    #[test]
+    fn test_checkin_undersized_buffer_is_dropped() {
+        let mut pool = BufferPool::new(2, 1500);
+        let _buf1 = pool.checkout();
+        let _buf2 = pool.checkout();
+        assert_eq!(pool.buffers.len(), 0);
+
+        let tiny = Vec::with_capacity(50);
+        pool.checkin(tiny);
+        assert_eq!(pool.buffers.len(), 0); // rejected — too small
+
+        let proper = vec![0u8; 1500];
+        pool.checkin(proper);
+        assert_eq!(pool.buffers.len(), 1);
+    }
+
+    #[test]
+    fn test_checkout_checkin_cycle_stability() {
+        let mut pool = BufferPool::new(2, 100);
+        for _ in 0..1000 {
+            let buf = pool.checkout();
+            pool.checkin(buf);
+        }
+        assert_eq!(pool.buffers.len(), 2);
+    }
+
+    #[test]
+    fn test_default_pool_dimensions() {
+        let pool = BufferPool::default();
+        assert_eq!(pool.buffers.len(), 256);
+        assert_eq!(pool.buf_size, 65535);
+    }
+
+    #[test]
+    fn adaptive_pool_checkout_picks_best_fit() {
+        let mut pool = AdaptiveBufferPool::new(4, 64);
+        let small = Vec::with_capacity(256);
+        let large = Vec::with_capacity(4096);
+        pool.checkin(small);
+        pool.checkin(large);
+
+        let (buf, reused) = pool.checkout(200);
+        assert!(reused);
+        assert_eq!(buf.len(), 200);
+    }
+
+    #[test]
+    fn adaptive_pool_checkout_below_min_allocates_min() {
+        let mut pool = AdaptiveBufferPool::new(4, 64);
+        let (buf, reused) = pool.checkout(8);
+        assert!(!reused);
+        assert!(buf.capacity() >= 64);
+    }
 }

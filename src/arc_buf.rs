@@ -154,4 +154,40 @@ mod tests {
         assert!(s.contains("ArcBuf"));
         assert!(s.contains("len: 3"));
     }
+
+    #[test]
+    fn test_try_add_prefix_sole_owner_succeeds() {
+        let mut buf = ArcBuf::from_vec(vec![0, 0, 1, 2, 3]);
+        let mut tail = buf.split_at(2);
+        // buf is the head [0, 0], tail is [1, 2, 3]
+        drop(buf); // drop head so tail is sole owner
+        assert!(tail.try_add_prefix(&[0xFF]));
+        assert_eq!(tail.as_ref(), &[0xFF, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_try_add_prefix_shared_owner_fails() {
+        let mut buf = ArcBuf::from_vec(vec![0, 0, 1, 2, 3]);
+        let mut tail = buf.split_at(2);
+        // Keep both head (buf) and tail alive
+        assert!(!tail.try_add_prefix(&[0xFF]));
+        // Ensure buf is still alive (prevents optimizer from dropping early)
+        let _ = buf.as_ref();
+    }
+
+    #[test]
+    fn test_try_add_prefix_empty_prefix_succeeds() {
+        let buf = ArcBuf::from_vec(vec![1, 2, 3]);
+        let mut original = buf.clone(); // refcount is now 2
+        assert!(original.try_add_prefix(&[]));
+        assert_eq!(original.as_ref(), &[1, 2, 3]);
+        let _ = buf.as_ref();
+    }
+
+    #[test]
+    #[should_panic(expected = "split_at index")]
+    fn test_split_at_out_of_bounds_panics() {
+        let mut buf = ArcBuf::from_vec(vec![1, 2, 3]);
+        buf.split_at(4);
+    }
 }

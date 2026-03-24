@@ -899,4 +899,73 @@ mod tests {
         let snap = handle.snapshot();
         assert_eq!(snap.sink_errors, 3);
     }
+
+    #[test]
+    fn test_batcher_exactly_max_batch_size() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        for _ in 0..MAX_BATCH_SIZE {
+            batcher.batch.push(dummy_event());
+        }
+        let ok = batcher.flush();
+        assert!(ok, "flush should succeed");
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 1, "exactly one batch should be delivered");
+        assert_eq!(delivered[0], 2048);
+    }
+
+    #[test]
+    fn test_batcher_exceeds_max_batch_size() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        for _ in 0..MAX_BATCH_SIZE + 1 {
+            batcher.batch.push(dummy_event());
+        }
+        let ok = batcher.flush();
+        assert!(ok, "flush should succeed");
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 1, "batcher does not split internally");
+        assert_eq!(delivered[0], 2049);
+    }
+
+    #[test]
+    fn test_batcher_stats_handle_clone_shares_state() {
+        let (sink, _log) = CaptureSink::new();
+        let batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+        let cloned = handle.clone();
+
+        cloned.record_drop(5);
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.dropped_events, 5);
+    }
+
+    #[test]
+    fn test_batcher_multiple_flush_cycles() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        for _ in 0..10 {
+            for _ in 0..3 {
+                batcher.batch.push(dummy_event());
+            }
+            batcher.flush();
+
+            for _ in 0..5 {
+                batcher.batch.push(dummy_event());
+            }
+            batcher.flush();
+        }
+
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 20, "20 flush cycles");
+        let total: usize = delivered.iter().sum();
+        assert_eq!(total, 80, "total events across all flushes");
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.flush_count, 20);
+        assert_eq!(snap.attempted_events, 80);
+    }
 }

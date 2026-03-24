@@ -160,4 +160,74 @@ mod tests {
         assert_eq!(heap.next_deadline(), None);
         assert!(heap.pop_expired(Instant::now()).is_empty());
     }
+
+    #[test]
+    fn test_pop_expired_with_deadline_in_past() {
+        let mut heap = TimerHeap::new();
+        let now = Instant::now();
+        let past = now.checked_sub(Duration::from_millis(100)).unwrap();
+
+        heap.schedule(1, past);
+        let expired = heap.pop_expired(now);
+        assert_eq!(expired, vec![1]);
+    }
+
+    #[test]
+    fn test_rapid_reschedule_triggers_compaction() {
+        let mut heap = TimerHeap::new();
+        let now = Instant::now();
+
+        let mut last_deadline = now;
+        for i in 0..200 {
+            last_deadline = now + Duration::from_millis(i + 1);
+            heap.schedule(1, last_deadline);
+        }
+
+        // 1 active handle, 200 heap pushes — compaction threshold (1*4+32=36) exceeded
+        assert_eq!(heap.next_deadline(), Some(last_deadline));
+
+        let expired = heap.pop_expired(now + Duration::from_secs(1));
+        assert_eq!(expired, vec![1]);
+    }
+
+    #[test]
+    fn test_pop_expired_returns_empty_when_no_expiry() {
+        let mut heap = TimerHeap::new();
+        let now = Instant::now();
+        let future = now + Duration::from_secs(1);
+
+        heap.schedule(1, future);
+        let expired = heap.pop_expired(now);
+        assert!(expired.is_empty());
+        assert_eq!(heap.next_deadline(), Some(future));
+    }
+
+    #[test]
+    fn test_many_handles_ordering() {
+        use std::collections::HashSet;
+
+        let mut heap = TimerHeap::new();
+        let now = Instant::now();
+
+        for i in 0..100usize {
+            let offset = Duration::from_millis((i * 7 % 100) as u64);
+            heap.schedule(i, now + offset);
+        }
+
+        let expired = heap.pop_expired(now + Duration::from_millis(200));
+        let set: HashSet<usize> = expired.iter().copied().collect();
+        assert_eq!(expired.len(), 100);
+        assert_eq!(set.len(), 100);
+        for i in 0..100usize {
+            assert!(set.contains(&i));
+        }
+    }
+
+    #[test]
+    fn test_remove_nonexistent_handle_is_noop() {
+        let mut heap = TimerHeap::new();
+        heap.remove_connection(999); // should not panic
+        assert_eq!(heap.next_deadline(), None);
+        assert!(heap.pop_expired(Instant::now()).is_empty());
+    }
 }

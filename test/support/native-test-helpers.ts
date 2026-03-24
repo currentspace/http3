@@ -71,6 +71,8 @@ export interface EventCollector {
   allEvents: any[];
   /** Wait until an event with the given `eventType` appears. */
   waitForEvent(eventType: number, timeoutMs?: number): Promise<any>;
+  /** Wait until N events of the given `eventType` have been collected. */
+  waitForNEvents(eventType: number, count: number, timeoutMs?: number): Promise<any[]>;
   /** Wait until a SHUTDOWN_COMPLETE (15) event is observed. */
   waitForShutdown(timeoutMs?: number): Promise<void>;
   /** Clear accumulated events. */
@@ -128,7 +130,54 @@ export function createEventCollector(): EventCollector {
     allEvents.length = 0;
   }
 
-  return { callback, allEvents, waitForEvent, waitForShutdown, reset };
+  function waitForNEvents(eventType: number, count: number, timeoutMs = 10000): Promise<any[]> {
+    return new Promise<any[]>((resolve, reject) => {
+      const collected: any[] = [];
+      // Check already-collected events first.
+      for (const e of allEvents) {
+        if (e.eventType === eventType) collected.push(e);
+      }
+      if (collected.length >= count) {
+        resolve(collected.slice(0, count));
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        // Remove our waiter entries
+        for (let i = waiters.length - 1; i >= 0; i--) {
+          if ((waiters[i] as any).__nEventsGroup === group) waiters.splice(i, 1);
+        }
+        reject(new Error(`Timed out waiting for ${count} events of type ${eventType} (got ${collected.length}) after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const group = Symbol('waitForNEvents');
+
+      const check = (evt: any): void => {
+        collected.push(evt);
+        if (collected.length >= count) {
+          clearTimeout(timer);
+          // Remove remaining waiters from this group
+          for (let i = waiters.length - 1; i >= 0; i--) {
+            if ((waiters[i] as any).__nEventsGroup === group) waiters.splice(i, 1);
+          }
+          resolve(collected.slice(0, count));
+        }
+      };
+
+      // Register enough waiters to collect the remaining events
+      const remaining = count - collected.length;
+      for (let i = 0; i < remaining; i++) {
+        const waiter = {
+          eventType,
+          resolve: check,
+          __nEventsGroup: group,
+        };
+        waiters.push(waiter as any);
+      }
+    });
+  }
+
+  return { callback, allEvents, waitForEvent, waitForNEvents, waitForShutdown, reset };
 }
 
 // ---- QUIC pair ----
@@ -214,7 +263,11 @@ export interface H3Pair {
  * The server listens on localhost with an ephemeral port; the client connects
  * immediately. Both use self-signed test certs.
  */
-export async function createH3Pair(): Promise<H3Pair> {
+export async function createH3Pair(opts?: {
+  enableDatagrams?: boolean;
+  maxIdleTimeoutMs?: number;
+  initialMaxStreamDataBidiLocal?: number;
+}): Promise<H3Pair> {
   const binding = loadBinding();
   const certs = generateTestCerts();
   const serverEvents = createEventCollector();
@@ -226,6 +279,9 @@ export async function createH3Pair(): Promise<H3Pair> {
       cert: certs.cert,
       disableRetry: true,
       runtimeMode: 'portable',
+      enableDatagrams: opts?.enableDatagrams ?? false,
+      ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+      ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
     },
     serverEvents.callback,
   );
@@ -236,6 +292,9 @@ export async function createH3Pair(): Promise<H3Pair> {
     {
       rejectUnauthorized: false,
       runtimeMode: 'portable',
+      enableDatagrams: opts?.enableDatagrams ?? false,
+      ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+      ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
     },
     clientEvents.callback,
   );
@@ -272,4 +331,20 @@ export async function createH3Pair(): Promise<H3Pair> {
 export async function drainAndShutdown(instance: any, collector: EventCollector): Promise<void> {
   try { instance.shutdown(); } catch { /* already shut down */ }
   await collector.waitForShutdown(5000);
+}
+
+// ---- Memory snapshot helper ----
+
+export interface MemorySnapshot {
+  rss: number;
+  heapUsed: number;
+  heapTotal: number;
+}
+
+/**
+ * Capture a point-in-time memory snapshot for leak detection in long-haul tests.
+ */
+export function snapshotMemory(): MemorySnapshot {
+  const m = process.memoryUsage();
+  return { rss: m.rss, heapUsed: m.heapUsed, heapTotal: m.heapTotal };
 }
