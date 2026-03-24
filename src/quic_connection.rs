@@ -28,6 +28,8 @@ pub struct QuicConnection {
     pub known_streams: HashSet<u64>,
     pub qlog_path: Option<String>,
     pub session_ticket: Option<Vec<u8>>,
+    /// Reusable buffer for stream_recv — avoids 64KB allocation per poll cycle.
+    pub recv_buf: Vec<u8>,
 }
 
 pub struct QuicConnectionInit<'a> {
@@ -66,6 +68,7 @@ impl QuicConnection {
             known_streams: HashSet::new(),
             qlog_path,
             session_ticket: None,
+            recv_buf: vec![0u8; 65535],
         }
     }
 
@@ -118,18 +121,14 @@ impl QuicConnection {
     pub fn poll_quic_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
         let readable: Vec<u64> = self.quiche_conn.readable().collect();
 
-        // Heap buffer: stream_recv writes into it, then we truncate and move
-        // into the event — no copy. Re-grown if needed between reads.
-        let mut recv_buf = vec![0u8; 65535];
         for stream_id in readable {
             let is_new = self.known_streams.insert(stream_id);
 
             if is_new {
                 // Coalesce first recv into NEW_STREAM event.
-                match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
+                match self.quiche_conn.stream_recv(stream_id, &mut self.recv_buf) {
                     Ok((len, fin)) => {
-                        let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
-                        data.truncate(len);
+                        let data = self.recv_buf[..len].to_vec();
                         events.push(JsH3Event::new_stream_with_data(
                             conn_handle,
                             stream_id,
@@ -169,17 +168,11 @@ impl QuicConnection {
             }
 
             loop {
-                match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
+                match self.quiche_conn.stream_recv(stream_id, &mut self.recv_buf) {
                     Ok((len, fin)) => {
                         if len > 0 {
-                            let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 65535]);
-                            data.truncate(len);
-                            events.push(JsH3Event::data(
-                                conn_handle,
-                                stream_id,
-                                data,
-                                fin,
-                            ));
+                            let data = self.recv_buf[..len].to_vec();
+                            events.push(JsH3Event::data(conn_handle, stream_id, data, fin));
                         }
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
@@ -436,10 +429,7 @@ impl QuicConnection {
     }
 
     pub fn pmtu(&self) -> usize {
-        self.quiche_conn
-            .path_stats()
-            .next()
-            .map_or(0, |s| s.pmtu)
+        self.quiche_conn.path_stats().next().map_or(0, |s| s.pmtu)
     }
 }
 
