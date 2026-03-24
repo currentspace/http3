@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use quiche::h3::NameValue;
 
+use crate::buffer_pool::AdaptiveBufferPool;
 use crate::error::Http3NativeError;
 use crate::h3_event::{JsH3Event, JsHeader};
 use crate::reactor_metrics;
@@ -29,8 +30,8 @@ pub struct H3Connection {
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
     pub last_peer_stream_id: u64,
-    /// Reusable buffer for h3 recv_body — avoids 16KB allocation per poll cycle.
-    pub recv_buf: Vec<u8>,
+    /// Pool for recv_body output — buffers become event data directly.
+    pub data_pool: AdaptiveBufferPool,
 }
 
 pub struct H3ConnectionInit<'a> {
@@ -90,7 +91,7 @@ impl H3Connection {
             qpack_max_table_capacity: init.qpack_max_table_capacity,
             qpack_blocked_streams: init.qpack_blocked_streams,
             last_peer_stream_id: 0,
-            recv_buf: vec![0u8; 16384],
+            data_pool: AdaptiveBufferPool::new(64, 4096),
         }
     }
 
@@ -153,22 +154,27 @@ impl H3Connection {
                     Ok((stream_id, quiche::h3::Event::Data)) => {
                         self.last_peer_stream_id = stream_id;
                         loop {
+                            let (mut buf, _) = self.data_pool.checkout(16384);
                             match h3_conn.recv_body(
                                 &mut self.quiche_conn,
                                 stream_id,
-                                &mut self.recv_buf,
+                                &mut buf,
                             ) {
                                 Ok(len) => {
-                                    let data = self.recv_buf[..len].to_vec();
+                                    buf.truncate(len);
                                     events.push(JsH3Event::data(
                                         conn_handle,
                                         stream_id,
-                                        data,
+                                        buf,
                                         false,
                                     ));
                                 }
-                                Err(quiche::h3::Error::Done) => break,
+                                Err(quiche::h3::Error::Done) => {
+                                    self.data_pool.checkin(buf);
+                                    break;
+                                }
                                 Err(e) => {
+                                    self.data_pool.checkin(buf);
                                     events.push(JsH3Event::error(
                                         conn_handle,
                                         stream_id as i64,
