@@ -481,6 +481,11 @@ export class QuicServer extends EventEmitter {
     const stream = session._streams.get(event.streamId);
     if (stream) {
       stream._pushData(null);
+      // If the readable side was never consumed, resume it so the Duplex
+      // can fully destroy and fire 'close' (which triggers map cleanup).
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
     }
   }
 

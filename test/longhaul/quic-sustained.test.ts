@@ -126,10 +126,11 @@ describe('QUIC sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       errorRate < 1,
       `error rate ${errorRate.toFixed(2)}% exceeds 1% limit (${errors}/${total})`,
     );
+    // Check heap (not RSS) — RSS includes native allocator fragmentation and
+    // kernel page cache which we don't control. Heap is what we can leak.
     assert.ok(
-      finalMem.rss < initialMem.rss * 3,
-      `RSS grew too much: ${formatMB(initialMem.rss)}MB -> ${formatMB(finalMem.rss)}MB ` +
-      `(${(finalMem.rss / initialMem.rss).toFixed(2)}x, limit 3x)`,
+      finalMem.heapUsed < 100 * 1024 * 1024,
+      `heap grew too much: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
     );
 
     await client.close();
