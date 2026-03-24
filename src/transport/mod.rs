@@ -140,7 +140,7 @@ pub trait DriverWaker: Send + Sync + Clone + 'static {
 }
 
 /// Type-erased waker for handle structs that don't know the concrete driver.
-pub(crate) trait ErasedWaker: Send + Sync {
+pub trait ErasedWaker: Send + Sync {
     fn wake(&self) -> io::Result<()>;
 }
 
@@ -249,24 +249,56 @@ pub(crate) fn create_platform_driver(
     match runtime_mode {
         TransportRuntimeMode::Fast => {
             reactor_metrics::record_driver_setup_attempt(RuntimeDriverKind::IoUring);
+            // Clone the socket before io_uring takes ownership — enables
+            // fallback to poll if io_uring setup fails (e.g. ENOMEM).
+            let fallback_socket = socket.try_clone().ok();
             match io_uring::IoUringDriver::new(socket) {
                 Ok((driver, waker)) => {
                     reactor_metrics::record_driver_setup_success(RuntimeDriverKind::IoUring);
-                    Ok((PlatformDriver::IoUring(driver), PlatformWaker::IoUring(waker)))
+                    Ok((
+                        PlatformDriver::IoUring(driver),
+                        PlatformWaker::IoUring(waker),
+                    ))
                 }
                 Err(error) => {
                     reactor_metrics::record_driver_setup_failure(RuntimeDriverKind::IoUring);
-                    Err(match error.raw_os_error() {
+                    match error.raw_os_error() {
                         Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::ENOSYS)
                         | Some(libc::ENOMEM) => {
-                            Http3NativeError::fast_path_unavailable(
+                            // Auto-fallback to poll driver
+                            if let Some(sock) = fallback_socket {
+                                log::warn!(
+                                    "io_uring setup failed ({error}), falling back to poll"
+                                );
+                                reactor_metrics::record_driver_setup_attempt(
+                                    RuntimeDriverKind::Poll,
+                                );
+                                match poll::PollDriver::new(sock) {
+                                    Ok((driver, waker)) => {
+                                        reactor_metrics::record_driver_setup_success(
+                                            RuntimeDriverKind::Poll,
+                                        );
+                                        return Ok((
+                                            PlatformDriver::Poll(driver),
+                                            PlatformWaker::Poll(waker),
+                                        ));
+                                    }
+                                    Err(poll_error) => {
+                                        reactor_metrics::record_driver_setup_failure(
+                                            RuntimeDriverKind::Poll,
+                                        );
+                                        return Err(Http3NativeError::Io(poll_error));
+                                    }
+                                }
+                            }
+                            Err(Http3NativeError::fast_path_unavailable(
                                 "io_uring",
                                 "io_uring_setup",
                                 error,
-                            )
+                            ))
                         }
-                        _ => Http3NativeError::Io(error),
-                    })
+                        _ => Err(Http3NativeError::Io(error)),
+                    }
                 }
             }
         }
@@ -368,3 +400,113 @@ impl DriverWaker for PlatformWaker {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("Only macOS (kqueue) and Linux (io_uring) are supported");
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod tests {
+    use super::*;
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn pkt(size: usize, port: u16) -> TxDatagram {
+        TxDatagram {
+            data: vec![0xAB; size],
+            to: addr(port),
+        }
+    }
+
+    #[test]
+    fn test_gso_empty_input() {
+        let batches = group_for_gso(vec![]);
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn test_gso_single_packet() {
+        let batches = group_for_gso(vec![pkt(1200, 4433)]);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].data.len(), 1200);
+        assert_eq!(batches[0].segment_size, 1200);
+        assert_eq!(batches[0].to, addr(4433));
+    }
+
+    #[test]
+    fn test_gso_same_dest_same_size() {
+        let packets = vec![pkt(1200, 4433), pkt(1200, 4433), pkt(1200, 4433)];
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].data.len(), 1200 * 3);
+        assert_eq!(batches[0].segment_size, 1200);
+        assert_eq!(batches[0].to, addr(4433));
+    }
+
+    #[test]
+    fn test_gso_different_dest_splits() {
+        let packets = vec![pkt(1200, 4433), pkt(1200, 4434), pkt(1200, 4433)];
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].to, addr(4433));
+        assert_eq!(batches[1].to, addr(4434));
+        assert_eq!(batches[2].to, addr(4433));
+    }
+
+    #[test]
+    fn test_gso_different_size_splits() {
+        let packets = vec![pkt(1200, 4433), pkt(800, 4433), pkt(1200, 4433)];
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].segment_size, 1200);
+        assert_eq!(batches[1].segment_size, 800);
+        assert_eq!(batches[2].segment_size, 1200);
+    }
+
+    #[test]
+    fn test_gso_max_64_segments() {
+        // 64 same-size packets to the same dest should coalesce into one batch.
+        let mut packets: Vec<TxDatagram> = (0..64).map(|_| pkt(100, 4433)).collect();
+        // The 65th packet must start a new batch.
+        packets.push(pkt(100, 4433));
+
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].data.len(), 100 * 64);
+        assert_eq!(batches[0].segment_size, 100);
+        assert_eq!(batches[1].data.len(), 100);
+        assert_eq!(batches[1].segment_size, 100);
+    }
+
+    #[test]
+    fn test_gso_max_payload_boundary() {
+        // Pick a segment size that divides evenly into the payload limit region.
+        // With segment_size = 1000, we can fit floor(65535 / 1000) = 65 segments
+        // but max segments is 64, so the segment cap fires first.
+        // Use segment_size = 1100: floor(65535 / 1100) = 59 fit, 60th would
+        // push total to 66000 > 65535, so batch splits at 59.
+        let seg = 1100;
+        let max_in_batch = GSO_MAX_PAYLOAD / seg; // 59
+        assert_eq!(max_in_batch, 59);
+
+        let mut packets: Vec<TxDatagram> =
+            (0..max_in_batch).map(|_| pkt(seg, 4433)).collect();
+        // One more packet should start a new batch.
+        packets.push(pkt(seg, 4433));
+
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].data.len(), seg * max_in_batch);
+        assert_eq!(batches[1].data.len(), seg);
+    }
+
+    #[test]
+    fn test_gso_large_segment_no_coalesce() {
+        // Segments larger than GSO_MAX_SEGMENT (1472) must not be coalesced.
+        let big = GSO_MAX_SEGMENT + 1; // 1473
+        let packets = vec![pkt(big, 4433), pkt(big, 4433)];
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].data.len(), big);
+        assert_eq!(batches[1].data.len(), big);
+    }
+}
