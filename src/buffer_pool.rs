@@ -21,10 +21,14 @@ impl BufferPool {
     /// Take a buffer from the pool (or allocate a new one).
     /// The returned buffer has length == buf_size but content is uninitialized.
     /// Callers must write before reading.
+    #[allow(unsafe_code)]
     pub fn checkout(&mut self) -> Vec<u8> {
-        self.buffers
-            .pop()
-            .unwrap_or_else(|| vec![0u8; self.buf_size])
+        self.buffers.pop().unwrap_or_else(|| {
+            let mut buf = Vec::with_capacity(self.buf_size);
+            // SAFETY: callers always write before reading (documented contract).
+            unsafe { buf.set_len(self.buf_size); }
+            buf
+        })
     }
 
     /// Return a buffer to the pool. Only keeps it if capacity is sufficient.

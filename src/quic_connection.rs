@@ -392,14 +392,21 @@ impl QuicConnection {
     }
 
     pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        let mut recv_buf = [0u8; 65535];
         loop {
-            match self.quiche_conn.dgram_recv(&mut recv_buf) {
+            let (mut buf, _) = self.data_pool.checkout(65535);
+            match self.quiche_conn.dgram_recv(&mut buf) {
                 Ok(len) => {
-                    events.push(JsH3Event::datagram(conn_handle, recv_buf[..len].to_vec()));
+                    buf.truncate(len);
+                    events.push(JsH3Event::datagram(conn_handle, buf));
                 }
-                Err(quiche::Error::Done) => break,
-                Err(_) => break,
+                Err(quiche::Error::Done) => {
+                    self.data_pool.checkin(buf);
+                    break;
+                }
+                Err(_) => {
+                    self.data_pool.checkin(buf);
+                    break;
+                }
             }
         }
     }
