@@ -378,7 +378,8 @@ impl EventBatcher {
         if self.batch.is_empty() {
             return true;
         }
-        let to_send = std::mem::take(&mut self.batch);
+        let mut to_send = Vec::with_capacity(MAX_BATCH_SIZE);
+        std::mem::swap(&mut self.batch, &mut to_send);
         self.stats.record_flush(to_send.len());
         reactor_metrics::record_lifecycle_trace(
             "event-batcher",
@@ -446,13 +447,8 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         let outcome = match driver.poll(deadline) {
             Ok(o) => o,
             Err(err) => {
-                let _ = flush_runtime_error(
-                    &mut batcher,
-                    driver,
-                    "poll",
-                    "driver-poll-failed",
-                    &err,
-                );
+                let _ =
+                    flush_runtime_error(&mut batcher, driver, "poll", "driver-poll-failed", &err);
                 return;
             }
         };
@@ -519,10 +515,18 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             if rx_idx == 0 {
                 log::trace!(
                     "event_loop: processing {rx_count} rx pkts, first: len={} peer={} local={} gro={:?} tid={:?}",
-                    pkt.data.len(), pkt.peer, pkt.local, pkt.segment_size, std::thread::current().id(),
+                    pkt.data.len(),
+                    pkt.peer,
+                    pkt.local,
+                    pkt.segment_size,
+                    std::thread::current().id(),
                 );
             }
-            let pkt_local = if use_pktinfo_local { pkt.local } else { local_addr };
+            let pkt_local = if use_pktinfo_local {
+                pkt.local
+            } else {
+                local_addr
+            };
             // Split by segment_size and call process_packet for each.
             if let Some(seg_size) = pkt.segment_size {
                 let seg = seg_size as usize;
@@ -672,5 +676,227 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             let _ = batcher.flush();
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Tracks the sizes of each batch delivered via `emit()`.
+    type DeliveryLog = Arc<Mutex<Vec<usize>>>;
+
+    /// A test-only sink that captures every batch delivered via `emit()`.
+    struct CaptureSink {
+        delivered: DeliveryLog,
+        should_close: bool,
+    }
+
+    impl CaptureSink {
+        fn new() -> (Self, DeliveryLog) {
+            let log: DeliveryLog = Arc::new(Mutex::new(Vec::new()));
+            let sink = Self {
+                delivered: Arc::clone(&log),
+                should_close: false,
+            };
+            (sink, log)
+        }
+
+        fn closing() -> Self {
+            Self {
+                delivered: Arc::new(Mutex::new(Vec::new())),
+                should_close: true,
+            }
+        }
+    }
+
+    impl EventSink for CaptureSink {
+        fn kind(&self) -> &'static str {
+            "capture"
+        }
+
+        fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool {
+            if self.should_close {
+                let count = events.len();
+                stats.record_drop(count);
+                return false;
+            }
+            self.delivered.lock().unwrap().push(events.len());
+            true
+        }
+    }
+
+    fn dummy_event() -> JsH3Event {
+        JsH3Event::data(0, 0, vec![1, 2, 3], false)
+    }
+
+    #[test]
+    fn test_batcher_empty_flush() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let ok = batcher.flush();
+        assert!(ok, "flush on empty batch should return true");
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "no batches should be delivered"
+        );
+    }
+
+    #[test]
+    fn test_batcher_flush_sends_to_sink() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        let ok = batcher.flush();
+        assert!(ok);
+        assert_eq!(log.lock().unwrap().len(), 1, "one batch should be delivered");
+        assert_eq!(log.lock().unwrap()[0], 2, "batch should contain 2 events");
+    }
+
+    #[test]
+    fn test_batcher_flush_clears_batch() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+        assert!(batcher.batch.is_empty(), "batch should be empty after flush");
+    }
+
+    #[test]
+    fn test_batcher_len() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        assert_eq!(batcher.len(), 0);
+        batcher.batch.push(dummy_event());
+        assert_eq!(batcher.len(), 1);
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        assert_eq!(batcher.len(), 3);
+    }
+
+    #[test]
+    fn test_batcher_stats_flush_count() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.flush_count, 3);
+    }
+
+    #[test]
+    fn test_batcher_stats_attempted_events() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        // flush 2 events
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        // flush 3 events
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.attempted_events, 5);
+    }
+
+    #[test]
+    fn test_batcher_stats_max_batch_size() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        // flush 1 event
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        // flush 4 events (new high-water mark)
+        for _ in 0..4 {
+            batcher.batch.push(dummy_event());
+        }
+        batcher.flush();
+
+        // flush 2 events (below high-water mark)
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.max_batch_size, 4);
+    }
+
+    #[test]
+    fn test_batcher_stats_delivered_vs_dropped() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        // flush 5 events via sink
+        for _ in 0..5 {
+            batcher.batch.push(dummy_event());
+        }
+        batcher.flush();
+
+        // manually record 2 dropped
+        handle.record_drop(2);
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.attempted_events, 5);
+        assert_eq!(snap.dropped_events, 2);
+        assert_eq!(
+            snap.delivered_events,
+            snap.attempted_events.saturating_sub(snap.dropped_events)
+        );
+        assert_eq!(snap.delivered_events, 3);
+    }
+
+    #[test]
+    fn test_batcher_sink_close_returns_false() {
+        let sink = CaptureSink::closing();
+        let mut batcher = EventBatcher::with_sink(sink);
+        batcher.batch.push(dummy_event());
+        let ok = batcher.flush();
+        assert!(!ok, "flush should return false when sink signals close");
+    }
+
+    #[test]
+    fn test_batcher_stats_drop_recording() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        handle.record_drop(3);
+        handle.record_drop(7);
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.dropped_events, 10);
+    }
+
+    #[test]
+    fn test_batcher_stats_sink_error_recording() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        handle.record_sink_error();
+        handle.record_sink_error();
+        handle.record_sink_error();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.sink_errors, 3);
     }
 }
