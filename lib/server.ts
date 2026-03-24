@@ -701,6 +701,12 @@ export class Http3SecureServer extends EventEmitter {
     const stream = this._streams.get(streamKey);
     if (stream) {
       stream._pushData(null); // EOF on readable side
+      // If the readable side was never consumed (e.g., a GET handler that
+      // only writes a response), it stays in non-flowing mode and 'close'
+      // never fires.  Resume it so Node's Duplex can fully destroy.
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
       // Don't remove from _streams yet — the writable side may still
       // have pending drain callbacks. Stream is cleaned up on session close
       // or when both sides complete naturally via 'close' event.
