@@ -71,6 +71,10 @@ pub struct JsReactorTelemetrySnapshot {
     pub ioUringRxInFlightHighWatermark: i64,
     pub ioUringTxInFlightHighWatermark: i64,
     pub ioUringPendingTxHighWatermark: i64,
+    pub ioUringTier2DrainRounds: i64,
+    pub ioUringTier2TaskrunPrefetches: i64,
+    pub ioUringTier2BlockingWaits: i64,
+    pub ioUringTier2CapHits: i64,
     pub ioUringRetryableSendCompletions: i64,
     pub ioUringSubmitCalls: i64,
     pub ioUringSubmitWithArgsCalls: i64,
@@ -226,6 +230,10 @@ static H3_SERVER_SESSIONS_CLOSED: AtomicU64 = AtomicU64::new(0);
 static IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static IO_URING_PENDING_TX_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_DRAIN_ROUNDS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_TASKRUN_PREFETCHES: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_BLOCKING_WAITS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_CAP_HITS: AtomicU64 = AtomicU64::new(0);
 static IO_URING_RETRYABLE_SEND_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
 static IO_URING_SUBMIT_CALLS: AtomicU64 = AtomicU64::new(0);
 static IO_URING_SUBMIT_WITH_ARGS_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -285,7 +293,8 @@ fn observe_max(counter: &AtomicU64, value: usize) {
 }
 
 fn lifecycle_trace_events() -> &'static Mutex<VecDeque<JsLifecycleTraceEvent>> {
-    LIFECYCLE_TRACE_EVENTS.get_or_init(|| Mutex::new(VecDeque::with_capacity(LIFECYCLE_TRACE_CAPACITY)))
+    LIFECYCLE_TRACE_EVENTS
+        .get_or_init(|| Mutex::new(VecDeque::with_capacity(LIFECYCLE_TRACE_CAPACITY)))
 }
 
 fn lifecycle_trace_timestamp_ms() -> i64 {
@@ -329,9 +338,7 @@ pub(crate) fn record_worker_thread_spawn(kind: WorkerSpawnKind) {
     bump(&WORKER_THREAD_SPAWNS_TOTAL);
     match kind {
         WorkerSpawnKind::RawQuicServer => bump(&RAW_QUIC_SERVER_WORKER_SPAWNS),
-        WorkerSpawnKind::RawQuicClientDedicated => {
-            bump(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS)
-        }
+        WorkerSpawnKind::RawQuicClientDedicated => bump(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         WorkerSpawnKind::RawQuicClientShared => bump(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
         WorkerSpawnKind::H3Server => bump(&H3_SERVER_WORKER_SPAWNS),
         WorkerSpawnKind::H3ClientDedicated => bump(&H3_CLIENT_DEDICATED_WORKER_SPAWNS),
@@ -515,6 +522,26 @@ pub(crate) fn record_io_uring_tx_in_flight(count: usize) {
 #[cfg(target_os = "linux")]
 pub(crate) fn record_io_uring_pending_tx(count: usize) {
     observe_max(&IO_URING_PENDING_TX_HIGH_WATERMARK, count);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_drain_round() {
+    bump(&IO_URING_TIER2_DRAIN_ROUNDS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_taskrun_prefetch() {
+    bump(&IO_URING_TIER2_TASKRUN_PREFETCHES);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_blocking_wait() {
+    bump(&IO_URING_TIER2_BLOCKING_WAITS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_cap_hit() {
+    bump(&IO_URING_TIER2_CAP_HITS);
 }
 
 #[cfg(target_os = "linux")]
@@ -705,9 +732,7 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         rawQuicFinishedEventEmits: load(&RAW_QUIC_FINISHED_EVENT_EMITS),
         rawQuicDrainEventEmits: load(&RAW_QUIC_DRAIN_EVENT_EMITS),
         rawQuicBlockedStreamHighWatermark: load(&RAW_QUIC_BLOCKED_STREAM_HIGH_WATERMARK),
-        rawQuicClientPendingWriteHighWatermark: load(
-            &RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK,
-        ),
+        rawQuicClientPendingWriteHighWatermark: load(&RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK),
         rawQuicClientReapsWithPendingWrites: load(&RAW_QUIC_CLIENT_REAPS_WITH_PENDING_WRITES),
         rawQuicClientReapsWithBlockedStreams: load(&RAW_QUIC_CLIENT_REAPS_WITH_BLOCKED_STREAMS),
         rawQuicClientReapsWithKnownStreams: load(&RAW_QUIC_CLIENT_REAPS_WITH_KNOWN_STREAMS),
@@ -724,6 +749,10 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         ioUringRxInFlightHighWatermark: load(&IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK),
         ioUringTxInFlightHighWatermark: load(&IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK),
         ioUringPendingTxHighWatermark: load(&IO_URING_PENDING_TX_HIGH_WATERMARK),
+        ioUringTier2DrainRounds: load(&IO_URING_TIER2_DRAIN_ROUNDS),
+        ioUringTier2TaskrunPrefetches: load(&IO_URING_TIER2_TASKRUN_PREFETCHES),
+        ioUringTier2BlockingWaits: load(&IO_URING_TIER2_BLOCKING_WAITS),
+        ioUringTier2CapHits: load(&IO_URING_TIER2_CAP_HITS),
         ioUringRetryableSendCompletions: load(&IO_URING_RETRYABLE_SEND_COMPLETIONS),
         ioUringSubmitCalls: load(&IO_URING_SUBMIT_CALLS),
         ioUringSubmitWithArgsCalls: load(&IO_URING_SUBMIT_WITH_ARGS_CALLS),
@@ -819,6 +848,10 @@ pub fn reset() {
         &IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK,
         &IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK,
         &IO_URING_PENDING_TX_HIGH_WATERMARK,
+        &IO_URING_TIER2_DRAIN_ROUNDS,
+        &IO_URING_TIER2_TASKRUN_PREFETCHES,
+        &IO_URING_TIER2_BLOCKING_WAITS,
+        &IO_URING_TIER2_CAP_HITS,
         &IO_URING_RETRYABLE_SEND_COMPLETIONS,
         &IO_URING_SUBMIT_CALLS,
         &IO_URING_SUBMIT_WITH_ARGS_CALLS,
@@ -855,5 +888,105 @@ pub fn reset() {
         &TX_BUFFERS_RECYCLED,
     ] {
         reset_counter(counter);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reset all global counters and lifecycle trace state before each test
+    /// to isolate from other tests (global atomics are shared across the
+    /// process, but `cargo test` runs tests on separate threads).
+    fn setup() {
+        reset();
+        set_lifecycle_trace_enabled(false);
+        reset_lifecycle_trace();
+    }
+
+    #[test]
+    fn test_snapshot_after_reset() {
+        setup();
+        let snap = snapshot();
+        assert_eq!(snap.driverSetupAttemptsTotal, 0);
+        assert_eq!(snap.driverSetupSuccessTotal, 0);
+        assert_eq!(snap.driverSetupFailureTotal, 0);
+        assert_eq!(snap.workerThreadSpawnsTotal, 0);
+        assert_eq!(snap.workerThreadStopsTotal, 0);
+        assert_eq!(snap.eventBatchFlushesTotal, 0);
+        assert_eq!(snap.eventBatchAttemptedEventsTotal, 0);
+        assert_eq!(snap.eventBatchDeliveredEventsTotal, 0);
+        assert_eq!(snap.eventBatchDroppedEventsTotal, 0);
+        assert_eq!(snap.eventBatchSinkErrorsTotal, 0);
+        assert_eq!(snap.eventBatchMaxSizeHighWatermark, 0);
+        assert_eq!(snap.rawQuicServerWorkerSpawns, 0);
+        assert_eq!(snap.h3ServerWorkerSpawns, 0);
+        assert_eq!(snap.txBuffersRecycled, 0);
+    }
+
+    #[test]
+    fn test_record_driver_setup_attempt() {
+        setup();
+        record_driver_setup_attempt(RuntimeDriverKind::Poll);
+        record_driver_setup_attempt(RuntimeDriverKind::Poll);
+        let snap = snapshot();
+        assert_eq!(snap.driverSetupAttemptsTotal, 2);
+        assert_eq!(snap.pollDriverSetupAttempts, 2);
+        assert_eq!(snap.ioUringDriverSetupAttempts, 0);
+        assert_eq!(snap.kqueueDriverSetupAttempts, 0);
+    }
+
+    #[test]
+    fn test_record_worker_thread_spawn() {
+        setup();
+        record_worker_thread_spawn(WorkerSpawnKind::RawQuicServer);
+        record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        record_worker_thread_spawn(WorkerSpawnKind::H3ClientDedicated);
+        let snap = snapshot();
+        assert_eq!(snap.workerThreadSpawnsTotal, 4);
+        assert_eq!(snap.rawQuicServerWorkerSpawns, 1);
+        assert_eq!(snap.h3ServerWorkerSpawns, 2);
+        assert_eq!(snap.h3ClientDedicatedWorkerSpawns, 1);
+        assert_eq!(snap.rawQuicClientDedicatedWorkerSpawns, 0);
+    }
+
+    #[test]
+    fn test_record_event_batch_flush() {
+        setup();
+        record_event_batch_flush(10);
+        record_event_batch_flush(20);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchFlushesTotal, 2);
+        assert_eq!(snap.eventBatchAttemptedEventsTotal, 30);
+        assert_eq!(snap.eventBatchMaxSizeHighWatermark, 20);
+    }
+
+    #[test]
+    fn test_lifecycle_trace_enable_disable() {
+        setup();
+
+        // Initially disabled
+        let trace = lifecycle_trace_snapshot();
+        assert!(!trace.enabled);
+
+        // Enable and record an event
+        set_lifecycle_trace_enabled(true);
+        let trace = lifecycle_trace_snapshot();
+        assert!(trace.enabled);
+
+        record_lifecycle_trace("test-component", "test-action", None, None, None, None);
+        let trace = lifecycle_trace_snapshot();
+        assert_eq!(trace.eventCount, 1);
+        assert_eq!(trace.events[0].component, "test-component");
+        assert_eq!(trace.events[0].action, "test-action");
+
+        // Disable and record -- should not add event
+        set_lifecycle_trace_enabled(false);
+        let trace = lifecycle_trace_snapshot();
+        assert!(!trace.enabled);
+        record_lifecycle_trace("test-component", "ignored", None, None, None, None);
+        let trace = lifecycle_trace_snapshot();
+        assert_eq!(trace.eventCount, 1, "event should not be recorded when trace is disabled");
     }
 }

@@ -795,7 +795,9 @@ fn test_standalone_h3_server_with_curl_retry() {
 #[test]
 fn test_standalone_h3_delayed_response() {
     if !has_curl_http3() {
-        eprintln!("skipping standalone curl delayed-response test: curl with HTTP/3 support not available");
+        eprintln!(
+            "skipping standalone curl delayed-response test: curl with HTTP/3 support not available"
+        );
         return;
     }
     let (cert_path, key_path) = generate_certs();

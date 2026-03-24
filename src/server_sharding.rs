@@ -31,3 +31,69 @@ pub(crate) fn local_conn_handle(conn_handle: u32) -> u32 {
 pub(crate) fn handle_offset(worker_index: u32) -> u32 {
     worker_index << WORKER_SHIFT
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_index_extraction() {
+        // worker 0, local handle 5
+        assert_eq!(worker_index(5), 0);
+        // worker 1
+        let handle = (1 << WORKER_SHIFT) | 7;
+        assert_eq!(worker_index(handle), 1);
+        // worker 3
+        let handle = (3 << WORKER_SHIFT) | 100;
+        assert_eq!(worker_index(handle), 3);
+    }
+
+    #[test]
+    fn test_local_conn_handle() {
+        let local = 0xABCu32;
+        let handle = (2 << WORKER_SHIFT) | local;
+        assert_eq!(local_conn_handle(handle), local);
+    }
+
+    #[test]
+    fn test_handle_offset() {
+        assert_eq!(handle_offset(0), 0);
+        assert_eq!(handle_offset(1), 1 << WORKER_SHIFT);
+        assert_eq!(handle_offset(5), 5 << WORKER_SHIFT);
+    }
+
+    #[test]
+    fn test_roundtrip_handle_encoding() {
+        for w in 0..8u32 {
+            for local in [0, 1, 42, WORKER_MASK - 1, WORKER_MASK] {
+                let global = handle_offset(w) | local;
+                assert_eq!(
+                    local_conn_handle(global),
+                    local,
+                    "roundtrip failed for worker={w} local={local}"
+                );
+                assert_eq!(
+                    worker_index(global),
+                    w as usize,
+                    "worker extraction failed for worker={w} local={local}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_worker_index_zero() {
+        assert_eq!(handle_offset(0), 0);
+        assert_eq!(worker_index(0), 0);
+    }
+
+    #[test]
+    fn test_max_local_handle() {
+        let local = WORKER_MASK;
+        for w in 0..4u32 {
+            let global = handle_offset(w) | local;
+            assert_eq!(local_conn_handle(global), local);
+            assert_eq!(worker_index(global), w as usize);
+        }
+    }
+}

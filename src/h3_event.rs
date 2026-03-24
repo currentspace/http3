@@ -153,7 +153,11 @@ impl JsH3Event {
             conn_handle,
             stream_id: stream_id as i64,
             headers: None,
-            data: if data.is_empty() { None } else { Some(data.into()) },
+            data: if data.is_empty() {
+                None
+            } else {
+                Some(data.into())
+            },
             fin: Some(fin),
             meta: None,
             metrics: None,
@@ -430,5 +434,206 @@ impl JsH3Event {
             meta: None,
             metrics: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_session_fields() {
+        let ev = JsH3Event::new_session(42, "127.0.0.1".into(), 4433, "example.com".into());
+        assert_eq!(ev.event_type, EVENT_NEW_SESSION);
+        assert_eq!(ev.conn_handle, 42);
+        assert_eq!(ev.stream_id, -1);
+        assert!(ev.headers.is_none());
+        assert!(ev.data.is_none());
+        assert!(ev.fin.is_none());
+        assert!(ev.metrics.is_none());
+        let meta = ev.meta.expect("meta must be Some");
+        assert_eq!(meta.remote_addr.as_deref(), Some("127.0.0.1"));
+        assert_eq!(meta.remote_port, Some(4433));
+        assert_eq!(meta.server_name.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn test_new_stream_fields() {
+        let ev = JsH3Event::new_stream(7, 12);
+        assert_eq!(ev.event_type, EVENT_NEW_STREAM);
+        assert_eq!(ev.conn_handle, 7);
+        assert_eq!(ev.stream_id, 12_i64);
+        assert!(ev.data.is_none());
+        assert!(ev.fin.is_none());
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_new_stream_with_data_fields() {
+        // Non-empty data is preserved.
+        let ev = JsH3Event::new_stream_with_data(1, 4, vec![0xAA, 0xBB], true);
+        assert_eq!(ev.event_type, EVENT_NEW_STREAM);
+        assert_eq!(ev.stream_id, 4_i64);
+        assert_eq!(ev.data.as_deref(), Some([0xAA, 0xBB].as_slice()));
+        assert_eq!(ev.fin, Some(true));
+
+        // Empty data is collapsed to None.
+        let ev2 = JsH3Event::new_stream_with_data(1, 4, vec![], false);
+        assert!(ev2.data.is_none());
+        assert_eq!(ev2.fin, Some(false));
+    }
+
+    #[test]
+    fn test_data_event_fields() {
+        let ev = JsH3Event::data(3, 8, vec![1, 2, 3], false);
+        assert_eq!(ev.event_type, EVENT_DATA);
+        assert_eq!(ev.conn_handle, 3);
+        assert_eq!(ev.stream_id, 8_i64);
+        assert_eq!(ev.data.as_deref(), Some([1u8, 2, 3].as_slice()));
+        assert_eq!(ev.fin, Some(false));
+
+        let ev_fin = JsH3Event::data(3, 8, vec![4], true);
+        assert_eq!(ev_fin.fin, Some(true));
+    }
+
+    #[test]
+    fn test_finished_fields() {
+        let ev = JsH3Event::finished(5, 16);
+        assert_eq!(ev.event_type, EVENT_FINISHED);
+        assert_eq!(ev.conn_handle, 5);
+        assert_eq!(ev.stream_id, 16_i64);
+        assert!(ev.data.is_none());
+        assert!(ev.fin.is_none());
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_reset_fields() {
+        let ev = JsH3Event::reset(9, 20, 256);
+        assert_eq!(ev.event_type, EVENT_RESET);
+        assert_eq!(ev.conn_handle, 9);
+        assert_eq!(ev.stream_id, 20_i64);
+        let meta = ev.meta.expect("meta must be Some");
+        assert_eq!(meta.error_code, Some(256));
+        assert!(meta.error_reason.is_none());
+    }
+
+    #[test]
+    fn test_session_close_fields() {
+        let ev = JsH3Event::session_close(11);
+        assert_eq!(ev.event_type, EVENT_SESSION_CLOSE);
+        assert_eq!(ev.conn_handle, 11);
+        assert_eq!(ev.stream_id, -1);
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_drain_fields() {
+        let ev = JsH3Event::drain(2, 32);
+        assert_eq!(ev.event_type, EVENT_DRAIN);
+        assert_eq!(ev.conn_handle, 2);
+        assert_eq!(ev.stream_id, 32_i64);
+        assert!(ev.data.is_none());
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_goaway_fields() {
+        let ev = JsH3Event::goaway(6, 64);
+        assert_eq!(ev.event_type, EVENT_GOAWAY);
+        assert_eq!(ev.conn_handle, 6);
+        assert_eq!(ev.stream_id, 64_i64);
+        assert!(ev.data.is_none());
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_error_fields() {
+        let ev = JsH3Event::error(10, 4, 0x0101, "flow control".into());
+        assert_eq!(ev.event_type, EVENT_ERROR);
+        assert_eq!(ev.conn_handle, 10);
+        assert_eq!(ev.stream_id, 4);
+        let meta = ev.meta.expect("meta must be Some");
+        assert_eq!(meta.error_code, Some(0x0101));
+        assert_eq!(meta.error_reason.as_deref(), Some("flow control"));
+        assert!(meta.error_category.is_none());
+    }
+
+    #[test]
+    fn test_runtime_error_fields() {
+        let io_err = std::io::Error::from_raw_os_error(libc::ECONNREFUSED);
+        let ev = JsH3Event::runtime_error(13, "poll", "sendmsg", "SEND_FAIL", &io_err);
+        assert_eq!(ev.event_type, EVENT_ERROR);
+        assert_eq!(ev.conn_handle, 13);
+        assert_eq!(ev.stream_id, -1);
+        let meta = ev.meta.expect("meta must be Some");
+        assert_eq!(meta.error_category.as_deref(), Some("runtime"));
+        assert_eq!(meta.runtime_driver.as_deref(), Some("poll"));
+        assert_eq!(meta.syscall.as_deref(), Some("sendmsg"));
+        assert_eq!(meta.reason_code.as_deref(), Some("SEND_FAIL"));
+        assert_eq!(meta.errno, Some(libc::ECONNREFUSED));
+        assert!(meta.error_reason.is_some());
+    }
+
+    #[test]
+    fn test_handshake_complete_fields() {
+        let ev = JsH3Event::handshake_complete(15);
+        assert_eq!(ev.event_type, EVENT_HANDSHAKE_COMPLETE);
+        assert_eq!(ev.conn_handle, 15);
+        assert_eq!(ev.stream_id, -1);
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_handshake_complete_with_peer_cert() {
+        let chain = vec![vec![0x30, 0x82], vec![0x30, 0x83]];
+        let ev = JsH3Event::handshake_complete_with_peer_certificate(20, true, Some(chain));
+        assert_eq!(ev.event_type, EVENT_HANDSHAKE_COMPLETE);
+        assert_eq!(ev.conn_handle, 20);
+        let meta = ev.meta.expect("meta must be Some");
+        assert_eq!(meta.peer_certificate_presented, Some(true));
+        let certs = meta.peer_certificate_chain.expect("chain must be Some");
+        assert_eq!(certs.len(), 2);
+        assert_eq!(certs[0].as_slice(), &[0x30, 0x82]);
+        assert_eq!(certs[1].as_slice(), &[0x30, 0x83]);
+
+        // Without cert chain.
+        let ev2 = JsH3Event::handshake_complete_with_peer_certificate(21, false, None);
+        let meta2 = ev2.meta.expect("meta must be Some");
+        assert_eq!(meta2.peer_certificate_presented, Some(false));
+        assert!(meta2.peer_certificate_chain.is_none());
+    }
+
+    #[test]
+    fn test_session_ticket_fields() {
+        let ticket = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let ev = JsH3Event::session_ticket(25, ticket.clone());
+        assert_eq!(ev.event_type, EVENT_SESSION_TICKET);
+        assert_eq!(ev.conn_handle, 25);
+        assert_eq!(ev.stream_id, -1);
+        assert_eq!(ev.data.as_deref(), Some(ticket.as_slice()));
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_datagram_fields() {
+        let payload = vec![0x01, 0x02, 0x03, 0x04];
+        let ev = JsH3Event::datagram(30, payload.clone());
+        assert_eq!(ev.event_type, EVENT_DATAGRAM);
+        assert_eq!(ev.conn_handle, 30);
+        assert_eq!(ev.stream_id, -1);
+        assert_eq!(ev.data.as_deref(), Some(payload.as_slice()));
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_shutdown_complete_fields() {
+        let ev = JsH3Event::shutdown_complete();
+        assert_eq!(ev.event_type, EVENT_SHUTDOWN_COMPLETE);
+        assert_eq!(ev.conn_handle, 0);
+        assert_eq!(ev.stream_id, -1);
+        assert!(ev.data.is_none());
+        assert!(ev.meta.is_none());
+        assert!(ev.metrics.is_none());
     }
 }
