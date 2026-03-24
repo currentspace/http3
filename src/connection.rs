@@ -29,6 +29,8 @@ pub struct H3Connection {
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
     pub last_peer_stream_id: u64,
+    /// Reusable buffer for h3 recv_body — avoids 16KB allocation per poll cycle.
+    pub recv_buf: Vec<u8>,
 }
 
 pub struct H3ConnectionInit<'a> {
@@ -88,6 +90,7 @@ impl H3Connection {
             qpack_max_table_capacity: init.qpack_max_table_capacity,
             qpack_blocked_streams: init.qpack_blocked_streams,
             last_peer_stream_id: 0,
+            recv_buf: vec![0u8; 16384],
         }
     }
 
@@ -149,14 +152,14 @@ impl H3Connection {
                     }
                     Ok((stream_id, quiche::h3::Event::Data)) => {
                         self.last_peer_stream_id = stream_id;
-                        // Read data into a heap buffer — move into event without copying.
-                        let mut recv_buf = vec![0u8; 16384];
                         loop {
-                            match h3_conn.recv_body(&mut self.quiche_conn, stream_id, &mut recv_buf)
-                            {
+                            match h3_conn.recv_body(
+                                &mut self.quiche_conn,
+                                stream_id,
+                                &mut self.recv_buf,
+                            ) {
                                 Ok(len) => {
-                                    let mut data = std::mem::replace(&mut recv_buf, vec![0u8; 16384]);
-                                    data.truncate(len);
+                                    let data = self.recv_buf[..len].to_vec();
                                     events.push(JsH3Event::data(
                                         conn_handle,
                                         stream_id,
@@ -440,10 +443,7 @@ impl H3Connection {
     }
 
     pub fn pmtu(&self) -> usize {
-        self.quiche_conn
-            .path_stats()
-            .next()
-            .map_or(0, |s| s.pmtu)
+        self.quiche_conn.path_stats().next().map_or(0, |s| s.pmtu)
     }
 }
 
