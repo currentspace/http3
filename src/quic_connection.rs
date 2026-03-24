@@ -127,6 +127,10 @@ impl QuicConnection {
     /// For new streams, the first `stream_recv` is coalesced into the
     /// NEW_STREAM event — saving one TSFN event per new stream (~33% fewer
     /// events for the typical new-stream lifecycle).
+    /// Max buffer size for stream_recv. 16KB matches the H3 path and covers
+    /// typical QUIC receive windows. quiche returns partial data and we loop.
+    const RECV_CHUNK: usize = 16_384;
+
     pub fn poll_quic_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
         let readable: Vec<u64> = self.quiche_conn.readable().collect();
 
@@ -138,7 +142,7 @@ impl QuicConnection {
                 // Checkout a pool buffer as the direct recv target — quiche copies
                 // into it, then we truncate and move ownership to the event (no
                 // intermediate copy).
-                let (mut buf, _) = self.data_pool.checkout(65535);
+                let (mut buf, _) = self.data_pool.checkout(Self::RECV_CHUNK);
                 match self.quiche_conn.stream_recv(stream_id, &mut buf) {
                     Ok((len, fin)) => {
                         buf.truncate(len);
@@ -179,7 +183,7 @@ impl QuicConnection {
             }
 
             loop {
-                let (mut buf, _) = self.data_pool.checkout(65535);
+                let (mut buf, _) = self.data_pool.checkout(Self::RECV_CHUNK);
                 match self.quiche_conn.stream_recv(stream_id, &mut buf) {
                     Ok((len, fin)) => {
                         if len > 0 {
@@ -390,7 +394,8 @@ impl QuicConnection {
 
     pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
         loop {
-            let (mut buf, _) = self.data_pool.checkout(65535);
+            // Datagrams are at most one MTU (~1500 bytes).
+            let (mut buf, _) = self.data_pool.checkout(1500);
             match self.quiche_conn.dgram_recv(&mut buf) {
                 Ok(len) => {
                     buf.truncate(len);
