@@ -28,10 +28,13 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool. Only keeps it if capacity is sufficient.
+    #[allow(unsafe_code)]
     pub fn checkin(&mut self, mut buf: Vec<u8>) {
         if buf.capacity() >= self.buf_size {
             buf.clear();
-            buf.resize(self.buf_size, 0);
+            // SAFETY: checkout() contract requires callers write before reading.
+            // Matches AdaptiveBufferPool::checkout() which uses the same pattern.
+            unsafe { buf.set_len(self.buf_size); }
             self.buffers.push(buf);
         }
         // Undersized buffers are dropped
