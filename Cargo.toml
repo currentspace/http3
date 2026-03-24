@@ -29,10 +29,15 @@ name = "quic_multiclient_bench"
 path = "src/bin/quic_multiclient_bench.rs"
 required-features = ["profile-binary"]
 
+[[bin]]
+name = "quic_mock_sustained"
+path = "src/bin/quic_mock_sustained.rs"
+required-features = ["profile-binary"]
+
 [dependencies]
 napi = { version = "3", features = ["napi4", "napi6", "napi8"] }
 napi-derive = "3"
-quiche = { version = "0.26", features = ["qlog"] }
+quiche = { version = "0.26", features = ["qlog", "aws-lc"] }
 ring = "0.17"
 log = "0.4"
 slab = "0.4"
@@ -64,6 +69,13 @@ env_logger = "0.11"
 name = "driver_udp"
 harness = false
 
+[[bench]]
+name = "quic_mock_pair"
+harness = false
+
+[profile.release]
+debug = 1  # line tables for perf/flamegraph symbol resolution
+
 [lints.rust]
 unsafe_code = "warn"
 unused_must_use = "deny"
@@ -86,3 +98,8 @@ unnecessary_wraps = "allow"        # napi requires Result return types on all me
 unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
+
+[patch.crates-io]
+quiche = { path = "../quiche-fork/quiche" }
+octets = { path = "../quiche-fork/octets" }
+qlog = { path = "../quiche-fork/qlog" }
