@@ -269,6 +269,10 @@ export interface JsReactorTelemetrySnapshot {
   ioUringRxInFlightHighWatermark: number
   ioUringTxInFlightHighWatermark: number
   ioUringPendingTxHighWatermark: number
+  ioUringTier2DrainRounds: number
+  ioUringTier2TaskrunPrefetches: number
+  ioUringTier2BlockingWaits: number
+  ioUringTier2CapHits: number
   ioUringRetryableSendCompletions: number
   ioUringSubmitCalls: number
   ioUringSubmitWithArgsCalls: number

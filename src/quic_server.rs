@@ -25,8 +25,8 @@ impl NativeQuicServer {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let quiche_config = crate::config::new_quic_server_config(&options)
-            .map_err(napi::Error::from)?;
+        let quiche_config =
+            crate::config::new_quic_server_config(&options).map_err(napi::Error::from)?;
         let server_config = crate::quic_worker::QuicServerConfig {
             qlog_dir: options.qlog_dir,
             qlog_level: options.qlog_level,
@@ -75,13 +75,8 @@ impl NativeQuicServer {
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
 
         let worker_handle =
-            crate::quic_worker::spawn_quic_server(
-                quiche_config,
-                server_config,
-                addr,
-                tsfn,
-            )
-            .map_err(napi::Error::from)?;
+            crate::quic_worker::spawn_quic_server(quiche_config, server_config, addr, tsfn)
+                .map_err(napi::Error::from)?;
 
         let local = worker_handle.local_addr();
         self.handle = Some(worker_handle);

@@ -207,9 +207,7 @@ pub(crate) fn parse_pktinfo_cmsg(control: &[u8]) -> Option<std::net::IpAddr> {
                 let ip = std::net::Ipv4Addr::from(u32::from_be(info.ipi_spec_dst.s_addr));
                 return Some(std::net::IpAddr::V4(ip));
             }
-        } else if hdr.cmsg_level == libc::IPPROTO_IPV6
-            && hdr.cmsg_type == libc::IPV6_PKTINFO
-        {
+        } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
             if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
                 let info: libc::in6_pktinfo =
                     unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };

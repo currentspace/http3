@@ -19,11 +19,7 @@ impl EventSink for NoopEventSink {
         "noop"
     }
 
-    fn emit(
-        &mut self,
-        _events: Vec<JsH3Event>,
-        _stats: &EventBatcherStatsHandle,
-    ) -> bool {
+    fn emit(&mut self, _events: Vec<JsH3Event>, _stats: &EventBatcherStatsHandle) -> bool {
         true
     }
 }
@@ -36,11 +32,7 @@ impl EventSink for CountingEventSink {
         "counting"
     }
 
-    fn emit(
-        &mut self,
-        _events: Vec<JsH3Event>,
-        _stats: &EventBatcherStatsHandle,
-    ) -> bool {
+    fn emit(&mut self, _events: Vec<JsH3Event>, _stats: &EventBatcherStatsHandle) -> bool {
         true
     }
 }
@@ -61,11 +53,7 @@ impl EventSink for ChannelEventSink {
         "channel"
     }
 
-    fn emit(
-        &mut self,
-        events: Vec<JsH3Event>,
-        stats: &EventBatcherStatsHandle,
-    ) -> bool {
+    fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool {
         let count = events.len();
         self.sender
             .send(TaggedEventBatch {
@@ -88,11 +76,7 @@ impl<A: EventSink, B: EventSink> EventSink for CompositeEventSink<A, B> {
         self.kind
     }
 
-    fn emit(
-        &mut self,
-        events: Vec<JsH3Event>,
-        stats: &EventBatcherStatsHandle,
-    ) -> bool {
+    fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool {
         let mirrored = clone_events(&events);
         let primary_ok = self.primary.emit(events, stats);
         let secondary_ok = self.secondary.emit(mirrored, stats);
@@ -101,20 +85,20 @@ impl<A: EventSink, B: EventSink> EventSink for CompositeEventSink<A, B> {
 }
 
 #[allow(dead_code)]
-pub(crate) fn noop_batcher() -> (EventBatcher, EventBatcherStatsHandle) {
+pub fn noop_batcher() -> (EventBatcher, EventBatcherStatsHandle) {
     let batcher = EventBatcher::with_sink(NoopEventSink);
     let stats = batcher.stats_handle();
     (batcher, stats)
 }
 
 #[allow(dead_code)]
-pub(crate) fn counting_batcher() -> (EventBatcher, EventBatcherStatsHandle) {
+pub fn counting_batcher() -> (EventBatcher, EventBatcherStatsHandle) {
     let batcher = EventBatcher::with_sink(CountingEventSink);
     let stats = batcher.stats_handle();
     (batcher, stats)
 }
 
-pub(crate) fn channel_batcher(
+pub fn channel_batcher(
     source: impl Into<String>,
     sender: Sender<TaggedEventBatch>,
 ) -> (EventBatcher, EventBatcherStatsHandle) {

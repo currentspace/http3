@@ -138,16 +138,13 @@ impl NativeWorkerServer {
             .take()
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
 
-        let stored = self.server_options_snapshot.take()
+        let stored = self
+            .server_options_snapshot
+            .take()
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
-        let worker_handle = crate::worker::spawn_worker(
-            quiche_config,
-            http3_config,
-            addr,
-            tsfn,
-            stored,
-        )
-        .map_err(napi::Error::from)?;
+        let worker_handle =
+            crate::worker::spawn_worker(quiche_config, http3_config, addr, tsfn, stored)
+                .map_err(napi::Error::from)?;
 
         let local = worker_handle.local_addr();
         self.handle = Some(worker_handle);
