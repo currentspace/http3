@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock, Weak,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,14 +19,14 @@ use slab::Slab;
 use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
 use crate::cid::CidEncoding;
 use crate::client_topology::{
-    default_quic_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
     ClientSocketStrategy, SharedClientWorkerKey as SharedQuicClientWorkerKey,
+    default_quic_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
 };
 use crate::config::{ClientAuthMode, TransportRuntimeMode};
 use crate::error::Http3NativeError;
-use crate::event_loop::{self, EventBatcher, ProtocolHandler, MAX_BATCH_SIZE, SEND_BUF_SIZE};
 #[cfg(feature = "node-api")]
 use crate::event_loop::EventTsfn;
+use crate::event_loop::{self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, SEND_BUF_SIZE};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{self, RawQuicClientCloseCause, SessionKind, WorkerSpawnKind};
@@ -77,10 +77,10 @@ pub enum QuicServerCommand {
 }
 
 /// Per-worker state inside a `QuicServerHandle`.
-pub(crate) struct QuicServerWorker {
-    pub(crate) cmd_tx: Sender<QuicServerCommand>,
-    pub(crate) join_handle: Option<thread::JoinHandle<()>>,
-    pub(crate) waker: Arc<dyn ErasedWaker>,
+pub struct QuicServerWorker {
+    pub cmd_tx: Sender<QuicServerCommand>,
+    pub join_handle: Option<thread::JoinHandle<()>>,
+    pub waker: Arc<dyn ErasedWaker>,
 }
 
 use crate::server_sharding::{self, WORKER_SHIFT};
@@ -91,8 +91,11 @@ pub struct QuicServerHandle {
 }
 
 impl QuicServerHandle {
-    pub(crate) fn from_workers(workers: Vec<QuicServerWorker>, local_addr: SocketAddr) -> Self {
-        Self { workers, local_addr }
+    pub fn from_workers(workers: Vec<QuicServerWorker>, local_addr: SocketAddr) -> Self {
+        Self {
+            workers,
+            local_addr,
+        }
     }
 
     /// Route a command to the worker that owns `conn_handle`.
@@ -119,7 +122,8 @@ impl QuicServerHandle {
         let worker = &self.workers[server_sharding::worker_index(conn_handle)];
         let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        worker.cmd_tx
+        worker
+            .cmd_tx
             .send(QuicServerCommand::GetSessionMetrics {
                 conn_handle: local_handle,
                 resp_tx,
@@ -131,15 +135,12 @@ impl QuicServerHandle {
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for metrics".into()))
     }
 
-    pub fn send_datagram(
-        &self,
-        conn_handle: u32,
-        data: Vec<u8>,
-    ) -> Result<bool, Http3NativeError> {
+    pub fn send_datagram(&self, conn_handle: u32, data: Vec<u8>) -> Result<bool, Http3NativeError> {
         let worker = &self.workers[server_sharding::worker_index(conn_handle)];
         let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        worker.cmd_tx
+        worker
+            .cmd_tx
             .send(QuicServerCommand::SendDatagram {
                 conn_handle: local_handle,
                 data,
@@ -156,7 +157,8 @@ impl QuicServerHandle {
         let worker = &self.workers[server_sharding::worker_index(conn_handle)];
         let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        worker.cmd_tx
+        worker
+            .cmd_tx
             .send(QuicServerCommand::PingSession {
                 conn_handle: local_handle,
                 resp_tx,
@@ -172,7 +174,8 @@ impl QuicServerHandle {
         let worker = &self.workers[server_sharding::worker_index(conn_handle)];
         let local_handle = server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        worker.cmd_tx
+        worker
+            .cmd_tx
             .send(QuicServerCommand::GetQlogPath {
                 conn_handle: local_handle,
                 resp_tx,
@@ -232,20 +235,65 @@ fn command_conn_handle(cmd: &QuicServerCommand) -> u32 {
 /// Remap a command's conn_handle from global to local (strip worker bits).
 fn remap_command_handle(cmd: QuicServerCommand) -> QuicServerCommand {
     match cmd {
-        QuicServerCommand::StreamSend { conn_handle, stream_id, data, fin } =>
-            QuicServerCommand::StreamSend { conn_handle: server_sharding::local_conn_handle(conn_handle), stream_id, data, fin },
-        QuicServerCommand::StreamClose { conn_handle, stream_id, error_code } =>
-            QuicServerCommand::StreamClose { conn_handle: server_sharding::local_conn_handle(conn_handle), stream_id, error_code },
-        QuicServerCommand::CloseSession { conn_handle, error_code, reason } =>
-            QuicServerCommand::CloseSession { conn_handle: server_sharding::local_conn_handle(conn_handle), error_code, reason },
-        QuicServerCommand::SendDatagram { conn_handle, data, resp_tx } =>
-            QuicServerCommand::SendDatagram { conn_handle: server_sharding::local_conn_handle(conn_handle), data, resp_tx },
-        QuicServerCommand::GetSessionMetrics { conn_handle, resp_tx } =>
-            QuicServerCommand::GetSessionMetrics { conn_handle: server_sharding::local_conn_handle(conn_handle), resp_tx },
-        QuicServerCommand::PingSession { conn_handle, resp_tx } =>
-            QuicServerCommand::PingSession { conn_handle: server_sharding::local_conn_handle(conn_handle), resp_tx },
-        QuicServerCommand::GetQlogPath { conn_handle, resp_tx } =>
-            QuicServerCommand::GetQlogPath { conn_handle: server_sharding::local_conn_handle(conn_handle), resp_tx },
+        QuicServerCommand::StreamSend {
+            conn_handle,
+            stream_id,
+            data,
+            fin,
+        } => QuicServerCommand::StreamSend {
+            conn_handle: server_sharding::local_conn_handle(conn_handle),
+            stream_id,
+            data,
+            fin,
+        },
+        QuicServerCommand::StreamClose {
+            conn_handle,
+            stream_id,
+            error_code,
+        } => QuicServerCommand::StreamClose {
+            conn_handle: server_sharding::local_conn_handle(conn_handle),
+            stream_id,
+            error_code,
+        },
+        QuicServerCommand::CloseSession {
+            conn_handle,
+            error_code,
+            reason,
+        } => QuicServerCommand::CloseSession {
+            conn_handle: server_sharding::local_conn_handle(conn_handle),
+            error_code,
+            reason,
+        },
+        QuicServerCommand::SendDatagram {
+            conn_handle,
+            data,
+            resp_tx,
+        } => QuicServerCommand::SendDatagram {
+            conn_handle: server_sharding::local_conn_handle(conn_handle),
+            data,
+            resp_tx,
+        },
+        QuicServerCommand::GetSessionMetrics {
+            conn_handle,
+            resp_tx,
+        } => QuicServerCommand::GetSessionMetrics {
+            conn_handle: server_sharding::local_conn_handle(conn_handle),
+            resp_tx,
+        },
+        QuicServerCommand::PingSession {
+            conn_handle,
+            resp_tx,
+        } => QuicServerCommand::PingSession {
+            conn_handle: server_sharding::local_conn_handle(conn_handle),
+            resp_tx,
+        },
+        QuicServerCommand::GetQlogPath {
+            conn_handle,
+            resp_tx,
+        } => QuicServerCommand::GetQlogPath {
+            conn_handle: server_sharding::local_conn_handle(conn_handle),
+            resp_tx,
+        },
         QuicServerCommand::Shutdown => QuicServerCommand::Shutdown,
     }
 }
@@ -474,7 +522,11 @@ impl QuicClientHandle {
                     })?;
                 worker.wake();
             }
-            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+            None => {
+                return Err(Http3NativeError::InvalidState(
+                    "quic client not running".into(),
+                ));
+            }
         }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
@@ -509,7 +561,11 @@ impl QuicClientHandle {
                     })?;
                 worker.wake();
             }
-            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+            None => {
+                return Err(Http3NativeError::InvalidState(
+                    "quic client not running".into(),
+                ));
+            }
         }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
@@ -544,7 +600,11 @@ impl QuicClientHandle {
                     })?;
                 worker.wake();
             }
-            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+            None => {
+                return Err(Http3NativeError::InvalidState(
+                    "quic client not running".into(),
+                ));
+            }
         }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
@@ -579,7 +639,11 @@ impl QuicClientHandle {
                     })?;
                 worker.wake();
             }
-            None => return Err(Http3NativeError::InvalidState("quic client not running".into())),
+            None => {
+                return Err(Http3NativeError::InvalidState(
+                    "quic client not running".into(),
+                ));
+            }
         }
         resp_rx
             .recv_timeout(Duration::from_secs(2))
@@ -942,7 +1006,7 @@ pub struct QuicServerConfig {
     pub runtime_mode: TransportRuntimeMode,
 }
 
-pub(crate) fn spawn_server_worker_on_driver<D>(
+pub fn spawn_server_worker_on_driver<D>(
     quiche_config: quiche::Config,
     server_config: QuicServerConfig,
     worker_index: u32,
@@ -975,7 +1039,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_dedicated_quic_client_on_driver<D>(
+pub fn spawn_dedicated_quic_client_on_driver<D>(
     quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
@@ -1047,11 +1111,19 @@ pub(crate) fn spawn_quic_server_with_batcher(
     let mut config_slot = Some(quiche_config);
     let mut batcher_slot = Some(batcher);
     spawn_quic_server_sharded(
-        || Ok(config_slot.take().expect("called exactly once for 1 worker")),
+        || {
+            Ok(config_slot
+                .take()
+                .expect("called exactly once for 1 worker"))
+        },
         server_config,
         bind_addr,
         1,
-        |_| batcher_slot.take().expect("called exactly once for 1 worker"),
+        |_| {
+            batcher_slot
+                .take()
+                .expect("called exactly once for 1 worker")
+        },
     )
 }
 
@@ -1264,8 +1336,8 @@ struct SharedQuicClientSession {
     server_addr: SocketAddr,
 }
 
-fn shared_quic_client_worker_registry(
-) -> &'static Mutex<HashMap<SharedQuicClientWorkerKey, Weak<SharedQuicClientWorkerControl>>> {
+fn shared_quic_client_worker_registry()
+-> &'static Mutex<HashMap<SharedQuicClientWorkerKey, Weak<SharedQuicClientWorkerControl>>> {
     static REGISTRY: OnceLock<
         Mutex<HashMap<SharedQuicClientWorkerKey, Weak<SharedQuicClientWorkerControl>>>,
     > = OnceLock::new();
@@ -1277,9 +1349,9 @@ fn acquire_shared_quic_client_worker(
     runtime_mode: TransportRuntimeMode,
 ) -> Result<Arc<SharedQuicClientWorkerControl>, Http3NativeError> {
     let key = shared_client_worker_key(server_addr, runtime_mode);
-    let mut registry = shared_quic_client_worker_registry()
-        .lock()
-        .map_err(|_| Http3NativeError::InvalidState("shared quic client registry poisoned".into()))?;
+    let mut registry = shared_quic_client_worker_registry().lock().map_err(|_| {
+        Http3NativeError::InvalidState("shared quic client registry poisoned".into())
+    })?;
     if let Some(worker) = registry.get(&key).and_then(Weak::upgrade) {
         if worker.running.load(Ordering::Acquire) {
             reactor_metrics::record_shared_worker_reuse(WorkerSpawnKind::RawQuicClientShared);
@@ -1341,14 +1413,14 @@ fn spawn_shared_quic_client(
             batcher,
             resp_tx,
         })
-        .map_err(|_| Http3NativeError::InvalidState("shared quic client worker not running".into()))?;
+        .map_err(|_| {
+            Http3NativeError::InvalidState("shared quic client worker not running".into())
+        })?;
     worker.wake();
 
-    let session_handle = resp_rx
-        .recv_timeout(Duration::from_secs(2))
-        .map_err(|_| {
-            Http3NativeError::InvalidState("timed out waiting for shared quic session".into())
-        })??;
+    let session_handle = resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        Http3NativeError::InvalidState("timed out waiting for shared quic session".into())
+    })??;
     worker.session_count.fetch_add(1, Ordering::AcqRel);
 
     Ok(QuicClientHandle {
@@ -1406,9 +1478,7 @@ fn remove_shared_quic_client_session(
             )),
         );
         if !session.handler.session_closed_emitted {
-            reactor_metrics::record_raw_quic_client_close_cause(
-                RawQuicClientCloseCause::Release,
-            );
+            reactor_metrics::record_raw_quic_client_close_cause(RawQuicClientCloseCause::Release);
             reactor_metrics::record_session_close(SessionKind::RawQuicClient);
         }
     }
@@ -1447,18 +1517,13 @@ fn flush_shared_quic_client_sends(
     tx_pool: &mut BufferPool,
     outbound: &mut Vec<TxDatagram>,
 ) {
-    shared_client_reactor::flush_round_robin_sends(
-        sessions,
-        handles_buf,
-        outbound,
-        |session| {
-            QuicClientHandler::try_send_next_with_pool_parts(
-                &mut session.handler.conn,
-                session.handler.send_buf.as_mut_slice(),
-                tx_pool,
-            )
-        },
-    );
+    shared_client_reactor::flush_round_robin_sends(sessions, handles_buf, outbound, |session| {
+        QuicClientHandler::try_send_next_with_pool_parts(
+            &mut session.handler.conn,
+            session.handler.send_buf.as_mut_slice(),
+            tx_pool,
+        )
+    });
 }
 
 fn refresh_shared_quic_client_timers_after_sends(
@@ -1625,7 +1690,12 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
             }
         }
 
-        flush_shared_quic_client_sends(&mut sessions, &mut handles_buf, &mut tx_pool, &mut outbound);
+        flush_shared_quic_client_sends(
+            &mut sessions,
+            &mut handles_buf,
+            &mut tx_pool,
+            &mut outbound,
+        );
         refresh_shared_quic_client_timers_after_sends(
             &mut sessions,
             &mut timer_heap,
@@ -1727,10 +1797,9 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                 session
                     .handler
                     .poll_drain_events_for_handle(&mut session.batcher.batch, handle as u32);
-                session.handler.flush_pending_writes_for_handle(
-                    &mut session.batcher.batch,
-                    handle as u32,
-                );
+                session
+                    .handler
+                    .flush_pending_writes_for_handle(&mut session.batcher.batch, handle as u32);
                 if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
                     closed_sessions.push(handle);
                 }
@@ -1745,7 +1814,12 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
             );
         }
 
-        flush_shared_quic_client_sends(&mut sessions, &mut handles_buf, &mut tx_pool, &mut outbound);
+        flush_shared_quic_client_sends(
+            &mut sessions,
+            &mut handles_buf,
+            &mut tx_pool,
+            &mut outbound,
+        );
         refresh_shared_quic_client_timers_after_sends(
             &mut sessions,
             &mut timer_heap,
@@ -1818,7 +1892,11 @@ struct QuicServerHandler {
 }
 
 impl QuicServerHandler {
-    fn new(quiche_config: quiche::Config, server_config: QuicServerConfig, worker_index: u32) -> Self {
+    fn new(
+        quiche_config: quiche::Config,
+        server_config: QuicServerConfig,
+        worker_index: u32,
+    ) -> Self {
         let disable_retry = server_config.disable_retry;
         Self {
             conn_map: QuicConnectionMap::new(
@@ -1852,11 +1930,7 @@ impl QuicServerHandler {
 impl ProtocolHandler for QuicServerHandler {
     type Command = QuicServerCommand;
 
-    fn dispatch_command(
-        &mut self,
-        cmd: QuicServerCommand,
-        _batch: &mut Vec<JsH3Event>,
-    ) -> bool {
+    fn dispatch_command(&mut self, cmd: QuicServerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             QuicServerCommand::Shutdown => return true,
             QuicServerCommand::StreamSend {
@@ -2149,9 +2223,8 @@ impl ProtocolHandler for QuicServerHandler {
         }
         top_up_server_scids(&mut self.conn_map, handle);
 
-        if let Some(timeout) = timeout {
-            self.timer_heap.schedule(handle, Instant::now() + timeout);
-        }
+        self.timer_heap
+            .set_deadline(handle, timeout.map(|timeout| Instant::now() + timeout));
     }
 
     fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
@@ -2180,9 +2253,8 @@ impl ProtocolHandler for QuicServerHandler {
                     batch.push(JsH3Event::session_close(offset | (handle as u32)));
                 } else {
                     conn.poll_quic_events(offset | (handle as u32), batch);
-                    if let Some(timeout) = conn.timeout() {
-                        self.timer_heap.schedule(handle, Instant::now() + timeout);
-                    }
+                    self.timer_heap
+                        .set_deadline(handle, conn.timeout().map(|timeout| now + timeout));
                 }
             }
         }
@@ -2236,6 +2308,15 @@ impl ProtocolHandler for QuicServerHandler {
                 }
             }
         }
+        let now = Instant::now();
+        for &handle in &self.handles_buf {
+            let timeout = self
+                .conn_map
+                .get_mut(handle)
+                .and_then(|conn| conn.timeout());
+            self.timer_heap
+                .set_deadline(handle, timeout.map(|timeout| now + timeout));
+        }
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
@@ -2246,7 +2327,10 @@ impl ProtocolHandler for QuicServerHandler {
         );
         for (local_handle, stream_id) in flushed {
             reactor_metrics::record_raw_quic_drain_event();
-            batch.push(JsH3Event::drain(local_handle | self.handle_offset, stream_id));
+            batch.push(JsH3Event::drain(
+                local_handle | self.handle_offset,
+                stream_id,
+            ));
         }
     }
 
@@ -2537,6 +2621,7 @@ impl QuicClientHandler {
                 self.emit_session_close(batch, conn_handle, RawQuicClientCloseCause::Timeout);
             } else {
                 self.conn.poll_quic_events(conn_handle, batch);
+                self.conn.sweep_finished_streams(conn_handle, batch);
                 if let Some(ticket) = self.conn.update_session_ticket() {
                     batch.push(JsH3Event::session_ticket(conn_handle, ticket));
                 }
@@ -2571,11 +2656,7 @@ impl QuicClientHandler {
         })
     }
 
-    fn flush_pending_writes_for_handle(
-        &mut self,
-        batch: &mut Vec<JsH3Event>,
-        conn_handle: u32,
-    ) {
+    fn flush_pending_writes_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
         let flushed = flush_quic_client_pending_writes(
             &mut self.conn,
             &mut self.pending_writes,
@@ -2609,11 +2690,7 @@ impl QuicClientHandler {
 impl ProtocolHandler for QuicClientHandler {
     type Command = QuicClientCommand;
 
-    fn dispatch_command(
-        &mut self,
-        cmd: QuicClientCommand,
-        _batch: &mut Vec<JsH3Event>,
-    ) -> bool {
+    fn dispatch_command(&mut self, cmd: QuicClientCommand, _batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             QuicClientCommand::Shutdown => {
                 if !self.session_closed_emitted {

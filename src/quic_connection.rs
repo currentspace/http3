@@ -26,6 +26,9 @@ pub struct QuicConnection {
     pub blocked_set: HashSet<u64>,
     /// Tracks which stream IDs we have already emitted NEW_STREAM for.
     pub known_streams: HashSet<u64>,
+    /// Streams where stream_recv returned Done but stream_finished() was false.
+    /// Only these are checked in sweep_finished_streams (avoids O(all_streams) scan).
+    pub pending_fin: HashSet<u64>,
     pub qlog_path: Option<String>,
     pub session_ticket: Option<Vec<u8>>,
     /// Reusable buffer for stream_recv — avoids 64KB allocation per poll cycle.
@@ -66,6 +69,7 @@ impl QuicConnection {
             blocked_queue: VecDeque::new(),
             blocked_set: HashSet::new(),
             known_streams: HashSet::new(),
+            pending_fin: HashSet::new(),
             qlog_path,
             session_ticket: None,
             recv_buf: vec![0u8; 65535],
@@ -197,9 +201,13 @@ impl QuicConnection {
                             reactor_metrics::record_raw_quic_finished_event();
                             events.push(JsH3Event::finished(conn_handle, stream_id));
                             self.known_streams.remove(&stream_id);
+                            self.pending_fin.remove(&stream_id);
                             self.quiche_conn
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .ok();
+                        } else {
+                            // FIN hasn't arrived yet — track for sweep
+                            self.pending_fin.insert(stream_id);
                         }
                         break;
                     }
@@ -217,26 +225,21 @@ impl QuicConnection {
             }
         }
 
-        self.sweep_finished_streams(conn_handle, events);
+        // NOTE: sweep_finished_streams is called by the handler at lower frequency
+        // (timer ticks) to avoid O(pending_fin) on every packet.
         self.poll_datagram_events(conn_handle, events);
         self.poll_drain_events(conn_handle, events);
     }
 
-    /// Scan known_streams for streams where quiche received FIN in a separate
-    /// packet after we already drained all data via `stream_recv`.  quiche
-    /// doesn't re-report these as readable, so we scan on every event loop
-    /// cycle.  O(N) in known_streams size — acceptable for typical stream
-    /// counts; profile if this becomes a bottleneck.
+    /// Check only the `pending_fin` set for streams where quiche received FIN
+    /// after we already drained all data via `stream_recv`. This is O(pending)
+    /// instead of the previous O(all_known_streams) — typically near zero.
     pub fn sweep_finished_streams(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        if self.known_streams.is_empty() {
+        if self.pending_fin.is_empty() {
             return;
         }
         let mut newly_finished = Vec::new();
-        for &stream_id in &self.known_streams {
-            // stream_finished(): peer sent FIN on this stream's read side.
-            // stream_readable(): there is still unread data buffered.
-            // Only emit FINISHED when FIN was received AND all data has
-            // been read — otherwise the data would be lost.
+        for &stream_id in &self.pending_fin {
             if self.quiche_conn.stream_finished(stream_id)
                 && !self.quiche_conn.stream_readable(stream_id)
             {
@@ -244,8 +247,7 @@ impl QuicConnection {
             }
         }
         for stream_id in newly_finished {
-            // Guard: poll_quic_events may have already handled this stream
-            // in the same cycle (data+FIN read in the drain loop).
+            self.pending_fin.remove(&stream_id);
             if !self.known_streams.remove(&stream_id) {
                 continue;
             }
