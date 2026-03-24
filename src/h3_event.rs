@@ -594,8 +594,8 @@ mod tests {
         assert_eq!(meta.peer_certificate_presented, Some(true));
         let certs = meta.peer_certificate_chain.expect("chain must be Some");
         assert_eq!(certs.len(), 2);
-        assert_eq!(certs[0].as_slice(), &[0x30, 0x82]);
-        assert_eq!(certs[1].as_slice(), &[0x30, 0x83]);
+        assert_eq!(&certs[0][..], &[0x30, 0x82]);
+        assert_eq!(&certs[1][..], &[0x30, 0x83]);
 
         // Without cert chain.
         let ev2 = JsH3Event::handshake_complete_with_peer_certificate(21, false, None);

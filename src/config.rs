@@ -694,4 +694,55 @@ mod tests {
             CidEncoding::Random => panic!("expected QUIC-LB plaintext CID encoding"),
         }
     }
+
+    #[test]
+    fn test_runtime_mode_parse_fast() {
+        assert_eq!(
+            TransportRuntimeMode::parse(Some("fast")).unwrap(),
+            TransportRuntimeMode::Fast
+        );
+        assert_eq!(
+            TransportRuntimeMode::parse(None).unwrap(),
+            TransportRuntimeMode::Fast,
+            "None should default to Fast"
+        );
+    }
+
+    #[test]
+    fn test_runtime_mode_parse_portable() {
+        assert_eq!(
+            TransportRuntimeMode::parse(Some("portable")).unwrap(),
+            TransportRuntimeMode::Portable
+        );
+    }
+
+    #[test]
+    fn test_runtime_mode_parse_invalid_rejects() {
+        let err = TransportRuntimeMode::parse(Some("turbo")).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid runtimeMode"),
+            "error should mention invalid runtimeMode, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_client_auth_mode_none_with_ca_rejects() {
+        let err = ClientAuthMode::parse(Some("none"), true).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be combined with ca"),
+            "error should mention ca conflict, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_client_auth_mode_require_without_ca_rejects() {
+        let err = ClientAuthMode::parse(Some("require"), false).unwrap_err();
+        assert!(
+            err.to_string().contains("requires ca"),
+            "error should mention ca requirement, got: {}",
+            err
+        );
+    }
 }
