@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::arc_buf::{ArcBuf, ArcBufFactory};
 use crate::buffer_pool::AdaptiveBufferPool;
 use crate::connection::ConnectionMetrics;
 use crate::error::Http3NativeError;
@@ -15,7 +16,7 @@ use crate::reactor_metrics;
 /// A raw QUIC connection (no HTTP/3 framing).
 /// Streams carry opaque byte data, not HTTP semantics.
 pub struct QuicConnection {
-    pub quiche_conn: quiche::Connection,
+    pub quiche_conn: quiche::Connection<ArcBufFactory>,
     pub conn_id: Vec<u8>,
     pub created_at: Instant,
     pub is_established: bool,
@@ -52,7 +53,7 @@ impl QuicConnection {
     }
 
     pub fn new(
-        mut quiche_conn: quiche::Connection,
+        mut quiche_conn: quiche::Connection<ArcBufFactory>,
         conn_id: Vec<u8>,
         init: QuicConnectionInit<'_>,
     ) -> Self {
@@ -296,44 +297,40 @@ impl QuicConnection {
         }
     }
 
-    /// Send raw data on a QUIC stream. Returns bytes written.
+    /// Send raw data on a QUIC stream using zero-copy. Returns
+    /// `(bytes_written, optional remainder)`.
+    ///
+    /// Takes ownership of the data `Vec`, wraps it in an `ArcBuf`, and hands
+    /// it to quiche's `stream_send_zc` — avoiding an internal memcpy.
     ///
     /// For FIN-only sends (empty data + fin=true), quiche returns Ok(0) on
     /// success. To distinguish that from `Err(Done)` (blocked), this method
-    /// returns `Ok(1)` when a FIN-only send is accepted by quiche — callers
+    /// returns written=1 when a FIN-only send is accepted by quiche — callers
     /// can treat any non-zero return as "progress was made."
-    ///
-    /// This sentinel is needed regardless of quiche version because the
-    /// quiche API uses Ok(0) for both "FIN accepted" and maps Err(Done)
-    /// to 0 in callers — there is no way to distinguish success from
-    /// flow-control block without it.
     pub fn stream_send(
         &mut self,
         stream_id: u64,
-        data: &[u8],
+        data: Vec<u8>,
         fin: bool,
-    ) -> Result<usize, Http3NativeError> {
-        match self.quiche_conn.stream_send(stream_id, data, fin) {
-            Ok(written) => {
-                if written < data.len() && self.blocked_set.insert(stream_id) {
+    ) -> Result<(usize, Option<Vec<u8>>), Http3NativeError> {
+        let data_len = data.len();
+        let buf = ArcBuf::from_vec(data);
+        match self.quiche_conn.stream_send_zc(stream_id, buf, None, fin) {
+            Ok((written, remaining)) => {
+                if written < data_len && self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
                     reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
-                // Track locally-opened streams so their inbound peer response is
-                // treated as DATA on an existing stream rather than NEW_STREAM.
-                // Do not reinsert peer-initiated streams here: doing so causes
-                // duplicate FINISHED events after their receive side is already
-                // complete and we begin writing the response.
                 if self.is_local_stream(stream_id) {
                     self.known_streams.insert(stream_id);
                 }
-                // Signal progress for FIN-only sends (0 data bytes written
-                // but FIN was accepted). Without this, callers can't
-                // distinguish a successful FIN from a blocked one.
-                if data.is_empty() && fin && written == 0 {
-                    Ok(1)
+                // Convert remaining ArcBuf back to Vec for pending-write storage.
+                let remainder = remaining.map(|r| r.as_ref().to_vec());
+                // Sentinel for FIN-only sends.
+                if data_len == 0 && fin && written == 0 {
+                    Ok((1, None))
                 } else {
-                    Ok(written)
+                    Ok((written, remainder))
                 }
             }
             Err(quiche::Error::Done) => {
@@ -341,7 +338,7 @@ impl QuicConnection {
                     self.blocked_queue.push_back(stream_id);
                     reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
-                Ok(0)
+                Ok((0, None))
             }
             Err(e) => Err(Http3NativeError::Quiche(e)),
         }
@@ -450,7 +447,7 @@ impl QuicConnection {
 }
 
 fn maybe_enable_qlog(
-    quiche_conn: &mut quiche::Connection,
+    quiche_conn: &mut quiche::Connection<ArcBufFactory>,
     conn_id: &[u8],
     role: &str,
     qlog_dir: Option<&str>,

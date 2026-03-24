@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ring::hmac;
 use ring::rand::SecureRandom;
 
+use crate::arc_buf::ArcBufFactory;
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::error::Http3NativeError;
 
@@ -217,8 +218,9 @@ impl ConnectionMap {
         let scid_owned = scid.to_vec();
         let scid_ref = quiche::ConnectionId::from_ref(scid);
 
-        let quiche_conn = quiche::accept(&scid_ref, odcid, local, peer, config)
-            .map_err(Http3NativeError::Quiche)?;
+        let quiche_conn =
+            quiche::accept_with_buf_factory::<ArcBufFactory>(&scid_ref, odcid, local, peer, config)
+                .map_err(Http3NativeError::Quiche)?;
 
         let conn = H3Connection::new(
             quiche_conn,

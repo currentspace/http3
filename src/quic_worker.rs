@@ -16,6 +16,7 @@ use ring::hmac;
 use ring::rand::SecureRandom;
 use slab::Slab;
 
+use crate::arc_buf::ArcBufFactory;
 use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
 use crate::cid::CidEncoding;
 use crate::client_topology::{
@@ -890,8 +891,9 @@ impl QuicConnectionMap {
         }
         let scid_owned = scid.to_vec();
         let scid_ref = quiche::ConnectionId::from_ref(scid);
-        let quiche_conn = quiche::accept(&scid_ref, odcid, local, peer, config)
-            .map_err(Http3NativeError::Quiche)?;
+        let quiche_conn =
+            quiche::accept_with_buf_factory::<ArcBufFactory>(&scid_ref, odcid, local, peer, config)
+                .map_err(Http3NativeError::Quiche)?;
         let conn = QuicConnection::new(
             quiche_conn,
             scid_owned.clone(),
@@ -1944,19 +1946,32 @@ impl ProtocolHandler for QuicServerHandler {
                     append_pending_write(&mut self.pending_write_pool, pw, &data);
                     pw.fin = pw.fin || fin;
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    let written = conn.stream_send(stream_id, &data, fin).unwrap_or(0);
-                    if written < data.len() {
+                    let data_len = data.len();
+                    let (written, remainder) =
+                        conn.stream_send(stream_id, data, fin).unwrap_or((0, None));
+                    if let Some(rem) = remainder {
                         self.pending_writes.insert(
                             key,
                             PendingWrite {
                                 data: checkout_pending_write_tail(
                                     &mut self.pending_write_pool,
-                                    &data[written..],
+                                    &rem,
                                 ),
                                 fin,
                             },
                         );
-                    } else if fin && written == 0 && data.is_empty() {
+                    } else if written < data_len {
+                        // stream_send_zc returned no remainder but wrote less
+                        // than the full buffer (shouldn't normally happen, but
+                        // guard defensively).
+                        self.pending_writes.insert(
+                            key,
+                            PendingWrite {
+                                data: Vec::new(),
+                                fin,
+                            },
+                        );
+                    } else if fin && written == 0 && data_len == 0 {
                         self.pending_writes.insert(
                             key,
                             PendingWrite {
@@ -2418,7 +2433,7 @@ impl QuicClientHandler {
             return None;
         };
         let scid_ref = quiche::ConnectionId::from_ref(&scid);
-        let Ok(mut quiche_conn) = quiche::connect(
+        let Ok(mut quiche_conn) = quiche::connect_with_buffer_factory::<ArcBufFactory>(
             Some(server_name),
             &scid_ref,
             local_addr,
@@ -2503,20 +2518,30 @@ impl QuicClientHandler {
             return;
         }
 
-        let written = self.conn.stream_send(stream_id, &data, fin).unwrap_or(0);
-        if written < data.len() {
+        let data_len = data.len();
+        let (written, remainder) = self
+            .conn
+            .stream_send(stream_id, data, fin)
+            .unwrap_or((0, None));
+        if let Some(rem) = remainder {
             self.pending_writes.insert(
                 stream_id,
                 PendingWrite {
-                    data: checkout_pending_write_tail(
-                        &mut self.pending_write_pool,
-                        &data[written..],
-                    ),
+                    data: checkout_pending_write_tail(&mut self.pending_write_pool, &rem),
                     fin,
                 },
             );
             reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
-        } else if fin && written == 0 && data.is_empty() {
+        } else if written < data_len {
+            self.pending_writes.insert(
+                stream_id,
+                PendingWrite {
+                    data: Vec::new(),
+                    fin,
+                },
+            );
+            reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
+        } else if fin && written == 0 && data_len == 0 {
             self.pending_writes.insert(
                 stream_id,
                 PendingWrite {
@@ -2859,17 +2884,19 @@ fn flush_quic_pending_writes(
             recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
             return false;
         };
-        let written = conn.stream_send(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written == 0 && pw.fin && pw.data.is_empty() {
+        let data = std::mem::take(&mut pw.data);
+        let data_len = data.len();
+        let (written, remainder) = conn.stream_send(stream_id, data, pw.fin).unwrap_or((0, None));
+        if written == 0 && pw.fin && data_len == 0 {
             true
-        } else if written >= pw.data.len() {
+        } else if let Some(rem) = remainder {
+            pw.data = checkout_pending_write_tail(pool, &rem);
+            true
+        } else if written >= data_len {
             flushed.push((conn_handle, stream_id));
-            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
             false
         } else {
-            if written > 0 {
-                pw.data.drain(..written);
-            }
+            // Partial write with no remainder (should not normally happen).
             true
         }
     });
@@ -2883,17 +2910,18 @@ fn flush_quic_client_pending_writes(
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
-        let written = conn.stream_send(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written == 0 && pw.fin && pw.data.is_empty() {
+        let data = std::mem::take(&mut pw.data);
+        let data_len = data.len();
+        let (written, remainder) = conn.stream_send(stream_id, data, pw.fin).unwrap_or((0, None));
+        if written == 0 && pw.fin && data_len == 0 {
             true
-        } else if written >= pw.data.len() {
+        } else if let Some(rem) = remainder {
+            pw.data = checkout_pending_write_tail(pool, &rem);
+            true
+        } else if written >= data_len {
             flushed.push(stream_id);
-            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
             false
         } else {
-            if written > 0 {
-                pw.data.drain(..written);
-            }
             true
         }
     });

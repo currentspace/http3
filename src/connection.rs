@@ -8,13 +8,14 @@ use std::time::Instant;
 
 use quiche::h3::NameValue;
 
+use crate::arc_buf::{ArcBuf, ArcBufFactory};
 use crate::buffer_pool::AdaptiveBufferPool;
 use crate::error::Http3NativeError;
 use crate::h3_event::{JsH3Event, JsHeader};
 use crate::reactor_metrics;
 
 pub struct H3Connection {
-    pub quiche_conn: quiche::Connection,
+    pub quiche_conn: quiche::Connection<ArcBufFactory>,
     pub h3_conn: Option<quiche::h3::Connection>,
     pub conn_id: Vec<u8>,
     pub created_at: Instant,
@@ -65,7 +66,7 @@ impl ConnectionMetrics {
 impl H3Connection {
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(
-        mut quiche_conn: quiche::Connection,
+        mut quiche_conn: quiche::Connection<ArcBufFactory>,
         conn_id: Vec<u8>,
         init: H3ConnectionInit<'_>,
     ) -> Self {
@@ -292,7 +293,10 @@ impl H3Connection {
             .map_err(Http3NativeError::H3)
     }
 
-    /// Send body data on a stream. Returns bytes written.
+    /// Send body data on a stream using zero-copy. Returns bytes written.
+    ///
+    /// Wraps the input slice into an `ArcBuf` and uses quiche's
+    /// `send_body_zc` to avoid an internal copy inside the H3 framer.
     pub fn send_body(
         &mut self,
         stream_id: u64,
@@ -303,7 +307,8 @@ impl H3Connection {
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
-        match h3.send_body(&mut self.quiche_conn, stream_id, data, fin) {
+        let mut buf = ArcBuf::from_vec(data.to_vec());
+        match h3.send_body_zc(&mut self.quiche_conn, stream_id, &mut buf, fin) {
             Ok(written) => {
                 if written < data.len() && self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
@@ -454,7 +459,7 @@ impl H3Connection {
 }
 
 fn maybe_enable_qlog(
-    quiche_conn: &mut quiche::Connection,
+    quiche_conn: &mut quiche::Connection<ArcBufFactory>,
     conn_id: &[u8],
     role: &str,
     qlog_dir: Option<&str>,
