@@ -21,7 +21,12 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────
 
-    fn setsockopt_int(fd: libc::c_int, level: libc::c_int, opt: libc::c_int, val: libc::c_int) -> libc::c_int {
+    fn setsockopt_int(
+        fd: libc::c_int,
+        level: libc::c_int,
+        opt: libc::c_int,
+        val: libc::c_int,
+    ) -> libc::c_int {
         unsafe {
             libc::setsockopt(
                 fd,
@@ -33,7 +38,11 @@ mod tests {
         }
     }
 
-    fn getsockopt_int(fd: libc::c_int, level: libc::c_int, opt: libc::c_int) -> Result<libc::c_int, std::io::Error> {
+    fn getsockopt_int(
+        fd: libc::c_int,
+        level: libc::c_int,
+        opt: libc::c_int,
+    ) -> Result<libc::c_int, std::io::Error> {
         let mut val: libc::c_int = -1;
         let mut len = std::mem::size_of_val(&val) as libc::socklen_t;
         let rc = unsafe {
@@ -45,7 +54,11 @@ mod tests {
                 &mut len,
             )
         };
-        if rc == 0 { Ok(val) } else { Err(std::io::Error::last_os_error()) }
+        if rc == 0 {
+            Ok(val)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
 
     /// Send a packet from `src` to `dst` via sendmmsg, return whether it succeeded.
@@ -59,10 +72,14 @@ mod tests {
                 let sin = libc::sockaddr_in {
                     sin_family: libc::AF_INET as _,
                     sin_port: a.port().to_be(),
-                    sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) },
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(a.ip().octets()),
+                    },
                     sin_zero: [0; 8],
                 };
-                unsafe { std::ptr::write(&mut storage as *mut _ as *mut _, sin); }
+                unsafe {
+                    std::ptr::write(&mut storage as *mut _ as *mut _, sin);
+                }
                 std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
             }
             _ => panic!("v4 only"),
@@ -85,7 +102,10 @@ mod tests {
     /// Receive via recvmmsg, return number of bytes in first datagram (0 = nothing received).
     fn recvmmsg_one(fd: libc::c_int) -> usize {
         let mut buf = [0u8; 65535];
-        let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        };
         let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut hdr: libc::mmsghdr = unsafe { std::mem::zeroed() };
         hdr.msg_hdr.msg_iov = &mut iov;
@@ -93,7 +113,8 @@ mod tests {
         hdr.msg_hdr.msg_name = (&mut addr as *mut libc::sockaddr_storage).cast();
         hdr.msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as _;
 
-        let rc = unsafe { libc::recvmmsg(fd, &mut hdr, 1, libc::MSG_DONTWAIT, std::ptr::null_mut()) };
+        let rc =
+            unsafe { libc::recvmmsg(fd, &mut hdr, 1, libc::MSG_DONTWAIT, std::ptr::null_mut()) };
         if rc > 0 { hdr.msg_len as usize } else { 0 }
     }
 
@@ -128,11 +149,14 @@ mod tests {
 
         // Move sender to a different thread (simulating main→worker move).
         let recv_clone = receiver.try_clone().unwrap();
-        let ok = thread::spawn(move || {
-            sendmmsg_one(sender_fd, &recv_clone)
-        }).join().unwrap();
+        let ok = thread::spawn(move || sendmmsg_one(sender_fd, &recv_clone))
+            .join()
+            .unwrap();
 
-        assert!(ok, "sendmmsg should succeed even with UDP_SEGMENT=0 on socket");
+        assert!(
+            ok,
+            "sendmmsg should succeed even with UDP_SEGMENT=0 on socket"
+        );
 
         // Verify the packet actually arrived.
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -165,7 +189,7 @@ mod tests {
 
     #[test]
     fn enable_gro_cross_thread_recvmmsg() {
-        let _serial = io_uring_test_lock().lock().unwrap();
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender.set_nonblocking(true).unwrap();
@@ -186,7 +210,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let n = thread::spawn(move || recvmmsg_one(recv_fd)).join().unwrap();
 
-        assert_eq!(n, 200, "recvmmsg on worker thread should get the packet (GRO enabled: {gro_enabled})");
+        assert_eq!(
+            n, 200,
+            "recvmmsg on worker thread should get the packet (GRO enabled: {gro_enabled})"
+        );
     }
 
     // ── Test: IP_PKTINFO doesn't break recvmmsg without cmsg buf ────
@@ -213,15 +240,18 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let n = thread::spawn(move || recvmmsg_one(recv_fd)).join().unwrap();
 
-        assert_eq!(n, 150, "recvmmsg should deliver payload even with IP_PKTINFO and no cmsg buffer");
+        assert_eq!(
+            n, 150,
+            "recvmmsg should deliver payload even with IP_PKTINFO and no cmsg buffer"
+        );
     }
 
     // ── Test: PollDriver created on main thread, roundtrip on worker ─
 
     #[test]
     fn poll_driver_cross_thread_roundtrip() {
-        use crate::transport::{Driver, TxDatagram};
         use crate::transport::poll::PollDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sock_a = UdpSocket::bind("127.0.0.1:0").unwrap();
         let sock_b = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -234,12 +264,18 @@ mod tests {
         let (mut driver_a, _waker_a) = PollDriver::new(sock_a).unwrap();
         let (mut driver_b, _waker_b) = PollDriver::new(sock_b).unwrap();
 
-        eprintln!("poll_driver_cross_thread_roundtrip: created on {:?}", thread::current().id());
+        eprintln!(
+            "poll_driver_cross_thread_roundtrip: created on {:?}",
+            thread::current().id()
+        );
 
         // Move driver_a to a worker thread, send from there to b_addr.
         let handle = thread::spawn(move || {
             eprintln!("  worker A on {:?}", thread::current().id());
-            let pkt = TxDatagram { data: vec![0xAB; 100], to: b_addr };
+            let pkt = TxDatagram {
+                data: vec![0xAB; 100],
+                to: b_addr,
+            };
             driver_a.submit_sends(vec![pkt]).unwrap();
             // Poll to flush (poll driver's sendmmsg happens inside send_batch).
             // The submit_sends already calls sendmmsg synchronously.
@@ -255,17 +291,27 @@ mod tests {
             let mut total_rx = 0;
             let deadline = Instant::now() + Duration::from_secs(2);
             while total_rx == 0 && Instant::now() < deadline {
-                let outcome = driver_b.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+                let outcome = driver_b
+                    .poll(Some(Instant::now() + Duration::from_millis(100)))
+                    .unwrap();
                 total_rx += outcome.rx.len();
                 if total_rx > 0 {
                     let pkt = &outcome.rx[0];
-                    eprintln!("  rx: len={} peer={} local={} gro={:?}",
-                        pkt.data.len(), pkt.peer, pkt.local, pkt.segment_size);
+                    eprintln!(
+                        "  rx: len={} peer={} local={} gro={:?}",
+                        pkt.data.len(),
+                        pkt.peer,
+                        pkt.local,
+                        pkt.segment_size
+                    );
                     assert_eq!(pkt.data.len(), 100);
                     assert_eq!(pkt.peer, a_addr);
                 }
             }
-            assert!(total_rx > 0, "should receive at least one packet on worker thread");
+            assert!(
+                total_rx > 0,
+                "should receive at least one packet on worker thread"
+            );
             driver_b
         });
 
@@ -277,7 +323,7 @@ mod tests {
 
     #[test]
     fn build_gso_cmsg_produces_valid_segmentation() {
-        use crate::transport::socket::{build_gso_cmsg, SOL_UDP, UDP_SEGMENT};
+        use crate::transport::socket::{SOL_UDP, UDP_SEGMENT, build_gso_cmsg};
 
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -290,8 +336,13 @@ mod tests {
         let mut gso_val: libc::c_int = 0;
         let mut gso_len = std::mem::size_of_val(&gso_val) as libc::socklen_t;
         let gso_ok = unsafe {
-            libc::getsockopt(sender_fd, SOL_UDP, UDP_SEGMENT,
-                &mut gso_val as *mut _ as *mut libc::c_void, &mut gso_len)
+            libc::getsockopt(
+                sender_fd,
+                SOL_UDP,
+                UDP_SEGMENT,
+                &mut gso_val as *mut _ as *mut libc::c_void,
+                &mut gso_len,
+            )
         };
         if gso_ok != 0 {
             eprintln!("GSO not supported, skipping");
@@ -310,9 +361,11 @@ mod tests {
         let mut cmsg_buf = [0u8; 32];
         let cmsg_len = build_gso_cmsg(&mut cmsg_buf, 100);
 
-        eprintln!("cmsg_len={cmsg_len} sizeof(cmsghdr)={} cmsg_data_offset={}",
+        eprintln!(
+            "cmsg_len={cmsg_len} sizeof(cmsghdr)={} cmsg_data_offset={}",
             std::mem::size_of::<libc::cmsghdr>(),
-            crate::transport::socket::cmsg_data_offset_for_test());
+            crate::transport::socket::cmsg_data_offset_for_test()
+        );
 
         // Build sendmsg manually.
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -321,10 +374,14 @@ mod tests {
                 let sin = libc::sockaddr_in {
                     sin_family: libc::AF_INET as _,
                     sin_port: a.port().to_be(),
-                    sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) },
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(a.ip().octets()),
+                    },
                     sin_zero: [0; 8],
                 };
-                unsafe { std::ptr::write(&mut storage as *mut _ as *mut _, sin); }
+                unsafe {
+                    std::ptr::write(&mut storage as *mut _ as *mut _, sin);
+                }
                 std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
             }
             _ => panic!("v4 only"),
@@ -343,7 +400,14 @@ mod tests {
         msg.msg_controllen = cmsg_len;
 
         let rc = unsafe { libc::sendmsg(sender_fd, &msg, 0) };
-        eprintln!("sendmsg rc={rc} errno={}", if rc < 0 { std::io::Error::last_os_error().to_string() } else { "ok".into() });
+        eprintln!(
+            "sendmsg rc={rc} errno={}",
+            if rc < 0 {
+                std::io::Error::last_os_error().to_string()
+            } else {
+                "ok".into()
+            }
+        );
         assert!(rc > 0, "sendmsg with GSO cmsg should succeed (rc={rc})");
 
         // Now receive — should get 4 separate 100-byte datagrams, not 1 × 400.
@@ -352,20 +416,31 @@ mod tests {
         let mut packets = Vec::new();
         for _ in 0..10 {
             let n = recvmmsg_one(recv_fd);
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             packets.push(n);
         }
 
         eprintln!("received packets: {packets:?}");
-        assert_eq!(packets.len(), 4, "GSO should segment into 4 packets, got {packets:?}");
-        assert!(packets.iter().all(|&n| n == 100), "each segment should be 100 bytes, got {packets:?}");
+        assert_eq!(
+            packets.len(),
+            4,
+            "GSO should segment into 4 packets, got {packets:?}"
+        );
+        assert!(
+            packets.iter().all(|&n| n == 100),
+            "each segment should be 100 bytes, got {packets:?}"
+        );
     }
 
     // ── Test: GSO after set_pktinfo + enable_gro ──────────────────
 
     #[test]
     fn gso_sendmsg_after_pktinfo_and_gro() {
-        use crate::transport::socket::{build_gso_cmsg, set_pktinfo, enable_gro, SOL_UDP, UDP_SEGMENT};
+        use crate::transport::socket::{
+            SOL_UDP, UDP_SEGMENT, build_gso_cmsg, enable_gro, set_pktinfo,
+        };
 
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -377,8 +452,19 @@ mod tests {
         // Check GSO support.
         let mut gso_val: libc::c_int = 0;
         let mut gso_len = std::mem::size_of_val(&gso_val) as libc::socklen_t;
-        let gso_ok = unsafe { libc::getsockopt(sender_fd, SOL_UDP, UDP_SEGMENT, &mut gso_val as *mut _ as *mut _, &mut gso_len) };
-        if gso_ok != 0 { eprintln!("GSO not supported, skipping"); return; }
+        let gso_ok = unsafe {
+            libc::getsockopt(
+                sender_fd,
+                SOL_UDP,
+                UDP_SEGMENT,
+                &mut gso_val as *mut _ as *mut _,
+                &mut gso_len,
+            )
+        };
+        if gso_ok != 0 {
+            eprintln!("GSO not supported, skipping");
+            return;
+        }
 
         // Apply the same socket options as PollDriver::new().
         set_pktinfo(&sender);
@@ -392,14 +478,26 @@ mod tests {
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let addrlen = match recv_addr {
             std::net::SocketAddr::V4(a) => {
-                let sin = libc::sockaddr_in { sin_family: libc::AF_INET as _, sin_port: a.port().to_be(), sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) }, sin_zero: [0; 8] };
-                unsafe { std::ptr::write(&mut storage as *mut _ as *mut _, sin); }
+                let sin = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as _,
+                    sin_port: a.port().to_be(),
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(a.ip().octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    std::ptr::write(&mut storage as *mut _ as *mut _, sin);
+                }
                 std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t
             }
             _ => panic!("v4 only"),
         };
 
-        let mut iov = libc::iovec { iov_base: payload.as_ptr() as *mut _, iov_len: payload.len() };
+        let mut iov = libc::iovec {
+            iov_base: payload.as_ptr() as *mut _,
+            iov_len: payload.len(),
+        };
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_name = (&mut storage as *mut libc::sockaddr_storage).cast();
         msg.msg_namelen = addrlen;
@@ -416,19 +514,25 @@ mod tests {
         let mut packets = Vec::new();
         for _ in 0..10 {
             let n = recvmmsg_one(recv_fd);
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             packets.push(n);
         }
 
         eprintln!("GSO after pktinfo+gro: received packets: {packets:?}");
-        assert_eq!(packets.len(), 4, "GSO should still segment after pktinfo+gro, got {packets:?}");
+        assert_eq!(
+            packets.len(),
+            4,
+            "GSO should still segment after pktinfo+gro, got {packets:?}"
+        );
     }
 
     // ── Test: Vec-based mmsghdr GSO (mimics send_batch_gso layout) ─
 
     #[test]
     fn gso_via_vec_mmsghdr_layout() {
-        use crate::transport::socket::{build_gso_cmsg, SOL_UDP, UDP_SEGMENT};
+        use crate::transport::socket::{SOL_UDP, UDP_SEGMENT, build_gso_cmsg};
 
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -439,14 +543,30 @@ mod tests {
 
         let mut gso_val: libc::c_int = 0;
         let mut gso_len = std::mem::size_of_val(&gso_val) as libc::socklen_t;
-        if unsafe { libc::getsockopt(sender_fd, SOL_UDP, UDP_SEGMENT, &mut gso_val as *mut _ as *mut _, &mut gso_len) } != 0 {
-            eprintln!("GSO not supported, skipping"); return;
+        if unsafe {
+            libc::getsockopt(
+                sender_fd,
+                SOL_UDP,
+                UDP_SEGMENT,
+                &mut gso_val as *mut _ as *mut _,
+                &mut gso_len,
+            )
+        } != 0
+        {
+            eprintln!("GSO not supported, skipping");
+            return;
         }
 
         // Mimic send_batch_gso: Vec<mmsghdr>, Vec<iovec>, Vec<sockaddr_storage>, Vec<[u8;32]>
         let count = 1usize;
         let mut tx_hdrs: Vec<libc::mmsghdr> = vec![unsafe { std::mem::zeroed() }; count];
-        let mut tx_iovs: Vec<libc::iovec> = vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; count];
+        let mut tx_iovs: Vec<libc::iovec> = vec![
+            libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0
+            };
+            count
+        ];
         let mut tx_addrs: Vec<libc::sockaddr_storage> = vec![unsafe { std::mem::zeroed() }; count];
         let mut tx_cmsg_bufs: Vec<[u8; 32]> = vec![[0u8; 32]; count];
 
@@ -455,8 +575,17 @@ mod tests {
         // Fill address
         match recv_addr {
             std::net::SocketAddr::V4(a) => {
-                let sin = libc::sockaddr_in { sin_family: libc::AF_INET as _, sin_port: a.port().to_be(), sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) }, sin_zero: [0; 8] };
-                unsafe { std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin); }
+                let sin = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as _,
+                    sin_port: a.port().to_be(),
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(a.ip().octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin);
+                }
                 tx_hdrs[0].msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as _;
             }
             _ => panic!("v4 only"),
@@ -472,7 +601,10 @@ mod tests {
         tx_hdrs[0].msg_hdr.msg_control = tx_cmsg_bufs[0].as_mut_ptr().cast();
         tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
 
-        eprintln!("Vec layout: controllen={cmsg_len} cmsg_bytes={:02x?}", &tx_cmsg_bufs[0][..cmsg_len]);
+        eprintln!(
+            "Vec layout: controllen={cmsg_len} cmsg_bytes={:02x?}",
+            &tx_cmsg_bufs[0][..cmsg_len]
+        );
 
         let rc = unsafe { libc::sendmsg(sender_fd, &tx_hdrs[0].msg_hdr, 0) };
         eprintln!("sendmsg rc={rc}");
@@ -483,19 +615,27 @@ mod tests {
         let mut packets = Vec::new();
         for _ in 0..10 {
             let n = recvmmsg_one(recv_fd);
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             packets.push(n);
         }
 
         eprintln!("Vec layout GSO: received {packets:?}");
-        assert_eq!(packets.len(), 4, "Vec-based GSO should segment into 4, got {packets:?}");
+        assert_eq!(
+            packets.len(),
+            4,
+            "Vec-based GSO should segment into 4, got {packets:?}"
+        );
     }
 
     // ── Test: Vec layout + pktinfo + gro (exact PollDriver conditions) ─
 
     #[test]
     fn gso_vec_layout_with_pktinfo_and_gro() {
-        use crate::transport::socket::{build_gso_cmsg, set_pktinfo, enable_gro, SOL_UDP, UDP_SEGMENT};
+        use crate::transport::socket::{
+            SOL_UDP, UDP_SEGMENT, build_gso_cmsg, enable_gro, set_pktinfo,
+        };
 
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -506,8 +646,18 @@ mod tests {
 
         let mut gso_val: libc::c_int = 0;
         let mut gso_len = std::mem::size_of_val(&gso_val) as libc::socklen_t;
-        if unsafe { libc::getsockopt(sender_fd, SOL_UDP, UDP_SEGMENT, &mut gso_val as *mut _ as *mut _, &mut gso_len) } != 0 {
-            eprintln!("GSO not supported, skipping"); return;
+        if unsafe {
+            libc::getsockopt(
+                sender_fd,
+                SOL_UDP,
+                UDP_SEGMENT,
+                &mut gso_val as *mut _ as *mut _,
+                &mut gso_len,
+            )
+        } != 0
+        {
+            eprintln!("GSO not supported, skipping");
+            return;
         }
 
         // Apply SAME socket options as PollDriver::new
@@ -517,7 +667,13 @@ mod tests {
         // Vec-based layout (exactly like send_batch_gso)
         let count = 1;
         let mut tx_hdrs: Vec<libc::mmsghdr> = vec![unsafe { std::mem::zeroed() }; count];
-        let mut tx_iovs: Vec<libc::iovec> = vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; count];
+        let mut tx_iovs: Vec<libc::iovec> = vec![
+            libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0
+            };
+            count
+        ];
         let mut tx_addrs: Vec<libc::sockaddr_storage> = vec![unsafe { std::mem::zeroed() }; count];
         let mut tx_cmsg_bufs: Vec<[u8; 32]> = vec![[0u8; 32]; count];
 
@@ -525,8 +681,17 @@ mod tests {
 
         match recv_addr {
             std::net::SocketAddr::V4(a) => {
-                let sin = libc::sockaddr_in { sin_family: libc::AF_INET as _, sin_port: a.port().to_be(), sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) }, sin_zero: [0; 8] };
-                unsafe { std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin); }
+                let sin = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as _,
+                    sin_port: a.port().to_be(),
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(a.ip().octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin);
+                }
                 tx_hdrs[0].msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as _;
             }
             _ => panic!("v4 only"),
@@ -543,10 +708,12 @@ mod tests {
         tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
 
         // Test hypothesis: sendmmsg with MSG_DONTWAIT vs sendmsg with 0
-        let rc_mmsg = unsafe {
-            libc::sendmmsg(sender_fd, tx_hdrs.as_mut_ptr(), 1, libc::MSG_DONTWAIT)
-        };
-        eprintln!("gso_vec_layout_with_pktinfo_and_gro: sendmmsg(MSG_DONTWAIT) rc={rc_mmsg} msg_len={}", tx_hdrs[0].msg_len);
+        let rc_mmsg =
+            unsafe { libc::sendmmsg(sender_fd, tx_hdrs.as_mut_ptr(), 1, libc::MSG_DONTWAIT) };
+        eprintln!(
+            "gso_vec_layout_with_pktinfo_and_gro: sendmmsg(MSG_DONTWAIT) rc={rc_mmsg} msg_len={}",
+            tx_hdrs[0].msg_len
+        );
         assert_eq!(rc_mmsg, 1, "sendmmsg should send 1 message");
 
         thread::sleep(Duration::from_millis(50));
@@ -554,7 +721,9 @@ mod tests {
         let mut packets = Vec::new();
         for _ in 0..10 {
             let n = recvmmsg_one(recv_fd);
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             packets.push(n);
         }
 
@@ -566,8 +735,10 @@ mod tests {
 
     #[test]
     fn group_for_gso_coalesced_send() {
+        use crate::transport::socket::{
+            SOL_UDP, UDP_SEGMENT, build_gso_cmsg, enable_gro, set_pktinfo,
+        };
         use crate::transport::{TxDatagram, group_for_gso};
-        use crate::transport::socket::{build_gso_cmsg, set_pktinfo, enable_gro, SOL_UDP, UDP_SEGMENT};
 
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -578,7 +749,16 @@ mod tests {
 
         let mut gso_val: libc::c_int = 0;
         let mut gso_len = std::mem::size_of_val(&gso_val) as libc::socklen_t;
-        if unsafe { libc::getsockopt(sender_fd, SOL_UDP, UDP_SEGMENT, &mut gso_val as *mut _ as *mut _, &mut gso_len) } != 0 {
+        if unsafe {
+            libc::getsockopt(
+                sender_fd,
+                SOL_UDP,
+                UDP_SEGMENT,
+                &mut gso_val as *mut _ as *mut _,
+                &mut gso_len,
+            )
+        } != 0
+        {
             return;
         }
 
@@ -587,25 +767,47 @@ mod tests {
 
         // Build packets like the test does
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
+            .map(|i| TxDatagram {
+                data: vec![i as u8; 200],
+                to: recv_addr,
+            })
             .collect();
         let batches = group_for_gso(packets);
         assert_eq!(batches.len(), 1, "4 same-size should coalesce into 1 batch");
         let batch = &batches[0];
-        eprintln!("batch: data.len()={} seg_size={}", batch.data.len(), batch.segment_size);
+        eprintln!(
+            "batch: data.len()={} seg_size={}",
+            batch.data.len(),
+            batch.segment_size
+        );
         assert_eq!(batch.data.len(), 800);
         assert_eq!(batch.segment_size, 200);
 
         // Now send with Vec layout
         let mut tx_hdrs: Vec<libc::mmsghdr> = vec![unsafe { std::mem::zeroed() }; 1];
-        let mut tx_iovs: Vec<libc::iovec> = vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; 1];
+        let mut tx_iovs: Vec<libc::iovec> = vec![
+            libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0
+            };
+            1
+        ];
         let mut tx_addrs: Vec<libc::sockaddr_storage> = vec![unsafe { std::mem::zeroed() }; 1];
         let mut tx_cmsg_bufs: Vec<[u8; 32]> = vec![[0u8; 32]; 1];
 
         match recv_addr {
             std::net::SocketAddr::V4(a) => {
-                let sin = libc::sockaddr_in { sin_family: libc::AF_INET as _, sin_port: a.port().to_be(), sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(a.ip().octets()) }, sin_zero: [0; 8] };
-                unsafe { std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin); }
+                let sin = libc::sockaddr_in {
+                    sin_family: libc::AF_INET as _,
+                    sin_port: a.port().to_be(),
+                    sin_addr: libc::in_addr {
+                        s_addr: u32::from_ne_bytes(a.ip().octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    std::ptr::write(&mut tx_addrs[0] as *mut _ as *mut _, sin);
+                }
                 tx_hdrs[0].msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as _;
             }
             _ => panic!("v4 only"),
@@ -630,25 +832,50 @@ mod tests {
         let mut packets_received = Vec::new();
         for _ in 0..10 {
             let n = recvmmsg_one(receiver.as_raw_fd());
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             packets_received.push(n);
         }
 
         eprintln!("received: {packets_received:?}");
-        assert_eq!(packets_received.len(), 4, "should get 4 segments via group_for_gso, got {packets_received:?}");
+        assert_eq!(
+            packets_received.len(),
+            4,
+            "should get 4 segments via group_for_gso, got {packets_received:?}"
+        );
     }
 
     // ── Test: PollDriver GSO send SAME thread ─────────────────────
 
     #[test]
     fn poll_driver_gso_send_same_thread() {
-        use crate::transport::{Driver, TxDatagram};
         use crate::transport::poll::PollDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender_sock.set_nonblocking(true).unwrap();
         receiver_sock.set_nonblocking(true).unwrap();
+        for sock in [&sender_sock, &receiver_sock] {
+            let buf_size: libc::c_int = 2 * 1024 * 1024;
+            unsafe {
+                libc::setsockopt(
+                    sock.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &buf_size as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&buf_size) as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    sock.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &buf_size as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&buf_size) as libc::socklen_t,
+                );
+            }
+        }
         let recv_addr = receiver_sock.local_addr().unwrap();
 
         // Use PollDriver for SENDER (this calls set_pktinfo + enable_gro + probe_gso)
@@ -658,7 +885,10 @@ mod tests {
 
         // Send 4 same-sized packets — ALL ON THE SAME THREAD.
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
+            .map(|i| TxDatagram {
+                data: vec![i as u8; 200],
+                to: recv_addr,
+            })
             .collect();
         sender.submit_sends(packets).unwrap();
         eprintln!("  submit_sends done, checking receiver...");
@@ -670,20 +900,26 @@ mod tests {
         let mut packets_rx = Vec::new();
         for _ in 0..10 {
             let n = recvmmsg_one(recv_fd);
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             packets_rx.push(n);
         }
         eprintln!("  raw receiver: {packets_rx:?}");
-        assert_eq!(packets_rx.len(), 4, "GSO should segment into 4 (got {packets_rx:?})");
+        assert_eq!(
+            packets_rx.len(),
+            4,
+            "GSO should segment into 4 (got {packets_rx:?})"
+        );
     }
 
     // ── Test: IoUringDriver GSO send + receive (GRO) ──────────────
 
     #[test]
     fn iouring_driver_gso_roundtrip() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -700,7 +936,10 @@ mod tests {
 
         // Send 4 same-sized packets (triggers GSO if supported).
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
+            .map(|i| TxDatagram {
+                data: vec![i as u8; 200],
+                to: recv_addr,
+            })
             .collect();
         sender.submit_sends(packets).unwrap();
 
@@ -712,15 +951,24 @@ mod tests {
         let mut pkt_count = 0usize;
         let deadline = Instant::now() + Duration::from_secs(2);
         while total_bytes < 800 && Instant::now() < deadline {
-            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+            let outcome = receiver
+                .poll(Some(Instant::now() + Duration::from_millis(100)))
+                .unwrap();
             for pkt in &outcome.rx {
-                eprintln!("  iouring rx: len={} gro={:?}", pkt.data.len(), pkt.segment_size);
+                eprintln!(
+                    "  iouring rx: len={} gro={:?}",
+                    pkt.data.len(),
+                    pkt.segment_size
+                );
                 total_bytes += pkt.data.len();
                 pkt_count += 1;
             }
         }
         eprintln!("  iouring GSO roundtrip: {pkt_count} pkts, {total_bytes} bytes");
-        assert_eq!(total_bytes, 800, "should receive 800 total bytes (got {total_bytes})");
+        assert_eq!(
+            total_bytes, 800,
+            "should receive 800 total bytes (got {total_bytes})"
+        );
     }
 
     // ── Test: IoUringDriver GRO cmsg delivery with QUIC-sized packets ──
@@ -731,9 +979,9 @@ mod tests {
     /// parse — causing stream timeouts in the QUIC benchmark.
     #[test]
     fn iouring_driver_gro_cmsg_with_quic_sized_packets() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -751,7 +999,10 @@ mod tests {
         // GSO coalesces these into one 4800B sendmsg. On loopback, GRO should
         // coalesce them back into one 4800B recvmsg with UDP_GRO segment_size=1200.
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram { data: vec![i as u8; 1200], to: recv_addr })
+            .map(|i| TxDatagram {
+                data: vec![i as u8; 1200],
+                to: recv_addr,
+            })
             .collect();
         sender.submit_sends(packets).unwrap();
         let _ = sender.poll(Some(Instant::now() + Duration::from_millis(50)));
@@ -761,11 +1012,14 @@ mod tests {
         let mut non_gro_count = 0usize;
         let deadline = Instant::now() + Duration::from_secs(2);
         while total_bytes < 4800 && Instant::now() < deadline {
-            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+            let outcome = receiver
+                .poll(Some(Instant::now() + Duration::from_millis(100)))
+                .unwrap();
             for pkt in &outcome.rx {
                 eprintln!(
                     "  iouring GRO: len={} segment_size={:?}",
-                    pkt.data.len(), pkt.segment_size,
+                    pkt.data.len(),
+                    pkt.segment_size,
                 );
                 total_bytes += pkt.data.len();
                 if pkt.segment_size.is_some() {
@@ -794,9 +1048,9 @@ mod tests {
 
     #[test]
     fn iouring_driver_gso_multi_round() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -813,7 +1067,10 @@ mod tests {
         for round in 0..5 {
             // Send 16 same-sized packets per round.
             let packets: Vec<TxDatagram> = (0..16)
-                .map(|i| TxDatagram { data: vec![(round * 16 + i) as u8; 200], to: recv_addr })
+                .map(|i| TxDatagram {
+                    data: vec![(round * 16 + i) as u8; 200],
+                    to: recv_addr,
+                })
                 .collect();
             sender.submit_sends(packets).unwrap();
             let _ = sender.poll(Some(Instant::now() + Duration::from_millis(50)));
@@ -821,13 +1078,18 @@ mod tests {
             let mut total_bytes = 0usize;
             let deadline = Instant::now() + Duration::from_secs(2);
             while total_bytes < 16 * 200 && Instant::now() < deadline {
-                let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+                let outcome = receiver
+                    .poll(Some(Instant::now() + Duration::from_millis(100)))
+                    .unwrap();
                 for pkt in &outcome.rx {
                     total_bytes += pkt.data.len();
                 }
             }
             eprintln!("  round {round}: {total_bytes}/3200 bytes");
-            assert_eq!(total_bytes, 3200, "round {round}: should get 3200 bytes (got {total_bytes})");
+            assert_eq!(
+                total_bytes, 3200,
+                "round {round}: should get 3200 bytes (got {total_bytes})"
+            );
         }
     }
 
@@ -839,9 +1101,9 @@ mod tests {
     /// in the SQ ring, invisible to the kernel until the next poll().
     #[test]
     fn iouring_driver_rapid_submit_sends_no_poll() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -879,7 +1141,9 @@ mod tests {
         let mut total_bytes = 0usize;
         let deadline = Instant::now() + Duration::from_secs(5);
         while total_bytes < total_expected && Instant::now() < deadline {
-            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+            let outcome = receiver
+                .poll(Some(Instant::now() + Duration::from_millis(100)))
+                .unwrap();
             for pkt in &outcome.rx {
                 total_bytes += pkt.data.len();
             }
@@ -899,9 +1163,9 @@ mod tests {
     /// unflushed SQEs, stuck completions, or poll/submit ordering issues.
     #[test]
     fn iouring_driver_bidirectional_echo() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sock_a = UdpSocket::bind("127.0.0.1:0").unwrap();
         let sock_b = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -949,8 +1213,12 @@ mod tests {
             b_sent += pkts_per_round;
 
             // Both poll (short timeout — we're testing throughput not blocking).
-            let out_a = a.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
-            let out_b = b.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            let out_a = a
+                .poll(Some(Instant::now() + Duration::from_millis(10)))
+                .unwrap();
+            let out_b = b
+                .poll(Some(Instant::now() + Duration::from_millis(10)))
+                .unwrap();
 
             let a_rx_this = out_a.rx.iter().map(|p| p.data.len()).sum::<usize>();
             let b_rx_this = out_b.rx.iter().map(|p| p.data.len()).sum::<usize>();
@@ -961,7 +1229,8 @@ mod tests {
             if round < 3 || round == rounds - 1 {
                 eprintln!(
                     "  round {round}: a_rx={} ({a_rx_this}B) b_rx={} ({b_rx_this}B) a_total={a_received} b_total={b_received}",
-                    out_a.rx.len(), out_b.rx.len(),
+                    out_a.rx.len(),
+                    out_b.rx.len(),
                 );
             }
         }
@@ -974,8 +1243,12 @@ mod tests {
         while (a_rx_bytes < b_expected_bytes_for_drain || b_rx_bytes < a_expected_bytes_for_drain)
             && Instant::now() < deadline
         {
-            let out_a = a.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
-            let out_b = b.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+            let out_a = a
+                .poll(Some(Instant::now() + Duration::from_millis(50)))
+                .unwrap();
+            let out_b = b
+                .poll(Some(Instant::now() + Duration::from_millis(50)))
+                .unwrap();
             let a_rx_this_bytes: usize = out_a.rx.iter().map(|p| p.data.len()).sum();
             let b_rx_this_bytes: usize = out_b.rx.iter().map(|p| p.data.len()).sum();
             a_received += out_a.rx.len();
@@ -997,8 +1270,14 @@ mod tests {
         );
         // Compare bytes, not packet counts — GRO coalesces multiple sends into
         // a single receive datagram on loopback.
-        assert_eq!(b_rx_bytes, a_expected_bytes, "B should receive all of A's bytes (got {b_rx_bytes}/{a_expected_bytes})");
-        assert_eq!(a_rx_bytes, b_expected_bytes, "A should receive all of B's bytes (got {a_rx_bytes}/{b_expected_bytes})");
+        assert_eq!(
+            b_rx_bytes, a_expected_bytes,
+            "B should receive all of A's bytes (got {b_rx_bytes}/{a_expected_bytes})"
+        );
+        assert_eq!(
+            a_rx_bytes, b_expected_bytes,
+            "A should receive all of B's bytes (got {a_rx_bytes}/{b_expected_bytes})"
+        );
     }
 
     // ── Test: IoUringDriver echo-at-scale (mimics QUIC benchmark server) ──
@@ -1009,9 +1288,9 @@ mod tests {
     /// Uses QUIC-sized packets (1200B) and a realistic connection count.
     #[test]
     fn iouring_driver_echo_at_scale() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1082,7 +1361,9 @@ mod tests {
             }
             loop_count += 1;
             // Server: poll, echo back anything received.
-            let s_out = server.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            let s_out = server
+                .poll(Some(Instant::now() + Duration::from_millis(10)))
+                .unwrap();
             let s_rx_this = s_out.rx.len();
             if !s_out.rx.is_empty() {
                 let mut echo_packets = Vec::new();
@@ -1123,7 +1404,9 @@ mod tests {
             }
 
             // Client: poll to receive echoes.
-            let c_out = client.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            let c_out = client
+                .poll(Some(Instant::now() + Duration::from_millis(10)))
+                .unwrap();
             for pkt in &c_out.rx {
                 client_echo_bytes += pkt.data.len();
             }
@@ -1156,9 +1439,9 @@ mod tests {
     /// drains, packets drop and the echo never completes.
     #[test]
     fn iouring_driver_cross_thread_echo() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1205,17 +1488,25 @@ mod tests {
             let echo_batch_size = 32usize;
 
             while Instant::now() < deadline {
-                let out = server.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+                let out = server
+                    .poll(Some(Instant::now() + Duration::from_millis(50)))
+                    .unwrap();
                 if !out.rx.is_empty() {
                     let mut echo = Vec::new();
                     for pkt in &out.rx {
                         rx_bytes += pkt.data.len();
                         if let Some(seg) = pkt.segment_size {
                             for chunk in pkt.data.chunks(seg as usize) {
-                                echo.push(TxDatagram { data: chunk.to_vec(), to: client_addr });
+                                echo.push(TxDatagram {
+                                    data: chunk.to_vec(),
+                                    to: client_addr,
+                                });
                             }
                         } else {
-                            echo.push(TxDatagram { data: pkt.data.clone(), to: client_addr });
+                            echo.push(TxDatagram {
+                                data: pkt.data.clone(),
+                                to: client_addr,
+                            });
                         }
                     }
                     tx_bytes += echo.iter().map(|p| p.data.len()).sum::<usize>();
@@ -1268,7 +1559,9 @@ mod tests {
                 sent_pkts = batch_end;
                 let _ = client.poll(Some(Instant::now() + Duration::from_millis(5)));
             }
-            let out = client.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+            let out = client
+                .poll(Some(Instant::now() + Duration::from_millis(50)))
+                .unwrap();
             for pkt in &out.rx {
                 echo_bytes += pkt.data.len();
             }
@@ -1284,6 +1577,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn iouring_driver_bounded_tier2_progress_under_saturation() {
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
+
+        let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender_sock.set_nonblocking(true).unwrap();
+        receiver_sock.set_nonblocking(true).unwrap();
+        // Increase rcvbuf to handle the full burst without packet loss.
+        // Default rmem_default (212992) is too small for 384 × 1480 = 568320 bytes.
+        setsockopt_int(
+            receiver_sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            1 << 20,
+        );
+        let recv_addr = receiver_sock.local_addr().unwrap();
+
+        let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
+        let (mut receiver, _rw) = IoUringDriver::new(receiver_sock).unwrap();
+
+        let packet_count = 384usize;
+        let packet_size = 1480usize;
+        let expected_bytes = packet_count * packet_size;
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let receiver_handle = thread::spawn(move || {
+            let _ = receiver
+                .poll(Some(Instant::now() + Duration::from_millis(1)))
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            let mut received = 0usize;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while received < expected_bytes && Instant::now() < deadline {
+                let outcome = receiver
+                    .poll(Some(Instant::now() + Duration::from_millis(20)))
+                    .unwrap();
+                for pkt in &outcome.rx {
+                    received += pkt.data.len();
+                }
+            }
+            received
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
+        let packets: Vec<TxDatagram> = (0..packet_count)
+            .map(|i| TxDatagram {
+                data: vec![(i % 251) as u8; packet_size],
+                to: recv_addr,
+            })
+            .collect();
+
+        let submit_started = Instant::now();
+        sender.submit_sends(packets).unwrap();
+        let submit_elapsed = submit_started.elapsed();
+        let pending_after_submit = sender.pending_tx_count();
+
+        eprintln!(
+            "  bounded-tier2: submit={submit_elapsed:?} outstanding_after_submit={pending_after_submit}",
+        );
+        assert!(
+            submit_elapsed < Duration::from_millis(500),
+            "submit_sends should stay bounded under saturation (took {submit_elapsed:?})",
+        );
+        assert!(
+            pending_after_submit > 256,
+            "test should saturate more than one TX window (outstanding_after_submit={pending_after_submit})",
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sender.pending_tx_count() > 0 && Instant::now() < deadline {
+            let _ = sender.poll(Some(Instant::now() + Duration::from_millis(5)));
+        }
+        let received = receiver_handle.join().unwrap();
+
+        assert_eq!(
+            received, expected_bytes,
+            "all saturated sends should arrive without stalling (got {received}/{expected_bytes})",
+        );
+        assert_eq!(
+            sender.pending_tx_count(),
+            0,
+            "sender should drain all pending saturated sends",
+        );
+    }
+
     // ── Test: IoUringDriver submit_sends latency (detect stall) ──
 
     /// Measures wall-clock time for submit_sends+poll round-trips.
@@ -1291,9 +1671,9 @@ mod tests {
     /// is blocking (unflushed SQEs, stuck completions, etc).
     #[test]
     fn iouring_driver_no_latency_spikes() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1326,7 +1706,9 @@ mod tests {
             let mut got = 0usize;
             let inner_deadline = Instant::now() + Duration::from_millis(500);
             while got < 32 * 200 && Instant::now() < inner_deadline {
-                let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+                let outcome = receiver
+                    .poll(Some(Instant::now() + Duration::from_millis(50)))
+                    .unwrap();
                 for pkt in &outcome.rx {
                     got += pkt.data.len();
                 }
@@ -1336,12 +1718,17 @@ mod tests {
             round_times.push(elapsed);
 
             if got < 32 * 200 {
-                eprintln!("  round {round}: STALL — only {got}/{} bytes in {:?}", 32 * 200, elapsed);
+                eprintln!(
+                    "  round {round}: STALL — only {got}/{} bytes in {:?}",
+                    32 * 200,
+                    elapsed
+                );
             }
         }
 
         let max_round = round_times.iter().max().unwrap();
-        let avg_ms = round_times.iter().map(|d| d.as_millis()).sum::<u128>() / round_times.len() as u128;
+        let avg_ms =
+            round_times.iter().map(|d| d.as_millis()).sum::<u128>() / round_times.len() as u128;
         eprintln!(
             "  latency: avg={avg_ms}ms max={:?} rounds={}",
             max_round,
@@ -1362,9 +1749,9 @@ mod tests {
     /// Verifies no packet loss or stalls under sustained load.
     #[test]
     fn iouring_driver_stress_multi_round() {
-        let _serial = io_uring_test_lock().lock().unwrap();
-        use crate::transport::{Driver, TxDatagram};
+        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         use crate::transport::io_uring::IoUringDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1396,7 +1783,9 @@ mod tests {
 
             // Poll both sides every round.
             let _ = sender.poll(Some(Instant::now() + Duration::from_millis(5)));
-            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(10))).unwrap();
+            let outcome = receiver
+                .poll(Some(Instant::now() + Duration::from_millis(10)))
+                .unwrap();
             for pkt in &outcome.rx {
                 total_received += pkt.data.len();
             }
@@ -1406,7 +1795,9 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         while total_received < total_expected && Instant::now() < deadline {
             let _ = sender.poll(Some(Instant::now() + Duration::from_millis(10)));
-            let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(50))).unwrap();
+            let outcome = receiver
+                .poll(Some(Instant::now() + Duration::from_millis(50)))
+                .unwrap();
             for pkt in &outcome.rx {
                 total_received += pkt.data.len();
             }
@@ -1434,8 +1825,8 @@ mod tests {
 
     #[test]
     fn poll_driver_gso_send_cross_thread() {
-        use crate::transport::{Driver, TxDatagram};
         use crate::transport::poll::PollDriver;
+        use crate::transport::{Driver, TxDatagram};
 
         let sender_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1451,7 +1842,10 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let packets: Vec<TxDatagram> = (0..4)
-                .map(|i| TxDatagram { data: vec![i as u8; 200], to: recv_addr })
+                .map(|i| TxDatagram {
+                    data: vec![i as u8; 200],
+                    to: recv_addr,
+                })
                 .collect();
             sender.submit_sends(packets).unwrap();
             sender
@@ -1464,7 +1858,9 @@ mod tests {
             let mut pkt_count = 0usize;
             let deadline = Instant::now() + Duration::from_secs(2);
             while total_bytes < 800 && Instant::now() < deadline {
-                let outcome = receiver.poll(Some(Instant::now() + Duration::from_millis(100))).unwrap();
+                let outcome = receiver
+                    .poll(Some(Instant::now() + Duration::from_millis(100)))
+                    .unwrap();
                 for pkt in &outcome.rx {
                     // With GRO, we may get 1 × 800 (coalesced) or 4 × 200.
                     // Both are correct — GRO splitting in event_loop handles it.
@@ -1473,7 +1869,10 @@ mod tests {
                 }
             }
             eprintln!("  cross-thread: {pkt_count} packets, {total_bytes} bytes");
-            assert_eq!(total_bytes, 800, "should receive 800 total bytes (got {total_bytes})");
+            assert_eq!(
+                total_bytes, 800,
+                "should receive 800 total bytes (got {total_bytes})"
+            );
             receiver
         });
 
