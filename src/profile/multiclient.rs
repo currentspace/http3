@@ -164,11 +164,7 @@ impl ServerEchoState {
         }
     }
 
-    fn flush_echo(
-        &mut self,
-        server: &crate::quic_worker::QuicServerHandle,
-        key: (u32, u64),
-    ) {
+    fn flush_echo(&mut self, server: &crate::quic_worker::QuicServerHandle, key: (u32, u64)) {
         let body = self.pending.remove(&key).unwrap_or_default();
         let body_len = body.len() as u64;
         let _ = server.send_command(QuicServerCommand::StreamSend {
@@ -260,7 +256,10 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
     let num_workers = options.server_workers;
     let mut server_sink_stats_list = Vec::new();
     let mut server = spawn_quic_server_sharded(
-        || build_server_quiche_config(&options).map_err(|e| crate::error::Http3NativeError::Config(e)),
+        || {
+            build_server_quiche_config(&options)
+                .map_err(|e| crate::error::Http3NativeError::Config(e))
+        },
         server_config,
         "127.0.0.1:0".parse().expect("valid addr"),
         num_workers,
@@ -273,10 +272,13 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     drop(server_event_tx_clone);
-    let server_sink_stats = server_sink_stats_list.into_iter().next().unwrap_or_else(|| {
-        let (_, s) = channel_batcher("server", server_event_tx.clone());
-        s
-    });
+    let server_sink_stats = server_sink_stats_list
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            let (_, s) = channel_batcher("server", server_event_tx.clone());
+            s
+        });
     let server_addr = server.local_addr();
     eprintln!("server listening on {server_addr} with {num_workers} worker(s)");
 
@@ -330,10 +332,7 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
         };
 
         for batch in batches {
-            let Some(session) = sessions
-                .iter_mut()
-                .find(|c| c.source == batch.source)
-            else {
+            let Some(session) = sessions.iter_mut().find(|c| c.source == batch.source) else {
                 continue;
             };
             for event in batch.events {
@@ -350,17 +349,12 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
                             }
                             for stream_index in 0..options.streams_per_client {
                                 let stream_id = (stream_index as u64) * 4;
-                                if session
-                                    .handle
-                                    .stream_send(stream_id, payload.clone(), true)
-                                {
-                                    session
-                                        .pending_streams
-                                        .insert(stream_id, Instant::now());
+                                if session.handle.stream_send(stream_id, payload.clone(), true) {
+                                    session.pending_streams.insert(stream_id, Instant::now());
                                 } else {
-                                    session.errors.push(format!(
-                                        "failed to enqueue stream {stream_id}"
-                                    ));
+                                    session
+                                        .errors
+                                        .push(format!("failed to enqueue stream {stream_id}"));
                                 }
                             }
                             session.workload_sent = true;
@@ -559,13 +553,18 @@ fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>), String> {
     let mut params = CertificateParams::default();
     params.distinguished_name = rcgen::DistinguishedName::new();
     params.subject_alt_names = vec![
-        rcgen::SanType::DnsName("localhost".try_into().map_err(|e: rcgen::Error| e.to_string())?),
+        rcgen::SanType::DnsName(
+            "localhost"
+                .try_into()
+                .map_err(|e: rcgen::Error| e.to_string())?,
+        ),
         rcgen::SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
     ];
-    let cert = params
-        .self_signed(&key_pair)
-        .map_err(|e| e.to_string())?;
-    Ok((cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes()))
+    let cert = params.self_signed(&key_pair).map_err(|e| e.to_string())?;
+    Ok((
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    ))
 }
 
 fn build_server_quiche_config(options: &BenchOptions) -> Result<quiche::Config, String> {
@@ -684,8 +683,7 @@ fn parse_cli(args: Vec<String>) -> Result<BenchOptions, String> {
 
     let (cert_pem, key_pem) = match (cert_path, key_path) {
         (Some(cert), Some(key)) => {
-            let cert_pem =
-                std::fs::read(&cert).map_err(|err| format!("reading cert: {err}"))?;
+            let cert_pem = std::fs::read(&cert).map_err(|err| format!("reading cert: {err}"))?;
             let key_pem = std::fs::read(&key).map_err(|err| format!("reading key: {err}"))?;
             (cert_pem, key_pem)
         }

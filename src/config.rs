@@ -450,8 +450,7 @@ pub fn new_quic_server_config(
 ) -> Result<quiche::Config, Http3NativeError> {
     let mut config =
         quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(Http3NativeError::Quiche)?;
-    let client_auth =
-        ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
+    let client_auth = ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
 
     let cert_path = TempFileGuard::new(&options.cert, "_qcert.pem")?;
     let key_path = TempFileGuard::new(&options.key, "_qkey.pem")?;
@@ -695,5 +694,4 @@ mod tests {
             CidEncoding::Random => panic!("expected QUIC-LB plaintext CID encoding"),
         }
     }
-
 }

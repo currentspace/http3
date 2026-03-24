@@ -13,13 +13,12 @@ mod inner {
 
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
-    use crate::transport::{
-        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
-        group_for_gso,
-    };
     use crate::transport::socket::{
-        CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg,
-        probe_gso, build_gso_cmsg, enable_gro, parse_gro_cmsg,
+        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_gro_cmsg, parse_pktinfo_cmsg,
+        probe_gso, set_pktinfo,
+    };
+    use crate::transport::{
+        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
     };
 
     const MAX_RX_PER_POLL: usize = 256;
@@ -55,8 +54,9 @@ mod inner {
                 .collect();
 
             // SAFETY: zeroed mmsghdr is valid (null pointers, zero lengths).
-            let mut hdrs: Vec<libc::mmsghdr> =
-                (0..MAX_RX_PER_POLL).map(|_| unsafe { std::mem::zeroed() }).collect();
+            let mut hdrs: Vec<libc::mmsghdr> = (0..MAX_RX_PER_POLL)
+                .map(|_| unsafe { std::mem::zeroed() })
+                .collect();
 
             // Wire up pointers. Each mmsghdr.msg_hdr points to the slot's buf/addr.
             for i in 0..MAX_RX_PER_POLL {
@@ -281,7 +281,8 @@ mod inner {
             if count > 0 {
                 log::trace!(
                     "poll::recv_batch fd={} count={count} tid={:?}",
-                    self.socket_fd, std::thread::current().id(),
+                    self.socket_fd,
+                    std::thread::current().id(),
                 );
             }
             if count <= 0 {
@@ -291,22 +292,25 @@ mod inner {
             for i in 0..(count as usize) {
                 let len = self.rx_batch.hdrs[i].msg_len as usize;
                 let namelen = self.rx_batch.hdrs[i].msg_hdr.msg_namelen;
-                let peer = sockaddr_to_socketaddr(
-                    &self.rx_batch.slots[i].addr,
-                    namelen,
-                );
+                let peer = sockaddr_to_socketaddr(&self.rx_batch.slots[i].addr, namelen);
                 if let Some(peer) = peer {
-                    let cmsg_data =
-                        &self.rx_batch.slots[i].cmsg_buf[..self.rx_batch.hdrs[i].msg_hdr.msg_controllen];
+                    let cmsg_data = &self.rx_batch.slots[i].cmsg_buf
+                        [..self.rx_batch.hdrs[i].msg_hdr.msg_controllen];
                     let local_ip = parse_pktinfo_cmsg(cmsg_data);
                     let local = local_ip
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
                     let segment_size = parse_gro_cmsg(cmsg_data);
-                    let (data, reused) =
-                        self.rx_pool.copy_from_slice(&self.rx_batch.slots[i].buf[..len]);
+                    let (data, reused) = self
+                        .rx_pool
+                        .copy_from_slice(&self.rx_batch.slots[i].buf[..len]);
                     reactor_metrics::record_rx_buffer_checkout(reused, len);
-                    outcome.rx.push(RxDatagram { data, peer, local, segment_size });
+                    outcome.rx.push(RxDatagram {
+                        data,
+                        peer,
+                        local,
+                        segment_size,
+                    });
                 }
             }
         }
@@ -315,7 +319,9 @@ mod inner {
         fn send_batch(&mut self, packets: Vec<TxDatagram>) {
             log::trace!(
                 "poll::send_batch pkts={} gso={} tid={:?}",
-                packets.len(), self.gso_supported, std::thread::current().id(),
+                packets.len(),
+                self.gso_supported,
+                std::thread::current().id(),
             );
             if self.gso_supported && packets.len() > 1 {
                 self.send_batch_gso(packets);
@@ -328,10 +334,13 @@ mod inner {
             self.tx_iovs.clear();
             self.tx_addrs.clear();
             self.tx_hdrs.resize(count, unsafe { std::mem::zeroed() });
-            self.tx_iovs.resize(count, libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 0,
-            });
+            self.tx_iovs.resize(
+                count,
+                libc::iovec {
+                    iov_base: std::ptr::null_mut(),
+                    iov_len: 0,
+                },
+            );
             // SAFETY: zeroed sockaddr_storage is valid.
             self.tx_addrs.resize(count, unsafe { std::mem::zeroed() });
 
@@ -350,8 +359,7 @@ mod inner {
                 self.tx_hdrs[i].msg_hdr.msg_name =
                     (&mut self.tx_addrs[i] as *mut libc::sockaddr_storage).cast();
                 self.tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
-                self.tx_hdrs[i].msg_hdr.msg_iov =
-                    &mut self.tx_iovs[i] as *mut libc::iovec;
+                self.tx_hdrs[i].msg_hdr.msg_iov = &mut self.tx_iovs[i] as *mut libc::iovec;
                 self.tx_hdrs[i].msg_hdr.msg_iovlen = 1;
             }
 
@@ -401,8 +409,13 @@ mod inner {
             // if the kernel reads beyond msg_controllen).
             let mut tx_hdrs: Vec<libc::mmsghdr> =
                 (0..count).map(|_| unsafe { std::mem::zeroed() }).collect();
-            let mut tx_iovs: Vec<libc::iovec> =
-                vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; count];
+            let mut tx_iovs: Vec<libc::iovec> = vec![
+                libc::iovec {
+                    iov_base: std::ptr::null_mut(),
+                    iov_len: 0
+                };
+                count
+            ];
             let mut tx_addrs: Vec<libc::sockaddr_storage> =
                 (0..count).map(|_| unsafe { std::mem::zeroed() }).collect();
             let mut tx_cmsg_bufs: Vec<[u8; 32]> = vec![[0u8; 32]; count];
@@ -424,18 +437,13 @@ mod inner {
                 tx_hdrs[i].msg_hdr.msg_name =
                     (&mut tx_addrs[i] as *mut libc::sockaddr_storage).cast();
                 tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
-                tx_hdrs[i].msg_hdr.msg_iov =
-                    &mut tx_iovs[i] as *mut libc::iovec;
+                tx_hdrs[i].msg_hdr.msg_iov = &mut tx_iovs[i] as *mut libc::iovec;
                 tx_hdrs[i].msg_hdr.msg_iovlen = 1;
 
                 // Attach UDP_SEGMENT cmsg when the batch holds >1 segment.
                 if batch_data[i].len() > batch_seg_sizes[i] as usize {
-                    let cmsg_len = build_gso_cmsg(
-                        &mut tx_cmsg_bufs[i],
-                        batch_seg_sizes[i],
-                    );
-                    tx_hdrs[i].msg_hdr.msg_control =
-                        tx_cmsg_bufs[i].as_mut_ptr().cast();
+                    let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[i], batch_seg_sizes[i]);
+                    tx_hdrs[i].msg_hdr.msg_control = tx_cmsg_bufs[i].as_mut_ptr().cast();
                     tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
                 }
             }

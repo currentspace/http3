@@ -134,9 +134,7 @@ impl NativeMockQuicProfiler {
                 payload_bytes: effective_payload_bytes as usize,
                 response_fragment_count: response_fragment_count.unwrap_or(1) as usize,
                 response_fragment_size: response_fragment_size.map(|value| value as usize),
-                timeout: Duration::from_millis(
-                    u64::from(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
-                ),
+                timeout: Duration::from_millis(u64::from(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS))),
                 client_sink_mode: sink_mode,
                 replay_trace,
             },

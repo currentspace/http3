@@ -20,11 +20,9 @@ use crate::h3_event::{
     EVENT_DATA, EVENT_ERROR, EVENT_FINISHED, EVENT_HANDSHAKE_COMPLETE, EVENT_NEW_SESSION,
     EVENT_NEW_STREAM, EVENT_SESSION_CLOSE, JsH3Event,
 };
-use crate::profile::event_sink::{
-    TaggedEventBatch, channel_and_counting_batcher, channel_batcher,
-};
 #[cfg(feature = "node-api")]
 use crate::profile::event_sink::channel_and_tsfn_batcher;
+use crate::profile::event_sink::{TaggedEventBatch, channel_and_counting_batcher, channel_batcher};
 use crate::profile::mock_trace::MockReplayTrace;
 use crate::quic_worker::{
     QuicClientHandle, QuicServerCommand, QuicServerConfig, QuicServerHandle, QuicServerWorker,
@@ -253,11 +251,7 @@ impl ServerEchoState {
         }
     }
 
-    fn flush_echo(
-        &mut self,
-        server: &crate::quic_worker::QuicServerHandle,
-        key: (u32, u64),
-    ) {
+    fn flush_echo(&mut self, server: &crate::quic_worker::QuicServerHandle, key: (u32, u64)) {
         let body = self.pending.remove(&key).unwrap_or_default();
         let body_len = body.len() as u64;
         let fragments = fragment_response(
@@ -347,9 +341,7 @@ fn run_mock_quic_profile(
     let (client_event_tx, client_event_rx) = unbounded();
     let (server_batcher, server_sink_stats) = channel_batcher("server", server_event_tx);
     let (client_batcher, client_sink_stats) = match config.client_sink_mode {
-        MockClientSinkMode::Counting => {
-            channel_and_counting_batcher("client-0", client_event_tx)
-        }
+        MockClientSinkMode::Counting => channel_and_counting_batcher("client-0", client_event_tx),
         #[cfg(feature = "node-api")]
         MockClientSinkMode::Tsfn => channel_and_tsfn_batcher(
             "client-0",
@@ -400,10 +392,13 @@ fn run_mock_quic_profile(
     let mut latencies_ms = Vec::with_capacity(config.streams_per_connection);
     let mut errors = Vec::new();
     let mut ready_connections = 0usize;
-    let mut server_echo_state =
-        ServerEchoState::new(config.response_fragment_count, config.response_fragment_size);
+    let mut server_echo_state = ServerEchoState::new(
+        config.response_fragment_count,
+        config.response_fragment_size,
+    );
 
-    while session.completed_streams < config.streams_per_connection && start.elapsed() < config.timeout
+    while session.completed_streams < config.streams_per_connection
+        && start.elapsed() < config.timeout
     {
         crossbeam_channel::select! {
             recv(stop_rx) -> _ => {
@@ -544,10 +539,7 @@ fn run_mock_quic_profile(
         throughput_mbps,
         latency_ms: summarize_latencies(&latencies_ms),
         error_count: errors.len() + server_echo_state.errors.len(),
-        errors: errors
-            .into_iter()
-            .chain(server_echo_state.errors)
-            .collect(),
+        errors: errors.into_iter().chain(server_echo_state.errors).collect(),
         trace: MockTraceSummary {
             datagrams: trace_snapshot.len(),
             bytes: trace_bytes,
@@ -676,5 +668,7 @@ fn fragment_response(
     }
 
     let chunk_size = body.len().div_ceil(fragment_count);
-    body.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect()
+    body.chunks(chunk_size)
+        .map(|chunk| chunk.to_vec())
+        .collect()
 }

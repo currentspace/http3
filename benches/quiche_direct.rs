@@ -33,9 +33,7 @@ const MAX_DATAGRAM_SIZE: usize = 1350;
 
 fn make_client_config() -> quiche::Config {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    config
-        .set_application_protos(&[b"bench"])
-        .unwrap();
+    config.set_application_protos(&[b"bench"]).unwrap();
     config.verify_peer(false);
     config.set_max_idle_timeout(5000);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
@@ -57,9 +55,7 @@ fn make_server_config(cert_path: &std::path::Path, key_path: &std::path::Path) -
     config
         .load_priv_key_from_pem_file(key_path.to_str().unwrap())
         .unwrap();
-    config
-        .set_application_protos(&[b"bench"])
-        .unwrap();
+    config.set_application_protos(&[b"bench"]).unwrap();
     config.set_max_idle_timeout(5000);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
@@ -92,9 +88,14 @@ impl BenchPair {
 
         let scid = vec![0xba; quiche::MAX_CONN_ID_LEN];
         let scid = quiche::ConnectionId::from_ref(&scid);
-        let client =
-            quiche::connect(Some("localhost"), &scid, client_addr, server_addr, &mut client_config)
-                .unwrap();
+        let client = quiche::connect(
+            Some("localhost"),
+            &scid,
+            client_addr,
+            server_addr,
+            &mut client_config,
+        )
+        .unwrap();
 
         Self {
             client,
@@ -175,12 +176,7 @@ impl BenchPair {
             }
         }
         assert!(self.client.is_established());
-        assert!(
-            self.server
-                .as_ref()
-                .unwrap()
-                .is_established()
-        );
+        assert!(self.server.as_ref().unwrap().is_established());
     }
 
     /// Exchange packets between client and server until no progress.
@@ -195,7 +191,11 @@ impl BenchPair {
                             from: self.client_addr,
                             to: info.to,
                         };
-                        self.server.as_mut().unwrap().recv(&mut self.buf[..len], ri).unwrap();
+                        self.server
+                            .as_mut()
+                            .unwrap()
+                            .recv(&mut self.buf[..len], ri)
+                            .unwrap();
                     }
                     Err(quiche::Error::Done) => break,
                     Err(e) => panic!("client send: {e}"),
@@ -260,9 +260,7 @@ fn quiche_stream_echo(c: &mut Criterion) {
                         let stream_id = 0u64;
 
                         // Client sends
-                        pair.client
-                            .stream_send(stream_id, &payload, true)
-                            .unwrap();
+                        pair.client.stream_send(stream_id, &payload, true).unwrap();
                         pair.flush();
 
                         // Server echoes

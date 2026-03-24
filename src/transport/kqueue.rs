@@ -15,7 +15,9 @@ mod inner {
 
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
-    use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
+    use crate::transport::{
+        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+    };
 
     const WAKER_IDENT: usize = 0xCAFE;
     const RX_BUF_SIZE: usize = 65535;
@@ -114,16 +116,18 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
-            let timeout = deadline.map(|d| {
-                let dur = d.saturating_duration_since(Instant::now());
-                libc::timespec {
-                    tv_sec: dur.as_secs() as libc::time_t,
-                    tv_nsec: dur.subsec_nanos() as libc::c_long,
-                }
-            }).unwrap_or(libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 100_000_000, // 100ms default
-            });
+            let timeout = deadline
+                .map(|d| {
+                    let dur = d.saturating_duration_since(Instant::now());
+                    libc::timespec {
+                        tv_sec: dur.as_secs() as libc::time_t,
+                        tv_nsec: dur.subsec_nanos() as libc::c_long,
+                    }
+                })
+                .unwrap_or(libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 100_000_000, // 100ms default
+                });
 
             // Manage EVFILT_WRITE: register only when unsent queue is non-empty
             let mut changes: Vec<KEvent> = Vec::new();

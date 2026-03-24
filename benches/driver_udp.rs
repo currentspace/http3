@@ -103,8 +103,8 @@ fn bench_poll_rx_group<D: Driver>(c: &mut Criterion, driver_name: &str) {
 }
 
 fn bench_roundtrip<D: Driver>(c: &mut Criterion, driver_name: &str) {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     c.bench_function(&format!("driver_roundtrip/{driver_name}"), |b| {
         let (sock_a, sock_b) = make_socket_pair();
@@ -124,7 +124,9 @@ fn bench_roundtrip<D: Driver>(c: &mut Criterion, driver_name: &str) {
                     .unwrap();
                 while !stop_clone.load(Ordering::Relaxed) {
                     match sock_b_clone.recv(&mut buf) {
-                        Ok(n) => { let _ = sock_b_clone.send(&buf[..n]); }
+                        Ok(n) => {
+                            let _ = sock_b_clone.send(&buf[..n]);
+                        }
                         Err(_) => {}
                     }
                 }

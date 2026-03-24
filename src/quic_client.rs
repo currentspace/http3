@@ -28,8 +28,8 @@ impl NativeQuicClient {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let quiche_config = crate::config::new_quic_client_config(&options)
-            .map_err(napi::Error::from)?;
+        let quiche_config =
+            crate::config::new_quic_client_config(&options).map_err(napi::Error::from)?;
 
         Ok(Self {
             handle: None,

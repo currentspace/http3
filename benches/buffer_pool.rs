@@ -62,16 +62,12 @@ fn copy_patterns(c: &mut Criterion) {
     let mut group = c.benchmark_group("buffer_copy");
     for size in [1350, 16384, 65535] {
         let src = vec![0xAB_u8; size];
-        group.bench_with_input(
-            BenchmarkId::new("to_vec", size),
-            &size,
-            |b, &_size| {
-                b.iter(|| {
-                    let v = src.to_vec();
-                    std::hint::black_box(v);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("to_vec", size), &size, |b, &_size| {
+            b.iter(|| {
+                let v = src.to_vec();
+                std::hint::black_box(v);
+            });
+        });
         group.bench_with_input(
             BenchmarkId::new("copy_from_slice", size),
             &size,

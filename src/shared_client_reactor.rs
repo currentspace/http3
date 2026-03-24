@@ -41,11 +41,7 @@ pub(crate) fn sync_timer<S, F>(
 ) where
     F: Fn(&S) -> Option<Instant>,
 {
-    if let Some(deadline) = get_deadline(session) {
-        timer_heap.schedule(handle, deadline);
-    } else {
-        timer_heap.remove_connection(handle);
-    }
+    timer_heap.set_deadline(handle, get_deadline(session));
 }
 
 pub(crate) fn flush_round_robin_sends<S, F>(

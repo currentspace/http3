@@ -186,11 +186,7 @@ impl ServerEchoState {
         }
     }
 
-    fn flush_echo(
-        &mut self,
-        server: &crate::quic_worker::QuicServerHandle,
-        key: (u32, u64),
-    ) {
+    fn flush_echo(&mut self, server: &crate::quic_worker::QuicServerHandle, key: (u32, u64)) {
         let body = self.pending.remove(&key).unwrap_or_default();
         let body_len = body.len() as u64;
         let _ = server.send_command(QuicServerCommand::StreamSend {
@@ -247,13 +243,9 @@ fn run_server(options: ServerOptions) -> Result<(), String> {
     let quiche_config = build_server_quiche_config(&options)?;
     let (event_tx, event_rx) = unbounded();
     let (batcher, sink_stats) = channel_batcher("server", event_tx);
-    let mut server = spawn_quic_server_with_batcher(
-        quiche_config,
-        server_config,
-        options.bind_addr,
-        batcher,
-    )
-    .map_err(|err| err.to_string())?;
+    let mut server =
+        spawn_quic_server_with_batcher(quiche_config, server_config, options.bind_addr, batcher)
+            .map_err(|err| err.to_string())?;
     let local_addr = server.local_addr();
     println!("READY {local_addr}");
 
@@ -351,7 +343,10 @@ fn run_client(options: ClientOptions) -> Result<(), String> {
     while completed_streams < total_streams && start.elapsed() < options.timeout {
         match event_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(batch) => {
-                let Some(session) = sessions.iter_mut().find(|candidate| candidate.source == batch.source) else {
+                let Some(session) = sessions
+                    .iter_mut()
+                    .find(|candidate| candidate.source == batch.source)
+                else {
                     continue;
                 };
                 if let Some(trace_started_at) = first_send_at {
@@ -388,9 +383,7 @@ fn run_client(options: ClientOptions) -> Result<(), String> {
                                             fin: true,
                                         });
                                     }
-                                    if session
-                                        .handle
-                                        .stream_send(stream_id, payload.clone(), true)
+                                    if session.handle.stream_send(stream_id, payload.clone(), true)
                                     {
                                         session.pending_streams.insert(stream_id, Instant::now());
                                     } else {
@@ -488,10 +481,10 @@ fn run_client(options: ClientOptions) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     }
 
-    let elapsed_ms = first_send_at
-        .map_or_else(|| start.elapsed().as_secs_f64() * 1000.0, |sent_at| {
-            sent_at.elapsed().as_secs_f64() * 1000.0
-        });
+    let elapsed_ms = first_send_at.map_or_else(
+        || start.elapsed().as_secs_f64() * 1000.0,
+        |sent_at| sent_at.elapsed().as_secs_f64() * 1000.0,
+    );
     let total_response_bytes = sessions.iter().map(|session| session.response_bytes).sum();
     let throughput_mbps = if elapsed_ms > 0.0 {
         (total_response_bytes as f64 * 8.0) / (elapsed_ms / 1000.0) / 1_000_000.0

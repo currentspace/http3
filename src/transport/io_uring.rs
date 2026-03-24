@@ -20,8 +20,13 @@ mod inner {
 
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
-    use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso};
-    use crate::transport::socket::{CMSG_CONTROL_LEN, set_pktinfo, parse_pktinfo_cmsg, probe_gso, build_gso_cmsg, enable_gro, parse_gro_cmsg};
+    use crate::transport::socket::{
+        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_gro_cmsg, parse_pktinfo_cmsg,
+        probe_gso, set_pktinfo,
+    };
+    use crate::transport::{
+        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
+    };
 
     /// Number of provided buffers in the RX buffer ring.
     const RX_RING_SIZE: u16 = 256;
@@ -33,6 +38,8 @@ mod inner {
     const USER_RX_BUF_SIZE: usize = 65535;
     const RX_BUF_SIZE: usize = 65535 + RX_BUF_OVERHEAD;
     const TX_SLOTS: usize = 256;
+    const TIER2_TASKRUN_PREFETCH_LIMIT: u32 = 2;
+    const TIER2_BLOCKING_WAIT_LIMIT: u32 = 4;
 
     const OP_RECV: u64 = 1 << 56;
     const OP_SEND: u64 = 2 << 56;
@@ -107,11 +114,7 @@ mod inner {
             // Register with the kernel.
             // SAFETY: ring_ptr is page-aligned mmap memory, entries are initialized.
             unsafe {
-                submitter.register_buf_ring(
-                    ring_ptr as u64,
-                    RX_RING_SIZE,
-                    BUF_GROUP,
-                )?;
+                submitter.register_buf_ring(ring_ptr as u64, RX_RING_SIZE, BUF_GROUP)?;
             }
 
             // Advance tail to make all buffers available.
@@ -126,8 +129,7 @@ mod inner {
             // used by the kernel to size the name/control regions in each provided buffer).
             // SAFETY: zeroed msghdr is valid.
             let mut msg: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
-            msg.msg_namelen =
-                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
             msg.msg_controllen = CMSG_CONTROL_LEN;
 
             Ok(Self {
@@ -303,10 +305,7 @@ mod inner {
 
         /// Process a completed SendBundle CQE. Returns (consumed, unsent_packets).
         /// Unsent packets are extracted from the ring and returned for retry.
-        fn complete(
-            &mut self,
-            bytes_sent: usize,
-        ) -> (usize, Vec<TxDatagram>) {
+        fn complete(&mut self, bytes_sent: usize) -> (usize, Vec<TxDatagram>) {
             let mut remaining = bytes_sent;
             let mut consumed = 0;
             for &len in &self.in_flight_lengths {
@@ -320,7 +319,8 @@ mod inner {
 
             // Extract unsent packet data for retry.
             let mut unsent = Vec::new();
-            let base_slot = ((self.tail.wrapping_sub(self.in_flight_count as u16)) % TX_RING_ENTRIES) as usize;
+            let base_slot =
+                ((self.tail.wrapping_sub(self.in_flight_count as u16)) % TX_RING_ENTRIES) as usize;
             for i in consumed..self.in_flight_count {
                 let slot = (base_slot + i) % TX_RING_ENTRIES as usize;
                 let len = self.in_flight_lengths[i];
@@ -459,6 +459,8 @@ mod inner {
         /// True when the ring was created with R_DISABLED and needs
         /// register_enable_rings() on the worker thread before first use.
         needs_enable: bool,
+        /// True when the ring was created with DEFER_TASKRUN semantics.
+        defer_taskrun_enabled: bool,
         /// TX provided buffer ring for send bundles (None if unsupported).
         tx_buf_ring: Option<TxBufRing>,
         tx_slots: Vec<TxSlot>,
@@ -549,7 +551,9 @@ mod inner {
             // Register socket and eventfd for fixed-fd SQE submission.
             ring.submitter()
                 .register_files(&[socket_fd, eventfd.as_raw_fd()])
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("register_files: {e}")))?;
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("register_files: {e}"))
+                })?;
 
             // Set up provided buffer ring for multishot recvmsg.
             let rx_ring = RxBufferRing::new(&ring.submitter())?;
@@ -558,9 +562,10 @@ mod inner {
 
             // Probe for send bundle support (kernel ≥6.10) with connected socket.
             let tx_buf_ring = if ring.params().is_feature_recvsend_bundle() {
-                socket.peer_addr().ok().and_then(|peer| {
-                    TxBufRing::new(&ring.submitter(), peer).ok()
-                })
+                socket
+                    .peer_addr()
+                    .ok()
+                    .and_then(|peer| TxBufRing::new(&ring.submitter(), peer).ok())
             } else {
                 None
             };
@@ -580,15 +585,17 @@ mod inner {
                         &mut len,
                     )
                 };
-                let raw = if rc == 0 && val > 0 { val as usize } else { 212992 };
+                let raw = if rc == 0 && val > 0 {
+                    val as usize
+                } else {
+                    212992
+                };
                 // Use 75% of the receiver's buffer as our cap — the remaining
                 // 25% absorbs packets already in the kernel's send pipeline
                 // (submitted but not yet completed) plus any peer sends that
                 // share the same buffer.
                 let effective = raw * 3 / 4;
-                log::info!(
-                    "IoUringDriver: tx_bytes_cap={effective} (75% of SO_RCVBUF={raw})",
-                );
+                log::info!("IoUringDriver: tx_bytes_cap={effective} (75% of SO_RCVBUF={raw})",);
                 effective
             };
 
@@ -602,6 +609,7 @@ mod inner {
                 rx_ring,
                 rx_armed: false,
                 needs_enable: defer_taskrun,
+                defer_taskrun_enabled: defer_taskrun,
                 tx_buf_ring,
                 tx_slots,
                 waker_buf: Box::new([0u8; 8]),
@@ -719,8 +727,7 @@ mod inner {
                                             .unwrap_or(self.local_addr);
                                         let segment_size = parse_gro_cmsg(control);
                                         let payload = parsed.payload_data();
-                                        let (data, reused) =
-                                            self.rx_pool.copy_from_slice(payload);
+                                        let (data, reused) = self.rx_pool.copy_from_slice(payload);
                                         reactor_metrics::record_rx_buffer_checkout(
                                             reused,
                                             payload.len(),
@@ -746,12 +753,15 @@ mod inner {
                         let idx = (user_data & IDX_MASK) as usize;
                         self.tx_in_flight -= 1;
                         let slot = &mut self.tx_slots[idx];
-                        self.tx_bytes_in_flight = self.tx_bytes_in_flight.saturating_sub(slot.data.len());
+                        self.tx_bytes_in_flight =
+                            self.tx_bytes_in_flight.saturating_sub(slot.data.len());
                         if result >= 0 {
                             if slot.gso_segment_size > 0 {
                                 log::trace!(
                                     "io_uring OP_SEND GSO complete: idx={idx} result={result} seg_size={} data_len={} in_flight={}",
-                                    slot.gso_segment_size, slot.data.len(), self.tx_in_flight,
+                                    slot.gso_segment_size,
+                                    slot.data.len(),
+                                    self.tx_in_flight,
                                 );
                             }
                             self.recycled_tx.push(slot.recycle_buffer());
@@ -760,12 +770,19 @@ mod inner {
                             let errno = -result;
                             log::warn!(
                                 "io_uring OP_SEND error: idx={idx} errno={errno} gso_seg={} data_len={} in_flight={} retryable={}",
-                                slot.gso_segment_size, slot.data.len(), self.tx_in_flight,
-                                errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR
+                                slot.gso_segment_size,
+                                slot.data.len(),
+                                self.tx_in_flight,
+                                errno == libc::EAGAIN
+                                    || errno == libc::ENOBUFS
+                                    || errno == libc::EINTR
                                     || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0),
                             );
-                            if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR
-                                || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0) {
+                            if errno == libc::EAGAIN
+                                || errno == libc::ENOBUFS
+                                || errno == libc::EINTR
+                                || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0)
+                            {
                                 reactor_metrics::record_io_uring_retryable_send_completion();
                                 // GSO batch or retryable: split back into individual packets.
                                 let seg = slot.gso_segment_size;
@@ -831,7 +848,9 @@ mod inner {
             if cqe_count > 0 {
                 log::trace!(
                     "io_uring::poll CQEs={cqe_count} rx={} tx_in_flight={} pending={}",
-                    outcome.rx.len(), self.tx_in_flight, self.pending_tx.len(),
+                    outcome.rx.len(),
+                    self.tx_in_flight,
+                    self.pending_tx.len(),
                 );
             }
 
@@ -851,7 +870,9 @@ mod inner {
                 if self.tx_in_flight > 0 || !self.pending_tx.is_empty() {
                     log::warn!(
                         "io_uring::poll TIMEOUT with tx_in_flight={} pending={} wait={:?}",
-                        self.tx_in_flight, self.pending_tx.len(), wait_dur,
+                        self.tx_in_flight,
+                        self.pending_tx.len(),
+                        wait_dur,
                     );
                 }
             }
@@ -870,18 +891,27 @@ mod inner {
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
             let pkt_count = packets.len();
             // Log at warn level when under pressure so we can diagnose stalls.
-            if self.tx_in_flight > TX_SLOTS / 2 || !self.pending_tx.is_empty()
+            if self.tx_in_flight > TX_SLOTS / 2
+                || !self.pending_tx.is_empty()
                 || self.tx_bytes_in_flight >= self.tx_bytes_cap
             {
                 log::warn!(
                     "io_uring::submit_sends PRESSURE: {} pkts, tx_in_flight={}/{}, pending={}, bytes={}/{}, gso={}",
-                    pkt_count, self.tx_in_flight, TX_SLOTS, self.pending_tx.len(),
-                    self.tx_bytes_in_flight, self.tx_bytes_cap, self.gso_supported,
+                    pkt_count,
+                    self.tx_in_flight,
+                    TX_SLOTS,
+                    self.pending_tx.len(),
+                    self.tx_bytes_in_flight,
+                    self.tx_bytes_cap,
+                    self.gso_supported,
                 );
             }
             log::trace!(
                 "io_uring::submit_sends: {} pkts, gso={}, tx_in_flight={}, pending={}",
-                packets.len(), self.gso_supported, self.tx_in_flight, self.pending_tx.len(),
+                packets.len(),
+                self.gso_supported,
+                self.tx_in_flight,
+                self.pending_tx.len(),
             );
             // Try send bundles first (connected socket, kernel ≥6.10).
             if let Some(ref mut tx_ring) = self.tx_buf_ring {
@@ -906,7 +936,10 @@ mod inner {
                         {
                             let seg = batch.segment_size as usize;
                             for chunk in batch.data.chunks(seg) {
-                                self.pending_tx.push_back(TxDatagram { data: chunk.to_vec(), to: batch.to });
+                                self.pending_tx.push_back(TxDatagram {
+                                    data: chunk.to_vec(),
+                                    to: batch.to,
+                                });
                             }
                             continue;
                         }
@@ -915,7 +948,10 @@ mod inner {
                             // No slot: split back to individual packets.
                             let seg = batch.segment_size as usize;
                             for chunk in batch.data.chunks(seg) {
-                                self.pending_tx.push_back(TxDatagram { data: chunk.to_vec(), to: batch.to });
+                                self.pending_tx.push_back(TxDatagram {
+                                    data: chunk.to_vec(),
+                                    to: batch.to,
+                                });
                             }
                             continue;
                         };
@@ -933,7 +969,10 @@ mod inner {
                             let peer = self.tx_slots[idx].peer;
                             let data = self.tx_slots[idx].recycle_buffer();
                             for chunk in data.chunks(seg) {
-                                self.pending_tx.push_back(TxDatagram { data: chunk.to_vec(), to: peer });
+                                self.pending_tx.push_back(TxDatagram {
+                                    data: chunk.to_vec(),
+                                    to: peer,
+                                });
                             }
                         } else {
                             self.tx_bytes_in_flight += self.tx_slots[idx].data.len();
@@ -942,7 +981,10 @@ mod inner {
                         }
                     } else {
                         // Single-packet batch: route through pending_tx (no cmsg needed).
-                        self.pending_tx.push_back(TxDatagram { data: batch.data, to: batch.to });
+                        self.pending_tx.push_back(TxDatagram {
+                            data: batch.data,
+                            to: batch.to,
+                        });
                     }
                 }
             } else {
@@ -960,28 +1002,55 @@ mod inner {
                 reactor_metrics::record_io_uring_submit_call();
                 let submitted = self.ring.submit();
                 if submitted.is_err() {
-                    log::warn!("io_uring::submit_sends: ring.submit() error: {:?}", submitted);
+                    log::warn!(
+                        "io_uring::submit_sends: ring.submit() error: {:?}",
+                        submitted
+                    );
                 }
             }
 
             // Tier 2: When pending_tx is non-empty, all TX slots are occupied.
-            // We must drain completions to free slots before returning, otherwise
-            // these packets are delayed a full event-loop iteration — inflating
-            // RTT and cascading into QUIC congestion collapse.
-            //
-            // submit_and_wait(1) is one syscall: it submits any remaining SQEs
-            // AND blocks until ≥1 CQE arrives (GETEVENTS). On loopback the wait
-            // is microseconds. We loop because one CQE might be an OP_RECV or
-            // OP_WAKER, not an OP_SEND — we need to keep going until we actually
-            // free slots or exhaust completions.
+            // We need to guarantee some forward progress here, but keep the work
+            // bounded so the normal poll() path remains responsible for draining
+            // the bulk of completions.
             if !self.pending_tx.is_empty() && self.tx_in_flight > 0 {
                 let drain_start_pending = self.pending_tx.len();
                 let drain_start_inflight = self.tx_in_flight;
                 let mut drain_rounds = 0u32;
+                let mut blocking_waits = 0u32;
+                let mut made_progress = false;
 
-                while !self.pending_tx.is_empty() && self.tx_in_flight > 0 {
+                for _ in 0..TIER2_TASKRUN_PREFETCH_LIMIT {
+                    if !self.defer_taskrun_enabled
+                        || !self.ring.submission().taskrun()
+                        || self.pending_tx.is_empty()
+                        || self.tx_in_flight == 0
+                    {
+                        break;
+                    }
                     drain_rounds += 1;
-                    // Wait for at least one completion (submits any queued SQEs too).
+                    reactor_metrics::record_io_uring_tier2_drain_round();
+                    reactor_metrics::record_io_uring_tier2_taskrun_prefetch();
+
+                    let freed = self.drain_completions_for_tx()?;
+                    if freed == 0 {
+                        break;
+                    }
+
+                    made_progress = true;
+                    self.flush_pending_tx_after_progress()?;
+                    break;
+                }
+
+                while !made_progress
+                    && !self.pending_tx.is_empty()
+                    && self.tx_in_flight > 0
+                    && blocking_waits < TIER2_BLOCKING_WAIT_LIMIT
+                {
+                    drain_rounds += 1;
+                    blocking_waits += 1;
+                    reactor_metrics::record_io_uring_tier2_drain_round();
+                    reactor_metrics::record_io_uring_tier2_blocking_wait();
                     reactor_metrics::record_io_uring_submit_call();
                     match self.ring.submit_and_wait(1) {
                         Ok(_) => {}
@@ -992,31 +1061,21 @@ mod inner {
                         }
                     }
 
-                    // Process all available CQEs.
-                    self.cqe_buf.clear();
-                    self.cqe_buf.extend(self.ring.completion());
-                    if self.cqe_buf.is_empty() {
-                        break;
-                    }
-
-                    let freed = self.process_cqes_inline()?;
-
-                    // Push newly-freed slots worth of pending packets.
+                    let freed = self.drain_ready_cqes_inline()?;
                     if freed > 0 {
-                        let retry_sqes = self.submit_pending_tx()?;
-                        if retry_sqes > 0 {
-                            // Flush the new SQEs — they'll generate completions for
-                            // the next iteration if we still have pending packets.
-                            reactor_metrics::record_io_uring_submit_call();
-                            let _ = self.ring.submit();
-                        }
+                        made_progress = true;
+                        self.flush_pending_tx_after_progress()?;
                     }
                 }
 
-                log::warn!(
-                    "io_uring::submit_sends DRAIN: {drain_rounds} rounds, pending {drain_start_pending}->{}, in_flight {drain_start_inflight}->{}, input_pkts={pkt_count}",
-                    self.pending_tx.len(), self.tx_in_flight,
-                );
+                if !made_progress && !self.pending_tx.is_empty() && self.tx_in_flight > 0 {
+                    reactor_metrics::record_io_uring_tier2_cap_hit();
+                    log::trace!(
+                        "io_uring::submit_sends bounded drain cap: rounds={drain_rounds} pending {drain_start_pending}->{}, in_flight {drain_start_inflight}->{}, input_pkts={pkt_count}",
+                        self.pending_tx.len(),
+                        self.tx_in_flight,
+                    );
+                }
             }
             Ok(())
         }
@@ -1089,13 +1148,9 @@ mod inner {
         }
 
         fn submit_waker_read(&mut self) -> io::Result<()> {
-            let entry = io_uring::opcode::Read::new(
-                FIXED_EVENTFD,
-                self.waker_buf.as_mut_ptr(),
-                8,
-            )
-            .build()
-            .user_data(OP_WAKER);
+            let entry = io_uring::opcode::Read::new(FIXED_EVENTFD, self.waker_buf.as_mut_ptr(), 8)
+                .build()
+                .user_data(OP_WAKER);
 
             // SAFETY: waker_buf is a stable Box address. Only one read is in flight.
             unsafe {
@@ -1201,7 +1256,10 @@ mod inner {
             let batches = group_for_gso(packets);
             log::trace!(
                 "io_uring::submit_sends_gso: {} packets -> {} batches, tx_in_flight={} pending_tx={} tid={:?}",
-                batches.iter().map(|b| b.data.len() / b.segment_size as usize).sum::<usize>(),
+                batches
+                    .iter()
+                    .map(|b| b.data.len() / b.segment_size as usize)
+                    .sum::<usize>(),
                 batches.len(),
                 self.tx_in_flight,
                 self.pending_tx.len(),
@@ -1228,7 +1286,10 @@ mod inner {
                 if batch.data.len() > batch.segment_size as usize {
                     self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
                 } else {
-                    self.tx_slots[idx].prepare(TxDatagram { data: batch.data, to: batch.to });
+                    self.tx_slots[idx].prepare(TxDatagram {
+                        data: batch.data,
+                        to: batch.to,
+                    });
                 }
                 let slot = &mut self.tx_slots[idx];
                 let entry = io_uring::opcode::SendMsg::new(
@@ -1278,7 +1339,10 @@ mod inner {
                     self.pending_tx.push_front(packet);
                     log::warn!(
                         "io_uring::submit_pending_tx BYTES_CAP: bytes={}/{} in_flight={} pending={}",
-                        self.tx_bytes_in_flight, self.tx_bytes_cap, self.tx_in_flight, self.pending_tx.len(),
+                        self.tx_bytes_in_flight,
+                        self.tx_bytes_cap,
+                        self.tx_in_flight,
+                        self.pending_tx.len(),
                     );
                     break;
                 }
@@ -1321,6 +1385,28 @@ mod inner {
             Ok(submitted)
         }
 
+        fn flush_pending_tx_after_progress(&mut self) -> io::Result<()> {
+            let retry_sqes = self.submit_pending_tx()?;
+            if retry_sqes > 0 {
+                reactor_metrics::record_io_uring_submit_call();
+                if let Err(err) = self.ring.submit() {
+                    log::warn!(
+                        "io_uring::flush_pending_tx_after_progress: ring.submit() error: {err}",
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        fn drain_ready_cqes_inline(&mut self) -> io::Result<usize> {
+            self.cqe_buf.clear();
+            self.cqe_buf.extend(self.ring.completion());
+            if self.cqe_buf.is_empty() {
+                return Ok(0);
+            }
+            self.process_cqes_inline()
+        }
+
         /// Process CQEs already in `self.cqe_buf`. Returns the number of TX
         /// slots freed (OP_SEND completions). Handles all op types — OP_RECV
         /// results go to `deferred_rx`, OP_WAKER sets `deferred_woken`.
@@ -1361,8 +1447,7 @@ mod inner {
                                             .unwrap_or(self.local_addr);
                                         let segment_size = parse_gro_cmsg(control);
                                         let payload = parsed.payload_data();
-                                        let (data, reused) =
-                                            self.rx_pool.copy_from_slice(payload);
+                                        let (data, reused) = self.rx_pool.copy_from_slice(payload);
                                         reactor_metrics::record_rx_buffer_checkout(
                                             reused,
                                             payload.len(),
@@ -1385,7 +1470,8 @@ mod inner {
                         self.tx_in_flight -= 1;
                         tx_freed += 1;
                         let slot = &mut self.tx_slots[idx];
-                        self.tx_bytes_in_flight = self.tx_bytes_in_flight.saturating_sub(slot.data.len());
+                        self.tx_bytes_in_flight =
+                            self.tx_bytes_in_flight.saturating_sub(slot.data.len());
                         if result >= 0 {
                             self.recycled_tx.push(slot.recycle_buffer());
                             reactor_metrics::record_io_uring_tx_datagrams_completed(1);
@@ -1393,9 +1479,13 @@ mod inner {
                             let errno = -result;
                             log::warn!(
                                 "io_uring OP_SEND error (inline): idx={idx} errno={errno} gso_seg={} data_len={} in_flight={}",
-                                slot.gso_segment_size, slot.data.len(), self.tx_in_flight,
+                                slot.gso_segment_size,
+                                slot.data.len(),
+                                self.tx_in_flight,
                             );
-                            if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR
+                            if errno == libc::EAGAIN
+                                || errno == libc::ENOBUFS
+                                || errno == libc::EINTR
                                 || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0)
                             {
                                 reactor_metrics::record_io_uring_retryable_send_completion();
@@ -1484,7 +1574,7 @@ mod inner {
         /// Returns the number of TX slots freed.
         fn drain_completions_for_tx(&mut self) -> io::Result<usize> {
             // Check if the kernel has deferred completions to process.
-            if !self.ring.submission().taskrun() {
+            if !self.defer_taskrun_enabled || !self.ring.submission().taskrun() {
                 return Ok(0);
             }
 
@@ -1493,166 +1583,11 @@ mod inner {
             // which runs io_run_local_work → posts CQEs → returns immediately.
             // SAFETY: no SQEs submitted (to_submit=0), no blocking (min_complete=0).
             unsafe {
-                self.ring.submitter().enter::<libc::sigset_t>(
-                    0,
-                    0,
-                    Self::GETEVENTS,
-                    None,
-                )?;
+                self.ring
+                    .submitter()
+                    .enter::<libc::sigset_t>(0, 0, Self::GETEVENTS, None)?;
             }
-
-            // Process all CQEs — we must handle every op type since
-            // ring.completion() advances the CQ head on drop.
-            self.cqe_buf.clear();
-            self.cqe_buf.extend(self.ring.completion());
-            let cqe_count = self.cqe_buf.len();
-            if cqe_count == 0 {
-                return Ok(0);
-            }
-
-            let mut tx_freed = 0usize;
-            let mut bundle_needs_reset = false;
-
-            for cqe_idx in 0..cqe_count {
-                let cqe = &self.cqe_buf[cqe_idx];
-                let user_data = cqe.user_data();
-                let op = user_data & OP_MASK;
-                let result = cqe.result();
-                let flags = cqe.flags();
-
-                match op {
-                    OP_RECV => {
-                        let has_more = io_uring::cqueue::more(flags);
-                        if !has_more {
-                            self.rx_armed = false;
-                        }
-                        if result > 0 {
-                            if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
-                                let buf = self.rx_ring.buffer_data(bid);
-                                let buf_len = result as usize;
-                                if let Ok(parsed) = io_uring::types::RecvMsgOut::parse(
-                                    &buf[..buf_len],
-                                    self.rx_ring.msg.as_ref(),
-                                ) {
-                                    let name_data = parsed.name_data();
-                                    let peer = parse_sockaddr(name_data);
-                                    if let Some(peer) = peer {
-                                        let control = parsed.control_data();
-                                        let local_ip = parse_pktinfo_cmsg(control);
-                                        let local = local_ip
-                                            .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
-                                            .unwrap_or(self.local_addr);
-                                        let segment_size = parse_gro_cmsg(control);
-                                        let payload = parsed.payload_data();
-                                        let (data, reused) =
-                                            self.rx_pool.copy_from_slice(payload);
-                                        reactor_metrics::record_rx_buffer_checkout(
-                                            reused,
-                                            payload.len(),
-                                        );
-                                        self.deferred_rx.push(RxDatagram {
-                                            data,
-                                            peer,
-                                            local,
-                                            segment_size,
-                                        });
-                                        reactor_metrics::record_io_uring_rx_datagrams(1);
-                                    }
-                                }
-                                self.rx_ring.stage_buffer_return(bid);
-                            }
-                        }
-                    }
-                    OP_SEND => {
-                        let idx = (user_data & IDX_MASK) as usize;
-                        self.tx_in_flight -= 1;
-                        tx_freed += 1;
-                        let slot = &mut self.tx_slots[idx];
-                        if result >= 0 {
-                            self.recycled_tx.push(slot.recycle_buffer());
-                            reactor_metrics::record_io_uring_tx_datagrams_completed(1);
-                        } else {
-                            let errno = -result;
-                            if errno == libc::EAGAIN || errno == libc::ENOBUFS || errno == libc::EINTR
-                                || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0)
-                            {
-                                reactor_metrics::record_io_uring_retryable_send_completion();
-                                let seg = slot.gso_segment_size;
-                                if seg > 0 {
-                                    let peer = slot.peer;
-                                    let data = slot.recycle_buffer();
-                                    for chunk in data.chunks(seg as usize) {
-                                        self.pending_tx.push_back(TxDatagram {
-                                            data: chunk.to_vec(),
-                                            to: peer,
-                                        });
-                                    }
-                                } else {
-                                    self.pending_tx.push_back(slot.take_packet());
-                                }
-                                reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
-                            } else {
-                                self.recycled_tx.push(slot.recycle_buffer());
-                            }
-                        }
-                    }
-                    OP_WAKER => {
-                        self.deferred_woken = true;
-                        reactor_metrics::record_io_uring_wake_completion();
-                        unsafe {
-                            libc::read(
-                                self.eventfd.as_raw_fd(),
-                                self.waker_buf.as_mut_ptr().cast(),
-                                8,
-                            );
-                        }
-                        let _ = self.submit_waker_read();
-                    }
-                    OP_BUNDLE => {
-                        if let Some(ref mut tx_ring) = self.tx_buf_ring {
-                            let (consumed, unsent) = if result > 0 {
-                                tx_ring.complete(result as usize)
-                            } else {
-                                tx_ring.complete(0)
-                            };
-                            reactor_metrics::record_io_uring_tx_datagrams_completed(consumed);
-                            if !unsent.is_empty() {
-                                let retryable = result >= 0
-                                    || matches!(-result, e if e == libc::EAGAIN || e == libc::ENOBUFS || e == libc::EINTR);
-                                if retryable {
-                                    for pkt in unsent {
-                                        self.pending_tx.push_back(pkt);
-                                    }
-                                }
-                                bundle_needs_reset = true;
-                            } else if result <= 0 {
-                                bundle_needs_reset = true;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            reactor_metrics::record_io_uring_completions(cqe_count);
-            self.rx_ring.flush_buffer_returns();
-
-            if bundle_needs_reset {
-                if let Some(ref mut tx_ring) = self.tx_buf_ring {
-                    let _ = tx_ring.reset(&self.ring.submitter());
-                }
-            }
-
-            if !self.rx_armed {
-                self.arm_multishot_recv()?;
-            }
-
-            log::trace!(
-                "drain_completions_for_tx: CQEs={cqe_count} tx_freed={tx_freed} deferred_rx={} pending={}",
-                self.deferred_rx.len(), self.pending_tx.len(),
-            );
-
-            Ok(tx_freed)
+            self.drain_ready_cqes_inline()
         }
     }
 
@@ -1683,13 +1618,10 @@ mod inner {
         }
         // First two bytes are the address family (sa_family_t).
         let family = u16::from_ne_bytes([data[0], data[1]]);
-        if family == libc::AF_INET as u16
-            && data.len() >= std::mem::size_of::<libc::sockaddr_in>()
+        if family == libc::AF_INET as u16 && data.len() >= std::mem::size_of::<libc::sockaddr_in>()
         {
             // SAFETY: data is large enough and we only read through a properly aligned cast.
-            let sin: libc::sockaddr_in = unsafe {
-                std::ptr::read_unaligned(data.as_ptr().cast())
-            };
+            let sin: libc::sockaddr_in = unsafe { std::ptr::read_unaligned(data.as_ptr().cast()) };
             let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
             let port = u16::from_be(sin.sin_port);
             Some(SocketAddr::from((ip, port)))
@@ -1697,9 +1629,8 @@ mod inner {
             && data.len() >= std::mem::size_of::<libc::sockaddr_in6>()
         {
             // SAFETY: data is large enough and we use read_unaligned.
-            let sin6: libc::sockaddr_in6 = unsafe {
-                std::ptr::read_unaligned(data.as_ptr().cast())
-            };
+            let sin6: libc::sockaddr_in6 =
+                unsafe { std::ptr::read_unaligned(data.as_ptr().cast()) };
             let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
             let port = u16::from_be(sin6.sin6_port);
             Some(SocketAddr::from((ip, port)))

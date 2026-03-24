@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, after, bounded, unbounded};
 
-use crate::transport::{Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};
+use crate::transport::{
+    Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+};
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
