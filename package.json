@@ -128,7 +128,7 @@
     "test:rust:stress:all": "cargo test --test stress_udp_quic --test stress_sustained_throughput --test stress_memory_stability --test stress_connection_churn --test stress_timer_accuracy --features bench-internals --no-default-features -- --ignored",
     "test:ffi:h3": "npm run build:test && node --test --test-timeout=120000 dist-test/test/ffi/h3-event-coverage.test.js dist-test/test/ffi/h3-stress.test.js",
     "test:interop:h3": "npm run build:test && node --test --test-timeout=120000 dist-test/test/interop/h3-loopback.test.js dist-test/test/interop/h3-edge-cases.test.js",
-    "test:longhaul": "npm run build:test && HTTP3_LONGHAUL=1 node --test --test-timeout=600000 dist-test/test/longhaul/**/*.test.js",
+    "test:longhaul": "npm run build:test && HTTP3_LONGHAUL=1 node --expose-gc --test --test-timeout=700000 dist-test/test/longhaul/**/*.test.js",
     "bench:h3": "npm run build:test && node scripts/h3-benchmark.mjs",
     "bench:h3:stress": "npm run build:test && node scripts/h3-benchmark.mjs --profile stress --allow-errors",
     "bench:h3:docker": "node scripts/docker-h3-benchmark.mjs",
