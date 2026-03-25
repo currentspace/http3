@@ -1,6 +1,8 @@
 //! Reusable buffer pool to reduce allocation pressure in the hot
 //! packet-receive and send loops.
 
+use std::sync::Arc;
+
 const DEFAULT_BUF_SIZE: usize = 65535;
 const DEFAULT_POOL_SIZE: usize = 256;
 
@@ -101,6 +103,30 @@ impl AdaptiveBufferPool {
         (buf, reused)
     }
 
+    /// Create a pool with a thread-safe return channel for cross-thread buffer recycling.
+    /// Returns (pool, recycler_arc, receiver). The receiver must be drained periodically
+    /// via `drain_returned()` on the pool's owning thread.
+    pub fn with_recycler(
+        max_buffers: usize,
+        min_capacity: usize,
+    ) -> (Self, Arc<BufferRecycler>, crossbeam_channel::Receiver<Vec<u8>>) {
+        let (tx, rx) = crossbeam_channel::bounded(max_buffers * 2);
+        let pool = Self {
+            buffers: Vec::with_capacity(max_buffers),
+            max_buffers,
+            min_capacity,
+        };
+        (pool, Arc::new(BufferRecycler(tx)), rx)
+    }
+
+    /// Pull returned buffers from the recycler channel back into the pool.
+    /// Should be called periodically on the pool's owning thread.
+    pub fn drain_returned(&mut self, rx: &crossbeam_channel::Receiver<Vec<u8>>) {
+        while let Ok(buf) = rx.try_recv() {
+            self.checkin(buf);
+        }
+    }
+
     /// Return a buffer to the pool.
     /// Returns `true` when the buffer was retained for reuse.
     pub fn checkin(&mut self, mut buf: Vec<u8>) -> bool {
@@ -111,6 +137,17 @@ impl AdaptiveBufferPool {
         buf.clear();
         self.buffers.push(buf);
         true
+    }
+}
+
+/// Thread-safe handle for returning buffers to an `AdaptiveBufferPool`
+/// from a different thread (e.g., V8 GC finalize callback).
+pub struct BufferRecycler(crossbeam_channel::Sender<Vec<u8>>);
+
+impl BufferRecycler {
+    /// Return a buffer to the pool. If the channel is full, the buffer is dropped.
+    pub fn recycle(&self, buf: Vec<u8>) {
+        let _ = self.0.try_send(buf);
     }
 }
 
@@ -233,5 +270,31 @@ mod tests {
         let (buf, reused) = pool.checkout(8);
         assert!(!reused);
         assert!(buf.capacity() >= 64);
+    }
+
+    #[test]
+    fn adaptive_pool_recycler_returns_buffers() {
+        let (mut pool, recycler, rx) = AdaptiveBufferPool::with_recycler(4, 64);
+
+        // Checkout a buffer (will allocate fresh since pool is empty)
+        let (buf, reused) = pool.checkout(128);
+        assert!(!reused);
+        assert_eq!(buf.len(), 128);
+        let cap = buf.capacity();
+
+        // Simulate GC thread returning the buffer via recycler
+        recycler.recycle(buf);
+
+        // Pool hasn't received it yet
+        assert_eq!(pool.buffers.len(), 0);
+
+        // Drain the return channel
+        pool.drain_returned(&rx);
+        assert_eq!(pool.buffers.len(), 1);
+
+        // Next checkout should reuse it
+        let (buf2, reused2) = pool.checkout(64);
+        assert!(reused2);
+        assert!(buf2.capacity() >= cap);
     }
 }

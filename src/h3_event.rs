@@ -5,9 +5,203 @@
 use napi_derive::napi;
 
 #[cfg(feature = "node-api")]
-type ByteBuf = napi::bindgen_prelude::Buffer;
+use std::sync::Arc;
+#[cfg(feature = "node-api")]
+use crate::buffer_pool::BufferRecycler;
+
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
+
+/// A buffer that can optionally return to a pool when V8 GC collects it,
+/// instead of being freed via glibc. Eliminates malloc fragmentation from
+/// high-frequency buffer alloc/free cycles across the FFI boundary.
+#[cfg(feature = "node-api")]
+pub struct RecyclableBuffer {
+    pub(crate) data: Vec<u8>,
+    pub(crate) recycler: Option<Arc<BufferRecycler>>,
+}
+
+#[cfg(feature = "node-api")]
+impl RecyclableBuffer {
+    pub fn new(data: Vec<u8>, recycler: Option<Arc<BufferRecycler>>) -> Self {
+        Self { data, recycler }
+    }
+
+    /// Create a non-recyclable buffer (for rare events like session_ticket).
+    pub fn owned(data: Vec<u8>) -> Self {
+        Self { data, recycler: None }
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl std::fmt::Debug for RecyclableBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecyclableBuffer")
+            .field("len", &self.data.len())
+            .field("recyclable", &self.recycler.is_some())
+            .finish()
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl From<Vec<u8>> for RecyclableBuffer {
+    fn from(data: Vec<u8>) -> Self {
+        Self::owned(data)
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl std::ops::Deref for RecyclableBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl AsRef<[u8]> for RecyclableBuffer {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+// NAPI trait impls for RecyclableBuffer so it can be used in #[napi(object)] structs.
+
+#[cfg(feature = "node-api")]
+impl napi::bindgen_prelude::TypeName for RecyclableBuffer {
+    fn type_name() -> &'static str {
+        "Buffer"
+    }
+
+    fn value_type() -> napi::ValueType {
+        napi::ValueType::Object
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl napi::bindgen_prelude::ValidateNapiValue for RecyclableBuffer {}
+
+#[cfg(feature = "node-api")]
+impl napi::bindgen_prelude::FromNapiValue for RecyclableBuffer {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        napi_val: napi::sys::napi_value,
+    ) -> napi::Result<Self> {
+        let buf = unsafe { napi::bindgen_prelude::Buffer::from_napi_value(env, napi_val)? };
+        Ok(Self { data: buf.to_vec(), recycler: None })
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
+    #[allow(unsafe_code)]
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        val: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        use std::ffi::c_void;
+
+        let mut data = val.data;
+        let len = data.len();
+
+        if len == 0 {
+            // Empty buffer — use standard NAPI path
+            let mut ret = std::ptr::null_mut();
+            let status = unsafe {
+                napi::sys::napi_create_buffer(env, 0, std::ptr::null_mut(), &mut ret)
+            };
+            if status != napi::sys::Status::napi_ok {
+                return Err(napi::Error::from_status(status.into()));
+            }
+            return Ok(ret);
+        }
+
+        let ptr = data.as_mut_ptr();
+        let cap = data.capacity();
+        std::mem::forget(data);
+
+        if let Some(recycler) = val.recycler {
+            // Recyclable — finalize callback returns to pool
+            let hint = Box::new(RecycleHint { ptr, cap, recycler });
+            let mut ret = std::ptr::null_mut();
+            let status = unsafe {
+                napi::sys::napi_create_external_buffer(
+                    env,
+                    len,
+                    ptr as *mut c_void,
+                    Some(finalize_recycle),
+                    Box::into_raw(hint) as *mut c_void,
+                    &mut ret,
+                )
+            };
+            if status == napi::sys::Status::napi_no_external_buffers_allowed {
+                // Fallback: reconstruct and use copy path
+                let data = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+                let buf = napi::bindgen_prelude::Buffer::from(data);
+                return unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) };
+            }
+            if status != napi::sys::Status::napi_ok {
+                return Err(napi::Error::from_status(status.into()));
+            }
+            Ok(ret)
+        } else {
+            // Non-recyclable — reconstruct Buffer and use its standard to_napi_value
+            let data = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+            let buf = napi::bindgen_prelude::Buffer::from(data);
+            unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) }
+        }
+    }
+}
+
+#[cfg(feature = "node-api")]
+struct RecycleHint {
+    ptr: *mut u8,
+    cap: usize,
+    recycler: Arc<BufferRecycler>,
+}
+
+// SAFETY: The pointer is only accessed in the finalize callback, which runs
+// after V8 GC has confirmed no JS references remain.
+#[cfg(feature = "node-api")]
+unsafe impl Send for RecycleHint {}
+
+#[cfg(feature = "node-api")]
+unsafe extern "C" fn finalize_recycle(
+    _env: napi::sys::napi_env,
+    _data: *mut std::ffi::c_void,
+    hint: *mut std::ffi::c_void,
+) {
+    let hint = unsafe { Box::from_raw(hint as *mut RecycleHint) };
+    // Reconstruct Vec with len=0 (content was consumed by JS), preserve capacity
+    let buf = unsafe { Vec::from_raw_parts(hint.ptr, 0, hint.cap) };
+    hint.recycler.recycle(buf);
+}
+
+#[cfg(feature = "node-api")]
+type ByteBuf = RecyclableBuffer;
+
+/// Type alias for the recycler parameter on hot-path event constructors.
+/// Under `node-api`, carries `Option<Arc<BufferRecycler>>`.
+/// Without `node-api`, it is `()` (zero-cost, optimized away).
+#[cfg(feature = "node-api")]
+pub type EventRecycler = Option<Arc<BufferRecycler>>;
+#[cfg(not(feature = "node-api"))]
+pub type EventRecycler = ();
+
+/// A recycler value meaning "no pool — use normal free".
+/// Works under both feature configurations.
+#[cfg(feature = "node-api")]
+pub const NO_RECYCLER: EventRecycler = None;
+#[cfg(not(feature = "node-api"))]
+pub const NO_RECYCLER: EventRecycler = ();
+
+fn make_data_buf(data: Vec<u8>, _recycler: EventRecycler) -> ByteBuf {
+    #[cfg(feature = "node-api")]
+    { RecyclableBuffer::new(data, _recycler) }
+    #[cfg(not(feature = "node-api"))]
+    { data }
+}
 
 pub const EVENT_NEW_SESSION: u8 = 1;
 pub const EVENT_NEW_STREAM: u8 = 2;
@@ -147,6 +341,7 @@ impl JsH3Event {
         stream_id: u64,
         data: Vec<u8>,
         fin: bool,
+        recycler: EventRecycler,
     ) -> Self {
         Self {
             event_type: EVENT_NEW_STREAM,
@@ -156,7 +351,7 @@ impl JsH3Event {
             data: if data.is_empty() {
                 None
             } else {
-                Some(data.into())
+                Some(make_data_buf(data, recycler))
             },
             fin: Some(fin),
             meta: None,
@@ -177,13 +372,13 @@ impl JsH3Event {
         }
     }
 
-    pub fn data(conn_handle: u32, stream_id: u64, data: Vec<u8>, fin: bool) -> Self {
+    pub fn data(conn_handle: u32, stream_id: u64, data: Vec<u8>, fin: bool, recycler: EventRecycler) -> Self {
         Self {
             event_type: EVENT_DATA,
             conn_handle,
             stream_id: stream_id as i64,
             headers: None,
-            data: Some(data.into()),
+            data: Some(make_data_buf(data, recycler)),
             fin: Some(fin),
             meta: None,
             metrics: None,
@@ -408,13 +603,13 @@ impl JsH3Event {
         }
     }
 
-    pub fn datagram(conn_handle: u32, data: Vec<u8>) -> Self {
+    pub fn datagram(conn_handle: u32, data: Vec<u8>, recycler: EventRecycler) -> Self {
         Self {
             event_type: EVENT_DATAGRAM,
             conn_handle,
             stream_id: -1,
             headers: None,
-            data: Some(data.into()),
+            data: Some(make_data_buf(data, recycler)),
             fin: None,
             meta: None,
             metrics: None,
@@ -471,28 +666,28 @@ mod tests {
     #[test]
     fn test_new_stream_with_data_fields() {
         // Non-empty data is preserved.
-        let ev = JsH3Event::new_stream_with_data(1, 4, vec![0xAA, 0xBB], true);
+        let ev = JsH3Event::new_stream_with_data(1, 4, vec![0xAA, 0xBB], true, NO_RECYCLER);
         assert_eq!(ev.event_type, EVENT_NEW_STREAM);
         assert_eq!(ev.stream_id, 4_i64);
         assert_eq!(ev.data.as_deref(), Some([0xAA, 0xBB].as_slice()));
         assert_eq!(ev.fin, Some(true));
 
         // Empty data is collapsed to None.
-        let ev2 = JsH3Event::new_stream_with_data(1, 4, vec![], false);
+        let ev2 = JsH3Event::new_stream_with_data(1, 4, vec![], false, NO_RECYCLER);
         assert!(ev2.data.is_none());
         assert_eq!(ev2.fin, Some(false));
     }
 
     #[test]
     fn test_data_event_fields() {
-        let ev = JsH3Event::data(3, 8, vec![1, 2, 3], false);
+        let ev = JsH3Event::data(3, 8, vec![1, 2, 3], false, NO_RECYCLER);
         assert_eq!(ev.event_type, EVENT_DATA);
         assert_eq!(ev.conn_handle, 3);
         assert_eq!(ev.stream_id, 8_i64);
         assert_eq!(ev.data.as_deref(), Some([1u8, 2, 3].as_slice()));
         assert_eq!(ev.fin, Some(false));
 
-        let ev_fin = JsH3Event::data(3, 8, vec![4], true);
+        let ev_fin = JsH3Event::data(3, 8, vec![4], true, NO_RECYCLER);
         assert_eq!(ev_fin.fin, Some(true));
     }
 
@@ -618,7 +813,7 @@ mod tests {
     #[test]
     fn test_datagram_fields() {
         let payload = vec![0x01, 0x02, 0x03, 0x04];
-        let ev = JsH3Event::datagram(30, payload.clone());
+        let ev = JsH3Event::datagram(30, payload.clone(), NO_RECYCLER);
         assert_eq!(ev.event_type, EVENT_DATAGRAM);
         assert_eq!(ev.conn_handle, 30);
         assert_eq!(ev.stream_id, -1);

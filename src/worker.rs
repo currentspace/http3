@@ -2391,6 +2391,15 @@ impl ProtocolHandler for H3ServerHandler {
         }
     }
 
+    fn drain_recycled_buffers(&mut self) {
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        for &handle in &self.handles_buf {
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                conn.drain_recycled();
+            }
+        }
+    }
+
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
         reactor_metrics::record_tx_buffers_recycled(buffers.len());
         for buf in buffers {
@@ -2836,6 +2845,10 @@ impl ProtocolHandler for H3ClientHandler {
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
         self.poll_drain_events_for_handle(batch, 0);
+    }
+
+    fn drain_recycled_buffers(&mut self) {
+        self.conn.drain_recycled();
     }
 
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
