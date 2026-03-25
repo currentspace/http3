@@ -1894,14 +1894,31 @@ impl ProtocolHandler for H3ServerHandler {
                     pw.fin = pw.fin || fin;
                     // chunk drops here -> recycles to pool
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    let written = conn.send_body(stream_id, chunk.remaining(), fin).unwrap_or(0);
-                    if written < chunk.remaining_len() {
-                        chunk.advance(written);
+                    // Use zero-copy send_body_owned: Vec wraps in ArcBuf without
+                    // an intermediate copy. If partial write, remainder is returned.
+                    let data_vec = chunk.into_vec();
+                    let data_len = data_vec.len();
+                    let (written, remainder) =
+                        conn.send_body_owned(stream_id, data_vec, fin).unwrap_or((0, None));
+                    if let Some(rem) = remainder {
+                        let rem_chunk = Chunk::from_vec(
+                            rem,
+                            Some(std::sync::Arc::clone(&self.chunk_pool_return)),
+                        );
                         self.pending_writes.insert(
                             key,
-                            PendingWrite { chunk, fin },
+                            PendingWrite { chunk: rem_chunk, fin },
                         );
-                    } else if fin && written == 0 && chunk.remaining_len() == 0 {
+                    } else if written < data_len {
+                        // Partial write with no remainder (shouldn't happen, but defensive).
+                        self.pending_writes.insert(
+                            key,
+                            PendingWrite {
+                                chunk: Chunk::unpooled(Vec::new()),
+                                fin,
+                            },
+                        );
+                    } else if fin && written == 0 && data_len == 0 {
                         self.pending_writes.insert(
                             key,
                             PendingWrite {
@@ -2548,14 +2565,28 @@ impl H3ClientHandler {
             return;
         }
 
-        let written = self.conn.send_body(stream_id, chunk.remaining(), fin).unwrap_or(0);
-        if written < chunk.remaining_len() {
-            chunk.advance(written);
+        let data_vec = chunk.into_vec();
+        let data_len = data_vec.len();
+        let (written, remainder) =
+            self.conn.send_body_owned(stream_id, data_vec, fin).unwrap_or((0, None));
+        if let Some(rem) = remainder {
+            let rem_chunk = Chunk::from_vec(
+                rem,
+                Some(std::sync::Arc::clone(&self.chunk_pool_return)),
+            );
             self.pending_writes.insert(
                 stream_id,
-                PendingWrite { chunk, fin },
+                PendingWrite { chunk: rem_chunk, fin },
             );
-        } else if fin && written == 0 && chunk.remaining_len() == 0 {
+        } else if written < data_len {
+            self.pending_writes.insert(
+                stream_id,
+                PendingWrite {
+                    chunk: Chunk::unpooled(Vec::new()),
+                    fin,
+                },
+            );
+        } else if fin && written == 0 && data_len == 0 {
             self.pending_writes.insert(
                 stream_id,
                 PendingWrite {
