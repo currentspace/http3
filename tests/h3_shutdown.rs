@@ -333,7 +333,7 @@ fn test_h3_server_shutdown_after_response() {
         WorkerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: b"response-body-complete".to_vec(),
+            chunk: Chunk::unpooled(b"response-body-complete".to_vec()),
             fin: true,
         },
     );

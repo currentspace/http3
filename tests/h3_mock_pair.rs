@@ -369,7 +369,7 @@ fn test_h3_request_response() {
         WorkerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: body.clone(),
+            chunk: Chunk::unpooled(body.clone()),
             fin: true,
         },
     );
@@ -436,7 +436,7 @@ fn test_h3_post_with_body() {
 
     // Client sends the POST body
     let post_body = b"request-body-payload".to_vec();
-    assert!(pair.client.stream_send(stream_id, post_body.clone(), true));
+    assert!(pair.client.stream_send(stream_id, Chunk::unpooled(post_body.clone()), true));
 
     // Collect all server events for this stream: HEADERS, DATA, FINISHED.
     // In H3, the body may arrive as DATA events and a FINISHED event,
@@ -557,7 +557,7 @@ fn test_h3_multiple_concurrent_streams() {
             WorkerCommand::StreamSend {
                 conn_handle: server_conn,
                 stream_id: sid,
-                data: format!("response-{sid}").into_bytes(),
+                chunk: Chunk::unpooled(format!("response-{sid}").into_bytes()),
                 fin: true,
             },
         );
@@ -641,7 +641,7 @@ fn test_h3_large_body() {
         WorkerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: body.clone(),
+            chunk: Chunk::unpooled(body.clone()),
             fin: true,
         },
     );
@@ -742,7 +742,7 @@ fn test_h3_trailers() {
         WorkerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: b"body-data".to_vec(),
+            chunk: Chunk::unpooled(b"body-data".to_vec()),
             fin: false,
         },
     );
@@ -766,7 +766,7 @@ fn test_h3_trailers() {
         WorkerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: Vec::new(),
+            chunk: Chunk::unpooled(Vec::new()),
             fin: true,
         },
     );

@@ -16,6 +16,7 @@ use slab::Slab;
 
 use crate::arc_buf::ArcBufFactory;
 use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
+use crate::chunk_pool::{Chunk, ChunkPool, ChunkPoolReturn};
 use crate::client_topology::{
     ClientSocketStrategy, SharedClientWorkerKey as SharedH3ClientWorkerKey,
     default_h3_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
@@ -46,7 +47,7 @@ pub enum WorkerCommand {
     StreamSend {
         conn_handle: u32,
         stream_id: u64,
-        data: Vec<u8>,
+        chunk: Chunk,
         fin: bool,
     },
     StreamClose {
@@ -90,53 +91,12 @@ pub enum WorkerCommand {
 
 /// Buffered partial write for a stream blocked by flow control.
 struct PendingWrite {
-    data: Vec<u8>,
+    chunk: Chunk,
     fin: bool,
 }
 
 const PENDING_WRITE_POOL_SIZE: usize = 256;
 const PENDING_WRITE_MIN_CAPACITY: usize = 4 * 1024;
-
-fn checkout_pending_write_tail(pool: &mut AdaptiveBufferPool, data: &[u8]) -> Vec<u8> {
-    reactor_metrics::record_pending_write_tail_allocation();
-    let (buf, reused) = pool.copy_from_slice(data);
-    reactor_metrics::record_pending_write_buffer_checkout(reused, data.len());
-    buf
-}
-
-fn recycle_pending_write_buffer(pool: &mut AdaptiveBufferPool, buf: Vec<u8>) {
-    if buf.capacity() == 0 {
-        return;
-    }
-
-    let retained = pool.checkin(buf);
-    reactor_metrics::record_pending_write_buffer_checkin(retained);
-}
-
-fn append_pending_write(pool: &mut AdaptiveBufferPool, pending: &mut PendingWrite, data: &[u8]) {
-    if data.is_empty() {
-        return;
-    }
-
-    if pending.data.capacity().saturating_sub(pending.data.len()) >= data.len() {
-        pending.data.extend_from_slice(data);
-        reactor_metrics::record_pending_write_copy(data.len());
-        return;
-    }
-
-    reactor_metrics::record_pending_write_growth_reallocation();
-    let old = std::mem::take(&mut pending.data);
-    let old_len = old.len();
-    let new_len = old_len + data.len();
-    let (mut new_buf, reused) = pool.checkout(new_len);
-    reactor_metrics::record_pending_write_buffer_checkout(reused, new_len);
-    if old_len > 0 {
-        new_buf[..old_len].copy_from_slice(&old);
-    }
-    new_buf[old_len..].copy_from_slice(data);
-    recycle_pending_write_buffer(pool, old);
-    pending.data = new_buf;
-}
 
 /// Per-worker state inside a `WorkerHandle`.
 pub struct H3ServerWorker {
@@ -335,12 +295,12 @@ fn remap_command_handle(cmd: WorkerCommand) -> WorkerCommand {
         WorkerCommand::StreamSend {
             conn_handle,
             stream_id,
-            data,
+            chunk,
             fin,
         } => WorkerCommand::StreamSend {
             conn_handle: local_conn_handle(conn_handle),
             stream_id,
-            data,
+            chunk,
             fin,
         },
         WorkerCommand::StreamClose {
@@ -420,7 +380,7 @@ pub enum ClientWorkerCommand {
     },
     StreamSend {
         stream_id: u64,
-        data: Vec<u8>,
+        chunk: Chunk,
         fin: bool,
     },
     StreamClose {
@@ -603,13 +563,13 @@ impl ClientWorkerHandle {
     }
 
     /// Queue stream data to be sent by the worker.
-    pub fn stream_send(&self, stream_id: u64, data: Vec<u8>, fin: bool) -> bool {
+    pub fn stream_send(&self, stream_id: u64, chunk: Chunk, fin: bool) -> bool {
         match &self.kind {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 if cmd_tx
                     .send(ClientWorkerCommand::StreamSend {
                         stream_id,
-                        data,
+                        chunk,
                         fin,
                     })
                     .is_ok()
@@ -630,7 +590,7 @@ impl ClientWorkerHandle {
                     .send(SharedClientWorkerCommand::StreamSend {
                         session_handle: *session_handle,
                         stream_id,
-                        data,
+                        data: chunk.into_vec(),
                         fin,
                     })
                     .is_ok()
@@ -1324,7 +1284,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     fin,
                 } => {
                     if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.handler.queue_stream_send(stream_id, data, fin);
+                        session.handler.queue_stream_send(stream_id, Chunk::unpooled(data), fin);
                     }
                 }
                 SharedClientWorkerCommand::StreamClose {
@@ -1863,11 +1823,16 @@ struct H3ServerHandler {
     /// Used by poll_drain_events and cleanup_closed to avoid duplicate events.
     last_expired: Vec<usize>,
     handle_offset: u32,
+    chunk_pool: ChunkPool,
+    chunk_pool_return: Arc<ChunkPoolReturn>,
+    chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 impl H3ServerHandler {
     fn new(quiche_config: quiche::Config, http3_config: Http3Config, worker_index: u32) -> Self {
         let disable_retry = http3_config.disable_retry;
+        let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
+            ChunkPool::with_return_channel(64);
         Self {
             conn_map: ConnectionMap::with_max_connections_and_cid(
                 http3_config.max_connections,
@@ -1889,6 +1854,9 @@ impl H3ServerHandler {
             disable_retry,
             last_expired: Vec::new(),
             handle_offset: crate::server_sharding::handle_offset(worker_index),
+            chunk_pool,
+            chunk_pool_return,
+            chunk_pool_rx,
         }
     }
 }
@@ -1917,35 +1885,32 @@ impl ProtocolHandler for H3ServerHandler {
             WorkerCommand::StreamSend {
                 conn_handle,
                 stream_id,
-                data,
+                mut chunk,
                 fin,
             } => {
                 let key = (conn_handle, stream_id);
                 if let Some(pw) = self.pending_writes.get_mut(&key) {
-                    append_pending_write(&mut self.pending_write_pool, pw, &data);
+                    pw.chunk.append(chunk.remaining());
                     pw.fin = pw.fin || fin;
+                    // chunk drops here -> recycles to pool
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    let written = conn.send_body(stream_id, &data, fin).unwrap_or(0);
-                    if written < data.len() {
+                    let written = conn.send_body(stream_id, chunk.remaining(), fin).unwrap_or(0);
+                    if written < chunk.remaining_len() {
+                        chunk.advance(written);
                         self.pending_writes.insert(
                             key,
-                            PendingWrite {
-                                data: checkout_pending_write_tail(
-                                    &mut self.pending_write_pool,
-                                    &data[written..],
-                                ),
-                                fin,
-                            },
+                            PendingWrite { chunk, fin },
                         );
-                    } else if fin && written == 0 && data.is_empty() {
+                    } else if fin && written == 0 && chunk.remaining_len() == 0 {
                         self.pending_writes.insert(
                             key,
                             PendingWrite {
-                                data: Vec::new(),
+                                chunk: Chunk::unpooled(Vec::new()),
                                 fin: true,
                             },
                         );
                     }
+                    // else: chunk drops here -> recycles to pool
                 }
             }
             WorkerCommand::StreamClose {
@@ -2398,6 +2363,7 @@ impl ProtocolHandler for H3ServerHandler {
                 conn.drain_recycled();
             }
         }
+        self.chunk_pool.drain_returned(&self.chunk_pool_rx);
     }
 
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
@@ -2460,6 +2426,9 @@ struct H3ClientHandler {
     pending_write_pool: AdaptiveBufferPool,
     timer_deadline: Option<Instant>,
     session_closed_emitted: bool,
+    chunk_pool: ChunkPool,
+    chunk_pool_return: Arc<ChunkPoolReturn>,
+    chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 impl H3ClientHandler {
@@ -2501,6 +2470,8 @@ impl H3ClientHandler {
         );
         let timer_deadline = conn.timeout().map(|t| Instant::now() + t);
         reactor_metrics::record_session_open(SessionKind::H3Client);
+        let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
+            ChunkPool::with_return_channel(64);
         Some(Self {
             conn,
             pending_writes: HashMap::new(),
@@ -2512,6 +2483,9 @@ impl H3ClientHandler {
             ),
             timer_deadline,
             session_closed_emitted: false,
+            chunk_pool,
+            chunk_pool_return,
+            chunk_pool_rx,
         })
     }
 
@@ -2566,34 +2540,31 @@ impl H3ClientHandler {
             .map_err(|error| format!("send_request failed: {error}"))
     }
 
-    fn queue_stream_send(&mut self, stream_id: u64, data: Vec<u8>, fin: bool) {
+    fn queue_stream_send(&mut self, stream_id: u64, mut chunk: Chunk, fin: bool) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
-            append_pending_write(&mut self.pending_write_pool, pw, &data);
+            pw.chunk.append(chunk.remaining());
             pw.fin = pw.fin || fin;
+            // chunk drops here -> recycles to pool
             return;
         }
 
-        let written = self.conn.send_body(stream_id, &data, fin).unwrap_or(0);
-        if written < data.len() {
+        let written = self.conn.send_body(stream_id, chunk.remaining(), fin).unwrap_or(0);
+        if written < chunk.remaining_len() {
+            chunk.advance(written);
             self.pending_writes.insert(
                 stream_id,
-                PendingWrite {
-                    data: checkout_pending_write_tail(
-                        &mut self.pending_write_pool,
-                        &data[written..],
-                    ),
-                    fin,
-                },
+                PendingWrite { chunk, fin },
             );
-        } else if fin && written == 0 && data.is_empty() {
+        } else if fin && written == 0 && chunk.remaining_len() == 0 {
             self.pending_writes.insert(
                 stream_id,
                 PendingWrite {
-                    data: Vec::new(),
+                    chunk: Chunk::unpooled(Vec::new()),
                     fin: true,
                 },
             );
         }
+        // else: chunk drops here -> recycles to pool
     }
 
     fn close_stream(&mut self, stream_id: u64, error_code: u32) {
@@ -2787,10 +2758,10 @@ impl ProtocolHandler for H3ClientHandler {
             }
             ClientWorkerCommand::StreamSend {
                 stream_id,
-                data,
+                chunk,
                 fin,
             } => {
-                self.queue_stream_send(stream_id, data, fin);
+                self.queue_stream_send(stream_id, chunk, fin);
             }
             ClientWorkerCommand::StreamClose {
                 stream_id,
@@ -2849,6 +2820,7 @@ impl ProtocolHandler for H3ClientHandler {
 
     fn drain_recycled_buffers(&mut self) {
         self.conn.drain_recycled();
+        self.chunk_pool.drain_returned(&self.chunk_pool_rx);
     }
 
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
@@ -2931,22 +2903,22 @@ fn snapshot_metrics(conn: &H3Connection) -> JsSessionMetrics {
 fn flush_pending_writes(
     conn_map: &mut ConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
-    pool: &mut AdaptiveBufferPool,
+    _pool: &mut AdaptiveBufferPool,
 ) -> Vec<(u32, u64)> {
     let mut flushed = Vec::new();
     pending.retain(|&(conn_handle, stream_id), pw| {
         let Some(conn) = conn_map.get_mut(conn_handle as usize) else {
-            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
+            // PendingWrite drops -> chunk recycles to pool
             return false;
         };
-        let written = conn.send_body(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written >= pw.data.len() {
+        let written = conn.send_body(stream_id, pw.chunk.remaining(), pw.fin).unwrap_or(0);
+        if written >= pw.chunk.remaining_len() {
             flushed.push((conn_handle, stream_id));
-            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
+            // PendingWrite drops -> chunk recycles to pool
             false
         } else {
             if written > 0 {
-                pw.data.drain(..written);
+                pw.chunk.advance(written);
             }
             true
         }
@@ -2958,18 +2930,18 @@ fn flush_pending_writes(
 fn flush_client_pending_writes(
     conn: &mut H3Connection,
     pending: &mut HashMap<u64, PendingWrite>,
-    pool: &mut AdaptiveBufferPool,
+    _pool: &mut AdaptiveBufferPool,
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
-        let written = conn.send_body(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written >= pw.data.len() {
+        let written = conn.send_body(stream_id, pw.chunk.remaining(), pw.fin).unwrap_or(0);
+        if written >= pw.chunk.remaining_len() {
             flushed.push(stream_id);
-            recycle_pending_write_buffer(pool, std::mem::take(&mut pw.data));
+            // PendingWrite drops -> chunk recycles to pool
             false
         } else {
             if written > 0 {
-                pw.data.drain(..written);
+                pw.chunk.advance(written);
             }
             true
         }

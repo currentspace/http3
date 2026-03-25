@@ -189,7 +189,7 @@ impl NativeWorkerServer {
         handle.send_command(crate::worker::WorkerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            data: data.to_vec(),
+            chunk: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
             fin,
         })
     }

@@ -268,7 +268,7 @@ fn quic_mock_echo_throughput(c: &mut Criterion) {
                         pair.server.send_command(QuicServerCommand::StreamSend {
                             conn_handle: server_conn,
                             stream_id,
-                            data,
+                            chunk: Chunk::unpooled(data),
                             fin: true,
                         });
                     }

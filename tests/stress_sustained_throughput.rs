@@ -423,7 +423,7 @@ fn test_sustained_quic_throughput_5_minutes() {
         pair.server.send_command(QuicServerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: payload.clone(),
+            chunk: Chunk::unpooled(payload.clone()),
             fin: true,
         });
 
@@ -530,7 +530,7 @@ fn test_sustained_h3_throughput_5_minutes() {
             WorkerCommand::StreamSend {
                 conn_handle: server_conn,
                 stream_id,
-                data: b"OK".to_vec(),
+                chunk: Chunk::unpooled(b"OK".to_vec()),
                 fin: true,
             },
         );

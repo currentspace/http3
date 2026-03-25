@@ -105,7 +105,7 @@ impl NativeWorkerClient {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle.stream_send(stream_id as u64, data.to_vec(), fin)
+        handle.stream_send(stream_id as u64, crate::chunk_pool::Chunk::unpooled(data.to_vec()), fin)
     }
 
     #[napi]
