@@ -359,6 +359,42 @@ impl QuicConnection {
         }
     }
 
+    /// Borrow-based stream send: writes data without taking ownership.
+    /// The caller retains the data and can track partial writes via the
+    /// returned byte count. Uses quiche's non-zero-copy path.
+    pub fn stream_send_borrowed(
+        &mut self,
+        stream_id: u64,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<usize, Http3NativeError> {
+        match self.quiche_conn.stream_send(stream_id, data, fin) {
+            Ok(written) => {
+                if written < data.len() && self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                    reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
+                }
+                if self.is_local_stream(stream_id) {
+                    self.known_streams.insert(stream_id);
+                }
+                // Sentinel for FIN-only sends.
+                if data.is_empty() && fin && written == 0 {
+                    Ok(1)
+                } else {
+                    Ok(written)
+                }
+            }
+            Err(quiche::Error::Done) => {
+                if self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                    reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
+                }
+                Ok(0)
+            }
+            Err(e) => Err(Http3NativeError::Quiche(e)),
+        }
+    }
+
     pub fn stream_close(
         &mut self,
         stream_id: u64,

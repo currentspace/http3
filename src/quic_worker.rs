@@ -1909,7 +1909,7 @@ impl ProtocolHandler for QuicServerHandler {
             QuicServerCommand::StreamSend {
                 conn_handle,
                 stream_id,
-                chunk,
+                mut chunk,
                 fin,
             } => {
                 let key = (conn_handle, stream_id);
@@ -1918,33 +1918,11 @@ impl ProtocolHandler for QuicServerHandler {
                     pw.fin = pw.fin || fin;
                     // chunk drops here -> recycles to pool
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    let data_vec = chunk.into_vec();
-                    let data_len = data_vec.len();
-                    let (written, remainder) =
-                        conn.stream_send(stream_id, data_vec, fin).unwrap_or((0, None));
-                    if let Some(rem) = remainder {
-                        self.pending_writes.insert(
-                            key,
-                            PendingWrite {
-                                chunk: Chunk::from_vec(
-                                    rem,
-                                    Some(Arc::clone(&self.chunk_pool_return)),
-                                ),
-                                fin,
-                            },
-                        );
-                    } else if written < data_len {
-                        // stream_send_zc returned no remainder but wrote less
-                        // than the full buffer (shouldn't normally happen, but
-                        // guard defensively).
-                        self.pending_writes.insert(
-                            key,
-                            PendingWrite {
-                                chunk: Chunk::unpooled(Vec::new()),
-                                fin,
-                            },
-                        );
-                    } else if fin && written == 0 && data_len == 0 {
+                    let written = conn.stream_send_borrowed(stream_id, chunk.remaining(), fin).unwrap_or(0);
+                    if written < chunk.remaining_len() {
+                        chunk.advance(written);
+                        self.pending_writes.insert(key, PendingWrite { chunk, fin });
+                    } else if fin && written == 0 && chunk.remaining_len() == 0 {
                         self.pending_writes.insert(
                             key,
                             PendingWrite {
@@ -1953,6 +1931,7 @@ impl ProtocolHandler for QuicServerHandler {
                             },
                         );
                     }
+                    // else: full write — chunk drops → recycles to pool
                 }
             }
             QuicServerCommand::StreamClose {
@@ -2502,51 +2481,26 @@ impl QuicClientHandler {
         self.timer_deadline = self.conn.timeout().map(|timeout| Instant::now() + timeout);
     }
 
-    fn queue_stream_send(&mut self, stream_id: u64, chunk: Chunk, fin: bool) {
+    fn queue_stream_send(&mut self, stream_id: u64, mut chunk: Chunk, fin: bool) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
             pw.chunk.append(chunk.remaining());
             pw.fin = pw.fin || fin;
-            // chunk drops here -> recycles to pool
             return;
         }
 
-        let data_vec = chunk.into_vec();
-        let data_len = data_vec.len();
-        let (written, remainder) = self
-            .conn
-            .stream_send(stream_id, data_vec, fin)
-            .unwrap_or((0, None));
-        if let Some(rem) = remainder {
-            self.pending_writes.insert(
-                stream_id,
-                PendingWrite {
-                    chunk: Chunk::from_vec(
-                        rem,
-                        Some(Arc::clone(&self.chunk_pool_return)),
-                    ),
-                    fin,
-                },
-            );
+        let written = self.conn.stream_send_borrowed(stream_id, chunk.remaining(), fin).unwrap_or(0);
+        if written < chunk.remaining_len() {
+            chunk.advance(written);
+            self.pending_writes.insert(stream_id, PendingWrite { chunk, fin });
             reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
-        } else if written < data_len {
+        } else if fin && written == 0 && chunk.remaining_len() == 0 {
             self.pending_writes.insert(
                 stream_id,
-                PendingWrite {
-                    chunk: Chunk::unpooled(Vec::new()),
-                    fin,
-                },
-            );
-            reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
-        } else if fin && written == 0 && data_len == 0 {
-            self.pending_writes.insert(
-                stream_id,
-                PendingWrite {
-                    chunk: Chunk::unpooled(Vec::new()),
-                    fin: true,
-                },
+                PendingWrite { chunk: Chunk::unpooled(Vec::new()), fin: true },
             );
             reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
         }
+        // else: full write — chunk drops → recycles to pool
     }
 
     fn close_stream(&mut self, stream_id: u64, error_code: u32) {
@@ -2877,28 +2831,23 @@ fn snapshot_quic_metrics(conn: &QuicConnection) -> JsSessionMetrics {
 fn flush_quic_pending_writes(
     conn_map: &mut QuicConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
-    pool_return: &Arc<ChunkPoolReturn>,
+    _pool_return: &Arc<ChunkPoolReturn>,
 ) -> Vec<(u32, u64)> {
     let mut flushed = Vec::new();
     pending.retain(|&(conn_handle, stream_id), pw| {
         let Some(conn) = conn_map.get_mut(conn_handle as usize) else {
-            // PendingWrite drops -> chunk recycles to pool
             return false;
         };
-        let data = std::mem::replace(&mut pw.chunk, Chunk::unpooled(Vec::new())).into_vec();
-        let data_len = data.len();
-        let (written, remainder) = conn.stream_send(stream_id, data, pw.fin).unwrap_or((0, None));
-        if written == 0 && pw.fin && data_len == 0 {
-            true
-        } else if let Some(rem) = remainder {
-            pw.chunk = Chunk::from_vec(rem, Some(Arc::clone(pool_return)));
-            true
-        } else if written >= data_len {
+        let written = conn.stream_send_borrowed(stream_id, pw.chunk.remaining(), pw.fin)
+            .unwrap_or(0);
+        if written >= pw.chunk.remaining_len() {
             flushed.push((conn_handle, stream_id));
-            false
+            false // Remove → PendingWrite drops → chunk recycles
         } else {
-            // Partial write with no remainder (should not normally happen).
-            true
+            if written > 0 {
+                pw.chunk.advance(written);
+            }
+            true // Keep
         }
     });
     flushed
@@ -2907,23 +2856,20 @@ fn flush_quic_pending_writes(
 fn flush_quic_client_pending_writes(
     conn: &mut QuicConnection,
     pending: &mut HashMap<u64, PendingWrite>,
-    pool_return: &Arc<ChunkPoolReturn>,
+    _pool_return: &Arc<ChunkPoolReturn>,
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
-        let data = std::mem::replace(&mut pw.chunk, Chunk::unpooled(Vec::new())).into_vec();
-        let data_len = data.len();
-        let (written, remainder) = conn.stream_send(stream_id, data, pw.fin).unwrap_or((0, None));
-        if written == 0 && pw.fin && data_len == 0 {
-            true
-        } else if let Some(rem) = remainder {
-            pw.chunk = Chunk::from_vec(rem, Some(Arc::clone(pool_return)));
-            true
-        } else if written >= data_len {
+        let written = conn.stream_send_borrowed(stream_id, pw.chunk.remaining(), pw.fin)
+            .unwrap_or(0);
+        if written >= pw.chunk.remaining_len() {
             flushed.push(stream_id);
-            false
+            false // Remove → PendingWrite drops → chunk recycles
         } else {
-            true
+            if written > 0 {
+                pw.chunk.advance(written);
+            }
+            true // Keep
         }
     });
     flushed
