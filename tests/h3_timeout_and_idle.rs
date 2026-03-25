@@ -362,7 +362,7 @@ fn test_h3_request_after_long_idle() {
         WorkerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: b"survived-idle".to_vec(),
+            chunk: Chunk::unpooled(b"survived-idle".to_vec()),
             fin: true,
         },
     );

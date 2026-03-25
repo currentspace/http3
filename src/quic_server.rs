@@ -100,7 +100,7 @@ impl NativeQuicServer {
         handle.send_command(crate::quic_worker::QuicServerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            data: data.to_vec(),
+            chunk: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
             fin,
         })
     }

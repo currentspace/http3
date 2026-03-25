@@ -4,6 +4,7 @@
 
 mod arc_buf;
 mod buffer_pool;
+pub mod chunk_pool;
 mod cid;
 #[cfg(feature = "node-api")]
 mod client;
@@ -61,6 +62,7 @@ pub mod bench_exports {
 
     // ── Buffer pools ────────────────────────────────────────────────
     pub use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
+    pub use crate::chunk_pool::Chunk;
 
     // ── Configuration ───────────────────────────────────────────────
     pub use crate::cid::CidEncoding;

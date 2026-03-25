@@ -425,7 +425,7 @@ fn test_h3_100_concurrent_get_requests() {
                             WorkerCommand::StreamSend {
                                 conn_handle: server_conn,
                                 stream_id: sid,
-                                data: format!("ok-{sid}").into_bytes(),
+                                chunk: Chunk::unpooled(format!("ok-{sid}").into_bytes()),
                                 fin: true,
                             },
                         );
@@ -508,7 +508,7 @@ fn test_h3_50_concurrent_post_requests() {
                 .expect("send_request should succeed");
 
             let body = vec![(i & 0xFF) as u8; body_size];
-            assert!(pair.client.stream_send(stream_id, body, true));
+            assert!(pair.client.stream_send(stream_id, Chunk::unpooled(body), true));
             batch_ids.push(stream_id);
             all_stream_ids.push(stream_id);
         }
@@ -638,7 +638,7 @@ fn test_quic_100_concurrent_bidi_streams() {
                         pair.server.send_command(QuicServerCommand::StreamSend {
                             conn_handle: server_conn,
                             stream_id: sid as u64,
-                            data,
+                            chunk: Chunk::unpooled(data),
                             fin: true,
                         });
                         echoed.insert(sid);

@@ -305,7 +305,7 @@ fn test_quic_client_stream_send_server_echo() {
     assert!(pair.server.send_command(QuicServerCommand::StreamSend {
         conn_handle: server_conn,
         stream_id: 0,
-        data: received_data.clone(),
+        chunk: Chunk::unpooled(received_data.clone()),
         fin: true,
     }));
 
@@ -398,7 +398,7 @@ fn test_quic_multiple_streams() {
         pair.server.send_command(QuicServerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data,
+            chunk: Chunk::unpooled(data),
             fin: true,
         });
     }
@@ -483,7 +483,7 @@ fn test_quic_large_payload() {
     pair.server.send_command(QuicServerCommand::StreamSend {
         conn_handle: server_conn,
         stream_id: 0,
-        data: server_data,
+        chunk: Chunk::unpooled(server_data),
         fin: true,
     });
 

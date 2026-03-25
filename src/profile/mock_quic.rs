@@ -22,6 +22,7 @@ use crate::h3_event::{
 };
 #[cfg(feature = "node-api")]
 use crate::profile::event_sink::channel_and_tsfn_batcher;
+use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_and_counting_batcher, channel_batcher};
 use crate::profile::mock_trace::MockReplayTrace;
 use crate::quic_worker::{
@@ -264,7 +265,7 @@ impl ServerEchoState {
             let _ = server.send_command(QuicServerCommand::StreamSend {
                 conn_handle: key.0,
                 stream_id: key.1,
-                data: fragment,
+                chunk: Chunk::unpooled(fragment),
                 fin: index == last_index,
             });
         }

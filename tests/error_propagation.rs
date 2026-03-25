@@ -565,7 +565,7 @@ fn test_quic_error_on_one_stream_does_not_kill_others() {
     assert!(pair.server.send_command(QuicServerCommand::StreamSend {
         conn_handle: server_conn,
         stream_id: 4,
-        data: stream_4_data,
+        chunk: Chunk::unpooled(stream_4_data),
         fin: true,
     }));
 

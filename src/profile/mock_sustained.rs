@@ -23,6 +23,7 @@ use crate::h3_event::{
     EVENT_DATA, EVENT_ERROR, EVENT_FINISHED, EVENT_HANDSHAKE_COMPLETE, EVENT_NEW_SESSION,
     EVENT_NEW_STREAM, EVENT_SESSION_CLOSE, JsH3Event,
 };
+use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_batcher};
 use crate::quic_worker::{
     QuicServerCommand, QuicServerConfig, QuicServerHandle, spawn_dedicated_quic_client_on_driver,
@@ -234,7 +235,7 @@ impl QuicServerEchoState {
         let _ = server.send_command(QuicServerCommand::StreamSend {
             conn_handle: key.0,
             stream_id: key.1,
-            data: body,
+            chunk: Chunk::unpooled(body),
             fin: true,
         });
         self.echoed_streams += 1;
@@ -318,7 +319,7 @@ impl H3ServerEchoState {
         let _ = server.send_command(WorkerCommand::StreamSend {
             conn_handle: key.0,
             stream_id: key.1,
-            data: body,
+            chunk: crate::chunk_pool::Chunk::unpooled(body),
             fin: true,
         });
         self.echoed_streams += 1;
@@ -785,7 +786,7 @@ fn open_h3_stream(
     let stream_id = client
         .send_request(headers, false)
         .map_err(|e| e.to_string())?;
-    client.stream_send(stream_id, payload.to_vec(), true);
+    client.stream_send(stream_id, crate::chunk_pool::Chunk::unpooled(payload.to_vec()), true);
     Ok(stream_id)
 }
 

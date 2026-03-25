@@ -338,6 +338,39 @@ impl H3Connection {
         }
     }
 
+    /// Send body data on a stream using zero-copy from an owned Vec.
+    ///
+    /// Like `send_body`, but takes ownership of the Vec to avoid an extra
+    /// copy when the caller already has an owned buffer (e.g., from a Chunk).
+    pub fn send_body_owned(
+        &mut self,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+    ) -> Result<usize, Http3NativeError> {
+        let h3 = self
+            .h3_conn
+            .as_mut()
+            .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
+        let data_len = data.len();
+        let mut buf = ArcBuf::from_vec(data);
+        match h3.send_body_zc(&mut self.quiche_conn, stream_id, &mut buf, fin) {
+            Ok(written) => {
+                if written < data_len && self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                }
+                Ok(written)
+            }
+            Err(quiche::h3::Error::Done) => {
+                if self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                }
+                Ok(0)
+            }
+            Err(e) => Err(Http3NativeError::H3(e)),
+        }
+    }
+
     /// Close/reset a stream.
     pub fn stream_close(
         &mut self,

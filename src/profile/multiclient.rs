@@ -23,6 +23,7 @@ use crate::h3_event::{
     EVENT_DATA, EVENT_ERROR, EVENT_FINISHED, EVENT_HANDSHAKE_COMPLETE, EVENT_NEW_SESSION,
     EVENT_NEW_STREAM, EVENT_SESSION_CLOSE, JsH3Event,
 };
+use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_batcher};
 use crate::quic_worker::{
     QuicClientHandle, QuicServerCommand, QuicServerConfig, spawn_quic_client_with_batcher,
@@ -170,7 +171,7 @@ impl ServerEchoState {
         let _ = server.send_command(QuicServerCommand::StreamSend {
             conn_handle: key.0,
             stream_id: key.1,
-            data: body,
+            chunk: Chunk::unpooled(body),
             fin: true,
         });
         self.echoed_streams += 1;

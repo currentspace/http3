@@ -289,7 +289,7 @@ fn test_h3_large_response_with_small_window() {
         WorkerCommand::StreamSend {
             conn_handle: server_conn,
             stream_id,
-            data: body.clone(),
+            chunk: Chunk::unpooled(body.clone()),
             fin: true,
         },
     );
@@ -370,7 +370,7 @@ fn test_h3_large_post_with_small_window() {
     // Client sends the 32KB POST body
     let body_len = 32 * 1024;
     let post_body = vec![0xEF_u8; body_len];
-    assert!(pair.client.stream_send(stream_id, post_body.clone(), true));
+    assert!(pair.client.stream_send(stream_id, Chunk::unpooled(post_body.clone()), true));
 
     // Collect all server events for this stream: HEADERS, DATA, FINISHED
     let mut got_headers = false;
