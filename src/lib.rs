@@ -37,7 +37,7 @@ mod worker;
 pub mod bench_exports {
     // ── Transport layer ─────────────────────────────────────────────
     pub use crate::timer_heap::TimerHeap;
-    pub use crate::transport::mock::{MockDriver, MockWaker};
+    pub use crate::transport::mock::{MockDriver, MockWaker, PacketLossConfig};
     pub use crate::transport::{
         Driver, DriverWaker, ErasedWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
     };
