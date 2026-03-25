@@ -553,6 +553,7 @@ describe('QUIC protocol verification', () => {
       // Trigger connection activity with a stream to ensure datagram path is active
       const stream = client.openStream();
       stream.end(Buffer.from('keepalive'));
+      const streamDone = collect(stream); // Start collecting before datagram race
 
       client.sendDatagram(Buffer.from('ping'));
 
@@ -561,7 +562,7 @@ describe('QUIC protocol verification', () => {
         new Promise<null>((resolve) => { setTimeout(() => resolve(null), 3000); }),
       ]);
 
-      await collect(stream);
+      await streamDone;
 
       assert.ok(echoed !== null, 'should receive datagram echo');
       assert.strictEqual(echoed!.toString(), 'echo:ping');
@@ -600,6 +601,7 @@ describe('QUIC protocol verification', () => {
       // Ensure connection is active
       const stream = client.openStream();
       stream.end(Buffer.from('keepalive'));
+      const streamDone = collect(stream); // Start collecting before datagram race
 
       // Send 20 datagrams rapidly
       for (let i = 0; i < 20; i++) {
@@ -611,7 +613,7 @@ describe('QUIC protocol verification', () => {
         new Promise<void>((resolve) => { setTimeout(resolve, 5000); }),
       ]);
 
-      await collect(stream);
+      await streamDone;
 
       assert.ok(receivedSet.size >= 18,
         `expected at least 18/20 datagrams echoed, got ${receivedSet.size}`);
