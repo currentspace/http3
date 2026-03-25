@@ -154,6 +154,9 @@ pub(crate) trait ProtocolHandler {
     /// Soonest quiche timeout, or `None`.
     fn next_deadline(&mut self) -> Option<Instant>;
 
+    /// Drain returned buffers from V8 GC back into connection data pools.
+    fn drain_recycled_buffers(&mut self) {}
+
     /// Recycle TX buffers back into the handler's pool.
     fn recycle_tx_buffers(&mut self, _buffers: Vec<Vec<u8>>) {}
 
@@ -645,6 +648,9 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         // 8. Cleanup closed connections
         handler.cleanup_closed(&mut batcher.batch);
 
+        // 8b. Drain returned data buffers from V8 GC back into connection pools.
+        handler.drain_recycled_buffers();
+
         // 9. Flush events to JS
         if !batcher.flush() {
             reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
@@ -728,7 +734,7 @@ mod tests {
     }
 
     fn dummy_event() -> JsH3Event {
-        JsH3Event::data(0, 0, vec![1, 2, 3], false)
+        JsH3Event::data(0, 0, vec![1, 2, 3], false, crate::h3_event::NO_RECYCLER)
     }
 
     #[test]

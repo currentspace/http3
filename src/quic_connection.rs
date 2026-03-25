@@ -4,13 +4,14 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::arc_buf::{ArcBuf, ArcBufFactory};
-use crate::buffer_pool::AdaptiveBufferPool;
+use crate::buffer_pool::{AdaptiveBufferPool, BufferRecycler};
 use crate::connection::ConnectionMetrics;
 use crate::error::Http3NativeError;
-use crate::h3_event::JsH3Event;
+use crate::h3_event::{EventRecycler, JsH3Event};
 use crate::reactor_metrics;
 
 /// A raw QUIC connection (no HTTP/3 framing).
@@ -34,10 +35,15 @@ pub struct QuicConnection {
     pub qlog_path: Option<String>,
     pub session_ticket: Option<Vec<u8>>,
     /// Pool for stream_recv output buffers — each checkout becomes the event data
-    /// Vec directly, avoiding an intermediate copy. Buffers are NOT returned to
-    /// the pool (they're consumed by TSFN/JS), but the pool reduces malloc churn
-    /// when quiche delivers data faster than JS consumes events.
+    /// Vec directly, avoiding an intermediate copy. Buffers returned from V8 GC
+    /// via the recycler channel are pulled back into this pool periodically.
     pub data_pool: AdaptiveBufferPool,
+    /// Thread-safe handle cloned into each data event so V8 GC can return
+    /// the buffer to `data_pool` instead of freeing it.
+    pub(crate) data_recycler: Arc<BufferRecycler>,
+    /// Receiving end of the recycler channel — drained periodically on the
+    /// worker thread to pull returned buffers back into `data_pool`.
+    pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 pub struct QuicConnectionInit<'a> {
@@ -64,6 +70,8 @@ impl QuicConnection {
             init.qlog_dir,
             init.qlog_level,
         );
+        let (data_pool, data_recycler, data_recycle_rx) =
+            AdaptiveBufferPool::with_recycler(64, 4096);
         Self {
             quiche_conn,
             conn_id,
@@ -77,7 +85,9 @@ impl QuicConnection {
             pending_fin: HashSet::new(),
             qlog_path,
             session_ticket: None,
-            data_pool: AdaptiveBufferPool::new(64, 4096),
+            data_pool,
+            data_recycler,
+            data_recycle_rx,
         }
     }
 
@@ -151,6 +161,7 @@ impl QuicConnection {
                             stream_id,
                             buf,
                             fin,
+                            self.event_recycler(),
                         ));
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
@@ -188,7 +199,7 @@ impl QuicConnection {
                     Ok((len, fin)) => {
                         if len > 0 {
                             buf.truncate(len);
-                            events.push(JsH3Event::data(conn_handle, stream_id, buf, fin));
+                            events.push(JsH3Event::data(conn_handle, stream_id, buf, fin, self.event_recycler()));
                         } else {
                             self.data_pool.checkin(buf);
                         }
@@ -381,6 +392,22 @@ impl QuicConnection {
         Ok(())
     }
 
+    /// Pull returned buffers from the recycler channel back into the data pool.
+    /// Called once per event-loop iteration on the worker thread.
+    pub fn drain_recycled(&mut self) {
+        self.data_pool.drain_returned(&self.data_recycle_rx);
+    }
+
+    /// Return the event recycler for data buffers. Under `node-api`, this is
+    /// `Some(Arc<BufferRecycler>)` so V8 GC can return buffers to the pool.
+    /// Without `node-api`, it is `()` (zero-cost no-op).
+    fn event_recycler(&self) -> EventRecycler {
+        #[cfg(feature = "node-api")]
+        { Some(Arc::clone(&self.data_recycler)) }
+        #[cfg(not(feature = "node-api"))]
+        { () }
+    }
+
     pub fn is_closed(&self) -> bool {
         self.quiche_conn.is_closed()
     }
@@ -399,7 +426,7 @@ impl QuicConnection {
             match self.quiche_conn.dgram_recv(&mut buf) {
                 Ok(len) => {
                     buf.truncate(len);
-                    events.push(JsH3Event::datagram(conn_handle, buf));
+                    events.push(JsH3Event::datagram(conn_handle, buf, self.event_recycler()));
                 }
                 Err(quiche::Error::Done) => {
                     self.data_pool.checkin(buf);

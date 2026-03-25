@@ -4,14 +4,15 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use quiche::h3::NameValue;
 
 use crate::arc_buf::{ArcBuf, ArcBufFactory};
-use crate::buffer_pool::AdaptiveBufferPool;
+use crate::buffer_pool::{AdaptiveBufferPool, BufferRecycler};
 use crate::error::Http3NativeError;
-use crate::h3_event::{JsH3Event, JsHeader};
+use crate::h3_event::{EventRecycler, JsH3Event, JsHeader};
 use crate::reactor_metrics;
 
 pub struct H3Connection {
@@ -33,6 +34,12 @@ pub struct H3Connection {
     pub last_peer_stream_id: u64,
     /// Pool for recv_body output — buffers become event data directly.
     pub data_pool: AdaptiveBufferPool,
+    /// Thread-safe handle cloned into each data event so V8 GC can return
+    /// the buffer to `data_pool` instead of freeing it.
+    pub(crate) data_recycler: Arc<BufferRecycler>,
+    /// Receiving end of the recycler channel — drained periodically on the
+    /// worker thread to pull returned buffers back into `data_pool`.
+    pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 pub struct H3ConnectionInit<'a> {
@@ -77,6 +84,8 @@ impl H3Connection {
             init.qlog_dir,
             init.qlog_level,
         );
+        let (data_pool, data_recycler, data_recycle_rx) =
+            AdaptiveBufferPool::with_recycler(64, 4096);
         Self {
             quiche_conn,
             h3_conn: None,
@@ -92,7 +101,9 @@ impl H3Connection {
             qpack_max_table_capacity: init.qpack_max_table_capacity,
             qpack_blocked_streams: init.qpack_blocked_streams,
             last_peer_stream_id: 0,
-            data_pool: AdaptiveBufferPool::new(64, 4096),
+            data_pool,
+            data_recycler,
+            data_recycle_rx,
         }
     }
 
@@ -133,6 +144,7 @@ impl H3Connection {
 
     /// Poll for H3 events and push them into the provided batch.
     pub fn poll_h3_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
+        let recycler = self.event_recycler();
         if let Some(h3_conn) = self.h3_conn.as_mut() {
             loop {
                 match h3_conn.poll(&mut self.quiche_conn) {
@@ -168,6 +180,7 @@ impl H3Connection {
                                         stream_id,
                                         buf,
                                         false,
+                                        recycler.clone(),
                                     ));
                                 }
                                 Err(quiche::h3::Error::Done) => {
@@ -369,6 +382,22 @@ impl H3Connection {
             .map_err(Http3NativeError::H3)
     }
 
+    /// Pull returned buffers from the recycler channel back into the data pool.
+    /// Called once per event-loop iteration on the worker thread.
+    pub fn drain_recycled(&mut self) {
+        self.data_pool.drain_returned(&self.data_recycle_rx);
+    }
+
+    /// Return the event recycler for data buffers. Under `node-api`, this is
+    /// `Some(Arc<BufferRecycler>)` so V8 GC can return buffers to the pool.
+    /// Without `node-api`, it is `()` (zero-cost no-op).
+    fn event_recycler(&self) -> EventRecycler {
+        #[cfg(feature = "node-api")]
+        { Some(Arc::clone(&self.data_recycler)) }
+        #[cfg(not(feature = "node-api"))]
+        { () }
+    }
+
     /// Is the connection closed?
     pub fn is_closed(&self) -> bool {
         self.quiche_conn.is_closed()
@@ -406,7 +435,11 @@ impl H3Connection {
         let mut recv_buf = [0u8; 65535];
         loop {
             match self.quiche_conn.dgram_recv(&mut recv_buf) {
-                Ok(len) => events.push(JsH3Event::datagram(conn_handle, recv_buf[..len].to_vec())),
+                Ok(len) => events.push(JsH3Event::datagram(
+                    conn_handle,
+                    recv_buf[..len].to_vec(),
+                    self.event_recycler(),
+                )),
                 Err(quiche::Error::Done) => break,
                 Err(_) => break,
             }
