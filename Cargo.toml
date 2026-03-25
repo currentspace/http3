@@ -37,7 +37,7 @@ required-features = ["profile-binary"]
 [dependencies]
 napi = { version = "3", features = ["napi4", "napi6", "napi8"] }
 napi-derive = "3"
-quiche = { version = "0.26", features = ["qlog", "aws-lc"] }
+quiche = { version = "0.26", features = ["qlog"] }
 ring = "0.17"
 log = "0.4"
 slab = "0.4"
@@ -99,7 +99,3 @@ unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
 
-[patch.crates-io]
-quiche = { git = "https://github.com/currentspace/quiche", branch = "feat/aws-lc-backend" }
-octets = { git = "https://github.com/currentspace/quiche", branch = "feat/aws-lc-backend" }
-qlog = { git = "https://github.com/currentspace/quiche", branch = "feat/aws-lc-backend" }
