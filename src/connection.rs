@@ -341,13 +341,19 @@ impl H3Connection {
     /// Send body data on a stream using zero-copy from an owned Vec.
     ///
     /// Like `send_body`, but takes ownership of the Vec to avoid an extra
-    /// copy when the caller already has an owned buffer (e.g., from a Chunk).
+    /// Zero-copy variant: wraps a `Vec<u8>` in `ArcBuf` without copying,
+    /// eliminating the `data.to_vec()` copy in [`send_body`].
+    ///
+    /// Returns `(written, Option<remainder>)`.  On full write, remainder is
+    /// `None` — the Vec is donated to quiche's ArcBuf.  On partial write,
+    /// the unwritten bytes are copied out of the ArcBuf into a new Vec
+    /// (one copy vs two in the old `send_body` path).
     pub fn send_body_owned(
         &mut self,
         stream_id: u64,
         data: Vec<u8>,
         fin: bool,
-    ) -> Result<usize, Http3NativeError> {
+    ) -> Result<(usize, Option<Vec<u8>>), Http3NativeError> {
         let h3 = self
             .h3_conn
             .as_mut()
@@ -359,13 +365,21 @@ impl H3Connection {
                 if written < data_len && self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
                 }
-                Ok(written)
+                // After send_body_zc, quiche replaces buf with the unwritten
+                // remainder (if any). buf.as_ref() IS the remainder.
+                let remainder = if written < data_len {
+                    Some(buf.as_ref().to_vec())
+                } else {
+                    None
+                };
+                Ok((written, remainder))
             }
             Err(quiche::h3::Error::Done) => {
                 if self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
                 }
-                Ok(0)
+                // Full block — buf is unmodified, return all data.
+                Ok((0, Some(buf.as_ref().to_vec())))
             }
             Err(e) => Err(Http3NativeError::H3(e)),
         }
