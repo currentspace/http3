@@ -1475,118 +1475,101 @@ mod tests {
         let (mut client, _cw) = IoUringDriver::new(client_sock).unwrap();
         let (mut server, _sw) = IoUringDriver::new(server_sock).unwrap();
 
-        let total_pkts = 500;
-        let pkt_size = 1200;
+        let total_pkts: usize = 500;
+        let pkt_size: usize = 1200;
         let total_bytes = total_pkts * pkt_size;
 
-        // Server thread: poll, echo back, repeat.
+        // Flow control: client sends a batch of `batch_size` packets, then
+        // waits for the server to echo them back before sending the next
+        // batch.  This keeps at most `batch_size` packets in-flight,
+        // preventing kernel rcvbuf overflow on any machine.
+        let batch_size: usize = 16;
+
+        // Synchronize: server signals when its ring is armed so the client
+        // doesn't send into a socket with no receiver.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+
+        // ── Server thread: echo everything back ──
         let server_handle = thread::spawn(move || {
-            let _ = server.poll(Some(Instant::now() + Duration::from_millis(1)));
+            // Enable ring + arm multishot recv.
+            let _ = server.poll(Some(Instant::now() + Duration::from_millis(100)));
+            let _ = ready_tx.send(()); // Signal: ring armed, ready to receive.
             let mut rx_bytes = 0usize;
-            let mut tx_bytes = 0usize;
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let echo_batch_size = 32usize;
+            let deadline = Instant::now() + Duration::from_secs(30);
 
             while Instant::now() < deadline {
                 let out = server
                     .poll(Some(Instant::now() + Duration::from_millis(50)))
                     .unwrap();
-                if !out.rx.is_empty() {
-                    let mut echo = Vec::new();
-                    for pkt in &out.rx {
-                        rx_bytes += pkt.data.len();
-                        if let Some(seg) = pkt.segment_size {
-                            for chunk in pkt.data.chunks(seg as usize) {
-                                echo.push(TxDatagram {
-                                    data: chunk.to_vec(),
-                                    to: client_addr,
-                                });
-                            }
-                        } else {
-                            echo.push(TxDatagram {
-                                data: pkt.data.clone(),
-                                to: client_addr,
-                            });
-                        }
-                    }
-                    tx_bytes += echo.iter().map(|p| p.data.len()).sum::<usize>();
-                    while !echo.is_empty() {
-                        let rest = if echo.len() > echo_batch_size {
-                            echo.split_off(echo_batch_size)
-                        } else {
-                            Vec::new()
-                        };
-                        let batch = std::mem::replace(&mut echo, rest);
-                        server.submit_sends(batch).unwrap();
-                        if server.pending_tx_count() > 0 {
-                            let _ = server.poll(Some(Instant::now() + Duration::from_millis(1)));
-                        }
-                    }
+                let mut echo = Vec::new();
+                for pkt in &out.rx {
+                    rx_bytes += pkt.data.len();
+                    echo.push(TxDatagram {
+                        data: pkt.data.clone(),
+                        to: client_addr,
+                    });
                 }
-                // Stop only after we've received the full burst and drained any
-                // queued echo sends back out to the client.
-                if rx_bytes >= total_bytes && server.pending_tx_count() == 0 {
-                    // Extra drain pass: poll one more time to flush any in-flight
-                    // echo sends and let the kernel deliver the final CQEs.
-                    let drain_out = server
-                        .poll(Some(Instant::now() + Duration::from_millis(20)))
-                        .unwrap();
-                    tx_bytes += drain_out.rx.iter().map(|p| p.data.len()).sum::<usize>();
+                if !echo.is_empty() {
+                    server.submit_sends(echo).unwrap();
+                    // Poll to flush sends.
+                    let _ = server.poll(Some(Instant::now() + Duration::from_millis(5)));
+                }
+                if rx_bytes >= total_bytes {
+                    // Final flush.
+                    let _ = server.poll(Some(Instant::now() + Duration::from_millis(50)));
                     break;
                 }
             }
-            eprintln!(
-                "  server: rx={rx_bytes} tx={tx_bytes} pending={}",
-                server.pending_tx_count(),
-            );
-            (rx_bytes, tx_bytes)
+            rx_bytes
         });
 
-        // Client: enable and then send in large batches while the server runs
-        // on a separate thread. This keeps the cross-thread topology without
-        // depending on host socket-buffer limits for a single 600KB burst.
-        let _ = client.poll(Some(Instant::now() + Duration::from_millis(1)));
+        // ── Client: send batch, wait for echoes, send next batch ──
+        // Enable ring, then wait for server to be ready.
+        let _ = client.poll(Some(Instant::now() + Duration::from_millis(100)));
+        let _ = ready_rx.recv_timeout(Duration::from_secs(5));
 
-        // Poll for echoes.
-        let batch_size = 10usize;
         let mut sent_pkts = 0usize;
         let mut echo_bytes = 0usize;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
+
         while echo_bytes < total_bytes && Instant::now() < deadline {
+            // Send one batch.
             if sent_pkts < total_pkts {
-                let batch_end = (sent_pkts + batch_size).min(total_pkts);
-                let packets: Vec<TxDatagram> = (sent_pkts..batch_end)
+                let n = batch_size.min(total_pkts - sent_pkts);
+                let packets: Vec<TxDatagram> = (sent_pkts..sent_pkts + n)
                     .map(|i| TxDatagram {
                         data: vec![(i % 256) as u8; pkt_size],
                         to: server_addr,
                     })
                     .collect();
                 client.submit_sends(packets).unwrap();
-                sent_pkts = batch_end;
-                let _ = client.poll(Some(Instant::now() + Duration::from_millis(5)));
+                sent_pkts += n;
             }
-            let out = client
-                .poll(Some(Instant::now() + Duration::from_millis(50)))
-                .unwrap();
-            for pkt in &out.rx {
-                echo_bytes += pkt.data.len();
+
+            // Wait for at least some echoes before sending more.
+            // The batch_size × pkt_size bytes we just sent should come back.
+            let batch_bytes = batch_size * pkt_size;
+            let target = (echo_bytes + batch_bytes).min(total_bytes);
+            let batch_deadline = Instant::now() + Duration::from_secs(5);
+            while echo_bytes < target && Instant::now() < batch_deadline {
+                let out = client
+                    .poll(Some(Instant::now() + Duration::from_millis(50)))
+                    .unwrap();
+                for pkt in &out.rx {
+                    echo_bytes += pkt.data.len();
+                }
             }
         }
 
-        let (srv_rx, _srv_tx) = server_handle.join().unwrap();
+        let srv_rx = server_handle.join().unwrap();
         eprintln!(
-            "  cross-thread echo: client_sent={total_bytes} server_rx={srv_rx} client_echo={echo_bytes}/{total_bytes}",
+            "  cross-thread echo: sent={sent_pkts}/{total_pkts} server_rx={srv_rx} \
+             echo={echo_bytes}/{total_bytes} (batch={batch_size})",
         );
-        // UDP on localhost can drop packets when the kernel socket buffer
-        // overflows (wmem_max limits the sender, rmem_max limits the receiver).
-        // Require >=98% delivery — enough to verify the io_uring driver works
-        // correctly without depending on perfect UDP delivery guarantees.
-        let min_expected = (total_bytes as f64 * 0.98) as usize;
-        assert!(
-            echo_bytes >= min_expected,
-            "client should receive >=98% of echoed bytes (got {echo_bytes}/{total_bytes} = {:.1}%, \
+        assert_eq!(
+            echo_bytes, total_bytes,
+            "client must receive all echoed bytes (got {echo_bytes}/{total_bytes}, \
              server_rx={srv_rx})",
-            (echo_bytes as f64 / total_bytes as f64) * 100.0,
         );
     }
 
