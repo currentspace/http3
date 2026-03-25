@@ -29,7 +29,11 @@ mod inner {
     };
 
     /// Number of provided buffers in the RX buffer ring.
-    const RX_RING_SIZE: u16 = 256;
+    /// 512 gives enough headroom for burst receives between poll() calls —
+    /// the kernel silently drops datagrams when the ring is exhausted.
+    const RX_RING_SIZE: u16 = 512;
+    /// Flush returned buffers to the kernel every N CQEs to prevent ring exhaustion.
+    const RX_FLUSH_INTERVAL: u16 = 32;
     /// Each buffer must hold a full UDP datagram + the recvmsg_out header + sockaddr.
     /// Header: io_uring_recvmsg_out (16 bytes) + sockaddr_storage (128 bytes) = 144 bytes overhead.
     const RX_BUF_OVERHEAD: usize = std::mem::size_of::<libc::sockaddr_storage>()
@@ -57,6 +61,15 @@ mod inner {
 
     const FIXED_SOCKET: io_uring::types::Fixed = io_uring::types::Fixed(0);
     const FIXED_EVENTFD: io_uring::types::Fixed = io_uring::types::Fixed(1);
+
+    /// Compile-time-optional trace logging for diagnosing driver-level issues.
+    /// Zero cost when `driver-tracing` feature is disabled (default).
+    macro_rules! driver_trace {
+        ($($arg:tt)*) => {
+            #[cfg(feature = "driver-tracing")]
+            log::trace!($($arg)*);
+        };
+    }
 
     /// Page-aligned buffer ring memory for the kernel provided-buffer interface.
     struct RxBufferRing {
@@ -691,6 +704,7 @@ mod inner {
             let cqe_count = self.cqe_buf.len();
 
             let mut bundle_needs_reset = false;
+            let mut staged_rx_returns = 0u16;
             for cqe_idx in 0..cqe_count {
                 let cqe = &self.cqe_buf[cqe_idx];
                 let user_data = cqe.user_data();
@@ -703,6 +717,7 @@ mod inner {
                         // Multishot recvmsg: check if more completions coming.
                         let has_more = io_uring::cqueue::more(flags);
                         if !has_more {
+                            driver_trace!("io_uring: multishot disarmed (no IORING_CQE_F_MORE)");
                             self.rx_armed = false;
                         }
 
@@ -742,8 +757,24 @@ mod inner {
                                     }
                                 }
 
-                                // Return buffer to the ring immediately.
+                                // Return buffer to the ring and flush periodically
+                                // to prevent ring exhaustion during large bursts.
                                 self.rx_ring.stage_buffer_return(bid);
+                                staged_rx_returns += 1;
+                                if staged_rx_returns >= RX_FLUSH_INTERVAL {
+                                    self.rx_ring.flush_buffer_returns();
+                                    driver_trace!(
+                                        "io_uring: flushed {staged_rx_returns} RX buffers mid-CQE"
+                                    );
+                                    staged_rx_returns = 0;
+                                }
+                            } else {
+                                // result > 0 but no buffer — the kernel ran out of
+                                // provided buffers and dropped the datagram.
+                                log::warn!(
+                                    "io_uring: RX buffer ring exhausted — datagram dropped \
+                                     (result={result}, ring_size={RX_RING_SIZE})"
+                                );
                             }
                         } else if result < 0 {
                             // Error on multishot — will re-arm below.
@@ -854,8 +885,13 @@ mod inner {
                 );
             }
 
-            // Single fence to publish all returned buffers to the kernel.
-            self.rx_ring.flush_buffer_returns();
+            // Final fence to publish any remaining returned buffers to the kernel.
+            if staged_rx_returns > 0 {
+                self.rx_ring.flush_buffer_returns();
+                driver_trace!(
+                    "io_uring: flushed final {staged_rx_returns} RX buffers after CQE loop"
+                );
+            }
 
             // Deferred TX bundle ring reset (avoids borrow conflict in CQE loop).
             if bundle_needs_reset {
@@ -879,6 +915,7 @@ mod inner {
 
             // Re-arm multishot recvmsg if it was disarmed.
             if !self.rx_armed {
+                driver_trace!("io_uring: re-arming multishot recv");
                 self.arm_multishot_recv()?;
             }
 

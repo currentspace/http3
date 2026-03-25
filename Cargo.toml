@@ -11,6 +11,7 @@ default = ["node-api"]
 node-api = []
 profile-binary = ["rcgen"]
 bench-internals = []
+driver-tracing = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]
