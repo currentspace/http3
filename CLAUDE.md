@@ -156,6 +156,19 @@ pnpm run docker:up                       # start on :8443 (H3+H2) + :8080 (healt
 pnpm run docker:down                     # stop
 ```
 
+## Driver Tracing
+
+Enable compile-time tracing in the io_uring/poll/kqueue transport drivers:
+
+```bash
+cargo test --lib --features driver-tracing -- iouring  # trace io_uring driver
+RUST_LOG=trace cargo run --features driver-tracing     # trace in production binary
+```
+
+The `driver-tracing` feature compiles to zero cost when disabled (default). It adds `log::trace!` calls at key points: RX buffer ring state, multishot arm/disarm, CQE processing, buffer exhaustion warnings.
+
+**Buffer exhaustion warnings** (`log::warn!`) are always enabled regardless of feature flag — they indicate the kernel is silently dropping datagrams.
+
 ## Performance Profiling
 
 ```bash
