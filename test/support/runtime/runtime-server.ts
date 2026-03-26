@@ -5,6 +5,7 @@ import type { FetchHandler } from '../../../lib/fetch-adapter.js';
 import { generateTestCerts } from '../generate-certs.js';
 import type { QuicServerSession } from '../../../lib/index.js';
 import type { QuicStream } from '../../../lib/quic-stream.js';
+import { echoStream } from '../echo-stream.js';
 
 const SERVER_RUNTIME_MODE = process.env.SERVER_RUNTIME_MODE as 'auto' | 'fast' | 'portable' | undefined;
 const SERVER_FALLBACK_POLICY = process.env.SERVER_FALLBACK_POLICY as 'error' | 'warn-and-fallback' | undefined;
@@ -36,7 +37,7 @@ async function main(): Promise<void> {
 
   quicServer.on('session', (session: QuicServerSession) => {
     session.on('stream', (stream: QuicStream) => {
-      stream.pipe(stream);
+      echoStream(stream);
     });
   });
 

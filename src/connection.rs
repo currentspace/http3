@@ -4,15 +4,19 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use quiche::h3::NameValue;
 
+use crate::arc_buf::{ArcBuf, ArcBufFactory};
+use crate::buffer_pool::{AdaptiveBufferPool, BufferRecycler};
 use crate::error::Http3NativeError;
-use crate::h3_event::{JsH3Event, JsHeader};
+use crate::h3_event::{EventRecycler, JsH3Event, JsHeader};
+use crate::reactor_metrics;
 
 pub struct H3Connection {
-    pub quiche_conn: quiche::Connection,
+    pub quiche_conn: quiche::Connection<ArcBufFactory>,
     pub h3_conn: Option<quiche::h3::Connection>,
     pub conn_id: Vec<u8>,
     pub created_at: Instant,
@@ -28,6 +32,14 @@ pub struct H3Connection {
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
     pub last_peer_stream_id: u64,
+    /// Pool for recv_body output — buffers become event data directly.
+    pub data_pool: AdaptiveBufferPool,
+    /// Thread-safe handle cloned into each data event so V8 GC can return
+    /// the buffer to `data_pool` instead of freeing it.
+    pub(crate) data_recycler: Arc<BufferRecycler>,
+    /// Receiving end of the recycler channel — drained periodically on the
+    /// worker thread to pull returned buffers back into `data_pool`.
+    pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 pub struct H3ConnectionInit<'a> {
@@ -61,7 +73,7 @@ impl ConnectionMetrics {
 impl H3Connection {
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(
-        mut quiche_conn: quiche::Connection,
+        mut quiche_conn: quiche::Connection<ArcBufFactory>,
         conn_id: Vec<u8>,
         init: H3ConnectionInit<'_>,
     ) -> Self {
@@ -72,6 +84,8 @@ impl H3Connection {
             init.qlog_dir,
             init.qlog_level,
         );
+        let (data_pool, data_recycler, data_recycle_rx) =
+            AdaptiveBufferPool::with_recycler(64, 4096);
         Self {
             quiche_conn,
             h3_conn: None,
@@ -87,6 +101,9 @@ impl H3Connection {
             qpack_max_table_capacity: init.qpack_max_table_capacity,
             qpack_blocked_streams: init.qpack_blocked_streams,
             last_peer_stream_id: 0,
+            data_pool,
+            data_recycler,
+            data_recycle_rx,
         }
     }
 
@@ -127,6 +144,7 @@ impl H3Connection {
 
     /// Poll for H3 events and push them into the provided batch.
     pub fn poll_h3_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
+        let recycler = self.event_recycler();
         if let Some(h3_conn) = self.h3_conn.as_mut() {
             loop {
                 match h3_conn.poll(&mut self.quiche_conn) {
@@ -148,23 +166,29 @@ impl H3Connection {
                     }
                     Ok((stream_id, quiche::h3::Event::Data)) => {
                         self.last_peer_stream_id = stream_id;
-                        // Read data — use a moderately-sized stack buffer.
-                        // H3 body chunks are typically small; quiche will return Done
-                        // when no more data is available and we'll loop to read more.
-                        let mut recv_buf = [0u8; 16384];
                         loop {
-                            match h3_conn.recv_body(&mut self.quiche_conn, stream_id, &mut recv_buf)
-                            {
+                            let (mut buf, _) = self.data_pool.checkout(16384);
+                            match h3_conn.recv_body(
+                                &mut self.quiche_conn,
+                                stream_id,
+                                &mut buf,
+                            ) {
                                 Ok(len) => {
+                                    buf.truncate(len);
                                     events.push(JsH3Event::data(
                                         conn_handle,
                                         stream_id,
-                                        recv_buf[..len].to_vec(),
+                                        buf,
                                         false,
+                                        recycler.clone(),
                                     ));
                                 }
-                                Err(quiche::h3::Error::Done) => break,
+                                Err(quiche::h3::Error::Done) => {
+                                    self.data_pool.checkin(buf);
+                                    break;
+                                }
                                 Err(e) => {
+                                    self.data_pool.checkin(buf);
                                     events.push(JsH3Event::error(
                                         conn_handle,
                                         stream_id as i64,
@@ -282,7 +306,10 @@ impl H3Connection {
             .map_err(Http3NativeError::H3)
     }
 
-    /// Send body data on a stream. Returns bytes written.
+    /// Send body data on a stream using zero-copy. Returns bytes written.
+    ///
+    /// Wraps the input slice into an `ArcBuf` and uses quiche's
+    /// `send_body_zc` to avoid an internal copy inside the H3 framer.
     pub fn send_body(
         &mut self,
         stream_id: u64,
@@ -293,7 +320,8 @@ impl H3Connection {
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
-        match h3.send_body(&mut self.quiche_conn, stream_id, data, fin) {
+        let mut buf = ArcBuf::from_vec(data.to_vec());
+        match h3.send_body_zc(&mut self.quiche_conn, stream_id, &mut buf, fin) {
             Ok(written) => {
                 if written < data.len() && self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
@@ -310,12 +338,70 @@ impl H3Connection {
         }
     }
 
+    /// Send body data on a stream using zero-copy from an owned Vec.
+    ///
+    /// Like `send_body`, but takes ownership of the Vec to avoid an extra
+    /// Zero-copy variant: wraps a `Vec<u8>` in `ArcBuf` without copying,
+    /// eliminating the `data.to_vec()` copy in [`send_body`].
+    ///
+    /// Returns `(written, Option<remainder>)`.  On full write, remainder is
+    /// `None` — the Vec is donated to quiche's ArcBuf.  On partial write,
+    /// the unwritten bytes are copied out of the ArcBuf into a new Vec
+    /// (one copy vs two in the old `send_body` path).
+    pub fn send_body_owned(
+        &mut self,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+    ) -> Result<(usize, Option<Vec<u8>>), Http3NativeError> {
+        let h3 = self
+            .h3_conn
+            .as_mut()
+            .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
+        let data_len = data.len();
+        let mut buf = ArcBuf::from_vec(data);
+        match h3.send_body_zc(&mut self.quiche_conn, stream_id, &mut buf, fin) {
+            Ok(written) => {
+                if written < data_len && self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                }
+                // After send_body_zc, quiche replaces buf with the unwritten
+                // remainder (if any). buf.as_ref() IS the remainder.
+                let remainder = if written < data_len {
+                    Some(buf.as_ref().to_vec())
+                } else {
+                    None
+                };
+                Ok((written, remainder))
+            }
+            Err(quiche::h3::Error::Done) => {
+                if self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                }
+                // Full block — buf is unmodified, return all data.
+                Ok((0, Some(buf.as_ref().to_vec())))
+            }
+            Err(e) => Err(Http3NativeError::H3(e)),
+        }
+    }
+
     /// Close/reset a stream.
     pub fn stream_close(
         &mut self,
         stream_id: u64,
         error_code: u64,
     ) -> Result<(), Http3NativeError> {
+        reactor_metrics::record_lifecycle_trace(
+            "h3-connection",
+            "stream-close",
+            None,
+            None,
+            None,
+            Some(format!(
+                "stream_id={stream_id} error_code={error_code} blocked_streams={}",
+                self.blocked_set.len()
+            )),
+        );
         self.quiche_conn
             .stream_shutdown(stream_id, quiche::Shutdown::Read, error_code)
             .ok(); // Ignore errors if already closed
@@ -343,6 +429,22 @@ impl H3Connection {
             .map_err(Http3NativeError::H3)
     }
 
+    /// Pull returned buffers from the recycler channel back into the data pool.
+    /// Called once per event-loop iteration on the worker thread.
+    pub fn drain_recycled(&mut self) {
+        self.data_pool.drain_returned(&self.data_recycle_rx);
+    }
+
+    /// Return the event recycler for data buffers. Under `node-api`, this is
+    /// `Some(Arc<BufferRecycler>)` so V8 GC can return buffers to the pool.
+    /// Without `node-api`, it is `()` (zero-cost no-op).
+    fn event_recycler(&self) -> EventRecycler {
+        #[cfg(feature = "node-api")]
+        { Some(Arc::clone(&self.data_recycler)) }
+        #[cfg(not(feature = "node-api"))]
+        { () }
+    }
+
     /// Is the connection closed?
     pub fn is_closed(&self) -> bool {
         self.quiche_conn.is_closed()
@@ -353,6 +455,18 @@ impl H3Connection {
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
+        reactor_metrics::record_lifecycle_trace(
+            "h3-connection",
+            "send-goaway",
+            None,
+            None,
+            None,
+            Some(format!(
+                "last_peer_stream_id={} blocked_streams={}",
+                self.last_peer_stream_id,
+                self.blocked_set.len()
+            )),
+        );
         h3.send_goaway(&mut self.quiche_conn, self.last_peer_stream_id)
             .map_err(Http3NativeError::H3)
     }
@@ -368,7 +482,11 @@ impl H3Connection {
         let mut recv_buf = [0u8; 65535];
         loop {
             match self.quiche_conn.dgram_recv(&mut recv_buf) {
-                Ok(len) => events.push(JsH3Event::datagram(conn_handle, recv_buf[..len].to_vec())),
+                Ok(len) => events.push(JsH3Event::datagram(
+                    conn_handle,
+                    recv_buf[..len].to_vec(),
+                    self.event_recycler(),
+                )),
                 Err(quiche::Error::Done) => break,
                 Err(_) => break,
             }
@@ -414,10 +532,14 @@ impl H3Connection {
             .next()
             .map_or(0, |s| s.cwnd as u64)
     }
+
+    pub fn pmtu(&self) -> usize {
+        self.quiche_conn.path_stats().next().map_or(0, |s| s.pmtu)
+    }
 }
 
 fn maybe_enable_qlog(
-    quiche_conn: &mut quiche::Connection,
+    quiche_conn: &mut quiche::Connection<ArcBufFactory>,
     conn_id: &[u8],
     role: &str,
     qlog_dir: Option<&str>,

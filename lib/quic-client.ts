@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { resolveConnectionEndpoint } from './endpoint.js';
@@ -74,9 +74,21 @@ interface NormalizedQuicClientTlsOptions {
 class QuicClientEventLoop implements QuicClientEventLoopLike {
   private readonly worker: NativeQuicClientBinding;
   private closed = false;
+  private _shutdownObserved = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeQuicClientBinding) {
     this.worker = worker;
+  }
+
+  /** @internal */
+  _onShutdownSentinel(): void {
+    this._shutdownObserved = true;
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
   }
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
@@ -112,11 +124,17 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const queued = this.worker.close(0, 'client close');
-    if (queued) {
-      await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
-    }
+    if (this._shutdownObserved) return;
+    this.worker.close(0, 'client close');
+    const settled = new Promise<void>((resolve) => {
+      if (this._shutdownObserved) {
+        resolve();
+        return;
+      }
+      this._shutdownResolve = resolve;
+    });
     this.worker.shutdown();
+    await settled;
   }
 }
 
@@ -192,6 +210,7 @@ export class QuicClientSession extends EventEmitter {
     stream._streamId = streamId;
     stream._clientLoop = this._eventLoop;
     this._streams.set(streamId, stream);
+    this._trackStreamLifecycle(streamId, stream);
     return stream;
   }
 
@@ -271,12 +290,12 @@ export class QuicClientSession extends EventEmitter {
           break;
         case EVENT_SESSION_TICKET:
           if (event.data) {
-            this.emit('sessionTicket', Buffer.from(event.data));
+            this.emit('sessionTicket', event.data);
           }
           break;
         case EVENT_DATAGRAM:
           if (event.data) {
-            this.emit('datagram', Buffer.from(event.data));
+            this.emit('datagram', event.data);
           }
           break;
         default:
@@ -287,12 +306,11 @@ export class QuicClientSession extends EventEmitter {
 
   private _onNewStream(event: NativeEvent): void {
     const stream = this._getOrCreateStream(event.streamId);
-    // Coalesced first data from Rust: push inline to avoid extra TSFN event
     if (event.data) {
-      stream.push(Buffer.from(event.data));
+      stream._pushData(event.data);
     }
     if (event.fin) {
-      stream.push(null);
+      stream._pushData(null);
     }
     this.emit('stream', stream);
   }
@@ -300,13 +318,18 @@ export class QuicClientSession extends EventEmitter {
   private _onData(event: NativeEvent): void {
     if (!event.data) return;
     const stream = this._getOrCreateStream(event.streamId);
-    stream.push(Buffer.from(event.data));
+    stream._pushData(event.data);
   }
 
   private _onFinished(event: NativeEvent): void {
     const stream = this._streams.get(event.streamId);
     if (stream) {
-      stream.push(null);
+      stream._pushData(null);
+      // If the readable side was never consumed, resume it so the Duplex
+      // can fully destroy and fire 'close' (which triggers map cleanup).
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
     }
   }
 
@@ -361,15 +384,29 @@ export class QuicClientSession extends EventEmitter {
       stream._streamId = streamId;
       stream._clientLoop = this._eventLoop;
       this._streams.set(streamId, stream);
+      this._trackStreamLifecycle(streamId, stream);
     }
     return stream;
   }
 
   private _cleanupStreams(): void {
-    for (const stream of this._streams.values()) {
-      stream.destroy();
+    const err = new Error('session closed');
+    for (const stream of [...this._streams.values()]) {
+      if (stream.listenerCount('error') > 0) {
+        stream.destroy(err);
+      } else {
+        stream.destroy();
+      }
     }
     this._streams.clear();
+  }
+
+  private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
+    stream.once('close', () => {
+      if (this._streams.get(streamId) === stream) {
+        this._streams.delete(streamId);
+      }
+    });
   }
 
   private _scheduleHandshakeReady(): void {
@@ -553,7 +590,18 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
             qlogLevel: options?.qlogLevel,
           },
           (_err: Error | null, events: NativeEvent[]) => {
-            session._dispatchEvents(events);
+            let hasShutdown = false;
+            for (const event of events) {
+              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                hasShutdown = true;
+              }
+            }
+            if (!hasShutdown) {
+              session._dispatchEvents(events);
+            } else {
+              session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+              eventLoop._onShutdownSentinel();
+            }
           },
         );
 

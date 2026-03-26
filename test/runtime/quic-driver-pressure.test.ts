@@ -180,7 +180,11 @@ describe('QUIC driver pressure tests', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        // Buffer-then-echo avoids the bidirectional pipe() deadlock where
+        // write-side flow control pauses the readable side of the same stream.
+        const chunks: Buffer[] = [];
+        stream.on('data', (chunk: Buffer) => { chunks.push(chunk); });
+        stream.on('end', () => { stream.end(Buffer.concat(chunks)); });
       });
     });
 

@@ -9,6 +9,7 @@ import { generateTestCerts } from '../support/generate-certs.js';
 import { createQuicServer, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { echoStream } from '../support/echo-stream.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -36,7 +37,7 @@ describe('QUIC race condition verification', () => {
     // Server echoes everything back, proving it received all data
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -71,7 +72,7 @@ describe('QUIC race condition verification', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -205,7 +206,7 @@ describe('QUIC race condition verification', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 
@@ -236,7 +237,7 @@ describe('QUIC race condition verification', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 

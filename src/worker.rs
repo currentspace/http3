@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock, Weak,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,16 +14,18 @@ use crossbeam_channel::Sender;
 use ring::rand::SecureRandom;
 use slab::Slab;
 
-use crate::buffer_pool::BufferPool;
+use crate::arc_buf::ArcBufFactory;
+use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
+use crate::chunk_pool::{Chunk, ChunkPool, ChunkPoolReturn};
 use crate::client_topology::{
-    default_h3_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
     ClientSocketStrategy, SharedClientWorkerKey as SharedH3ClientWorkerKey,
+    default_h3_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
 };
-use crate::config::{Http3Config, TransportRuntimeMode};
+use crate::config::{Http3Config, JsServerOptions, TransportRuntimeMode};
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::connection_map::ConnectionMap;
 use crate::error::Http3NativeError;
-use crate::event_loop::{self, EventBatcher, ProtocolHandler, MAX_BATCH_SIZE, SEND_BUF_SIZE};
+use crate::event_loop::{self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, SEND_BUF_SIZE};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::reactor_metrics::{self, SessionKind, WorkerSpawnKind};
 use crate::shared_client_reactor;
@@ -31,6 +33,7 @@ use crate::timer_heap::TimerHeap;
 use crate::transport::{self, ErasedWaker, TxDatagram};
 
 // Re-export for backward compatibility with server.rs / client.rs / quic_server.rs / quic_client.rs
+#[cfg(feature = "node-api")]
 pub use crate::event_loop::EventTsfn;
 
 /// Commands sent from the JS main thread to the worker thread.
@@ -44,7 +47,7 @@ pub enum WorkerCommand {
     StreamSend {
         conn_handle: u32,
         stream_id: u64,
-        data: Vec<u8>,
+        chunk: Chunk,
         fin: bool,
     },
     StreamClose {
@@ -88,31 +91,50 @@ pub enum WorkerCommand {
 
 /// Buffered partial write for a stream blocked by flow control.
 struct PendingWrite {
-    data: Vec<u8>,
+    chunk: Chunk,
     fin: bool,
 }
 
-/// Handle returned to the JS side for sending commands to the worker.
+const PENDING_WRITE_POOL_SIZE: usize = 256;
+const PENDING_WRITE_MIN_CAPACITY: usize = 4 * 1024;
+
+/// Per-worker state inside a `WorkerHandle`.
+pub struct H3ServerWorker {
+    pub cmd_tx: Sender<WorkerCommand>,
+    pub join_handle: Option<thread::JoinHandle<()>>,
+    pub waker: Arc<dyn ErasedWaker>,
+}
+
+/// Handle returned to the JS side for sending commands to the worker(s).
+/// Supports multiple sharded workers via SO_REUSEPORT — commands are
+/// routed to the correct worker by the worker index encoded in conn_handle.
 pub struct WorkerHandle {
-    cmd_tx: Sender<WorkerCommand>,
-    join_handle: Option<thread::JoinHandle<()>>,
+    workers: Vec<H3ServerWorker>,
     local_addr: SocketAddr,
-    waker: Arc<dyn ErasedWaker>,
 }
 
 impl WorkerHandle {
-    /// Send a command to the worker thread.
-    /// The channel is unbounded so this only fails if the worker has disconnected.
+    /// Construct a `WorkerHandle` from a pre-spawned list of workers.
+    pub fn from_workers(workers: Vec<H3ServerWorker>, local_addr: SocketAddr) -> Self {
+        Self {
+            workers,
+            local_addr,
+        }
+    }
+
+    /// Route a command to the worker that owns `conn_handle`.
     pub fn send_command(&self, cmd: WorkerCommand) -> bool {
-        if self.cmd_tx.send(cmd).is_ok() {
-            let _ = self.waker.wake();
+        let ch = command_conn_handle(&cmd);
+        let worker = &self.workers[crate::server_sharding::worker_index(ch)];
+        let local = remap_command_handle(cmd);
+        if worker.cmd_tx.send(local).is_ok() {
+            let _ = worker.waker.wake();
             true
         } else {
             false
         }
     }
 
-    /// Get the bound local address.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -121,29 +143,35 @@ impl WorkerHandle {
         &self,
         conn_handle: u32,
     ) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
+        worker
+            .cmd_tx
             .send(WorkerCommand::GetSessionMetrics {
-                conn_handle,
+                conn_handle: local,
                 resp_tx,
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server metrics".into())
         })
     }
 
     pub fn send_datagram(&self, conn_handle: u32, data: Vec<u8>) -> Result<bool, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
+        worker
+            .cmd_tx
             .send(WorkerCommand::SendDatagram {
-                conn_handle,
+                conn_handle: local,
                 data,
                 resp_tx,
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server datagram send".into())
         })
@@ -153,52 +181,76 @@ impl WorkerHandle {
         &self,
         conn_handle: u32,
     ) -> Result<Vec<(u64, u64)>, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
+        worker
+            .cmd_tx
             .send(WorkerCommand::GetRemoteSettings {
-                conn_handle,
+                conn_handle: local,
                 resp_tx,
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server settings".into())
         })
     }
 
     pub fn ping_session(&self, conn_handle: u32) -> Result<bool, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
+        worker
+            .cmd_tx
             .send(WorkerCommand::PingSession {
-                conn_handle,
+                conn_handle: local,
                 resp_tx,
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for server ping".into()))
     }
 
     pub fn get_qlog_path(&self, conn_handle: u32) -> Result<Option<String>, Http3NativeError> {
+        let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
+        let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-        self.cmd_tx
+        worker
+            .cmd_tx
             .send(WorkerCommand::GetQlogPath {
-                conn_handle,
+                conn_handle: local,
                 resp_tx,
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
-        let _ = self.waker.wake();
+        let _ = worker.waker.wake();
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server qlog path".into())
         })
     }
 
-    /// Shut down the worker thread and wait for it to finish.
     pub fn shutdown(&mut self) {
-        let _ = self.cmd_tx.send(WorkerCommand::Shutdown);
-        let _ = self.waker.wake();
-        if let Some(handle) = self.join_handle.take() {
+        for worker in &self.workers {
+            let _ = worker.cmd_tx.send(WorkerCommand::Shutdown);
+            let _ = worker.waker.wake();
+        }
+        for worker in &mut self.workers {
+            if let Some(handle) = worker.join_handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+fn shutdown_spawned_h3_server_workers(workers: &mut Vec<H3ServerWorker>) {
+    for worker in workers.iter() {
+        let _ = worker.cmd_tx.send(WorkerCommand::Shutdown);
+        let _ = worker.waker.wake();
+    }
+    for worker in workers.iter_mut() {
+        if let Some(handle) = worker.join_handle.take() {
             let _ = handle.join();
         }
     }
@@ -207,6 +259,115 @@ impl WorkerHandle {
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+fn command_conn_handle(cmd: &WorkerCommand) -> u32 {
+    match cmd {
+        WorkerCommand::SendResponseHeaders { conn_handle, .. }
+        | WorkerCommand::StreamSend { conn_handle, .. }
+        | WorkerCommand::StreamClose { conn_handle, .. }
+        | WorkerCommand::SendTrailers { conn_handle, .. }
+        | WorkerCommand::CloseSession { conn_handle, .. }
+        | WorkerCommand::SendDatagram { conn_handle, .. }
+        | WorkerCommand::GetSessionMetrics { conn_handle, .. }
+        | WorkerCommand::GetRemoteSettings { conn_handle, .. }
+        | WorkerCommand::GetQlogPath { conn_handle, .. }
+        | WorkerCommand::PingSession { conn_handle, .. } => *conn_handle,
+        WorkerCommand::Shutdown => 0,
+    }
+}
+
+fn remap_command_handle(cmd: WorkerCommand) -> WorkerCommand {
+    use crate::server_sharding::local_conn_handle;
+    match cmd {
+        WorkerCommand::SendResponseHeaders {
+            conn_handle,
+            stream_id,
+            headers,
+            fin,
+        } => WorkerCommand::SendResponseHeaders {
+            conn_handle: local_conn_handle(conn_handle),
+            stream_id,
+            headers,
+            fin,
+        },
+        WorkerCommand::StreamSend {
+            conn_handle,
+            stream_id,
+            chunk,
+            fin,
+        } => WorkerCommand::StreamSend {
+            conn_handle: local_conn_handle(conn_handle),
+            stream_id,
+            chunk,
+            fin,
+        },
+        WorkerCommand::StreamClose {
+            conn_handle,
+            stream_id,
+            error_code,
+        } => WorkerCommand::StreamClose {
+            conn_handle: local_conn_handle(conn_handle),
+            stream_id,
+            error_code,
+        },
+        WorkerCommand::SendTrailers {
+            conn_handle,
+            stream_id,
+            headers,
+        } => WorkerCommand::SendTrailers {
+            conn_handle: local_conn_handle(conn_handle),
+            stream_id,
+            headers,
+        },
+        WorkerCommand::CloseSession {
+            conn_handle,
+            error_code,
+            reason,
+        } => WorkerCommand::CloseSession {
+            conn_handle: local_conn_handle(conn_handle),
+            error_code,
+            reason,
+        },
+        WorkerCommand::SendDatagram {
+            conn_handle,
+            data,
+            resp_tx,
+        } => WorkerCommand::SendDatagram {
+            conn_handle: local_conn_handle(conn_handle),
+            data,
+            resp_tx,
+        },
+        WorkerCommand::GetSessionMetrics {
+            conn_handle,
+            resp_tx,
+        } => WorkerCommand::GetSessionMetrics {
+            conn_handle: local_conn_handle(conn_handle),
+            resp_tx,
+        },
+        WorkerCommand::GetRemoteSettings {
+            conn_handle,
+            resp_tx,
+        } => WorkerCommand::GetRemoteSettings {
+            conn_handle: local_conn_handle(conn_handle),
+            resp_tx,
+        },
+        WorkerCommand::GetQlogPath {
+            conn_handle,
+            resp_tx,
+        } => WorkerCommand::GetQlogPath {
+            conn_handle: local_conn_handle(conn_handle),
+            resp_tx,
+        },
+        WorkerCommand::PingSession {
+            conn_handle,
+            resp_tx,
+        } => WorkerCommand::PingSession {
+            conn_handle: local_conn_handle(conn_handle),
+            resp_tx,
+        },
+        WorkerCommand::Shutdown => WorkerCommand::Shutdown,
     }
 }
 
@@ -219,7 +380,7 @@ pub enum ClientWorkerCommand {
     },
     StreamSend {
         stream_id: u64,
-        data: Vec<u8>,
+        chunk: Chunk,
         fin: bool,
     },
     StreamClose {
@@ -249,6 +410,7 @@ pub enum ClientWorkerCommand {
     Shutdown,
 }
 
+#[cfg(feature = "node-api")]
 enum SharedClientWorkerCommand {
     OpenSession {
         quiche_config: quiche::Config,
@@ -308,6 +470,7 @@ enum SharedClientWorkerCommand {
     },
 }
 
+#[cfg(feature = "node-api")]
 struct SharedClientWorkerControl {
     cmd_tx: Sender<SharedClientWorkerCommand>,
     waker: Arc<dyn ErasedWaker>,
@@ -318,6 +481,7 @@ struct SharedClientWorkerControl {
     key: SharedH3ClientWorkerKey,
 }
 
+#[cfg(feature = "node-api")]
 impl SharedClientWorkerControl {
     fn wake(&self) {
         let _ = self.waker.wake();
@@ -330,6 +494,7 @@ enum ClientWorkerHandleKind {
         join_handle: Option<thread::JoinHandle<()>>,
         waker: Arc<dyn ErasedWaker>,
     },
+    #[cfg(feature = "node-api")]
     Shared {
         session_handle: u32,
         worker: Arc<SharedClientWorkerControl>,
@@ -358,9 +523,12 @@ impl ClientWorkerHandle {
                         fin,
                         resp_tx,
                     })
-                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("client worker not running".into())
+                    })?;
                 let _ = waker.wake();
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -379,7 +547,9 @@ impl ClientWorkerHandle {
                 worker.wake();
             }
             None => {
-                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+                return Err(Http3NativeError::InvalidState(
+                    "client worker not running".into(),
+                ));
             }
         }
 
@@ -393,13 +563,13 @@ impl ClientWorkerHandle {
     }
 
     /// Queue stream data to be sent by the worker.
-    pub fn stream_send(&self, stream_id: u64, data: Vec<u8>, fin: bool) -> bool {
+    pub fn stream_send(&self, stream_id: u64, chunk: Chunk, fin: bool) -> bool {
         match &self.kind {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 if cmd_tx
                     .send(ClientWorkerCommand::StreamSend {
                         stream_id,
-                        data,
+                        chunk,
                         fin,
                     })
                     .is_ok()
@@ -410,6 +580,7 @@ impl ClientWorkerHandle {
                     false
                 }
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -419,7 +590,7 @@ impl ClientWorkerHandle {
                     .send(SharedClientWorkerCommand::StreamSend {
                         session_handle: *session_handle,
                         stream_id,
-                        data,
+                        data: chunk.into_vec(),
                         fin,
                     })
                     .is_ok()
@@ -450,6 +621,7 @@ impl ClientWorkerHandle {
                     false
                 }
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -479,9 +651,12 @@ impl ClientWorkerHandle {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 cmd_tx
                     .send(ClientWorkerCommand::SendDatagram { data, resp_tx })
-                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("client worker not running".into())
+                    })?;
                 let _ = waker.wake();
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -499,7 +674,9 @@ impl ClientWorkerHandle {
                 worker.wake();
             }
             None => {
-                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+                return Err(Http3NativeError::InvalidState(
+                    "client worker not running".into(),
+                ));
             }
         }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
@@ -513,9 +690,12 @@ impl ClientWorkerHandle {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 cmd_tx
                     .send(ClientWorkerCommand::GetSessionMetrics { resp_tx })
-                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("client worker not running".into())
+                    })?;
                 let _ = waker.wake();
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -532,7 +712,9 @@ impl ClientWorkerHandle {
                 worker.wake();
             }
             None => {
-                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+                return Err(Http3NativeError::InvalidState(
+                    "client worker not running".into(),
+                ));
             }
         }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
@@ -546,9 +728,12 @@ impl ClientWorkerHandle {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 cmd_tx
                     .send(ClientWorkerCommand::GetRemoteSettings { resp_tx })
-                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("client worker not running".into())
+                    })?;
                 let _ = waker.wake();
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -565,7 +750,9 @@ impl ClientWorkerHandle {
                 worker.wake();
             }
             None => {
-                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+                return Err(Http3NativeError::InvalidState(
+                    "client worker not running".into(),
+                ));
             }
         }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
@@ -579,9 +766,12 @@ impl ClientWorkerHandle {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 cmd_tx
                     .send(ClientWorkerCommand::Ping { resp_tx })
-                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("client worker not running".into())
+                    })?;
                 let _ = waker.wake();
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -598,7 +788,9 @@ impl ClientWorkerHandle {
                 worker.wake();
             }
             None => {
-                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+                return Err(Http3NativeError::InvalidState(
+                    "client worker not running".into(),
+                ));
             }
         }
         resp_rx
@@ -612,9 +804,12 @@ impl ClientWorkerHandle {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 cmd_tx
                     .send(ClientWorkerCommand::GetQlogPath { resp_tx })
-                    .map_err(|_| Http3NativeError::InvalidState("client worker not running".into()))?;
+                    .map_err(|_| {
+                        Http3NativeError::InvalidState("client worker not running".into())
+                    })?;
                 let _ = waker.wake();
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -631,7 +826,9 @@ impl ClientWorkerHandle {
                 worker.wake();
             }
             None => {
-                return Err(Http3NativeError::InvalidState("client worker not running".into()))
+                return Err(Http3NativeError::InvalidState(
+                    "client worker not running".into(),
+                ));
             }
         }
         resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
@@ -653,6 +850,7 @@ impl ClientWorkerHandle {
                     false
                 }
             }
+            #[cfg(feature = "node-api")]
             Some(ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -696,6 +894,7 @@ impl ClientWorkerHandle {
                     let _ = handle.join();
                 }
             }
+            #[cfg(feature = "node-api")]
             ClientWorkerHandleKind::Shared {
                 session_handle,
                 worker,
@@ -727,16 +926,17 @@ impl Drop for ClientWorkerHandle {
 
 // ── Spawn functions ─────────────────────────────────────────────────
 
+// --- Node-API-dependent spawn functions (use EventTsfn / shared workers) ---
+#[cfg(feature = "node-api")]
 /// Spawn a client worker thread that owns UDP I/O and QUIC/H3 processing.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_client_worker(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
@@ -748,7 +948,6 @@ pub fn spawn_client_worker(
             session_ticket,
             qlog_dir,
             qlog_level,
-            user_set_mtu,
             runtime_mode,
             tsfn,
         );
@@ -759,13 +958,6 @@ pub fn spawn_client_worker(
     let bind_addr = shared_client_bind_addr(server_addr);
     let (driver, waker, local_addr) =
         transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
-
-    // Loopback MTU auto-detection (check server address)
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&server_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
@@ -803,20 +995,23 @@ pub fn spawn_client_worker(
     })
 }
 
+#[cfg(feature = "node-api")]
 struct SharedClientSession {
     handler: H3ClientHandler,
     batcher: EventBatcher,
     server_addr: SocketAddr,
 }
 
-fn shared_client_worker_registry(
-) -> &'static Mutex<HashMap<SharedH3ClientWorkerKey, Weak<SharedClientWorkerControl>>> {
+#[cfg(feature = "node-api")]
+fn shared_client_worker_registry()
+-> &'static Mutex<HashMap<SharedH3ClientWorkerKey, Weak<SharedClientWorkerControl>>> {
     static REGISTRY: OnceLock<
         Mutex<HashMap<SharedH3ClientWorkerKey, Weak<SharedClientWorkerControl>>>,
     > = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(feature = "node-api")]
 fn acquire_shared_client_worker(
     server_addr: SocketAddr,
     runtime_mode: TransportRuntimeMode,
@@ -861,24 +1056,18 @@ fn acquire_shared_client_worker(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "node-api")]
 fn spawn_shared_client_worker(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
     let worker = acquire_shared_client_worker(server_addr, runtime_mode)?;
-
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&server_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
-    }
 
     let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
     worker
@@ -910,6 +1099,7 @@ fn spawn_shared_client_worker(
     })
 }
 
+#[cfg(feature = "node-api")]
 fn emit_shared_client_runtime_error<D: transport::Driver>(
     sessions: &mut Slab<SharedClientSession>,
     driver: &D,
@@ -927,6 +1117,7 @@ fn emit_shared_client_runtime_error<D: transport::Driver>(
     );
 }
 
+#[cfg(feature = "node-api")]
 fn remove_shared_client_session(
     sessions: &mut Slab<SharedClientSession>,
     route_by_dcid: &mut HashMap<Vec<u8>, usize>,
@@ -937,6 +1128,18 @@ fn remove_shared_client_session(
         return;
     }
     if let Some(session) = sessions.get(handle) {
+        reactor_metrics::record_lifecycle_trace(
+            "h3-client",
+            "shared-session-release",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle={handle} pending_writes={} blocked_streams={}",
+                session.handler.pending_writes.len(),
+                session.handler.conn.blocked_set.len()
+            )),
+        );
         if !session.handler.session_closed_emitted {
             reactor_metrics::record_session_close(SessionKind::H3Client);
         }
@@ -946,6 +1149,7 @@ fn remove_shared_client_session(
     route_by_dcid.retain(|_, mapped_handle| *mapped_handle != handle);
 }
 
+#[cfg(feature = "node-api")]
 fn refresh_shared_client_dcid(
     route_by_dcid: &mut HashMap<Vec<u8>, usize>,
     handle: usize,
@@ -960,32 +1164,34 @@ fn refresh_shared_client_dcid(
     }
 }
 
-fn sync_shared_client_timer(timer_heap: &mut TimerHeap, handle: usize, session: &SharedClientSession) {
+#[cfg(feature = "node-api")]
+fn sync_shared_client_timer(
+    timer_heap: &mut TimerHeap,
+    handle: usize,
+    session: &SharedClientSession,
+) {
     shared_client_reactor::sync_timer(timer_heap, handle, session, |current| {
         current.handler.timer_deadline
     });
 }
 
+#[cfg(feature = "node-api")]
 fn flush_shared_client_sends(
     sessions: &mut Slab<SharedClientSession>,
     handles_buf: &mut Vec<usize>,
     tx_pool: &mut BufferPool,
     outbound: &mut Vec<TxDatagram>,
 ) {
-    shared_client_reactor::flush_round_robin_sends(
-        sessions,
-        handles_buf,
-        outbound,
-        |session| {
-            H3ClientHandler::try_send_next_with_pool_parts(
-                &mut session.handler.conn,
-                session.handler.send_buf.as_mut_slice(),
-                tx_pool,
-            )
-        },
-    );
+    shared_client_reactor::flush_round_robin_sends(sessions, handles_buf, outbound, |session| {
+        H3ClientHandler::try_send_next_with_pool_parts(
+            &mut session.handler.conn,
+            session.handler.send_buf.as_mut_slice(),
+            tx_pool,
+        )
+    });
 }
 
+#[cfg(feature = "node-api")]
 fn run_shared_client_event_loop<D: transport::Driver>(
     driver: &mut D,
     cmd_rx: crossbeam_channel::Receiver<SharedClientWorkerCommand>,
@@ -994,7 +1200,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
     let mut sessions: Slab<SharedClientSession> = Slab::new();
     let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut timer_heap = TimerHeap::new();
-    let mut tx_pool = BufferPool::new(512, 1350);
+    let mut tx_pool = BufferPool::new(256, 65535);
     let mut handles_buf = Vec::new();
     let mut outbound = Vec::new();
     let mut closed_sessions = Vec::new();
@@ -1078,7 +1284,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     fin,
                 } => {
                     if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.handler.queue_stream_send(stream_id, data, fin);
+                        session.handler.queue_stream_send(stream_id, Chunk::unpooled(data), fin, &mut session.batcher.batch);
                     }
                 }
                 SharedClientWorkerCommand::StreamClose {
@@ -1173,7 +1379,9 @@ fn run_shared_client_event_loop<D: transport::Driver>(
 
         let rx_count = outcome.rx.len();
         for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
-            let Ok(header) = quiche::Header::from_slice(pkt.data.as_mut_slice(), crate::cid::SCID_LEN) else {
+            let Ok(header) =
+                quiche::Header::from_slice(pkt.data.as_mut_slice(), crate::cid::SCID_LEN)
+            else {
                 continue;
             };
             let Some(handle) = route_by_dcid.get(header.dcid.as_ref()).copied() else {
@@ -1249,10 +1457,9 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                 session
                     .handler
                     .poll_drain_events_for_handle(&mut session.batcher.batch, handle as u32);
-                session.handler.flush_pending_writes_for_handle(
-                    &mut session.batcher.batch,
-                    handle as u32,
-                );
+                session
+                    .handler
+                    .flush_pending_writes_for_handle(&mut session.batcher.batch, handle as u32);
                 if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
                     closed_sessions.push(handle);
                 }
@@ -1313,57 +1520,288 @@ fn run_shared_client_event_loop<D: transport::Driver>(
     }
 }
 
-/// Spawn a worker thread for the given server configuration.
-/// Events are delivered to JS via the provided `ThreadsafeFunction`.
+#[cfg(feature = "node-api")]
+/// Spawn server worker thread(s) for the given configuration.
+///
+/// When `reuse_port` is enabled in the config, spawns multiple workers
+/// (one per available CPU, capped at 8) each with its own socket bound
+/// to the same address via SO_REUSEPORT.  The kernel distributes incoming
+/// packets by 4-tuple hash.  All workers share the same TSFN for event
+/// delivery to JS.
+///
+/// When `reuse_port` is disabled (default), spawns a single worker.
 pub fn spawn_worker(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     http3_config: Http3Config,
     bind_addr: SocketAddr,
-    user_set_mtu: bool,
     tsfn: EventTsfn,
+    stored_options: crate::server::StoredServerOptions,
 ) -> Result<WorkerHandle, Http3NativeError> {
-    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+    let num_workers = std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(1);
 
-    let std_socket = transport::socket::bind_worker_socket(bind_addr, http3_config.reuse_port)?;
-    std_socket
+    let mut config_slot = Some(quiche_config);
+    spawn_worker_sharded(
+        move || {
+            if let Some(config) = config_slot.take() {
+                return Ok(config);
+            }
+            // Workers 1..N: rebuild config from the stored snapshot
+            // which preserves all original options (datagrams, TLS, etc).
+            Http3Config::new_server_quiche_config(&stored_options.to_js_server_options())
+        },
+        http3_config,
+        bind_addr,
+        num_workers,
+        tsfn,
+    )
+}
+
+#[cfg(feature = "node-api")]
+/// Spawn N H3 server workers with SO_REUSEPORT.  `make_quiche_config` is
+/// called once per worker since `quiche::Config` is not `Clone`.
+pub(crate) fn spawn_worker_sharded<F>(
+    mut make_quiche_config: F,
+    http3_config: Http3Config,
+    bind_addr: SocketAddr,
+    num_workers: usize,
+    tsfn: EventTsfn,
+) -> Result<WorkerHandle, Http3NativeError>
+where
+    F: FnMut() -> Result<quiche::Config, Http3NativeError>,
+{
+    // With SO_REUSEPORT, per-worker connection limits are approximate since
+    // the kernel distributes packets by 4-tuple hash.  For exact enforcement
+    // of small limits (e.g. maxConnections=2), use a single worker.
+    let num_workers = if http3_config.max_connections <= num_workers {
+        1
+    } else {
+        num_workers.max(1)
+    };
+    let use_reuse_port = num_workers > 1;
+
+    // Bind the first socket to discover the actual local address.
+    let first_socket = transport::socket::bind_worker_socket(bind_addr, use_reuse_port)?;
+    first_socket
         .set_nonblocking(true)
         .map_err(Http3NativeError::Io)?;
-    let _ = transport::socket::set_socket_buffers(&std_socket, 2 * 1024 * 1024);
-    let local_addr = std_socket.local_addr().map_err(Http3NativeError::Io)?;
+    let _ = transport::socket::set_socket_buffers(&first_socket, 2 * 1024 * 1024);
+    let local_addr = first_socket.local_addr().map_err(Http3NativeError::Io)?;
 
-    // Loopback MTU auto-detection
-    if !user_set_mtu {
-        let mtu = crate::config::effective_max_datagram_size(&local_addr);
-        quiche_config.set_max_recv_udp_payload_size(mtu);
-        quiche_config.set_max_send_udp_payload_size(mtu);
+    // Divide max_connections across workers so the total stays correct.
+    let per_worker_max_connections = (http3_config.max_connections + num_workers - 1) / num_workers;
+
+    // Query path MTU once for all workers on this address.
+    let ceiling = if !local_addr.ip().is_unspecified() {
+        crate::config::effective_pmtud_ceiling(&local_addr)
+    } else {
+        crate::config::FALLBACK_MAX_UDP_PAYLOAD
+    };
+
+    let tsfn = Arc::new(tsfn);
+    let mut workers = Vec::with_capacity(num_workers);
+
+    // Worker 0 uses the already-bound first socket.
+    {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let mut config = make_quiche_config()?;
+        config.set_max_send_udp_payload_size(ceiling);
+        config.set_max_recv_udp_payload_size(ceiling);
+        let (driver, waker) =
+            transport::create_platform_driver(first_socket, http3_config.runtime_mode)?;
+        let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+        let tsfn_ref = Arc::clone(&tsfn);
+        let http3_clone = Http3Config {
+            qlog_dir: http3_config.qlog_dir.clone(),
+            qlog_level: http3_config.qlog_level.clone(),
+            qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
+            qpack_blocked_streams: http3_config.qpack_blocked_streams,
+            max_connections: per_worker_max_connections,
+            disable_retry: http3_config.disable_retry,
+            reuse_port: http3_config.reuse_port,
+            cid_encoding: http3_config.cid_encoding.clone(),
+            runtime_mode: http3_config.runtime_mode,
+        };
+
+        reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        let join_handle = thread::spawn(move || {
+            let mut driver = driver;
+            let mut handler = H3ServerHandler::new(config, http3_clone, 0);
+            event_loop::run_event_loop(
+                &mut driver,
+                cmd_rx,
+                &mut handler,
+                EventBatcher::new_shared_tsfn(tsfn_ref),
+                local_addr,
+            );
+        });
+        workers.push(H3ServerWorker {
+            cmd_tx,
+            join_handle: Some(join_handle),
+            waker: waker_arc,
+        });
     }
 
-    let (driver, waker) =
-        transport::create_platform_driver(std_socket, http3_config.runtime_mode)?;
+    // Workers 1..N bind new sockets to the same address via SO_REUSEPORT.
+    for i in 1..num_workers {
+        let socket = match transport::socket::bind_worker_socket(local_addr, true) {
+            Ok(socket) => socket,
+            Err(err) => {
+                shutdown_spawned_h3_server_workers(&mut workers);
+                return Err(err);
+            }
+        };
+        if let Err(err) = socket.set_nonblocking(true).map_err(Http3NativeError::Io) {
+            shutdown_spawned_h3_server_workers(&mut workers);
+            return Err(err);
+        }
+        let _ = transport::socket::set_socket_buffers(&socket, 2 * 1024 * 1024);
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let mut config = match make_quiche_config() {
+            Ok(config) => config,
+            Err(err) => {
+                shutdown_spawned_h3_server_workers(&mut workers);
+                return Err(err);
+            }
+        };
+        config.set_max_send_udp_payload_size(ceiling);
+        config.set_max_recv_udp_payload_size(ceiling);
+        let (driver, waker) =
+            match transport::create_platform_driver(socket, http3_config.runtime_mode) {
+                Ok(driver_and_waker) => driver_and_waker,
+                Err(err) => {
+                    shutdown_spawned_h3_server_workers(&mut workers);
+                    return Err(err);
+                }
+            };
+        let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+        let tsfn_ref = Arc::clone(&tsfn);
+        let http3_clone = Http3Config {
+            qlog_dir: http3_config.qlog_dir.clone(),
+            qlog_level: http3_config.qlog_level.clone(),
+            qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
+            qpack_blocked_streams: http3_config.qpack_blocked_streams,
+            max_connections: per_worker_max_connections,
+            disable_retry: http3_config.disable_retry,
+            reuse_port: http3_config.reuse_port,
+            cid_encoding: http3_config.cid_encoding.clone(),
+            runtime_mode: http3_config.runtime_mode,
+        };
+        let worker_index = i as u32;
+
+        reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        let join_handle = thread::spawn(move || {
+            let mut driver = driver;
+            let mut handler = H3ServerHandler::new(config, http3_clone, worker_index);
+            event_loop::run_event_loop(
+                &mut driver,
+                cmd_rx,
+                &mut handler,
+                EventBatcher::new_shared_tsfn(tsfn_ref),
+                local_addr,
+            );
+        });
+        workers.push(H3ServerWorker {
+            cmd_tx,
+            join_handle: Some(join_handle),
+            waker: waker_arc,
+        });
+    }
+
+    Ok(WorkerHandle {
+        workers,
+        local_addr,
+    })
+}
+
+// ── Generic driver-parameterized spawn functions for testing ─────────
+
+/// Spawn a single H3 server worker on a caller-provided driver (e.g. `MockDriver`).
+///
+/// This is the H3 analogue of `quic_worker::spawn_server_worker_on_driver`.
+pub fn spawn_h3_server_worker_on_driver<D>(
+    quiche_config: quiche::Config,
+    http3_config: Http3Config,
+    worker_index: u32,
+    driver: D,
+    waker: D::Waker,
+    local_addr: SocketAddr,
+    cmd_tx: Sender<WorkerCommand>,
+    cmd_rx: crossbeam_channel::Receiver<WorkerCommand>,
+    batcher: EventBatcher,
+) -> H3ServerWorker
+where
+    D: transport::Driver + Send + 'static,
+    D::Waker: Send + Sync + Clone + 'static,
+{
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
 
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
-        let mut handler = H3ServerHandler::new(quiche_config, http3_config);
-        event_loop::run_event_loop(
-            &mut driver,
-            cmd_rx,
-            &mut handler,
-            EventBatcher::new_tsfn(tsfn),
-            local_addr,
-        );
+        let mut handler = H3ServerHandler::new(quiche_config, http3_config, worker_index);
+        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
     });
 
-    let handle = WorkerHandle {
+    H3ServerWorker {
         cmd_tx,
         join_handle: Some(join_handle),
-        local_addr,
         waker: waker_clone,
-    };
+    }
+}
 
-    Ok(handle)
+/// Spawn a dedicated H3 client worker on a caller-provided driver (e.g. `MockDriver`).
+///
+/// This is the H3 analogue of `quic_worker::spawn_dedicated_quic_client_on_driver`.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_h3_client_on_driver<D>(
+    quiche_config: quiche::Config,
+    server_addr: SocketAddr,
+    server_name: String,
+    session_ticket: Option<Vec<u8>>,
+    qlog_dir: Option<String>,
+    qlog_level: Option<String>,
+    driver: D,
+    waker: D::Waker,
+    local_addr: SocketAddr,
+    cmd_tx: Sender<ClientWorkerCommand>,
+    cmd_rx: crossbeam_channel::Receiver<ClientWorkerCommand>,
+    batcher: EventBatcher,
+) -> ClientWorkerHandle
+where
+    D: transport::Driver + Send + 'static,
+    D::Waker: Send + Sync + Clone + 'static,
+{
+    let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+    let waker_clone = waker_arc.clone();
+
+    reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3ClientDedicated);
+    let join_handle = thread::spawn(move || {
+        let mut driver = driver;
+        let mut quiche_config = quiche_config;
+        let handler = H3ClientHandler::new(
+            local_addr,
+            server_addr,
+            &server_name,
+            session_ticket.as_deref(),
+            qlog_dir.as_deref(),
+            qlog_level.as_deref(),
+            &mut quiche_config,
+        );
+        let Some(mut handler) = handler else { return };
+        event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
+    });
+
+    ClientWorkerHandle {
+        kind: Some(ClientWorkerHandleKind::Dedicated {
+            cmd_tx,
+            join_handle: Some(join_handle),
+            waker: waker_clone,
+        }),
+        local_addr,
+    }
 }
 
 // ── H3 Server Protocol Handler ──────────────────────────────────────
@@ -1373,6 +1811,7 @@ struct H3ServerHandler {
     timer_heap: TimerHeap,
     buffer_pool: BufferPool,
     tx_pool: BufferPool,
+    pending_write_pool: AdaptiveBufferPool,
     pending_writes: HashMap<(u32, u64), PendingWrite>,
     pending_session_closes: HashMap<u32, (u32, String, Instant)>,
     conn_send_buffers: HashMap<usize, Vec<u8>>,
@@ -1383,11 +1822,17 @@ struct H3ServerHandler {
     /// Handles that were expired in the most recent process_timers call.
     /// Used by poll_drain_events and cleanup_closed to avoid duplicate events.
     last_expired: Vec<usize>,
+    handle_offset: u32,
+    chunk_pool: ChunkPool,
+    chunk_pool_return: Arc<ChunkPoolReturn>,
+    chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 impl H3ServerHandler {
-    fn new(quiche_config: quiche::Config, http3_config: Http3Config) -> Self {
+    fn new(quiche_config: quiche::Config, http3_config: Http3Config, worker_index: u32) -> Self {
         let disable_retry = http3_config.disable_retry;
+        let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
+            ChunkPool::with_return_channel(64);
         Self {
             conn_map: ConnectionMap::with_max_connections_and_cid(
                 http3_config.max_connections,
@@ -1395,7 +1840,11 @@ impl H3ServerHandler {
             ),
             timer_heap: TimerHeap::new(),
             buffer_pool: BufferPool::default(),
-            tx_pool: BufferPool::new(512, 1350),
+            tx_pool: BufferPool::new(256, 65535),
+            pending_write_pool: AdaptiveBufferPool::new(
+                PENDING_WRITE_POOL_SIZE,
+                PENDING_WRITE_MIN_CAPACITY,
+            ),
             pending_writes: HashMap::new(),
             pending_session_closes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
@@ -1404,6 +1853,10 @@ impl H3ServerHandler {
             quiche_config,
             disable_retry,
             last_expired: Vec::new(),
+            handle_offset: crate::server_sharding::handle_offset(worker_index),
+            chunk_pool,
+            chunk_pool_return,
+            chunk_pool_rx,
         }
     }
 }
@@ -1432,31 +1885,38 @@ impl ProtocolHandler for H3ServerHandler {
             WorkerCommand::StreamSend {
                 conn_handle,
                 stream_id,
-                data,
+                mut chunk,
                 fin,
             } => {
                 let key = (conn_handle, stream_id);
                 if let Some(pw) = self.pending_writes.get_mut(&key) {
-                    pw.data.extend_from_slice(&data);
+                    pw.chunk.append(chunk.remaining());
                     pw.fin = pw.fin || fin;
+                    // chunk drops here -> recycles to pool
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    let written = conn.send_body(stream_id, &data, fin).unwrap_or(0);
-                    if written < data.len() {
-                        self.pending_writes.insert(
-                            key,
-                            PendingWrite {
-                                data: data[written..].to_vec(),
-                                fin,
-                            },
-                        );
-                    } else if fin && written == 0 && data.is_empty() {
-                        self.pending_writes.insert(
-                            key,
-                            PendingWrite {
-                                data: Vec::new(),
-                                fin: true,
-                            },
-                        );
+                    match conn.send_body(stream_id, chunk.remaining(), fin) {
+                        Ok(written) => {
+                            if written < chunk.remaining_len() {
+                                chunk.advance(written);
+                                self.pending_writes.insert(key, PendingWrite { chunk, fin });
+                            } else if fin && written == 0 && chunk.remaining_len() == 0 {
+                                self.pending_writes.insert(
+                                    key,
+                                    PendingWrite {
+                                        chunk: Chunk::unpooled(Vec::new()),
+                                        fin: true,
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            _batch.push(JsH3Event::error(
+                                conn_handle,
+                                stream_id as i64,
+                                0,
+                                format!("stream send failed: {e}"),
+                            ));
+                        }
                     }
                 }
             }
@@ -1488,6 +1948,19 @@ impl ProtocolHandler for H3ServerHandler {
                 reason,
             } => {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-server",
+                        "close-session-requested",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={conn_handle} error_code={error_code} blocked_streams={} pending_graceful_closes={} reason={}",
+                            conn.blocked_set.len(),
+                            self.pending_session_closes.len(),
+                            reason.as_str()
+                        )),
+                    );
                     if conn.send_goaway().is_ok() {
                         self.pending_session_closes.insert(
                             conn_handle,
@@ -1497,12 +1970,34 @@ impl ProtocolHandler for H3ServerHandler {
                                 Instant::now() + Duration::from_millis(25),
                             ),
                         );
-                    } else {
-                        let _ = conn.quiche_conn.close(
-                            true,
-                            u64::from(error_code),
-                            reason.as_bytes(),
+                        reactor_metrics::record_lifecycle_trace(
+                            "h3-server",
+                            "close-session-deferred",
+                            None,
+                            None,
+                            None,
+                            Some(format!(
+                                "conn_handle={conn_handle} error_code={error_code} blocked_streams={} pending_graceful_closes={}",
+                                conn.blocked_set.len(),
+                                self.pending_session_closes.len()
+                            )),
                         );
+                    } else {
+                        reactor_metrics::record_lifecycle_trace(
+                            "h3-server",
+                            "close-session-direct",
+                            None,
+                            None,
+                            None,
+                            Some(format!(
+                                "conn_handle={conn_handle} error_code={error_code} blocked_streams={} reason={}",
+                                conn.blocked_set.len(),
+                                reason.as_str()
+                            )),
+                        );
+                        let _ =
+                            conn.quiche_conn
+                                .close(true, u64::from(error_code), reason.as_bytes());
                     }
                 }
             }
@@ -1521,7 +2016,10 @@ impl ProtocolHandler for H3ServerHandler {
                 conn_handle,
                 resp_tx,
             } => {
-                let metrics = self.conn_map.get(conn_handle as usize).map(snapshot_metrics);
+                let metrics = self
+                    .conn_map
+                    .get(conn_handle as usize)
+                    .map(snapshot_metrics);
                 let _ = resp_tx.send(metrics);
             }
             WorkerCommand::GetRemoteSettings {
@@ -1568,6 +2066,7 @@ impl ProtocolHandler for H3ServerHandler {
         pending_outbound: &mut Vec<TxDatagram>,
         batch: &mut Vec<JsH3Event>,
     ) {
+        let offset = self.handle_offset;
         let Ok(hdr) = quiche::Header::from_slice(buf, crate::connection_map::SCID_LEN) else {
             return;
         };
@@ -1599,7 +2098,7 @@ impl ProtocolHandler for H3ServerHandler {
                         self.conn_map.add_dcid(h, client_dcid);
                         reactor_metrics::record_session_open(SessionKind::H3Server);
                         batch.push(JsH3Event::new_session(
-                            h as u32,
+                            offset | (h as u32),
                             peer.ip().to_string(),
                             peer.port(),
                             String::new(),
@@ -1628,7 +2127,7 @@ impl ProtocolHandler for H3ServerHandler {
                                 self.conn_map.add_dcid(h, odcid);
                                 reactor_metrics::record_session_open(SessionKind::H3Server);
                                 batch.push(JsH3Event::new_session(
-                                    h as u32,
+                                    offset | (h as u32),
                                     peer.ip().to_string(),
                                     peer.port(),
                                     String::new(),
@@ -1686,7 +2185,7 @@ impl ProtocolHandler for H3ServerHandler {
             }
             if conn.quiche_conn.is_established() && !conn.handshake_complete_emitted {
                 conn.handshake_complete_emitted = true;
-                batch.push(JsH3Event::handshake_complete(handle as u32));
+                batch.push(JsH3Event::handshake_complete(offset | (handle as u32)));
             }
 
             let current_scid: Vec<u8> = conn.quiche_conn.source_id().into_owned().to_vec();
@@ -1695,7 +2194,7 @@ impl ProtocolHandler for H3ServerHandler {
                 conn.conn_id = current_scid.clone();
             }
 
-            conn.poll_h3_events(handle as u32, batch);
+            conn.poll_h3_events(offset | (handle as u32), batch);
 
             let mut retired_scids = Vec::new();
             while let Some(retired) = conn.quiche_conn.retired_scid_next() {
@@ -1720,12 +2219,12 @@ impl ProtocolHandler for H3ServerHandler {
 
         top_up_server_scids(&mut self.conn_map, handle);
 
-        if let Some(timeout) = timeout {
-            self.timer_heap.schedule(handle, Instant::now() + timeout);
-        }
+        self.timer_heap
+            .set_deadline(handle, timeout.map(|timeout| Instant::now() + timeout));
     }
 
     fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
         self.last_expired = self.timer_heap.pop_expired(now);
         self.last_expired.sort_unstable();
         self.last_expired.dedup();
@@ -1733,13 +2232,24 @@ impl ProtocolHandler for H3ServerHandler {
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 conn.on_timeout();
                 if conn.is_closed() {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-server",
+                        "session-close-timeout",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={} blocked_streams={}",
+                            offset | (handle as u32),
+                            conn.blocked_set.len()
+                        )),
+                    );
                     reactor_metrics::record_session_close(SessionKind::H3Server);
-                    batch.push(JsH3Event::session_close(handle as u32));
+                    batch.push(JsH3Event::session_close(offset | (handle as u32)));
                 } else {
-                    conn.poll_h3_events(handle as u32, batch);
-                    if let Some(timeout) = conn.timeout() {
-                        self.timer_heap.schedule(handle, Instant::now() + timeout);
-                    }
+                    conn.poll_h3_events(offset | (handle as u32), batch);
+                    self.timer_heap
+                        .set_deadline(handle, conn.timeout().map(|timeout| now + timeout));
                 }
             }
         }
@@ -1751,10 +2261,22 @@ impl ProtocolHandler for H3ServerHandler {
             .filter_map(|(handle, (_, _, deadline))| (now >= *deadline).then_some(*handle))
             .collect();
         for conn_handle in due_closes {
-            if let Some((error_code, reason, _)) =
-                self.pending_session_closes.remove(&conn_handle)
+            if let Some((error_code, reason, _)) = self.pending_session_closes.remove(&conn_handle)
             {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-server",
+                        "close-session-deadline",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={conn_handle} error_code={error_code} blocked_streams={} pending_graceful_closes={} reason={}",
+                            conn.blocked_set.len(),
+                            self.pending_session_closes.len(),
+                            reason.as_str()
+                        )),
+                    );
                     let _ = conn
                         .quiche_conn
                         .close(true, u64::from(error_code), reason.as_bytes());
@@ -1780,17 +2302,9 @@ impl ProtocolHandler for H3ServerHandler {
                     continue;
                 }
                 let handle = self.handles_buf[i];
-                let send_buf = self
-                    .conn_send_buffers
-                    .entry(handle)
-                    .or_insert_with(|| vec![0u8; SEND_BUF_SIZE]);
                 let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
-                    if let Ok((len, send_info)) = conn.send(send_buf.as_mut_slice()) {
-                        let mut tx_buf = self.tx_pool.checkout();
-                        if tx_buf.len() < len {
-                            tx_buf.resize(len, 0);
-                        }
-                        tx_buf[..len].copy_from_slice(&send_buf[..len]);
+                    let mut tx_buf = self.tx_pool.checkout();
+                    if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
                         tx_buf.truncate(len);
                         outbound.push(TxDatagram {
                             data: tx_buf,
@@ -1798,6 +2312,7 @@ impl ProtocolHandler for H3ServerHandler {
                         });
                         true
                     } else {
+                        self.tx_pool.checkin(tx_buf);
                         false
                     }
                 } else {
@@ -1809,16 +2324,31 @@ impl ProtocolHandler for H3ServerHandler {
                 }
             }
         }
+        let now = Instant::now();
+        for &handle in &self.handles_buf {
+            let timeout = self
+                .conn_map
+                .get_mut(handle)
+                .and_then(|conn| conn.timeout());
+            self.timer_heap
+                .set_deadline(handle, timeout.map(|timeout| now + timeout));
+        }
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
-        let flushed = flush_pending_writes(&mut self.conn_map, &mut self.pending_writes);
-        for (conn_handle, stream_id) in flushed {
-            batch.push(JsH3Event::drain(conn_handle, stream_id));
+        let offset = self.handle_offset;
+        let flushed = flush_pending_writes(
+            &mut self.conn_map,
+            &mut self.pending_writes,
+            &mut self.pending_write_pool,
+        );
+        for (local_handle, stream_id) in flushed {
+            batch.push(JsH3Event::drain(offset | local_handle, stream_id));
         }
     }
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
         self.conn_map.fill_handles(&mut self.handles_buf);
         for i in 0..self.handles_buf.len() {
             let handle = self.handles_buf[i];
@@ -1827,10 +2357,20 @@ impl ProtocolHandler for H3ServerHandler {
             }
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 if !conn.blocked_set.is_empty() {
-                    conn.poll_drain_events(handle as u32, batch);
+                    conn.poll_drain_events(offset | (handle as u32), batch);
                 }
             }
         }
+    }
+
+    fn drain_recycled_buffers(&mut self) {
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        for &handle in &self.handles_buf {
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                conn.drain_recycled();
+            }
+        }
+        self.chunk_pool.drain_returned(&self.chunk_pool_rx);
     }
 
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
@@ -1841,16 +2381,29 @@ impl ProtocolHandler for H3ServerHandler {
     }
 
     fn cleanup_closed(&mut self, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
         let closed = self.conn_map.drain_closed();
         for handle in &closed {
             self.timer_heap.remove_connection(*handle);
             self.conn_send_buffers.remove(handle);
             self.pending_session_closes.remove(&(*handle as u32));
             self.pending_writes
-                .retain(|&(ch, _), _| ch != *handle as u32);
+                .retain(|&(ch, _), _| ch as usize != *handle);
             if !self.last_expired.contains(handle) {
+                reactor_metrics::record_lifecycle_trace(
+                    "h3-server",
+                    "session-close-cleanup",
+                    None,
+                    None,
+                    None,
+                    Some(format!(
+                        "conn_handle={} pending_graceful_closes={}",
+                        offset | (*handle as u32),
+                        self.pending_session_closes.len()
+                    )),
+                );
                 reactor_metrics::record_session_close(SessionKind::H3Server);
-                batch.push(JsH3Event::session_close(*handle as u32));
+                batch.push(JsH3Event::session_close(offset | (*handle as u32)));
             }
         }
         self.last_expired.clear();
@@ -1877,8 +2430,12 @@ struct H3ClientHandler {
     pending_writes: HashMap<u64, PendingWrite>,
     send_buf: Vec<u8>,
     tx_pool: BufferPool,
+    pending_write_pool: AdaptiveBufferPool,
     timer_deadline: Option<Instant>,
     session_closed_emitted: bool,
+    chunk_pool: ChunkPool,
+    chunk_pool_return: Arc<ChunkPoolReturn>,
+    chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 impl H3ClientHandler {
@@ -1895,7 +2452,7 @@ impl H3ClientHandler {
             return None;
         };
         let scid_ref = quiche::ConnectionId::from_ref(&scid);
-        let Ok(mut quiche_conn) = quiche::connect(
+        let Ok(mut quiche_conn) = quiche::connect_with_buffer_factory::<ArcBufFactory>(
             Some(server_name),
             &scid_ref,
             local_addr,
@@ -1920,16 +2477,25 @@ impl H3ClientHandler {
         );
         let timer_deadline = conn.timeout().map(|t| Instant::now() + t);
         reactor_metrics::record_session_open(SessionKind::H3Client);
+        let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
+            ChunkPool::with_return_channel(64);
         Some(Self {
             conn,
             pending_writes: HashMap::new(),
             send_buf: vec![0u8; SEND_BUF_SIZE],
-            tx_pool: BufferPool::new(256, 1350),
+            tx_pool: BufferPool::new(256, 65535),
+            pending_write_pool: AdaptiveBufferPool::new(
+                PENDING_WRITE_POOL_SIZE,
+                PENDING_WRITE_MIN_CAPACITY,
+            ),
             timer_deadline,
             session_closed_emitted: false,
+            chunk_pool,
+            chunk_pool_return,
+            chunk_pool_rx,
         })
     }
-    
+
     fn current_dcid(&self) -> Vec<u8> {
         self.conn.quiche_conn.source_id().into_owned().to_vec()
     }
@@ -1948,6 +2514,18 @@ impl H3ClientHandler {
     }
 
     fn close_session(&mut self, error_code: u32, reason: &str) {
+        reactor_metrics::record_lifecycle_trace(
+            "h3-client",
+            "close-session-requested",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle=0 error_code={error_code} pending_writes={} blocked_streams={} reason={reason}",
+                self.pending_writes.len(),
+                self.conn.blocked_set.len()
+            )),
+        );
         let _ = self
             .conn
             .quiche_conn
@@ -1969,30 +2547,34 @@ impl H3ClientHandler {
             .map_err(|error| format!("send_request failed: {error}"))
     }
 
-    fn queue_stream_send(&mut self, stream_id: u64, data: Vec<u8>, fin: bool) {
+    fn queue_stream_send(&mut self, stream_id: u64, mut chunk: Chunk, fin: bool, batch: &mut Vec<JsH3Event>) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
-            pw.data.extend_from_slice(&data);
+            pw.chunk.append(chunk.remaining());
             pw.fin = pw.fin || fin;
             return;
         }
 
-        let written = self.conn.send_body(stream_id, &data, fin).unwrap_or(0);
-        if written < data.len() {
-            self.pending_writes.insert(
-                stream_id,
-                PendingWrite {
-                    data: data[written..].to_vec(),
-                    fin,
-                },
-            );
-        } else if fin && written == 0 && data.is_empty() {
-            self.pending_writes.insert(
-                stream_id,
-                PendingWrite {
-                    data: Vec::new(),
-                    fin: true,
-                },
-            );
+        match self.conn.send_body(stream_id, chunk.remaining(), fin) {
+            Ok(written) => {
+                if written < chunk.remaining_len() {
+                    chunk.advance(written);
+                    self.pending_writes.insert(stream_id, PendingWrite { chunk, fin });
+                } else if fin && written == 0 && chunk.remaining_len() == 0 {
+                    self.pending_writes.insert(
+                        stream_id,
+                        PendingWrite { chunk: Chunk::unpooled(Vec::new()), fin: true },
+                    );
+                }
+                // else: full write — chunk drops → recycles to pool
+            }
+            Err(e) => {
+                batch.push(JsH3Event::error(
+                    0, // client uses conn_handle 0
+                    stream_id as i64,
+                    0,
+                    format!("stream send failed: {e}"),
+                ));
+            }
         }
     }
 
@@ -2024,6 +2606,18 @@ impl H3ClientHandler {
         if self.session_closed_emitted {
             return;
         }
+        reactor_metrics::record_lifecycle_trace(
+            "h3-client",
+            "session-close-emitted",
+            None,
+            None,
+            None,
+            Some(format!(
+                "conn_handle={conn_handle} pending_writes={} blocked_streams={}",
+                self.pending_writes.len(),
+                self.conn.blocked_set.len()
+            )),
+        );
         reactor_metrics::record_session_close(SessionKind::H3Client);
         batch.push(JsH3Event::session_close(conn_handle));
         self.session_closed_emitted = true;
@@ -2095,17 +2689,14 @@ impl H3ClientHandler {
 
     fn try_send_next_with_pool_parts(
         conn: &mut H3Connection,
-        send_buf: &mut [u8],
+        _send_buf: &mut [u8],
         tx_pool: &mut BufferPool,
     ) -> Option<TxDatagram> {
-        let Ok((len, send_info)) = conn.send(send_buf) else {
+        let mut tx_buf = tx_pool.checkout();
+        let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) else {
+            tx_pool.checkin(tx_buf);
             return None;
         };
-        let mut tx_buf = tx_pool.checkout();
-        if tx_buf.len() < len {
-            tx_buf.resize(len, 0);
-        }
-        tx_buf[..len].copy_from_slice(&send_buf[..len]);
         tx_buf.truncate(len);
         Some(TxDatagram {
             data: tx_buf,
@@ -2113,12 +2704,12 @@ impl H3ClientHandler {
         })
     }
 
-    fn flush_pending_writes_for_handle(
-        &mut self,
-        batch: &mut Vec<JsH3Event>,
-        conn_handle: u32,
-    ) {
-        let flushed = flush_client_pending_writes(&mut self.conn, &mut self.pending_writes);
+    fn flush_pending_writes_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
+        let flushed = flush_client_pending_writes(
+            &mut self.conn,
+            &mut self.pending_writes,
+            &mut self.pending_write_pool,
+        );
         for stream_id in flushed {
             batch.push(JsH3Event::drain(conn_handle, stream_id));
         }
@@ -2145,14 +2736,22 @@ impl H3ClientHandler {
 impl ProtocolHandler for H3ClientHandler {
     type Command = ClientWorkerCommand;
 
-    fn dispatch_command(
-        &mut self,
-        cmd: ClientWorkerCommand,
-        _batch: &mut Vec<JsH3Event>,
-    ) -> bool {
+    fn dispatch_command(&mut self, cmd: ClientWorkerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             ClientWorkerCommand::Shutdown => {
                 if !self.session_closed_emitted {
+                    reactor_metrics::record_lifecycle_trace(
+                        "h3-client",
+                        "shutdown-command",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle=0 pending_writes={} blocked_streams={}",
+                            self.pending_writes.len(),
+                            self.conn.blocked_set.len()
+                        )),
+                    );
                     reactor_metrics::record_session_close(SessionKind::H3Client);
                     self.session_closed_emitted = true;
                 }
@@ -2170,10 +2769,10 @@ impl ProtocolHandler for H3ClientHandler {
             }
             ClientWorkerCommand::StreamSend {
                 stream_id,
-                data,
+                chunk,
                 fin,
             } => {
-                self.queue_stream_send(stream_id, data, fin);
+                self.queue_stream_send(stream_id, chunk, fin, _batch);
             }
             ClientWorkerCommand::StreamClose {
                 stream_id,
@@ -2219,6 +2818,7 @@ impl ProtocolHandler for H3ClientHandler {
         while let Some(packet) = self.try_send_next() {
             outbound.push(packet);
         }
+        self.timer_deadline = self.conn.timeout().map(|timeout| Instant::now() + timeout);
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
@@ -2227,6 +2827,11 @@ impl ProtocolHandler for H3ClientHandler {
 
     fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>) {
         self.poll_drain_events_for_handle(batch, 0);
+    }
+
+    fn drain_recycled_buffers(&mut self) {
+        self.conn.drain_recycled();
+        self.chunk_pool.drain_returned(&self.chunk_pool_rx);
     }
 
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
@@ -2301,6 +2906,7 @@ fn snapshot_metrics(conn: &H3Connection) -> JsSessionMetrics {
         handshake_time_ms: conn.handshake_time_ms(),
         rtt_ms: conn.rtt_ms(),
         cwnd: conn.cwnd() as i64,
+        pmtu: conn.pmtu() as i64,
     }
 }
 
@@ -2308,21 +2914,30 @@ fn snapshot_metrics(conn: &H3Connection) -> JsSessionMetrics {
 fn flush_pending_writes(
     conn_map: &mut ConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
+    _pool: &mut AdaptiveBufferPool,
 ) -> Vec<(u32, u64)> {
     let mut flushed = Vec::new();
     pending.retain(|&(conn_handle, stream_id), pw| {
         let Some(conn) = conn_map.get_mut(conn_handle as usize) else {
+            // PendingWrite drops -> chunk recycles to pool
             return false;
         };
-        let written = conn.send_body(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written >= pw.data.len() {
-            flushed.push((conn_handle, stream_id));
-            false
-        } else {
-            if written > 0 {
-                pw.data.drain(..written);
+        match conn.send_body(stream_id, pw.chunk.remaining(), pw.fin) {
+            Ok(written) if written >= pw.chunk.remaining_len() => {
+                flushed.push((conn_handle, stream_id));
+                // PendingWrite drops -> chunk recycles to pool
+                false
             }
-            true
+            Ok(written) => {
+                if written > 0 {
+                    pw.chunk.advance(written);
+                }
+                true
+            }
+            Err(e) => {
+                log::warn!("flush pending write failed for stream {stream_id}: {e}");
+                false // Remove — stream is dead
+            }
         }
     });
     flushed
@@ -2332,18 +2947,26 @@ fn flush_pending_writes(
 fn flush_client_pending_writes(
     conn: &mut H3Connection,
     pending: &mut HashMap<u64, PendingWrite>,
+    _pool: &mut AdaptiveBufferPool,
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
-        let written = conn.send_body(stream_id, &pw.data, pw.fin).unwrap_or(0);
-        if written >= pw.data.len() {
-            flushed.push(stream_id);
-            false
-        } else {
-            if written > 0 {
-                pw.data.drain(..written);
+        match conn.send_body(stream_id, pw.chunk.remaining(), pw.fin) {
+            Ok(written) if written >= pw.chunk.remaining_len() => {
+                flushed.push(stream_id);
+                // PendingWrite drops -> chunk recycles to pool
+                false
             }
-            true
+            Ok(written) => {
+                if written > 0 {
+                    pw.chunk.advance(written);
+                }
+                true
+            }
+            Err(e) => {
+                log::warn!("flush pending write failed for stream {stream_id}: {e}");
+                false // Remove — stream is dead
+            }
         }
     });
     flushed

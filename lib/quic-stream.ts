@@ -1,4 +1,12 @@
 import { Duplex } from 'node:stream';
+import {
+  type BackpressureState,
+  cancelDrainCallbacks,
+  createBackpressureState,
+  pushData,
+  drainPendingReads,
+  fireDrainCallbacks,
+} from './stream-backpressure.js';
 
 /**
  * Event loop interface for QUIC server-side stream commands.
@@ -30,7 +38,8 @@ export class QuicStream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _serverLoop: QuicServerEventLoopLike | null = null;
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
-  /** @internal */ _drainCallbacks: Array<() => void> = [];
+  /** @internal */ _bp: BackpressureState = createBackpressureState();
+  private _finalChunk: Buffer | null = null;
 
   constructor(opts?: { highWaterMark?: number }) {
     super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
@@ -53,27 +62,54 @@ export class QuicStream extends Duplex {
     } else if (this._clientLoop) {
       this._clientLoop.streamClose(this._streamId, errorCode);
     }
-    for (const cb of this._drainCallbacks) {
-      cb();
-    }
-    this._drainCallbacks.length = 0;
+    cancelDrainCallbacks(this._bp);
     this.destroy();
   }
 
   /** @internal — called by event dispatcher when flow control window opens */
   _onNativeDrain(): void {
-    const cbs = this._drainCallbacks.splice(0);
-    for (const cb of cbs) {
-      cb();
-    }
+    fireDrainCallbacks(this._bp);
   }
 
   _read(_size: number): void {
-    // Data is pushed by the event dispatcher — no pull needed
+    drainPendingReads(this, this._bp);
+  }
+
+  /** @internal — push data respecting Readable backpressure. */
+  _pushData(chunk: Buffer | null): void {
+    pushData(this, this._bp, chunk);
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
     this._writeChunk(chunk, callback);
+  }
+
+  override end(chunk?: any, encoding?: any, callback?: any): this {
+    let finalChunk = chunk;
+    let finalEncoding = encoding;
+    let finalCallback = callback;
+
+    if (typeof finalChunk === 'function') {
+      finalCallback = finalChunk;
+      finalChunk = undefined;
+      finalEncoding = undefined;
+    } else if (typeof finalEncoding === 'function') {
+      finalCallback = finalEncoding;
+      finalEncoding = undefined;
+    }
+
+    if (finalChunk != null) {
+      if (Buffer.isBuffer(finalChunk)) {
+        this._finalChunk = finalChunk;
+      } else if (finalChunk instanceof Uint8Array) {
+        this._finalChunk = Buffer.from(finalChunk);
+      } else {
+        this._finalChunk = Buffer.from(String(finalChunk), finalEncoding);
+      }
+      return (super.end as any)(undefined, undefined, finalCallback);
+    }
+
+    return (super.end as any)(undefined, undefined, finalCallback);
   }
 
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
@@ -82,22 +118,37 @@ export class QuicStream extends Duplex {
       callback();
     } else {
       const remaining = chunk.subarray(written);
-      this._drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push(() => {
         this._writeChunk(remaining, callback);
       });
     }
   }
 
-  _final(callback: (error?: Error | null) => void): void {
-    const written = this._doSend(Buffer.alloc(0), true);
-    if (written === 0) {
-      this._drainCallbacks.push(() => {
-        this._doSend(Buffer.alloc(0), true);
+  private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const written = this._doSend(chunk, true);
+    if (chunk.length === 0) {
+      if (written > 0) {
         callback();
-      });
-    } else {
-      callback();
+      } else {
+        this._bp.drainCallbacks.push(() => {
+          this._writeFinalChunk(chunk, callback);
+        });
+      }
+      return;
     }
+    if (written >= chunk.length) {
+      callback();
+    } else {
+      this._bp.drainCallbacks.push(() => {
+        this._writeFinalChunk(chunk.subarray(written), callback);
+      });
+    }
+  }
+
+  _final(callback: (error?: Error | null) => void): void {
+    const finalChunk = this._finalChunk ?? Buffer.alloc(0);
+    this._finalChunk = null;
+    this._writeFinalChunk(finalChunk, callback);
   }
 
   private _doSend(data: Buffer, fin: boolean): number {
@@ -108,5 +159,10 @@ export class QuicStream extends Duplex {
       return this._clientLoop.streamSend(this._streamId, data, fin);
     }
     return 0;
+  }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    cancelDrainCallbacks(this._bp);
+    callback(error);
   }
 }

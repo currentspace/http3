@@ -134,6 +134,25 @@ export interface JsHeader {
   value: string
 }
 
+export interface JsLifecycleTraceEvent {
+  seq: number
+  timestampMs: number
+  component: string
+  action: string
+  driver?: string
+  batchSize?: number
+  pendingTx?: number
+  note?: string
+}
+
+export interface JsLifecycleTraceSnapshot {
+  enabled: boolean
+  capacity: number
+  droppedEvents: number
+  eventCount: number
+  events: Array<JsLifecycleTraceEvent>
+}
+
 export interface JsMockQuicProfileOptions {
   key: Buffer
   cert: Buffer
@@ -206,6 +225,18 @@ export interface JsReactorTelemetrySnapshot {
   kqueueDriverSetupSuccesses: number
   kqueueDriverSetupFailures: number
   workerThreadSpawnsTotal: number
+  workerThreadStopsTotal: number
+  workerLoopExitByCommandTotal: number
+  workerLoopExitByHandlerDoneTotal: number
+  workerLoopExitBySinkCloseTotal: number
+  workerLoopExitByRuntimeErrorTotal: number
+  shutdownCompleteEmittedTotal: number
+  eventBatchFlushesTotal: number
+  eventBatchAttemptedEventsTotal: number
+  eventBatchDeliveredEventsTotal: number
+  eventBatchDroppedEventsTotal: number
+  eventBatchSinkErrorsTotal: number
+  eventBatchMaxSizeHighWatermark: number
   rawQuicServerWorkerSpawns: number
   rawQuicClientDedicatedWorkerSpawns: number
   rawQuicClientSharedWorkersCreated: number
@@ -238,6 +269,10 @@ export interface JsReactorTelemetrySnapshot {
   ioUringRxInFlightHighWatermark: number
   ioUringTxInFlightHighWatermark: number
   ioUringPendingTxHighWatermark: number
+  ioUringTier2DrainRounds: number
+  ioUringTier2TaskrunPrefetches: number
+  ioUringTier2BlockingWaits: number
+  ioUringTier2CapHits: number
   ioUringRetryableSendCompletions: number
   ioUringSubmitCalls: number
   ioUringSubmitWithArgsCalls: number
@@ -254,6 +289,23 @@ export interface JsReactorTelemetrySnapshot {
   kqueueUnsentHighWatermark: number
   kqueueWouldBlockSends: number
   kqueueWriteWakeups: number
+  rxBufferReuses: number
+  rxBufferAllocations: number
+  rxBufferCheckins: number
+  rxBufferDrops: number
+  rxBufferCopiedBytes: number
+  groSegmentBufferReuses: number
+  groSegmentBufferAllocations: number
+  groSegmentBufferCheckins: number
+  groSegmentBufferDrops: number
+  groSegmentBufferCopiedBytes: number
+  pendingWriteBufferReuses: number
+  pendingWriteBufferAllocations: number
+  pendingWriteBufferCheckins: number
+  pendingWriteBufferDrops: number
+  pendingWriteCopiedBytes: number
+  pendingWriteTailAllocations: number
+  pendingWriteGrowthReallocations: number
   txBuffersRecycled: number
 }
 
@@ -292,6 +344,7 @@ export interface JsSessionMetrics {
   handshakeTimeMs: number
   rttMs: number
   cwnd: number
+  pmtu: number
 }
 
 export interface JsSetting {
@@ -299,8 +352,14 @@ export interface JsSetting {
   value: number
 }
 
+export declare function lifecycleTraceSnapshot(): JsLifecycleTraceSnapshot
+
+export declare function resetLifecycleTrace(): void
+
 export declare function resetRuntimeTelemetry(): void
 
 export declare function runtimeTelemetry(): JsReactorTelemetrySnapshot
+
+export declare function setLifecycleTraceEnabled(enabled: boolean): void
 
 export declare function version(): string
