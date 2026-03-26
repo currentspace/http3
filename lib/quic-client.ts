@@ -390,8 +390,13 @@ export class QuicClientSession extends EventEmitter {
   }
 
   private _cleanupStreams(): void {
+    const err = new Error('session closed');
     for (const stream of [...this._streams.values()]) {
-      stream.destroy();
+      if (stream.listenerCount('error') > 0) {
+        stream.destroy(err);
+      } else {
+        stream.destroy();
+      }
     }
     this._streams.clear();
   }

@@ -537,8 +537,13 @@ export class Http3SecureServer extends EventEmitter {
   private _destroyH2SessionStreams(h2Session: Http2Session): void {
     const streams = this._h2SessionStreams.get(h2Session);
     if (!streams) return;
+    const err = new Error('session closed');
     for (const stream of streams) {
-      stream.destroy();
+      if (stream.listenerCount('error') > 0) {
+        stream.destroy(err);
+      } else {
+        stream.destroy();
+      }
     }
     this._h2SessionStreams.delete(h2Session);
   }
@@ -737,9 +742,14 @@ export class Http3SecureServer extends EventEmitter {
       this._sessions.delete(event.connHandle);
     }
     // Clean up any streams belonging to this session
+    const err = new Error('session closed');
     for (const [key, stream] of this._streams) {
       if (key.startsWith(`${event.connHandle}:`)) {
-        stream.destroy();
+        if (stream.listenerCount('error') > 0) {
+          stream.destroy(err);
+        } else {
+          stream.destroy();
+        }
         this._streams.delete(key);
       }
     }

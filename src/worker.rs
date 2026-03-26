@@ -1284,7 +1284,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     fin,
                 } => {
                     if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.handler.queue_stream_send(stream_id, Chunk::unpooled(data), fin);
+                        session.handler.queue_stream_send(stream_id, Chunk::unpooled(data), fin, &mut session.batcher.batch);
                     }
                 }
                 SharedClientWorkerCommand::StreamClose {
@@ -1894,18 +1894,29 @@ impl ProtocolHandler for H3ServerHandler {
                     pw.fin = pw.fin || fin;
                     // chunk drops here -> recycles to pool
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    let written = conn.send_body(stream_id, chunk.remaining(), fin).unwrap_or(0);
-                    if written < chunk.remaining_len() {
-                        chunk.advance(written);
-                        self.pending_writes.insert(key, PendingWrite { chunk, fin });
-                    } else if fin && written == 0 && chunk.remaining_len() == 0 {
-                        self.pending_writes.insert(
-                            key,
-                            PendingWrite {
-                                chunk: Chunk::unpooled(Vec::new()),
-                                fin: true,
-                            },
-                        );
+                    match conn.send_body(stream_id, chunk.remaining(), fin) {
+                        Ok(written) => {
+                            if written < chunk.remaining_len() {
+                                chunk.advance(written);
+                                self.pending_writes.insert(key, PendingWrite { chunk, fin });
+                            } else if fin && written == 0 && chunk.remaining_len() == 0 {
+                                self.pending_writes.insert(
+                                    key,
+                                    PendingWrite {
+                                        chunk: Chunk::unpooled(Vec::new()),
+                                        fin: true,
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            _batch.push(JsH3Event::error(
+                                conn_handle,
+                                stream_id as i64,
+                                0,
+                                format!("stream send failed: {e}"),
+                            ));
+                        }
                     }
                 }
             }
@@ -2536,24 +2547,35 @@ impl H3ClientHandler {
             .map_err(|error| format!("send_request failed: {error}"))
     }
 
-    fn queue_stream_send(&mut self, stream_id: u64, mut chunk: Chunk, fin: bool) {
+    fn queue_stream_send(&mut self, stream_id: u64, mut chunk: Chunk, fin: bool, batch: &mut Vec<JsH3Event>) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
             pw.chunk.append(chunk.remaining());
             pw.fin = pw.fin || fin;
             return;
         }
 
-        let written = self.conn.send_body(stream_id, chunk.remaining(), fin).unwrap_or(0);
-        if written < chunk.remaining_len() {
-            chunk.advance(written);
-            self.pending_writes.insert(stream_id, PendingWrite { chunk, fin });
-        } else if fin && written == 0 && chunk.remaining_len() == 0 {
-            self.pending_writes.insert(
-                stream_id,
-                PendingWrite { chunk: Chunk::unpooled(Vec::new()), fin: true },
-            );
+        match self.conn.send_body(stream_id, chunk.remaining(), fin) {
+            Ok(written) => {
+                if written < chunk.remaining_len() {
+                    chunk.advance(written);
+                    self.pending_writes.insert(stream_id, PendingWrite { chunk, fin });
+                } else if fin && written == 0 && chunk.remaining_len() == 0 {
+                    self.pending_writes.insert(
+                        stream_id,
+                        PendingWrite { chunk: Chunk::unpooled(Vec::new()), fin: true },
+                    );
+                }
+                // else: full write — chunk drops → recycles to pool
+            }
+            Err(e) => {
+                batch.push(JsH3Event::error(
+                    0, // client uses conn_handle 0
+                    stream_id as i64,
+                    0,
+                    format!("stream send failed: {e}"),
+                ));
+            }
         }
-        // else: full write — chunk drops → recycles to pool
     }
 
     fn close_stream(&mut self, stream_id: u64, error_code: u32) {
@@ -2750,7 +2772,7 @@ impl ProtocolHandler for H3ClientHandler {
                 chunk,
                 fin,
             } => {
-                self.queue_stream_send(stream_id, chunk, fin);
+                self.queue_stream_send(stream_id, chunk, fin, _batch);
             }
             ClientWorkerCommand::StreamClose {
                 stream_id,
@@ -2900,16 +2922,22 @@ fn flush_pending_writes(
             // PendingWrite drops -> chunk recycles to pool
             return false;
         };
-        let written = conn.send_body(stream_id, pw.chunk.remaining(), pw.fin).unwrap_or(0);
-        if written >= pw.chunk.remaining_len() {
-            flushed.push((conn_handle, stream_id));
-            // PendingWrite drops -> chunk recycles to pool
-            false
-        } else {
-            if written > 0 {
-                pw.chunk.advance(written);
+        match conn.send_body(stream_id, pw.chunk.remaining(), pw.fin) {
+            Ok(written) if written >= pw.chunk.remaining_len() => {
+                flushed.push((conn_handle, stream_id));
+                // PendingWrite drops -> chunk recycles to pool
+                false
             }
-            true
+            Ok(written) => {
+                if written > 0 {
+                    pw.chunk.advance(written);
+                }
+                true
+            }
+            Err(e) => {
+                log::warn!("flush pending write failed for stream {stream_id}: {e}");
+                false // Remove — stream is dead
+            }
         }
     });
     flushed
@@ -2923,16 +2951,22 @@ fn flush_client_pending_writes(
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
-        let written = conn.send_body(stream_id, pw.chunk.remaining(), pw.fin).unwrap_or(0);
-        if written >= pw.chunk.remaining_len() {
-            flushed.push(stream_id);
-            // PendingWrite drops -> chunk recycles to pool
-            false
-        } else {
-            if written > 0 {
-                pw.chunk.advance(written);
+        match conn.send_body(stream_id, pw.chunk.remaining(), pw.fin) {
+            Ok(written) if written >= pw.chunk.remaining_len() => {
+                flushed.push(stream_id);
+                // PendingWrite drops -> chunk recycles to pool
+                false
             }
-            true
+            Ok(written) => {
+                if written > 0 {
+                    pw.chunk.advance(written);
+                }
+                true
+            }
+            Err(e) => {
+                log::warn!("flush pending write failed for stream {stream_id}: {e}");
+                false // Remove — stream is dead
+            }
         }
     });
     flushed
