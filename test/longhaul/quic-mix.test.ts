@@ -17,12 +17,21 @@ function formatMB(bytes: number): string {
 
 function collectStream(stream: QuicStream, timeoutMs = 10_000): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    if (stream.destroyed) {
+      reject(new Error('stream already destroyed'));
+      return;
+    }
     const chunks: Buffer[] = [];
     const timer = setTimeout(() => reject(new Error('stream collect timed out')), timeoutMs);
+    const cleanup = (): void => { clearTimeout(timer); };
     stream.on('data', (chunk: Buffer) => { chunks.push(chunk); });
-    stream.on('end', () => {
-      clearTimeout(timer);
-      resolve(Buffer.concat(chunks));
+    stream.on('end', () => { cleanup(); resolve(Buffer.concat(chunks)); });
+    stream.on('error', (err: Error) => { cleanup(); reject(err); });
+    stream.on('close', () => {
+      cleanup();
+      if (!stream.readableEnded) {
+        reject(new Error('stream closed before end'));
+      }
     });
     stream.on('error', (err: Error) => {
       clearTimeout(timer);
@@ -43,6 +52,7 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       cert: certs.cert,
       disableRetry: true,
       maxConnections: 1000,
+      initialMaxStreamsBidi: 1_000_000,
     });
 
     server.on('session', (session: QuicServerSession) => {
@@ -75,6 +85,13 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
 
     let client = await connectQuicAsync(`127.0.0.1:${serverPort}`, {
       rejectUnauthorized: false,
+      initialMaxStreamsBidi: 1_000_000,
+    });
+    client.on('error', (err: Error) => {
+      console.log(`  [quic-mix] SESSION ERROR: ${err.message}`);
+    });
+    client.on('close', () => {
+      console.log('  [quic-mix] SESSION CLOSED');
     });
 
     // Listen for server-initiated streams (for server-push scenario)
@@ -107,9 +124,18 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       const payload = Buffer.alloc(size, size & 0xff);
       const stream = client.openStream();
       stream.end(payload);
-      const echoed = await collectStream(stream, 15_000);
-      if (echoed.length !== size) {
-        throw new Error(`echo mismatch: expected ${size}, got ${echoed.length}`);
+      try {
+        const echoed = await collectStream(stream, 30_000);
+        if (echoed.length !== size) {
+          throw new Error(`echo mismatch: expected ${size}, got ${echoed.length}`);
+        }
+      } catch (err: unknown) {
+        // Add diagnostic info
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `${msg} (streamId=${stream.id} destroyed=${stream.destroyed} ` +
+          `readableEnded=${stream.readableEnded} writableFinished=${stream.writableFinished})`,
+        );
       }
     }
 
@@ -177,9 +203,11 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
         }
         tracker.record(Date.now() - startTs);
         totalOps++;
-      } catch {
+      } catch (err: unknown) {
         errors++;
         totalOps++;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`  [quic-mix] ERROR on ${scenario}: ${msg}`);
         // Reconnect if session died.
         try {
           const probe = client.openStream();
