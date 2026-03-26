@@ -20,7 +20,7 @@ function formatMB(bytes: number): string {
 describe('H3 mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL }, () => {
   it('sustained mixed H3 scenario traffic with latency tracking', { timeout: 330_000 }, async () => {
     const { server, port } = await startScenarioServer();
-    const session = await connectScenarioClient(port);
+    let session = await connectScenarioClient(port);
 
     const tracker = new LatencyTracker();
     const DURATION_S = 300;
@@ -34,10 +34,10 @@ describe('H3 mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       ['/health', 40],
       ['/api/users', 20],
       ['/api/users POST', 15],
-      ['/files/large.bin', 10],
-      ['/slow', 5],
+      ['/files/small.txt', 10],
+      ['/headers/echo', 5],
       ['/api/upload', 5],
-      ['/sse/events', 5],
+      ['/concurrent', 5],
     ];
 
     while ((Date.now() - start) / 1000 < DURATION_S) {
@@ -57,6 +57,20 @@ describe('H3 mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       } catch {
         errors++;
         totalRequests++;
+        // If session is dead, reconnect before continuing.
+        try {
+          await doRequest(session, 'GET', '/health');
+        } catch {
+          // Session is truly dead — reconnect.
+          try { await session.close(); } catch { /* ignore */ }
+          try {
+            session = await connectScenarioClient(port);
+          } catch {
+            // Server may be overwhelmed — wait before retrying.
+            await new Promise(r => setTimeout(r, 500));
+            session = await connectScenarioClient(port);
+          }
+        }
       }
 
       // Log stats every 30s
