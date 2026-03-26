@@ -53,6 +53,8 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       disableRetry: true,
       maxConnections: 1000,
       initialMaxStreamsBidi: 1_000_000,
+      maxIdleTimeoutMs: 600_000,
+      initialMaxData: 2_000_000_000, // 2GB
     });
 
     server.on('session', (session: QuicServerSession) => {
@@ -86,13 +88,12 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
     let client = await connectQuicAsync(`127.0.0.1:${serverPort}`, {
       rejectUnauthorized: false,
       initialMaxStreamsBidi: 1_000_000,
+      maxIdleTimeoutMs: 600_000,
+      initialMaxData: 4_000_000_000,
     });
-    client.on('error', (err: Error) => {
-      console.log(`  [quic-mix] SESSION ERROR: ${err.message}`);
-    });
-    client.on('close', () => {
-      console.log('  [quic-mix] SESSION CLOSED');
-    });
+    // Session may close under extreme stream churn (quiche FLOW_CONTROL_ERROR
+    // when MAX_DATA credit extension doesn't arrive fast enough). The reconnect
+    // logic below handles this gracefully.
 
     // Listen for server-initiated streams (for server-push scenario)
     client.on('stream', (stream: QuicStream) => {
@@ -258,8 +259,8 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
     );
 
     assert.ok(
-      errorRate < 5,
-      `error rate ${errorRate.toFixed(2)}% exceeds 5% limit (${errors}/${total})`,
+      errorRate < 1,
+      `error rate ${errorRate.toFixed(2)}% exceeds 1% limit (${errors}/${total})`,
     );
     assert.ok(
       finalMem.heapUsed < 100 * 1024 * 1024,

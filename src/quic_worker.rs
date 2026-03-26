@@ -2554,6 +2554,15 @@ impl QuicClientHandler {
         if self.session_closed_emitted {
             return;
         }
+        let peer_error = self.conn.quiche_conn.peer_error();
+        let local_error = self.conn.quiche_conn.local_error();
+        log::warn!(
+            "quic-client session close: cause={cause:?} peer_error={peer_error:?} \
+             local_error={local_error:?} pending_writes={} blocked={} known={}",
+            self.pending_writes.len(),
+            self.conn.blocked_set.len(),
+            self.conn.known_streams.len(),
+        );
         reactor_metrics::record_lifecycle_trace(
             "quic-client",
             "session-close-emitted",
