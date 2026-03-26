@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { X509Certificate } from 'node:crypto';
-import { binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
@@ -84,9 +84,21 @@ export interface QuicServerOptions {
 class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   private readonly worker: NativeQuicServerBinding;
   private closed = false;
+  private _shutdownObserved = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeQuicServerBinding) {
     this.worker = worker;
+  }
+
+  /** @internal */
+  _onShutdownSentinel(): void {
+    this._shutdownObserved = true;
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
@@ -121,8 +133,16 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this._shutdownObserved) return;
+    const settled = new Promise<void>((resolve) => {
+      if (this._shutdownObserved) {
+        resolve();
+        return;
+      }
+      this._shutdownResolve = resolve;
+    });
     this.worker.shutdown();
-    await Promise.resolve();
+    await settled;
   }
 }
 
@@ -173,6 +193,7 @@ export class QuicServerSession extends EventEmitter {
     stream._streamId = streamId;
     stream._serverLoop = this._eventLoop;
     this._streams.set(streamId, stream);
+    this._trackStreamLifecycle(streamId, stream);
     return stream;
   }
 
@@ -233,16 +254,30 @@ export class QuicServerSession extends EventEmitter {
       stream._streamId = streamId;
       stream._serverLoop = this._eventLoop;
       this._streams.set(streamId, stream);
+      this._trackStreamLifecycle(streamId, stream);
     }
     return stream;
   }
 
   /** @internal */
   _cleanup(): void {
-    for (const stream of this._streams.values()) {
-      stream.destroy();
+    const err = new Error('session closed');
+    for (const stream of [...this._streams.values()]) {
+      if (stream.listenerCount('error') > 0) {
+        stream.destroy(err);
+      } else {
+        stream.destroy();
+      }
     }
     this._streams.clear();
+  }
+
+  private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
+    stream.once('close', () => {
+      if (this._streams.get(streamId) === stream) {
+        this._streams.delete(streamId);
+      }
+    });
   }
 }
 
@@ -318,7 +353,18 @@ export class QuicServer extends EventEmitter {
           keylog: opts.keylog,
         },
         (_err: Error | null, events: NativeEvent[]) => {
-          this._dispatchEvents(events);
+          let hasShutdown = false;
+          for (const event of events) {
+            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+              hasShutdown = true;
+            }
+          }
+          if (!hasShutdown) {
+            this._dispatchEvents(events);
+          } else {
+            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+            eventLoop._onShutdownSentinel();
+          }
         },
       );
 
@@ -418,12 +464,11 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (!session) return;
     const stream = session._getOrCreateStream(event.streamId);
-    // Coalesced first data from Rust: push inline to avoid extra TSFN event
     if (event.data) {
-      stream.push(Buffer.from(event.data));
+      stream._pushData(event.data);
     }
     if (event.fin) {
-      stream.push(null);
+      stream._pushData(null);
     }
     session.emit('stream', stream);
   }
@@ -432,7 +477,7 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (!session || !event.data) return;
     const stream = session._getOrCreateStream(event.streamId);
-    stream.push(Buffer.from(event.data));
+    stream._pushData(event.data);
   }
 
   private _onFinished(event: NativeEvent): void {
@@ -440,9 +485,12 @@ export class QuicServer extends EventEmitter {
     if (!session) return;
     const stream = session._streams.get(event.streamId);
     if (stream) {
-      stream.push(null);
-      // Don't delete from map yet — drain callbacks may still be pending.
-      // The stream will be cleaned up when the session closes.
+      stream._pushData(null);
+      // If the readable side was never consumed, resume it so the Duplex
+      // can fully destroy and fire 'close' (which triggers map cleanup).
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
     }
   }
 
@@ -493,7 +541,7 @@ export class QuicServer extends EventEmitter {
   private _onDatagram(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
     if (session && event.data) {
-      session.emit('datagram', Buffer.from(event.data));
+      session.emit('datagram', event.data);
     }
   }
 }

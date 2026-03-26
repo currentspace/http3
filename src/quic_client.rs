@@ -17,7 +17,6 @@ pub struct NativeQuicClient {
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
 }
 
@@ -29,9 +28,8 @@ impl NativeQuicClient {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let user_set_mtu = options.max_udp_payload_size.is_some();
-        let quiche_config = crate::config::new_quic_client_config(&options)
-            .map_err(napi::Error::from)?;
+        let quiche_config =
+            crate::config::new_quic_client_config(&options).map_err(napi::Error::from)?;
 
         Ok(Self {
             handle: None,
@@ -40,7 +38,6 @@ impl NativeQuicClient {
             session_ticket: options.session_ticket.map(|t| t.to_vec()),
             qlog_dir: options.qlog_dir,
             qlog_level: options.qlog_level,
-            user_set_mtu,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
         })
@@ -72,7 +69,6 @@ impl NativeQuicClient {
             self.session_ticket.take(),
             self.qlog_dir.clone(),
             self.qlog_level.clone(),
-            self.user_set_mtu,
             self.runtime_mode,
             tsfn,
         )

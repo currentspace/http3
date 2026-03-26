@@ -1,0 +1,101 @@
+{
+  "artifactType": "iouring-vs-poll-escalation",
+  "generatedAt": "2026-03-19T22:24:03.049Z",
+  "stopConditions": {
+    "p95SpikeFactor": 3,
+    "errorRateThreshold": 0.02
+  },
+  "rounds": 3,
+  "initial": {
+    "clients": 2,
+    "connections": 10,
+    "streams": 50,
+    "messageSize": "4KB"
+  },
+  "escalation": {
+    "clients": 1.3,
+    "connections": 1.4,
+    "streams": 1.5
+  },
+  "results": [
+    {
+      "protocol": "quic",
+      "runtime": "fast",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": null,
+      "error": "exited 1"
+    },
+    {
+      "protocol": "quic",
+      "runtime": "portable",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": null,
+      "error": "exited 1"
+    },
+    {
+      "protocol": "h3",
+      "runtime": "fast",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": null,
+      "error": "exited 1"
+    },
+    {
+      "protocol": "h3",
+      "runtime": "portable",
+      "level": 0,
+      "iteration": 0,
+      "clients": 2,
+      "connections": 10,
+      "streams": 50,
+      "messageSize": "4KB",
+      "totalStreams": 3000,
+      "metrics": {
+        "throughputMbps": 12.358169266172334,
+        "streamsPerSecond": 188.57069803119407,
+        "latencyMeanMs": 33.208474576271186,
+        "latencyP50Ms": 26.76833333333333,
+        "latencyP95Ms": 85.10666666666667,
+        "latencyP99Ms": 126.25666666666667,
+        "errors": 50,
+        "totalStreams": 2950,
+        "errorRate": 0.01694915254237288,
+        "wallElapsedMs": 15644,
+        "clientCpuPct": 4.576834569163897,
+        "serverCpuPct": 3.928042700076707,
+        "peakRssMB": 122.585088,
+        "serverDriver": "poll"
+      }
+    },
+    {
+      "protocol": "h3",
+      "runtime": "portable",
+      "level": 1,
+      "iteration": 1,
+      "clients": 3,
+      "connections": 14,
+      "streams": 75,
+      "messageSize": "4KB",
+      "totalStreams": 9450,
+      "metrics": null,
+      "error": "exited 1"
+    }
+  ]
+}

@@ -15,7 +15,6 @@ pub struct NativeQuicServer {
     quiche_config: Option<quiche::Config>,
     server_config: Option<crate::quic_worker::QuicServerConfig>,
     tsfn: Option<crate::worker::EventTsfn>,
-    user_set_mtu: bool,
 }
 
 #[napi]
@@ -26,9 +25,8 @@ impl NativeQuicServer {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let user_set_mtu = options.max_udp_payload_size.is_some();
-        let quiche_config = crate::config::new_quic_server_config(&options)
-            .map_err(napi::Error::from)?;
+        let quiche_config =
+            crate::config::new_quic_server_config(&options).map_err(napi::Error::from)?;
         let server_config = crate::quic_worker::QuicServerConfig {
             qlog_dir: options.qlog_dir,
             qlog_level: options.qlog_level,
@@ -49,7 +47,6 @@ impl NativeQuicServer {
             quiche_config: Some(quiche_config),
             server_config: Some(server_config),
             tsfn: Some(callback),
-            user_set_mtu,
         })
     }
 
@@ -78,14 +75,8 @@ impl NativeQuicServer {
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
 
         let worker_handle =
-            crate::quic_worker::spawn_quic_server(
-                quiche_config,
-                server_config,
-                addr,
-                self.user_set_mtu,
-                tsfn,
-            )
-            .map_err(napi::Error::from)?;
+            crate::quic_worker::spawn_quic_server(quiche_config, server_config, addr, tsfn)
+                .map_err(napi::Error::from)?;
 
         let local = worker_handle.local_addr();
         self.handle = Some(worker_handle);
@@ -109,7 +100,7 @@ impl NativeQuicServer {
         handle.send_command(crate::quic_worker::QuicServerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            data: data.to_vec(),
+            chunk: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
             fin,
         })
     }

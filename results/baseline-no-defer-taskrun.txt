@@ -1,0 +1,29 @@
+Baseline: without DEFER_TASKRUN (plain io_uring, setup_cqsize only)
+Kernel: 6.16.0-1002-asahi-arm
+Date: 2026-03-20
+
+driver_submit_sends/io_uring/1      238.67 ns
+driver_submit_sends/io_uring/16     3.4822 µs
+driver_submit_sends/io_uring/64     13.911 µs
+driver_submit_sends/io_uring/256    35.447 µs
+
+driver_poll_rx/io_uring/1           1.7400 µs
+driver_poll_rx/io_uring/16          22.352 µs
+driver_poll_rx/io_uring/64          88.288 µs
+driver_poll_rx/io_uring/128         176.03 µs
+
+driver_roundtrip/io_uring           7.3858 µs
+driver_poll_idle_wake/io_uring      28.374 µs
+
+driver_submit_sends/poll/1          1.2683 µs
+driver_submit_sends/poll/16         4.7251 µs
+driver_submit_sends/poll/64         14.137 µs
+driver_submit_sends/poll/256        59.350 µs
+
+driver_poll_rx/poll/1               2.1901 µs
+driver_poll_rx/poll/16              20.743 µs
+driver_poll_rx/poll/64              80.463 µs
+driver_poll_rx/poll/128             160.19 µs
+
+driver_roundtrip/poll               8.6330 µs
+driver_poll_idle_wake/poll          26.788 µs
