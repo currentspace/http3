@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- Fixed `optionalDependencies` in the root package to reference the matching `0.7.1` native sidecar versions instead of the stale `0.6.0` references shipped in 0.7.0.
+
 ## 0.7.0
 
 ### Memory leak and correctness fixes
