@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
