@@ -10,6 +10,13 @@ import { generateTestCerts } from '../support/generate-certs.js';
 import { createQuicServer, connectQuic, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { echoStream } from '../support/echo-stream.js';
+import {
+  appendLifecycleArtifacts,
+  beginLifecycleCapture,
+  endLifecycleCapture,
+  withLifecycleTimeout,
+} from '../support/failure-artifacts.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -36,7 +43,7 @@ describe('QUIC protocol verification', () => {
     it('session ticket emitted after handshake', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -73,7 +80,7 @@ describe('QUIC protocol verification', () => {
     it('resumption with stored ticket', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -116,7 +123,7 @@ describe('QUIC protocol verification', () => {
     it('invalid session ticket falls back to full handshake', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -147,7 +154,7 @@ describe('QUIC protocol verification', () => {
         disableRetry: false, // Retry enabled
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -170,7 +177,7 @@ describe('QUIC protocol verification', () => {
         disableRetry: false,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -209,7 +216,7 @@ describe('QUIC protocol verification', () => {
         initialMaxStreamDataBidiLocal: 4096, // Small window
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -248,7 +255,7 @@ describe('QUIC protocol verification', () => {
         initialMaxStreamDataBidiLocal: 8192,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -327,7 +334,7 @@ describe('QUIC protocol verification', () => {
         server.on('session', (session: QuicServerSession) => {
           session.on('stream', (stream: QuicStream) => {
             // Echo via pipe — will get interrupted by reset
-            stream.pipe(stream);
+            echoStream(stream);
             stream.on('error', resolve);
           });
         });
@@ -364,7 +371,7 @@ describe('QUIC protocol verification', () => {
         initialMaxStreamsBidi: 5,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -451,7 +458,7 @@ describe('QUIC protocol verification', () => {
     it('sequential stream lifecycle — ID monotonicity', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -478,6 +485,39 @@ describe('QUIC protocol verification', () => {
       await client.close();
       await server.close();
     });
+
+    it('releases finished streams before session shutdown', async () => {
+      const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
+      const sessions: QuicServerSession[] = [];
+      server.on('session', (session: QuicServerSession) => {
+        sessions.push(session);
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
+      });
+      const addr = await server.listen(0, '127.0.0.1');
+
+      const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+
+      for (let i = 0; i < 32; i++) {
+        const payload = Buffer.from(`cleanup-${i}`);
+        const stream = client.openStream();
+        stream.end(payload);
+        const echoed = await collect(stream, 5000);
+        assert.deepStrictEqual(echoed, payload);
+      }
+
+      await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
+      assert.strictEqual((client as unknown as { _streams: Map<number, QuicStream> })._streams.size, 0);
+      assert.strictEqual(sessions.length, 1);
+      assert.strictEqual(
+        (sessions[0] as unknown as { _streams: Map<number, QuicStream> })._streams.size,
+        0,
+      );
+
+      await client.close();
+      await server.close();
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -496,7 +536,7 @@ describe('QUIC protocol verification', () => {
           session.sendDatagram(Buffer.concat([Buffer.from('echo:'), data]));
         });
         // Need a stream listener to keep session alive
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
 
       const addr = await server.listen(0, '127.0.0.1');
@@ -513,6 +553,7 @@ describe('QUIC protocol verification', () => {
       // Trigger connection activity with a stream to ensure datagram path is active
       const stream = client.openStream();
       stream.end(Buffer.from('keepalive'));
+      const streamDone = collect(stream); // Start collecting before datagram race
 
       client.sendDatagram(Buffer.from('ping'));
 
@@ -521,7 +562,7 @@ describe('QUIC protocol verification', () => {
         new Promise<null>((resolve) => { setTimeout(() => resolve(null), 3000); }),
       ]);
 
-      await collect(stream);
+      await streamDone;
 
       assert.ok(echoed !== null, 'should receive datagram echo');
       assert.strictEqual(echoed!.toString(), 'echo:ping');
@@ -540,7 +581,7 @@ describe('QUIC protocol verification', () => {
         session.on('datagram', (data: Buffer) => {
           session.sendDatagram(data);
         });
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
 
       const addr = await server.listen(0, '127.0.0.1');
@@ -560,6 +601,7 @@ describe('QUIC protocol verification', () => {
       // Ensure connection is active
       const stream = client.openStream();
       stream.end(Buffer.from('keepalive'));
+      const streamDone = collect(stream); // Start collecting before datagram race
 
       // Send 20 datagrams rapidly
       for (let i = 0; i < 20; i++) {
@@ -571,7 +613,7 @@ describe('QUIC protocol verification', () => {
         new Promise<void>((resolve) => { setTimeout(resolve, 5000); }),
       ]);
 
-      await collect(stream);
+      await streamDone;
 
       assert.ok(receivedSet.size >= 18,
         `expected at least 18/20 datagrams echoed, got ${receivedSet.size}`);
@@ -587,7 +629,7 @@ describe('QUIC protocol verification', () => {
         maxIdleTimeoutMs: 5000,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -636,7 +678,7 @@ describe('QUIC protocol verification', () => {
         maxIdleTimeoutMs: 1000,
       });
       server.on('session', (session: QuicServerSession) => {
-        session.on('stream', (stream: QuicStream) => { stream.pipe(stream); });
+        session.on('stream', (stream: QuicStream) => { echoStream(stream); });
       });
       const addr = await server.listen(0, '127.0.0.1');
 
@@ -665,58 +707,76 @@ describe('QUIC protocol verification', () => {
     });
 
     it('server graceful close with active streams', async () => {
+      beginLifecycleCapture();
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
-
-      const serverSessions: QuicServerSession[] = [];
-      server.on('session', (session: QuicServerSession) => {
-        serverSessions.push(session);
-        session.on('stream', (stream: QuicStream) => {
-          // Don't complete the echo — keep streams "active"
-          stream.on('data', () => { /* swallow */ });
+      const clients: Awaited<ReturnType<typeof connectQuicAsync>>[] = [];
+      try {
+        const serverSessions: QuicServerSession[] = [];
+        server.on('session', (session: QuicServerSession) => {
+          serverSessions.push(session);
+          session.on('stream', (stream: QuicStream) => {
+            // Don't complete the echo — keep streams "active"
+            stream.on('data', () => { /* swallow */ });
+          });
         });
-      });
 
-      const addr = await server.listen(0, '127.0.0.1');
+        const addr = await server.listen(0, '127.0.0.1');
 
-      // Connect 3 clients with active streams
-      const clients = await Promise.all(
-        Array.from({ length: 3 }, () =>
-          connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false }),
-        ),
-      );
+        // Connect 3 clients with active streams
+        clients.push(...await withLifecycleTimeout(
+          Promise.all(
+            Array.from({ length: 3 }, () =>
+              connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false }),
+            ),
+          ),
+          5000,
+          'quic-protocol/active-streams/connect-clients',
+        ));
 
-      // Open a stream on each
-      for (const client of clients) {
-        const stream = client.openStream();
-        stream.write(Buffer.from('active'));
+        // Open a stream on each
+        for (const client of clients) {
+          const stream = client.openStream();
+          stream.write(Buffer.from('active'));
+        }
+
+        // Give streams time to reach server
+        await new Promise<void>((r) => { setTimeout(r, 100); });
+
+        // Gracefully close each server session
+        for (const session of serverSessions) {
+          session.close(0, 'shutdown');
+        }
+
+        // All clients should receive close events, no crash, no hang
+        const closeResults = await Promise.all(
+          clients.map((client) =>
+            Promise.race([
+              new Promise<boolean>((resolve) => {
+                client.on('close', () => resolve(true));
+                client.on('error', () => resolve(true)); // error before close is also acceptable
+              }),
+              new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 3000); }),
+            ]),
+          ),
+        );
+
+        assert.ok(closeResults.every(Boolean),
+          'all clients should receive close/error events after graceful shutdown');
+
+        await withLifecycleTimeout(
+          Promise.all(clients.map(async (client) => { try { await client.close(); } catch { /* cleanup */ } })),
+          5000,
+          'quic-protocol/active-streams/client-cleanup-close',
+        );
+        await withLifecycleTimeout(server.close(), 5000, 'quic-protocol/active-streams/server-close');
+      } catch (error: unknown) {
+        appendLifecycleArtifacts(error, 'quic-protocol-active-streams-close');
+        throw error;
+      } finally {
+        await Promise.all(clients.map(async (client) => { try { await client.close(); } catch { /* cleanup */ } }));
+        try { await server.close(); } catch { /* cleanup */ }
+        endLifecycleCapture();
       }
-
-      // Give streams time to reach server
-      await new Promise<void>((r) => { setTimeout(r, 100); });
-
-      // Gracefully close each server session
-      for (const session of serverSessions) {
-        session.close(0, 'shutdown');
-      }
-
-      // All clients should receive close events, no crash, no hang
-      const closeResults = await Promise.all(
-        clients.map((client) =>
-          Promise.race([
-            new Promise<boolean>((resolve) => {
-              client.on('close', () => resolve(true));
-              client.on('error', () => resolve(true)); // error before close is also acceptable
-            }),
-            new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 3000); }),
-          ]),
-        ),
-      );
-
-      assert.ok(closeResults.every(Boolean),
-        'all clients should receive close/error events after graceful shutdown');
-
-      await Promise.all(clients.map(async (c) => { try { await c.close(); } catch { /* */ } }));
-      await server.close();
     });
   });
 });

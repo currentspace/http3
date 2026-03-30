@@ -72,6 +72,7 @@ export interface ParsedNativeRuntimeError {
 
 const NATIVE_RUNTIME_ERROR_PREFIX = /^(ERR_HTTP3_[A-Z_]+)\s+([^:]+):\s+(.*)$/u;
 let cachedFastPathFailure: CachedFastPathFailure | null = null;
+const emittedRuntimeWarnings = new Set<string>();
 
 function parseMetadataSegment(segment: string): Record<string, string> {
   const meta: Record<string, string> = {};
@@ -134,10 +135,14 @@ export function updateRuntimeInfo(
   target.emit('runtime', snapshot);
 
   if (snapshot.fallbackOccurred && snapshot.fallbackPolicy === 'warn-and-fallback') {
-    process.emitWarning(formatRuntimeWarning(snapshot), {
-      code: snapshot.warningCode ?? WARN_HTTP3_RUNTIME_FALLBACK,
-      detail: JSON.stringify(snapshot),
-    });
+    const warningKey = createRuntimeWarningKey(snapshot);
+    if (!emittedRuntimeWarnings.has(warningKey)) {
+      emittedRuntimeWarnings.add(warningKey);
+      process.emitWarning(formatRuntimeWarning(snapshot), {
+        code: snapshot.warningCode ?? WARN_HTTP3_RUNTIME_FALLBACK,
+        detail: JSON.stringify(snapshot),
+      });
+    }
   }
 
   return snapshot;
@@ -279,6 +284,7 @@ function createCachedFastPathError(
 /** @internal test hook */
 export function resetRuntimeSelectionCacheForTests(): void {
   cachedFastPathFailure = null;
+  emittedRuntimeWarnings.clear();
 }
 
 export function createSelectedRuntimeInfo(
@@ -315,6 +321,21 @@ export function formatRuntimeWarning(info: RuntimeInfo): string {
   const base = `@currentspace/http3 runtime fallback selected ${selected} (${driver})`;
   if (!info.message) return base;
   return `${base}: ${info.message}`;
+}
+
+function createRuntimeWarningKey(info: RuntimeInfo): string {
+  return JSON.stringify({
+    requestedMode: info.requestedMode,
+    fallbackPolicy: info.fallbackPolicy,
+    selectedMode: info.selectedMode,
+    driver: info.driver,
+    reasonCode: info.reasonCode,
+    message: info.message,
+    errno: info.errno,
+    syscall: info.syscall,
+    warningCode: info.warningCode,
+    fastAttempt: info.fastAttempt ?? null,
+  });
 }
 
 function buildFailureInfo(

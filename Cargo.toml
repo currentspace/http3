@@ -2,13 +2,16 @@
 name = "http3"
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.85"
+resolver = "3"
+rust-version = "1.94"
 autobins = false
 
 [features]
 default = ["node-api"]
 node-api = []
-profile-binary = []
+profile-binary = ["rcgen"]
+bench-internals = []
+driver-tracing = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -23,6 +26,16 @@ name = "quic_direct_profile"
 path = "src/bin/quic_direct_profile.rs"
 required-features = ["profile-binary"]
 
+[[bin]]
+name = "quic_multiclient_bench"
+path = "src/bin/quic_multiclient_bench.rs"
+required-features = ["profile-binary"]
+
+[[bin]]
+name = "quic_mock_sustained"
+path = "src/bin/quic_mock_sustained.rs"
+required-features = ["profile-binary"]
+
 [dependencies]
 napi = { version = "3", features = ["napi4", "napi6", "napi8"] }
 napi-derive = "3"
@@ -33,12 +46,14 @@ slab = "0.4"
 bytes = "1"
 crossbeam-channel = "0.5"
 libc = "0.2"
-socket2 = "0.5"
+socket2 = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+env_logger = "0.11"
+rcgen = { version = "0.14", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nix = { version = "0.29", features = ["event"] }
+nix = { version = "0.31", features = ["event"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
@@ -48,7 +63,20 @@ napi-build = "2"
 
 [dev-dependencies]
 mio = { version = "1", features = ["os-poll", "net"] }
-rcgen = "0.13"
+rcgen = "0.14"
+criterion = { version = "0.8", features = ["html_reports"] }
+env_logger = "0.11"
+
+[[bench]]
+name = "driver_udp"
+harness = false
+
+[[bench]]
+name = "quic_mock_pair"
+harness = false
+
+[profile.release]
+debug = 1  # line tables for perf/flamegraph symbol resolution
 
 [lints.rust]
 unsafe_code = "warn"
@@ -72,3 +100,4 @@ unnecessary_wraps = "allow"        # napi requires Result return types on all me
 unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
+

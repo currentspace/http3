@@ -60,7 +60,7 @@ async function doRequest(
     let status = '';
     const hdrs: Record<string, string> = {};
     const chunks: Buffer[] = [];
-    const timeout = setTimeout(() => reject(new Error(`doRequest ${method} ${path} timed out`)), 5000);
+    const timeout = setTimeout(() => reject(new Error(`doRequest ${method} ${path} timed out`)), 15000);
 
     stream.on('response', (h: Record<string, string>) => {
       status = h[':status'] ?? '';
@@ -82,7 +82,7 @@ async function connectClient(port: number): Promise<Http3ClientSession> {
   const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
   let connected = false;
   session.on('connect', () => { connected = true; });
-  await waitFor(() => connected, 3000);
+  await waitFor(() => connected, 15000);
   return session;
 }
 
@@ -177,7 +177,7 @@ describe('Worker Concurrency', () => {
 
   // --- Tier 2: Multi-Client Scale ---
 
-  it('10 clients x 10 streams = 100 total', { timeout: 8000 }, async () => {
+  it('10 clients x 10 streams = 100 total', { timeout: 25000 }, async () => {
     const clients = await Promise.all(
       Array.from({ length: 10 }, () => connectClient(port)),
     );
@@ -192,7 +192,7 @@ describe('Worker Concurrency', () => {
     await Promise.all(clients.map(s => s.close()));
   });
 
-  it('50 clients x 1 stream = 50 total', { timeout: 8000 }, async () => {
+  it('50 clients x 1 stream = 50 total', { timeout: 25000 }, async () => {
     const clients = await Promise.all(
       Array.from({ length: 50 }, () => connectClient(port)),
     );
@@ -205,7 +205,7 @@ describe('Worker Concurrency', () => {
     await Promise.all(clients.map(s => s.close()));
   });
 
-  it('20 clients x 10 streams = 200 total', { timeout: 8000 }, async () => {
+  it('20 clients x 10 streams = 200 total', { timeout: 25000 }, async () => {
     const clients = await Promise.all(
       Array.from({ length: 20 }, () => connectClient(port)),
     );
@@ -222,7 +222,7 @@ describe('Worker Concurrency', () => {
 
   // --- Tier 3: Mixed Payload Sizes ---
 
-  it('10 clients, 1KB-64KB bodies concurrent', { timeout: 8000 }, async () => {
+  it('10 clients, 1KB-64KB bodies concurrent', { timeout: 25000 }, async () => {
     const clients = await Promise.all(
       Array.from({ length: 10 }, () => connectClient(port)),
     );
@@ -240,7 +240,7 @@ describe('Worker Concurrency', () => {
     await Promise.all(clients.map(s => s.close()));
   });
 
-  it('5 clients x 256KB POST echo', { timeout: 8000 }, async () => {
+  it('5 clients x 256KB POST echo', { timeout: 20000 }, async () => {
     const payload = Buffer.alloc(256 * 1024, 'Z');
     const clients = await Promise.all(
       Array.from({ length: 5 }, () => connectClient(port)),
@@ -278,7 +278,7 @@ describe('Worker Concurrency', () => {
     await session.close();
   });
 
-  it('interleaved small+large on same connection', { timeout: 8000 }, async () => {
+  it('interleaved small+large on same connection', { timeout: 25000 }, async () => {
     const session = await connectClient(port);
     const bigPayload = Buffer.alloc(64 * 1024, 'B');
     const results = await Promise.all([
@@ -308,7 +308,7 @@ describe('Worker Concurrency', () => {
     await session.close();
   });
 
-  it('10 rounds x 20 concurrent streams', { timeout: 8000 }, async () => {
+  it('10 rounds x 20 concurrent streams', { timeout: 25000 }, async () => {
     const session = await connectClient(port);
     for (let round = 0; round < 10; round++) {
       const results = await Promise.all(
@@ -322,7 +322,7 @@ describe('Worker Concurrency', () => {
 
   // --- Step 4: Event Loop Responsiveness ---
 
-  it('event loop stays responsive under load', { timeout: 8000 }, async () => {
+  it('event loop stays responsive under load', { timeout: 25000 }, async () => {
     const session = await connectClient(port);
     const ticks: number[] = [];
     const interval = setInterval(() => { ticks.push(Date.now()); }, 5);

@@ -1,0 +1,4 @@
+[env]
+# aws-lc-sys requires this when used as a BoringSSL drop-in replacement
+# (avoids symbol name prefixing that would break quiche's FFI bindings).
+AWS_LC_SYS_NO_PREFIX = "1"

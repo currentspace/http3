@@ -86,3 +86,11 @@ The perf campaign is intentionally manual and artifact-driven for now. Do not
 promote new benchmark gates into CI until the baseline criteria in
 [`PERF_PROFILING.md`](./PERF_PROFILING.md) are stable.
 
+## Lifecycle hardening workstream
+
+The active lifecycle instrumentation, integration, and load-test hardening plan
+is tracked in [`LIFECYCLE_VALIDATION_CHECKLIST.md`](./LIFECYCLE_VALIDATION_CHECKLIST.md).
+Use that checklist as the source of truth for shutdown ordering, GOAWAY/close,
+raw QUIC active-stream teardown, durable tracing, and representative
+driver/bridge validation work.
+

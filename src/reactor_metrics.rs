@@ -1,6 +1,9 @@
 #![allow(non_snake_case)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "node-api")]
 use napi_derive::napi;
@@ -24,6 +27,18 @@ pub struct JsReactorTelemetrySnapshot {
     pub kqueueDriverSetupSuccesses: i64,
     pub kqueueDriverSetupFailures: i64,
     pub workerThreadSpawnsTotal: i64,
+    pub workerThreadStopsTotal: i64,
+    pub workerLoopExitByCommandTotal: i64,
+    pub workerLoopExitByHandlerDoneTotal: i64,
+    pub workerLoopExitBySinkCloseTotal: i64,
+    pub workerLoopExitByRuntimeErrorTotal: i64,
+    pub shutdownCompleteEmittedTotal: i64,
+    pub eventBatchFlushesTotal: i64,
+    pub eventBatchAttemptedEventsTotal: i64,
+    pub eventBatchDeliveredEventsTotal: i64,
+    pub eventBatchDroppedEventsTotal: i64,
+    pub eventBatchSinkErrorsTotal: i64,
+    pub eventBatchMaxSizeHighWatermark: i64,
     pub rawQuicServerWorkerSpawns: i64,
     pub rawQuicClientDedicatedWorkerSpawns: i64,
     pub rawQuicClientSharedWorkersCreated: i64,
@@ -56,6 +71,10 @@ pub struct JsReactorTelemetrySnapshot {
     pub ioUringRxInFlightHighWatermark: i64,
     pub ioUringTxInFlightHighWatermark: i64,
     pub ioUringPendingTxHighWatermark: i64,
+    pub ioUringTier2DrainRounds: i64,
+    pub ioUringTier2TaskrunPrefetches: i64,
+    pub ioUringTier2BlockingWaits: i64,
+    pub ioUringTier2CapHits: i64,
     pub ioUringRetryableSendCompletions: i64,
     pub ioUringSubmitCalls: i64,
     pub ioUringSubmitWithArgsCalls: i64,
@@ -72,7 +91,47 @@ pub struct JsReactorTelemetrySnapshot {
     pub kqueueUnsentHighWatermark: i64,
     pub kqueueWouldBlockSends: i64,
     pub kqueueWriteWakeups: i64,
+    pub rxBufferReuses: i64,
+    pub rxBufferAllocations: i64,
+    pub rxBufferCheckins: i64,
+    pub rxBufferDrops: i64,
+    pub rxBufferCopiedBytes: i64,
+    pub groSegmentBufferReuses: i64,
+    pub groSegmentBufferAllocations: i64,
+    pub groSegmentBufferCheckins: i64,
+    pub groSegmentBufferDrops: i64,
+    pub groSegmentBufferCopiedBytes: i64,
+    pub pendingWriteBufferReuses: i64,
+    pub pendingWriteBufferAllocations: i64,
+    pub pendingWriteBufferCheckins: i64,
+    pub pendingWriteBufferDrops: i64,
+    pub pendingWriteCopiedBytes: i64,
+    pub pendingWriteTailAllocations: i64,
+    pub pendingWriteGrowthReallocations: i64,
     pub txBuffersRecycled: i64,
+}
+
+#[cfg_attr(feature = "node-api", napi(object))]
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct JsLifecycleTraceEvent {
+    pub seq: i64,
+    pub timestampMs: i64,
+    pub component: String,
+    pub action: String,
+    pub driver: Option<String>,
+    pub batchSize: Option<i64>,
+    pub pendingTx: Option<i64>,
+    pub note: Option<String>,
+}
+
+#[cfg_attr(feature = "node-api", napi(object))]
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct JsLifecycleTraceSnapshot {
+    pub enabled: bool,
+    pub capacity: i64,
+    pub droppedEvents: i64,
+    pub eventCount: i64,
+    pub events: Vec<JsLifecycleTraceEvent>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +160,14 @@ pub(crate) enum RawQuicClientCloseCause {
     Release,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WorkerLoopExitCause {
+    Command,
+    HandlerDone,
+    SinkClose,
+    RuntimeError,
+}
+
 static DRIVER_SETUP_ATTEMPTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DRIVER_SETUP_SUCCESS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DRIVER_SETUP_FAILURE_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -118,6 +185,17 @@ static KQUEUE_DRIVER_SETUP_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_DRIVER_SETUP_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 static WORKER_THREAD_SPAWNS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WORKER_THREAD_STOPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_COMMAND: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_HANDLER_DONE: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_SINK_CLOSE: AtomicU64 = AtomicU64::new(0);
+static WORKER_LOOP_EXIT_BY_RUNTIME_ERROR: AtomicU64 = AtomicU64::new(0);
+static SHUTDOWN_COMPLETE_EMITTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_FLUSHES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_DROPPED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_SINK_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_SERVER_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED: AtomicU64 = AtomicU64::new(0);
@@ -152,6 +230,10 @@ static H3_SERVER_SESSIONS_CLOSED: AtomicU64 = AtomicU64::new(0);
 static IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static IO_URING_PENDING_TX_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_DRAIN_ROUNDS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_TASKRUN_PREFETCHES: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_BLOCKING_WAITS: AtomicU64 = AtomicU64::new(0);
+static IO_URING_TIER2_CAP_HITS: AtomicU64 = AtomicU64::new(0);
 static IO_URING_RETRYABLE_SEND_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
 static IO_URING_SUBMIT_CALLS: AtomicU64 = AtomicU64::new(0);
 static IO_URING_SUBMIT_WITH_ARGS_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -168,8 +250,31 @@ static IO_URING_SQ_FULL_EVENTS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_UNSENT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WOULD_BLOCK_SENDS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WRITE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_DROPS: AtomicU64 = AtomicU64::new(0);
+static RX_BUFFER_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_DROPS: AtomicU64 = AtomicU64::new(0);
+static GRO_SEGMENT_BUFFER_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_BUFFER_DROPS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_TAIL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static PENDING_WRITE_GROWTH_REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
 static TX_BUFFERS_RECYCLED: AtomicU64 = AtomicU64::new(0);
+
+const LIFECYCLE_TRACE_CAPACITY: usize = 512;
+static LIFECYCLE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+static LIFECYCLE_TRACE_DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static LIFECYCLE_TRACE_NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
+static LIFECYCLE_TRACE_EVENTS: OnceLock<Mutex<VecDeque<JsLifecycleTraceEvent>>> = OnceLock::new();
 
 fn load(counter: &AtomicU64) -> i64 {
     counter.load(Ordering::Relaxed) as i64
@@ -185,6 +290,18 @@ fn bump(counter: &AtomicU64) {
 
 fn observe_max(counter: &AtomicU64, value: usize) {
     counter.fetch_max(value as u64, Ordering::Relaxed);
+}
+
+fn lifecycle_trace_events() -> &'static Mutex<VecDeque<JsLifecycleTraceEvent>> {
+    LIFECYCLE_TRACE_EVENTS
+        .get_or_init(|| Mutex::new(VecDeque::with_capacity(LIFECYCLE_TRACE_CAPACITY)))
+}
+
+fn lifecycle_trace_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 pub(crate) fn record_driver_setup_attempt(kind: RuntimeDriverKind) {
@@ -221,14 +338,103 @@ pub(crate) fn record_worker_thread_spawn(kind: WorkerSpawnKind) {
     bump(&WORKER_THREAD_SPAWNS_TOTAL);
     match kind {
         WorkerSpawnKind::RawQuicServer => bump(&RAW_QUIC_SERVER_WORKER_SPAWNS),
-        WorkerSpawnKind::RawQuicClientDedicated => {
-            bump(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS)
-        }
+        WorkerSpawnKind::RawQuicClientDedicated => bump(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         WorkerSpawnKind::RawQuicClientShared => bump(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
         WorkerSpawnKind::H3Server => bump(&H3_SERVER_WORKER_SPAWNS),
         WorkerSpawnKind::H3ClientDedicated => bump(&H3_CLIENT_DEDICATED_WORKER_SPAWNS),
         WorkerSpawnKind::H3ClientShared => bump(&H3_CLIENT_SHARED_WORKERS_CREATED),
     }
+}
+
+pub(crate) fn record_worker_thread_stop() {
+    bump(&WORKER_THREAD_STOPS_TOTAL);
+}
+
+pub(crate) fn record_worker_loop_exit(cause: WorkerLoopExitCause) {
+    match cause {
+        WorkerLoopExitCause::Command => bump(&WORKER_LOOP_EXIT_BY_COMMAND),
+        WorkerLoopExitCause::HandlerDone => bump(&WORKER_LOOP_EXIT_BY_HANDLER_DONE),
+        WorkerLoopExitCause::SinkClose => bump(&WORKER_LOOP_EXIT_BY_SINK_CLOSE),
+        WorkerLoopExitCause::RuntimeError => bump(&WORKER_LOOP_EXIT_BY_RUNTIME_ERROR),
+    }
+}
+
+pub(crate) fn record_shutdown_complete_emitted() {
+    bump(&SHUTDOWN_COMPLETE_EMITTED_TOTAL);
+}
+
+pub(crate) fn record_event_batch_flush(count: usize) {
+    bump(&EVENT_BATCH_FLUSHES_TOTAL);
+    EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+    observe_max(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK, count);
+}
+
+pub(crate) fn record_event_batch_drop(count: usize) {
+    EVENT_BATCH_DROPPED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_event_batch_sink_error() {
+    bump(&EVENT_BATCH_SINK_ERRORS_TOTAL);
+}
+
+pub fn set_lifecycle_trace_enabled(enabled: bool) {
+    LIFECYCLE_TRACE_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn reset_lifecycle_trace() {
+    LIFECYCLE_TRACE_DROPPED_EVENTS.store(0, Ordering::Relaxed);
+    LIFECYCLE_TRACE_NEXT_SEQ.store(0, Ordering::Relaxed);
+    let mut events = lifecycle_trace_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    events.clear();
+}
+
+pub fn lifecycle_trace_snapshot() -> JsLifecycleTraceSnapshot {
+    let events = lifecycle_trace_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let snapshot_events = events.iter().cloned().collect::<Vec<_>>();
+    JsLifecycleTraceSnapshot {
+        enabled: LIFECYCLE_TRACE_ENABLED.load(Ordering::Relaxed),
+        capacity: LIFECYCLE_TRACE_CAPACITY as i64,
+        droppedEvents: load(&LIFECYCLE_TRACE_DROPPED_EVENTS),
+        eventCount: snapshot_events.len() as i64,
+        events: snapshot_events,
+    }
+}
+
+pub(crate) fn record_lifecycle_trace(
+    component: &'static str,
+    action: &'static str,
+    driver: Option<RuntimeDriverKind>,
+    batch_size: Option<usize>,
+    pending_tx: Option<usize>,
+    note: Option<String>,
+) {
+    if !LIFECYCLE_TRACE_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let event = JsLifecycleTraceEvent {
+        seq: LIFECYCLE_TRACE_NEXT_SEQ.fetch_add(1, Ordering::Relaxed) as i64,
+        timestampMs: lifecycle_trace_timestamp_ms(),
+        component: component.to_string(),
+        action: action.to_string(),
+        driver: driver.map(|kind| kind.as_str().to_string()),
+        batchSize: batch_size.map(|count| count as i64),
+        pendingTx: pending_tx.map(|count| count as i64),
+        note,
+    };
+
+    let mut events = lifecycle_trace_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if events.len() == LIFECYCLE_TRACE_CAPACITY {
+        events.pop_front();
+        LIFECYCLE_TRACE_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+    }
+    events.push_back(event);
 }
 
 pub(crate) fn record_shared_worker_reuse(kind: WorkerSpawnKind) {
@@ -319,6 +525,26 @@ pub(crate) fn record_io_uring_pending_tx(count: usize) {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_drain_round() {
+    bump(&IO_URING_TIER2_DRAIN_ROUNDS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_taskrun_prefetch() {
+    bump(&IO_URING_TIER2_TASKRUN_PREFETCHES);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_blocking_wait() {
+    bump(&IO_URING_TIER2_BLOCKING_WAITS);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn record_io_uring_tier2_cap_hit() {
+    bump(&IO_URING_TIER2_CAP_HITS);
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn record_io_uring_retryable_send_completion() {
     bump(&IO_URING_RETRYABLE_SEND_COMPLETIONS);
 }
@@ -394,11 +620,76 @@ pub(crate) fn record_kqueue_write_wakeup() {
     bump(&KQUEUE_WRITE_WAKEUPS);
 }
 
+pub(crate) fn record_rx_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&RX_BUFFER_REUSES);
+    } else {
+        bump(&RX_BUFFER_ALLOCATIONS);
+    }
+    RX_BUFFER_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_rx_buffer_checkin(retained: bool) {
+    if retained {
+        bump(&RX_BUFFER_CHECKINS);
+    } else {
+        bump(&RX_BUFFER_DROPS);
+    }
+}
+
+pub(crate) fn record_gro_segment_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&GRO_SEGMENT_BUFFER_REUSES);
+    } else {
+        bump(&GRO_SEGMENT_BUFFER_ALLOCATIONS);
+    }
+    GRO_SEGMENT_BUFFER_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_gro_segment_buffer_checkin(retained: bool) {
+    if retained {
+        bump(&GRO_SEGMENT_BUFFER_CHECKINS);
+    } else {
+        bump(&GRO_SEGMENT_BUFFER_DROPS);
+    }
+}
+
+pub(crate) fn record_pending_write_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&PENDING_WRITE_BUFFER_REUSES);
+    } else {
+        bump(&PENDING_WRITE_BUFFER_ALLOCATIONS);
+    }
+    PENDING_WRITE_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_pending_write_buffer_checkin(retained: bool) {
+    if retained {
+        bump(&PENDING_WRITE_BUFFER_CHECKINS);
+    } else {
+        bump(&PENDING_WRITE_BUFFER_DROPS);
+    }
+}
+
+pub(crate) fn record_pending_write_copy(bytes: usize) {
+    PENDING_WRITE_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_pending_write_tail_allocation() {
+    bump(&PENDING_WRITE_TAIL_ALLOCATIONS);
+}
+
+pub(crate) fn record_pending_write_growth_reallocation() {
+    bump(&PENDING_WRITE_GROWTH_REALLOCATIONS);
+}
+
 pub(crate) fn record_tx_buffers_recycled(count: usize) {
     TX_BUFFERS_RECYCLED.fetch_add(count as u64, Ordering::Relaxed);
 }
 
 pub fn snapshot() -> JsReactorTelemetrySnapshot {
+    let event_batch_attempted_events_total = load(&EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL);
+    let event_batch_dropped_events_total = load(&EVENT_BATCH_DROPPED_EVENTS_TOTAL);
     JsReactorTelemetrySnapshot {
         driverSetupAttemptsTotal: load(&DRIVER_SETUP_ATTEMPTS_TOTAL),
         driverSetupSuccessTotal: load(&DRIVER_SETUP_SUCCESS_TOTAL),
@@ -413,6 +704,19 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         kqueueDriverSetupSuccesses: load(&KQUEUE_DRIVER_SETUP_SUCCESSES),
         kqueueDriverSetupFailures: load(&KQUEUE_DRIVER_SETUP_FAILURES),
         workerThreadSpawnsTotal: load(&WORKER_THREAD_SPAWNS_TOTAL),
+        workerThreadStopsTotal: load(&WORKER_THREAD_STOPS_TOTAL),
+        workerLoopExitByCommandTotal: load(&WORKER_LOOP_EXIT_BY_COMMAND),
+        workerLoopExitByHandlerDoneTotal: load(&WORKER_LOOP_EXIT_BY_HANDLER_DONE),
+        workerLoopExitBySinkCloseTotal: load(&WORKER_LOOP_EXIT_BY_SINK_CLOSE),
+        workerLoopExitByRuntimeErrorTotal: load(&WORKER_LOOP_EXIT_BY_RUNTIME_ERROR),
+        shutdownCompleteEmittedTotal: load(&SHUTDOWN_COMPLETE_EMITTED_TOTAL),
+        eventBatchFlushesTotal: load(&EVENT_BATCH_FLUSHES_TOTAL),
+        eventBatchAttemptedEventsTotal: event_batch_attempted_events_total,
+        eventBatchDeliveredEventsTotal: event_batch_attempted_events_total
+            .saturating_sub(event_batch_dropped_events_total),
+        eventBatchDroppedEventsTotal: event_batch_dropped_events_total,
+        eventBatchSinkErrorsTotal: load(&EVENT_BATCH_SINK_ERRORS_TOTAL),
+        eventBatchMaxSizeHighWatermark: load(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK),
         rawQuicServerWorkerSpawns: load(&RAW_QUIC_SERVER_WORKER_SPAWNS),
         rawQuicClientDedicatedWorkerSpawns: load(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         rawQuicClientSharedWorkersCreated: load(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
@@ -428,9 +732,7 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         rawQuicFinishedEventEmits: load(&RAW_QUIC_FINISHED_EVENT_EMITS),
         rawQuicDrainEventEmits: load(&RAW_QUIC_DRAIN_EVENT_EMITS),
         rawQuicBlockedStreamHighWatermark: load(&RAW_QUIC_BLOCKED_STREAM_HIGH_WATERMARK),
-        rawQuicClientPendingWriteHighWatermark: load(
-            &RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK,
-        ),
+        rawQuicClientPendingWriteHighWatermark: load(&RAW_QUIC_CLIENT_PENDING_WRITE_HIGH_WATERMARK),
         rawQuicClientReapsWithPendingWrites: load(&RAW_QUIC_CLIENT_REAPS_WITH_PENDING_WRITES),
         rawQuicClientReapsWithBlockedStreams: load(&RAW_QUIC_CLIENT_REAPS_WITH_BLOCKED_STREAMS),
         rawQuicClientReapsWithKnownStreams: load(&RAW_QUIC_CLIENT_REAPS_WITH_KNOWN_STREAMS),
@@ -447,6 +749,10 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         ioUringRxInFlightHighWatermark: load(&IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK),
         ioUringTxInFlightHighWatermark: load(&IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK),
         ioUringPendingTxHighWatermark: load(&IO_URING_PENDING_TX_HIGH_WATERMARK),
+        ioUringTier2DrainRounds: load(&IO_URING_TIER2_DRAIN_ROUNDS),
+        ioUringTier2TaskrunPrefetches: load(&IO_URING_TIER2_TASKRUN_PREFETCHES),
+        ioUringTier2BlockingWaits: load(&IO_URING_TIER2_BLOCKING_WAITS),
+        ioUringTier2CapHits: load(&IO_URING_TIER2_CAP_HITS),
         ioUringRetryableSendCompletions: load(&IO_URING_RETRYABLE_SEND_COMPLETIONS),
         ioUringSubmitCalls: load(&IO_URING_SUBMIT_CALLS),
         ioUringSubmitWithArgsCalls: load(&IO_URING_SUBMIT_WITH_ARGS_CALLS),
@@ -463,6 +769,23 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         kqueueUnsentHighWatermark: load(&KQUEUE_UNSENT_HIGH_WATERMARK),
         kqueueWouldBlockSends: load(&KQUEUE_WOULD_BLOCK_SENDS),
         kqueueWriteWakeups: load(&KQUEUE_WRITE_WAKEUPS),
+        rxBufferReuses: load(&RX_BUFFER_REUSES),
+        rxBufferAllocations: load(&RX_BUFFER_ALLOCATIONS),
+        rxBufferCheckins: load(&RX_BUFFER_CHECKINS),
+        rxBufferDrops: load(&RX_BUFFER_DROPS),
+        rxBufferCopiedBytes: load(&RX_BUFFER_COPIED_BYTES),
+        groSegmentBufferReuses: load(&GRO_SEGMENT_BUFFER_REUSES),
+        groSegmentBufferAllocations: load(&GRO_SEGMENT_BUFFER_ALLOCATIONS),
+        groSegmentBufferCheckins: load(&GRO_SEGMENT_BUFFER_CHECKINS),
+        groSegmentBufferDrops: load(&GRO_SEGMENT_BUFFER_DROPS),
+        groSegmentBufferCopiedBytes: load(&GRO_SEGMENT_BUFFER_COPIED_BYTES),
+        pendingWriteBufferReuses: load(&PENDING_WRITE_BUFFER_REUSES),
+        pendingWriteBufferAllocations: load(&PENDING_WRITE_BUFFER_ALLOCATIONS),
+        pendingWriteBufferCheckins: load(&PENDING_WRITE_BUFFER_CHECKINS),
+        pendingWriteBufferDrops: load(&PENDING_WRITE_BUFFER_DROPS),
+        pendingWriteCopiedBytes: load(&PENDING_WRITE_COPIED_BYTES),
+        pendingWriteTailAllocations: load(&PENDING_WRITE_TAIL_ALLOCATIONS),
+        pendingWriteGrowthReallocations: load(&PENDING_WRITE_GROWTH_REALLOCATIONS),
         txBuffersRecycled: load(&TX_BUFFERS_RECYCLED),
     }
 }
@@ -482,6 +805,17 @@ pub fn reset() {
         &KQUEUE_DRIVER_SETUP_SUCCESSES,
         &KQUEUE_DRIVER_SETUP_FAILURES,
         &WORKER_THREAD_SPAWNS_TOTAL,
+        &WORKER_THREAD_STOPS_TOTAL,
+        &WORKER_LOOP_EXIT_BY_COMMAND,
+        &WORKER_LOOP_EXIT_BY_HANDLER_DONE,
+        &WORKER_LOOP_EXIT_BY_SINK_CLOSE,
+        &WORKER_LOOP_EXIT_BY_RUNTIME_ERROR,
+        &SHUTDOWN_COMPLETE_EMITTED_TOTAL,
+        &EVENT_BATCH_FLUSHES_TOTAL,
+        &EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL,
+        &EVENT_BATCH_DROPPED_EVENTS_TOTAL,
+        &EVENT_BATCH_SINK_ERRORS_TOTAL,
+        &EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK,
         &RAW_QUIC_SERVER_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED,
@@ -514,6 +848,10 @@ pub fn reset() {
         &IO_URING_RX_IN_FLIGHT_HIGH_WATERMARK,
         &IO_URING_TX_IN_FLIGHT_HIGH_WATERMARK,
         &IO_URING_PENDING_TX_HIGH_WATERMARK,
+        &IO_URING_TIER2_DRAIN_ROUNDS,
+        &IO_URING_TIER2_TASKRUN_PREFETCHES,
+        &IO_URING_TIER2_BLOCKING_WAITS,
+        &IO_URING_TIER2_CAP_HITS,
         &IO_URING_RETRYABLE_SEND_COMPLETIONS,
         &IO_URING_SUBMIT_CALLS,
         &IO_URING_SUBMIT_WITH_ARGS_CALLS,
@@ -530,8 +868,125 @@ pub fn reset() {
         &KQUEUE_UNSENT_HIGH_WATERMARK,
         &KQUEUE_WOULD_BLOCK_SENDS,
         &KQUEUE_WRITE_WAKEUPS,
+        &RX_BUFFER_REUSES,
+        &RX_BUFFER_ALLOCATIONS,
+        &RX_BUFFER_CHECKINS,
+        &RX_BUFFER_DROPS,
+        &RX_BUFFER_COPIED_BYTES,
+        &GRO_SEGMENT_BUFFER_REUSES,
+        &GRO_SEGMENT_BUFFER_ALLOCATIONS,
+        &GRO_SEGMENT_BUFFER_CHECKINS,
+        &GRO_SEGMENT_BUFFER_DROPS,
+        &GRO_SEGMENT_BUFFER_COPIED_BYTES,
+        &PENDING_WRITE_BUFFER_REUSES,
+        &PENDING_WRITE_BUFFER_ALLOCATIONS,
+        &PENDING_WRITE_BUFFER_CHECKINS,
+        &PENDING_WRITE_BUFFER_DROPS,
+        &PENDING_WRITE_COPIED_BYTES,
+        &PENDING_WRITE_TAIL_ALLOCATIONS,
+        &PENDING_WRITE_GROWTH_REALLOCATIONS,
         &TX_BUFFERS_RECYCLED,
     ] {
         reset_counter(counter);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reset all global counters and lifecycle trace state before each test
+    /// to isolate from other tests (global atomics are shared across the
+    /// process, but `cargo test` runs tests on separate threads).
+    fn setup() {
+        reset();
+        set_lifecycle_trace_enabled(false);
+        reset_lifecycle_trace();
+    }
+
+    #[test]
+    fn test_snapshot_after_reset() {
+        setup();
+        let snap = snapshot();
+        assert_eq!(snap.driverSetupAttemptsTotal, 0);
+        assert_eq!(snap.driverSetupSuccessTotal, 0);
+        assert_eq!(snap.driverSetupFailureTotal, 0);
+        assert_eq!(snap.workerThreadSpawnsTotal, 0);
+        assert_eq!(snap.workerThreadStopsTotal, 0);
+        assert_eq!(snap.eventBatchFlushesTotal, 0);
+        assert_eq!(snap.eventBatchAttemptedEventsTotal, 0);
+        assert_eq!(snap.eventBatchDeliveredEventsTotal, 0);
+        assert_eq!(snap.eventBatchDroppedEventsTotal, 0);
+        assert_eq!(snap.eventBatchSinkErrorsTotal, 0);
+        assert_eq!(snap.eventBatchMaxSizeHighWatermark, 0);
+        assert_eq!(snap.rawQuicServerWorkerSpawns, 0);
+        assert_eq!(snap.h3ServerWorkerSpawns, 0);
+        assert_eq!(snap.txBuffersRecycled, 0);
+    }
+
+    #[test]
+    fn test_record_driver_setup_attempt() {
+        setup();
+        record_driver_setup_attempt(RuntimeDriverKind::Poll);
+        record_driver_setup_attempt(RuntimeDriverKind::Poll);
+        let snap = snapshot();
+        assert_eq!(snap.driverSetupAttemptsTotal, 2);
+        assert_eq!(snap.pollDriverSetupAttempts, 2);
+        assert_eq!(snap.ioUringDriverSetupAttempts, 0);
+        assert_eq!(snap.kqueueDriverSetupAttempts, 0);
+    }
+
+    #[test]
+    fn test_record_worker_thread_spawn() {
+        setup();
+        record_worker_thread_spawn(WorkerSpawnKind::RawQuicServer);
+        record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        record_worker_thread_spawn(WorkerSpawnKind::H3Server);
+        record_worker_thread_spawn(WorkerSpawnKind::H3ClientDedicated);
+        let snap = snapshot();
+        assert_eq!(snap.workerThreadSpawnsTotal, 4);
+        assert_eq!(snap.rawQuicServerWorkerSpawns, 1);
+        assert_eq!(snap.h3ServerWorkerSpawns, 2);
+        assert_eq!(snap.h3ClientDedicatedWorkerSpawns, 1);
+        assert_eq!(snap.rawQuicClientDedicatedWorkerSpawns, 0);
+    }
+
+    #[test]
+    fn test_record_event_batch_flush() {
+        setup();
+        record_event_batch_flush(10);
+        record_event_batch_flush(20);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchFlushesTotal, 2);
+        assert_eq!(snap.eventBatchAttemptedEventsTotal, 30);
+        assert_eq!(snap.eventBatchMaxSizeHighWatermark, 20);
+    }
+
+    #[test]
+    fn test_lifecycle_trace_enable_disable() {
+        setup();
+
+        // Initially disabled
+        let trace = lifecycle_trace_snapshot();
+        assert!(!trace.enabled);
+
+        // Enable and record an event
+        set_lifecycle_trace_enabled(true);
+        let trace = lifecycle_trace_snapshot();
+        assert!(trace.enabled);
+
+        record_lifecycle_trace("test-component", "test-action", None, None, None, None);
+        let trace = lifecycle_trace_snapshot();
+        assert_eq!(trace.eventCount, 1);
+        assert_eq!(trace.events[0].component, "test-component");
+        assert_eq!(trace.events[0].action, "test-action");
+
+        // Disable and record -- should not add event
+        set_lifecycle_trace_enabled(false);
+        let trace = lifecycle_trace_snapshot();
+        assert!(!trace.enabled);
+        record_lifecycle_trace("test-component", "ignored", None, None, None, None);
+        let trace = lifecycle_trace_snapshot();
+        assert_eq!(trace.eventCount, 1, "event should not be recorded when trace is disabled");
     }
 }
