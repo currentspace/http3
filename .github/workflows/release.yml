@@ -34,17 +34,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: npm
+          cache: pnpm
 
-      - run: npm install -g npm@latest
-
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Build native prebuild
-        run: npx napi build --release --platform --target ${{ matrix.target }}
+        run: pnpm exec napi build --release --platform --target ${{ matrix.target }}
 
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@v7
@@ -62,15 +64,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-          cache: npm
+          cache: pnpm
           registry-url: "https://registry.npmjs.org"
 
-      - run: npm install -g npm@latest
-
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Download prebuild artifacts
         uses: actions/download-artifact@v8
