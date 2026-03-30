@@ -181,6 +181,30 @@ impl NativeWorkerServer {
         })
     }
 
+    /// Combined headers + body + FIN in a single NAPI call — avoids 2 extra
+    /// FFI boundary crossings for the common respond-then-end pattern.
+    #[napi]
+    pub fn send_response(
+        &self,
+        conn_handle: u32,
+        stream_id: i64,
+        headers: Vec<JsHeader>,
+        data: Buffer,
+        fin: bool,
+    ) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        let h: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
+        handle.send_command(crate::worker::WorkerCommand::SendResponse {
+            conn_handle,
+            stream_id: stream_id as u64,
+            headers: h,
+            body: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
+            fin,
+        })
+    }
+
     #[napi]
     pub fn stream_send(&self, conn_handle: u32, stream_id: i64, data: Buffer, fin: bool) -> bool {
         let Some(handle) = &self.handle else {
@@ -306,6 +330,26 @@ impl NativeWorkerServer {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("worker not running"))?;
         handle.get_qlog_path(conn_handle).map_err(napi::Error::from)
+    }
+
+    /// Send the Shutdown command without joining the worker threads.
+    #[napi]
+    pub fn request_shutdown(&self) -> bool {
+        match &self.handle {
+            Some(h) => {
+                h.request_shutdown();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Join all worker threads. Safe to call after `request_shutdown()`.
+    #[napi]
+    pub fn join_worker(&mut self) {
+        if let Some(mut h) = self.handle.take() {
+            h.join();
+        }
     }
 
     #[napi]

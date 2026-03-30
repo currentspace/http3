@@ -189,16 +189,26 @@ impl QuicServerHandle {
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for qlog path".into()))
     }
 
-    pub fn shutdown(&mut self) {
+    /// Send the Shutdown command to all workers without joining threads.
+    pub fn request_shutdown(&self) {
         for worker in &self.workers {
             let _ = worker.cmd_tx.send(QuicServerCommand::Shutdown);
             let _ = worker.waker.wake();
         }
+    }
+
+    /// Join all worker threads. Call after `request_shutdown()`.
+    pub fn join(&mut self) {
         for worker in &mut self.workers {
             if let Some(handle) = worker.join_handle.take() {
                 let _ = handle.join();
             }
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.request_shutdown();
+        self.join();
     }
 }
 
@@ -692,21 +702,13 @@ impl QuicClientHandle {
         self.local_addr
     }
 
-    pub fn shutdown(&mut self) {
-        let Some(kind) = self.kind.take() else {
-            return;
-        };
+    /// Send the Shutdown (or ReleaseSession) command without joining threads.
+    pub fn request_shutdown(&self) {
+        let Some(kind) = &self.kind else { return };
         match kind {
-            QuicClientHandleKind::Dedicated {
-                cmd_tx,
-                mut join_handle,
-                waker,
-            } => {
+            QuicClientHandleKind::Dedicated { cmd_tx, waker, .. } => {
                 let _ = cmd_tx.send(QuicClientCommand::Shutdown);
                 let _ = waker.wake();
-                if let Some(handle) = join_handle.take() {
-                    let _ = handle.join();
-                }
             }
             QuicClientHandleKind::Shared {
                 session_handle,
@@ -714,8 +716,29 @@ impl QuicClientHandle {
             } => {
                 let _ = worker
                     .cmd_tx
-                    .send(SharedQuicClientCommand::ReleaseSession { session_handle });
+                    .send(SharedQuicClientCommand::ReleaseSession {
+                        session_handle: *session_handle,
+                    });
                 worker.wake();
+            }
+        }
+    }
+
+    /// Join the worker thread. Call after `request_shutdown()`.
+    pub fn join(&mut self) {
+        let Some(kind) = self.kind.take() else { return };
+        match kind {
+            QuicClientHandleKind::Dedicated {
+                mut join_handle, ..
+            } => {
+                if let Some(handle) = join_handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            QuicClientHandleKind::Shared {
+                worker,
+                ..
+            } => {
                 if worker.session_count.fetch_sub(1, Ordering::AcqRel) == 1 {
                     if let Ok(mut join_handle) = worker.join_handle.lock() {
                         if let Some(handle) = join_handle.take() {
@@ -728,6 +751,11 @@ impl QuicClientHandle {
                 }
             }
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.request_shutdown();
+        self.join();
     }
 }
 
@@ -1057,13 +1085,13 @@ pub fn spawn_quic_server(
     quiche_config: quiche::Config,
     server_config: QuicServerConfig,
     bind_addr: SocketAddr,
-    tsfn: EventTsfn,
+    tsfn: std::sync::Arc<EventTsfn>,
 ) -> Result<QuicServerHandle, Http3NativeError> {
     spawn_quic_server_with_batcher(
         quiche_config,
         server_config,
         bind_addr,
-        EventBatcher::new_tsfn(tsfn),
+        EventBatcher::new_shared_tsfn(tsfn),
     )
 }
 
@@ -1231,7 +1259,7 @@ pub fn spawn_quic_client(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
-    tsfn: EventTsfn,
+    tsfn: std::sync::Arc<EventTsfn>,
 ) -> Result<QuicClientHandle, Http3NativeError> {
     spawn_quic_client_with_batcher(
         quiche_config,
@@ -1241,7 +1269,7 @@ pub fn spawn_quic_client(
         qlog_dir,
         qlog_level,
         runtime_mode,
-        EventBatcher::new_tsfn(tsfn),
+        EventBatcher::new_shared_tsfn(tsfn),
     )
 }
 

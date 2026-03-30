@@ -52,8 +52,8 @@ describe('FFI boundary stress', () => {
         events.callback,
       );
       server.listen(0, '127.0.0.1');
-      server.shutdown();
-      await events.waitForShutdown(5000);
+      server.requestShutdown();
+      server.joinWorker();
     }
   });
 
@@ -72,8 +72,8 @@ describe('FFI boundary stress', () => {
         events.callback,
       );
       server.listen(0, '127.0.0.1');
-      server.shutdown();
-      await events.waitForShutdown(5000);
+      server.requestShutdown();
+      server.joinWorker();
     }
   });
 
@@ -103,12 +103,12 @@ describe('FFI boundary stress', () => {
       await clientEvents.waitForEvent(EVENT_HANDSHAKE_COMPLETE, 5000);
 
       try { client.close(0, 'done'); } catch { /* ok */ }
-      client.shutdown();
-      await clientEvents.waitForShutdown(5000);
+      client.requestShutdown();
+      client.joinWorker();
     }
 
-    server.shutdown();
-    await serverEvents.waitForShutdown(5000);
+    server.requestShutdown();
+    server.joinWorker();
   });
 
   // ── Large buffer transfer: H3 ────────────────────────────────
@@ -243,12 +243,10 @@ describe('FFI boundary stress', () => {
     );
 
     try { client.close(0, 'done'); } catch { /* ok */ }
-    try { client.shutdown(); } catch { /* ok */ }
-    try { server.shutdown(); } catch { /* ok */ }
-    await Promise.allSettled([
-      clientEvents.waitForShutdown(3000).catch(() => {}),
-      serverEvents.waitForShutdown(3000).catch(() => {}),
-    ]);
+    try { client.requestShutdown(); } catch { /* ok */ }
+    try { server.requestShutdown(); } catch { /* ok */ }
+    try { client.joinWorker(); } catch { /* ok */ }
+    try { server.joinWorker(); } catch { /* ok */ }
   });
 
   // ── Large buffer transfer: QUIC ──────────────────────────────
@@ -364,12 +362,10 @@ describe('FFI boundary stress', () => {
     );
 
     try { client.close(0, 'done'); } catch { /* ok */ }
-    try { client.shutdown(); } catch { /* ok */ }
-    try { server.shutdown(); } catch { /* ok */ }
-    await Promise.allSettled([
-      clientEvents.waitForShutdown(3000).catch(() => {}),
-      serverEvents.waitForShutdown(3000).catch(() => {}),
-    ]);
+    try { client.requestShutdown(); } catch { /* ok */ }
+    try { server.requestShutdown(); } catch { /* ok */ }
+    try { client.joinWorker(); } catch { /* ok */ }
+    try { server.joinWorker(); } catch { /* ok */ }
   });
 
   // ── Concurrent sessions: H3 ──────────────────────────────────
@@ -453,8 +449,8 @@ describe('FFI boundary stress', () => {
       assert.ok(dataEvents.length > 0, `session ${index}: should receive response data`);
 
       try { client.close(0, 'done'); } catch { /* ok */ }
-      client.shutdown();
-      await clientEvents.waitForShutdown(5000);
+      client.requestShutdown();
+      client.joinWorker();
     };
 
     // Run 5 sessions concurrently.
@@ -463,8 +459,8 @@ describe('FFI boundary stress', () => {
     );
 
     stopResponder();
-    server.shutdown();
-    await serverEvents.waitForShutdown(5000);
+    server.requestShutdown();
+    server.joinWorker();
   });
 
   // ── Concurrent sessions: QUIC ────────────────────────────────
@@ -533,8 +529,8 @@ describe('FFI boundary stress', () => {
       assert.ok(dataEvents.length > 0, `session ${index}: should receive echoed data`);
 
       try { client.close(0, 'done'); } catch { /* ok */ }
-      client.shutdown();
-      await clientEvents.waitForShutdown(5000);
+      client.requestShutdown();
+      client.joinWorker();
     };
 
     // Run 5 sessions concurrently.
@@ -543,8 +539,8 @@ describe('FFI boundary stress', () => {
     );
 
     stopResponder();
-    server.shutdown();
-    await serverEvents.waitForShutdown(5000);
+    server.requestShutdown();
+    server.joinWorker();
   });
 
   // ── Telemetry integrity ──────────────────────────────────────
@@ -565,8 +561,8 @@ describe('FFI boundary stress', () => {
         events.callback,
       );
       server.listen(0, '127.0.0.1');
-      server.shutdown();
-      await events.waitForShutdown(5000);
+      server.requestShutdown();
+      server.joinWorker();
     }
 
     // Also do a few client connections to stress the event pipeline.
@@ -591,12 +587,12 @@ describe('FFI boundary stress', () => {
       client.connect(`127.0.0.1:${addr.port}`, 'localhost');
       await clientEvents.waitForEvent(EVENT_HANDSHAKE_COMPLETE, 5000);
       try { client.close(0, 'done'); } catch { /* ok */ }
-      client.shutdown();
-      await clientEvents.waitForShutdown(5000);
+      client.requestShutdown();
+      client.joinWorker();
     }
 
-    server.shutdown();
-    await serverEvents.waitForShutdown(5000);
+    server.requestShutdown();
+    server.joinWorker();
 
     const telemetry = binding.runtimeTelemetry();
     assert.strictEqual(
