@@ -43,6 +43,9 @@ jobs:
           node-version: "24"
           cache: pnpm
 
+      - name: Ensure Rust >= 1.94
+        run: rustup update stable && rustc --version
+
       - run: pnpm install --frozen-lockfile
 
       - name: Build native prebuild
