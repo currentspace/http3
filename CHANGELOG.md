@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.7.0
+
+### Memory leak and correctness fixes
+
+- Fixed a heap leak where `ServerHttp3Stream` and `QuicStream` readable sides were never consumed on GET requests, preventing the `'close'` event from firing and streams from being GC'd. Heap dropped from 358MB to 5.4MB after 1M requests.
+- Fixed silent data loss at 8 call sites where `.unwrap_or(0)` swallowed fatal send errors (`InvalidStreamState`, `StreamLimit`, `FinalSize`); these now emit `EVENT_ERROR` to JS instead of retrying forever in `pending_writes`.
+- Fixed partial-write data loss where `into_vec()` consumed the send buffer before confirming the write succeeded; now uses borrow-based `stream_send`.
+- Fixed io_uring RX buffer ring exhaustion and implemented a stop-and-wait cross-thread echo protocol for reliable buffer recycling.
+
+### Performance (+21.8% H3 sustained throughput)
+
+- Added `RecyclableBuffer` for inbound data using `napi_create_external_buffer` with finalize callbacks that return buffers to the worker pool via crossbeam, eliminating malloc fragmentation.
+- Added `ChunkPool` with 1KB/2KB/4KB size classes for outbound `WorkerCommand::StreamSend` and `PendingWrite`, with auto-recycle on drop.
+- Added zero-copy H3 send via `send_body_owned()` wrapping `Vec` in `ArcBuf` without copying, matching the QUIC zero-copy path.
+- Normalized `JsH3Event` object shapes so all events present the same set of JS properties (`headers`, `fin`, `meta`, `metrics`), reducing V8 hidden classes from 6-8 to 2 and eliminating megamorphic inline-cache misses in the hot event dispatch path.
+- Added lazy `BackpressureState` allocation: the per-stream backpressure state and its two internal arrays are no longer created eagerly, saving ~69K object allocations per second under sustained load.
+- Added combined `sendResponse` NAPI method (`respondWithBody` on `ServerHttp3Stream`) that sends response headers, body, and FIN in a single FFI boundary crossing instead of three separate NAPI calls.
+
+### Shutdown lifecycle fix
+
+- Fixed a deadlock where `close()` on all four event loop types (H3 server/client, QUIC server/client) would block the JS event loop by synchronously joining the native worker thread, preventing the TSFN shutdown sentinel callback from ever firing.
+- Split the native `shutdown()` into `requestShutdown()` (non-blocking command send) and `joinWorker()` (thread join), exposed via NAPI on all native binding structs.
+- Switched QUIC client/server TSFN ownership to `Arc<EventTsfn>` to keep the threadsafe function alive during the shutdown-to-join window, matching the H3 server's existing pattern.
+
+### Transport drivers
+
+- Improved io_uring driver reliability: RX buffer ring exhaustion fix, waker resubmit, `sendmsg` EAGAIN handling, `recv_from` fallback.
+- Improved kqueue driver with pending-write drain fixes and waker reliability.
+- Added driver-tracing feature gate for optional per-event diagnostic logging.
+
+### Test infrastructure
+
+- Added 545 tests (161 Rust unit, 53 integration, 8 packet loss, 325 TypeScript), all passing.
+- Added comprehensive e2e scenario suites for both H3 and raw QUIC covering echo, streaming, datagrams, server push, concurrent sessions, connection churn, and mixed workloads (34 tests).
+- Added 5-minute longhaul tests: sustained H3 at 24.6K req/s (0 errors), sustained QUIC at 45.6K streams/s (0 errors), H3 mix at 197 req/s, QUIC mix at 2.4K ops/s, idle connection stability, and connection churn.
+- Added FFI boundary stress tests validating rapid lifecycle, large buffer transfers (256KB), concurrent sessions, and telemetry integrity.
+- Added packet loss simulation tests at 5%, 10%, and 20% loss rates.
+- Added heap profiling scripts (`heap-profile-h3-sustained.mjs`, `analyze-heap-snapshot.mjs`).
+
+### Dependencies
+
+- Rust 1.94, napi-rs 3.8, quiche 0.26.1 (BoringSSL).
+- Migrated to pnpm for workspace management.
+
 ## 0.6.0
 
 - Added first-class raw QUIC client mTLS support through the public `connectQuic()` and `connectQuicAsync()` options, including `cert`/`key` validation and explicit `ERR_HTTP3_TLS_CONFIG_ERROR` failures for invalid TLS input.
