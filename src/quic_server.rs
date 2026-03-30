@@ -8,13 +8,16 @@ use crate::config::{ClientAuthMode, JsQuicServerOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsSessionMetrics};
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 #[napi]
 pub struct NativeQuicServer {
     handle: Option<crate::quic_worker::QuicServerHandle>,
     quiche_config: Option<quiche::Config>,
     server_config: Option<crate::quic_worker::QuicServerConfig>,
-    tsfn: Option<crate::worker::EventTsfn>,
+    /// Kept alive so the TSFN reference count stays > 0 while the worker
+    /// thread is shutting down, ensuring pending callbacks are delivered.
+    tsfn: Option<Arc<crate::worker::EventTsfn>>,
 }
 
 #[napi]
@@ -46,7 +49,7 @@ impl NativeQuicServer {
             handle: None,
             quiche_config: Some(quiche_config),
             server_config: Some(server_config),
-            tsfn: Some(callback),
+            tsfn: Some(Arc::new(callback)),
         })
     }
 
@@ -71,12 +74,17 @@ impl NativeQuicServer {
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
         let tsfn = self
             .tsfn
-            .take()
+            .as_ref()
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
 
         let worker_handle =
-            crate::quic_worker::spawn_quic_server(quiche_config, server_config, addr, tsfn)
-                .map_err(napi::Error::from)?;
+            crate::quic_worker::spawn_quic_server(
+                quiche_config,
+                server_config,
+                addr,
+                Arc::clone(tsfn),
+            )
+            .map_err(napi::Error::from)?;
 
         let local = worker_handle.local_addr();
         self.handle = Some(worker_handle);
@@ -188,11 +196,34 @@ impl NativeQuicServer {
         handle.get_qlog_path(conn_handle).map_err(napi::Error::from)
     }
 
+    /// Send the Shutdown command without joining the worker threads.
+    #[napi]
+    pub fn request_shutdown(&self) -> bool {
+        match &self.handle {
+            Some(h) => {
+                h.request_shutdown();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Join all worker threads. Safe to call after `request_shutdown()`.
+    /// Also releases the TSFN reference held by this struct.
+    #[napi]
+    pub fn join_worker(&mut self) {
+        if let Some(mut h) = self.handle.take() {
+            h.join();
+        }
+        self.tsfn = None;
+    }
+
     #[napi]
     pub fn shutdown(&mut self) -> napi::Result<()> {
         if let Some(mut h) = self.handle.take() {
             h.shutdown();
         }
+        self.tsfn = None;
         Ok(())
     }
 }

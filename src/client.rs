@@ -197,6 +197,26 @@ impl NativeWorkerClient {
         handle.get_qlog_path().map_err(napi::Error::from)
     }
 
+    /// Send the Shutdown command without joining the worker thread.
+    #[napi]
+    pub fn request_shutdown(&self) -> bool {
+        match &self.handle {
+            Some(h) => {
+                h.request_shutdown();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Join the worker thread. Safe to call after `request_shutdown()`.
+    #[napi]
+    pub fn join_worker(&mut self) {
+        if let Some(mut h) = self.handle.take() {
+            h.join();
+        }
+    }
+
     #[napi]
     pub fn shutdown(&mut self) -> napi::Result<()> {
         if let Some(mut h) = self.handle.take() {

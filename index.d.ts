@@ -17,6 +17,13 @@ export declare class NativeQuicClient {
   getSessionMetrics(): JsSessionMetrics
   ping(): boolean
   getQlogPath(): string | null
+  /** Send the Shutdown command without joining the worker thread. */
+  requestShutdown(): boolean
+  /**
+   * Join the worker thread. Safe to call after `request_shutdown()`.
+   * Also releases the TSFN reference held by this struct.
+   */
+  joinWorker(): void
   shutdown(): void
 }
 
@@ -31,6 +38,13 @@ export declare class NativeQuicServer {
   getSessionMetrics(connHandle: number): JsSessionMetrics
   pingSession(connHandle: number): boolean
   getQlogPath(connHandle: number): string | null
+  /** Send the Shutdown command without joining the worker threads. */
+  requestShutdown(): boolean
+  /**
+   * Join all worker threads. Safe to call after `request_shutdown()`.
+   * Also releases the TSFN reference held by this struct.
+   */
+  joinWorker(): void
   shutdown(): void
 }
 
@@ -48,6 +62,10 @@ export declare class NativeWorkerClient {
   getRemoteSettings(): Array<JsSetting>
   ping(): boolean
   getQlogPath(): string | null
+  /** Send the Shutdown command without joining the worker thread. */
+  requestShutdown(): boolean
+  /** Join the worker thread. Safe to call after `request_shutdown()`. */
+  joinWorker(): void
   shutdown(): void
 }
 
@@ -60,6 +78,11 @@ export declare class NativeWorkerServer {
   listen(port: number, host: string): JsAddressInfo
   /** Send a command to the worker. Returns false if backpressure (queue full). */
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<JsHeader>, fin: boolean): boolean
+  /**
+   * Combined headers + body + FIN in a single NAPI call — avoids 2 extra
+   * FFI boundary crossings for the common respond-then-end pattern.
+   */
+  sendResponse(connHandle: number, streamId: number, headers: Array<JsHeader>, data: Buffer, fin: boolean): boolean
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean
   sendTrailers(connHandle: number, streamId: number, headers: Array<JsHeader>): boolean
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean
@@ -70,6 +93,10 @@ export declare class NativeWorkerServer {
   getRemoteSettings(connHandle: number): Array<JsSetting>
   pingSession(connHandle: number): boolean
   getQlogPath(connHandle: number): string | null
+  /** Send the Shutdown command without joining the worker threads. */
+  requestShutdown(): boolean
+  /** Join all worker threads. Safe to call after `request_shutdown()`. */
+  joinWorker(): void
   shutdown(): void
 }
 

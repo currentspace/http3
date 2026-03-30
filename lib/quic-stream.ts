@@ -3,6 +3,7 @@ import {
   type BackpressureState,
   cancelDrainCallbacks,
   createBackpressureState,
+  ensureBackpressureState,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
@@ -38,7 +39,7 @@ export class QuicStream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _serverLoop: QuicServerEventLoopLike | null = null;
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
-  /** @internal */ _bp: BackpressureState = createBackpressureState();
+  /** @internal */ _bp: BackpressureState | null = createBackpressureState();
   private _finalChunk: Buffer | null = null;
 
   constructor(opts?: { highWaterMark?: number }) {
@@ -77,7 +78,7 @@ export class QuicStream extends Duplex {
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
-    pushData(this, this._bp, chunk);
+    this._bp = pushData(this, this._bp, chunk);
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -118,6 +119,7 @@ export class QuicStream extends Duplex {
       callback();
     } else {
       const remaining = chunk.subarray(written);
+      this._bp = ensureBackpressureState(this._bp);
       this._bp.drainCallbacks.push(() => {
         this._writeChunk(remaining, callback);
       });
@@ -130,7 +132,8 @@ export class QuicStream extends Duplex {
       if (written > 0) {
         callback();
       } else {
-        this._bp.drainCallbacks.push(() => {
+        this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push(() => {
           this._writeFinalChunk(chunk, callback);
         });
       }
@@ -139,6 +142,7 @@ export class QuicStream extends Duplex {
     if (written >= chunk.length) {
       callback();
     } else {
+      this._bp = ensureBackpressureState(this._bp);
       this._bp.drainCallbacks.push(() => {
         this._writeFinalChunk(chunk.subarray(written), callback);
       });

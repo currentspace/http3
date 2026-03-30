@@ -237,12 +237,10 @@ export async function createQuicPair(opts?: { enableDatagrams?: boolean }): Prom
     serverAddr: addr,
     async cleanup() {
       try { client.close(0, 'test cleanup'); } catch { /* already closed */ }
-      try { client.shutdown(); } catch { /* already shut down */ }
-      try { server.shutdown(); } catch { /* already shut down */ }
-      await Promise.allSettled([
-        clientEvents.waitForShutdown(3000).catch(() => {}),
-        serverEvents.waitForShutdown(3000).catch(() => {}),
-      ]);
+      try { client.requestShutdown(); } catch { /* already shut down */ }
+      try { server.requestShutdown(); } catch { /* already shut down */ }
+      try { client.joinWorker(); } catch { /* already joined */ }
+      try { server.joinWorker(); } catch { /* already joined */ }
     },
   };
 }
@@ -312,12 +310,10 @@ export async function createH3Pair(opts?: {
     serverAddr: addr,
     async cleanup() {
       try { client.close(0, 'test cleanup'); } catch { /* already closed */ }
-      try { client.shutdown(); } catch { /* already shut down */ }
-      try { server.shutdown(); } catch { /* already shut down */ }
-      await Promise.allSettled([
-        clientEvents.waitForShutdown(3000).catch(() => {}),
-        serverEvents.waitForShutdown(3000).catch(() => {}),
-      ]);
+      try { client.requestShutdown(); } catch { /* already shut down */ }
+      try { server.requestShutdown(); } catch { /* already shut down */ }
+      try { client.joinWorker(); } catch { /* already joined */ }
+      try { server.joinWorker(); } catch { /* already joined */ }
     },
   };
 }
@@ -325,12 +321,16 @@ export async function createH3Pair(opts?: {
 // ---- Drain + shutdown helper ----
 
 /**
- * Gracefully drain and shut down a native server or client instance,
- * waiting for the SHUTDOWN_COMPLETE sentinel event.
+ * Gracefully drain and shut down a native server or client instance.
+ * Uses requestShutdown + joinWorker instead of blocking shutdown() to
+ * avoid TSFN callback delivery issues with the shutdown sentinel.
+ *
+ * Both calls are synchronous NAPI — the try/catch guards against the
+ * native handle already being consumed.
  */
-export async function drainAndShutdown(instance: any, collector: EventCollector): Promise<void> {
-  try { instance.shutdown(); } catch { /* already shut down */ }
-  await collector.waitForShutdown(5000);
+export function drainAndShutdown(instance: any, _collector: EventCollector): void {
+  try { instance.requestShutdown(); } catch { /* already shut down */ }
+  try { instance.joinWorker(); } catch { /* already joined */ }
 }
 
 // ---- Memory snapshot helper ----

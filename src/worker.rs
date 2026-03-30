@@ -44,6 +44,15 @@ pub enum WorkerCommand {
         headers: Vec<(String, String)>,
         fin: bool,
     },
+    /// Combined headers + body + FIN in a single command — avoids 2 extra
+    /// NAPI boundary crossings for the common respond-then-end pattern.
+    SendResponse {
+        conn_handle: u32,
+        stream_id: u64,
+        headers: Vec<(String, String)>,
+        body: Chunk,
+        fin: bool,
+    },
     StreamSend {
         conn_handle: u32,
         stream_id: u64,
@@ -231,16 +240,26 @@ impl WorkerHandle {
         })
     }
 
-    pub fn shutdown(&mut self) {
+    /// Send the Shutdown command to all workers without joining threads.
+    pub fn request_shutdown(&self) {
         for worker in &self.workers {
             let _ = worker.cmd_tx.send(WorkerCommand::Shutdown);
             let _ = worker.waker.wake();
         }
+    }
+
+    /// Join all worker threads. Call after `request_shutdown()`.
+    pub fn join(&mut self) {
         for worker in &mut self.workers {
             if let Some(handle) = worker.join_handle.take() {
                 let _ = handle.join();
             }
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.request_shutdown();
+        self.join();
     }
 }
 
@@ -265,6 +284,7 @@ impl Drop for WorkerHandle {
 fn command_conn_handle(cmd: &WorkerCommand) -> u32 {
     match cmd {
         WorkerCommand::SendResponseHeaders { conn_handle, .. }
+        | WorkerCommand::SendResponse { conn_handle, .. }
         | WorkerCommand::StreamSend { conn_handle, .. }
         | WorkerCommand::StreamClose { conn_handle, .. }
         | WorkerCommand::SendTrailers { conn_handle, .. }
@@ -290,6 +310,19 @@ fn remap_command_handle(cmd: WorkerCommand) -> WorkerCommand {
             conn_handle: local_conn_handle(conn_handle),
             stream_id,
             headers,
+            fin,
+        },
+        WorkerCommand::SendResponse {
+            conn_handle,
+            stream_id,
+            headers,
+            body,
+            fin,
+        } => WorkerCommand::SendResponse {
+            conn_handle: local_conn_handle(conn_handle),
+            stream_id,
+            headers,
+            body,
             fin,
         },
         WorkerCommand::StreamSend {
@@ -878,21 +911,13 @@ impl ClientWorkerHandle {
         self.local_addr
     }
 
-    pub fn shutdown(&mut self) {
-        let Some(kind) = self.kind.take() else {
-            return;
-        };
+    /// Send the Shutdown (or ReleaseSession) command without joining threads.
+    pub fn request_shutdown(&self) {
+        let Some(kind) = &self.kind else { return };
         match kind {
-            ClientWorkerHandleKind::Dedicated {
-                cmd_tx,
-                mut join_handle,
-                waker,
-            } => {
+            ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. } => {
                 let _ = cmd_tx.send(ClientWorkerCommand::Shutdown);
                 let _ = waker.wake();
-                if let Some(handle) = join_handle.take() {
-                    let _ = handle.join();
-                }
             }
             #[cfg(feature = "node-api")]
             ClientWorkerHandleKind::Shared {
@@ -901,8 +926,30 @@ impl ClientWorkerHandle {
             } => {
                 let _ = worker
                     .cmd_tx
-                    .send(SharedClientWorkerCommand::ReleaseSession { session_handle });
+                    .send(SharedClientWorkerCommand::ReleaseSession {
+                        session_handle: *session_handle,
+                    });
                 worker.wake();
+            }
+        }
+    }
+
+    /// Join the worker thread. Call after `request_shutdown()`.
+    pub fn join(&mut self) {
+        let Some(kind) = self.kind.take() else { return };
+        match kind {
+            ClientWorkerHandleKind::Dedicated {
+                mut join_handle, ..
+            } => {
+                if let Some(handle) = join_handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            #[cfg(feature = "node-api")]
+            ClientWorkerHandleKind::Shared {
+                worker,
+                ..
+            } => {
                 if worker.session_count.fetch_sub(1, Ordering::AcqRel) == 1 {
                     if let Ok(mut join_handle) = worker.join_handle.lock() {
                         if let Some(handle) = join_handle.take() {
@@ -915,6 +962,11 @@ impl ClientWorkerHandle {
                 }
             }
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.request_shutdown();
+        self.join();
     }
 }
 
@@ -1880,6 +1932,48 @@ impl ProtocolHandler for H3ServerHandler {
                         .map(|(n, v)| quiche::h3::Header::new(n.as_bytes(), v.as_bytes()))
                         .collect();
                     let _ = conn.send_response(stream_id, &h3_headers, fin);
+                }
+            }
+            WorkerCommand::SendResponse {
+                conn_handle,
+                stream_id,
+                headers,
+                mut body,
+                fin,
+            } => {
+                if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+                    // Step 1: send response headers (never with FIN — body follows)
+                    let h3_headers: Vec<quiche::h3::Header> = headers
+                        .iter()
+                        .map(|(n, v)| quiche::h3::Header::new(n.as_bytes(), v.as_bytes()))
+                        .collect();
+                    let _ = conn.send_response(stream_id, &h3_headers, false);
+                    // Step 2: send body + FIN
+                    let key = (conn_handle, stream_id);
+                    match conn.send_body(stream_id, body.remaining(), fin) {
+                        Ok(written) => {
+                            if written < body.remaining_len() {
+                                body.advance(written);
+                                self.pending_writes.insert(key, PendingWrite { chunk: body, fin });
+                            } else if fin && written == 0 && body.remaining_len() == 0 {
+                                self.pending_writes.insert(
+                                    key,
+                                    PendingWrite {
+                                        chunk: Chunk::unpooled(Vec::new()),
+                                        fin: true,
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            _batch.push(JsH3Event::error(
+                                conn_handle,
+                                stream_id as i64,
+                                0,
+                                format!("stream send failed: {e}"),
+                            ));
+                        }
+                    }
                 }
             }
             WorkerCommand::StreamSend {

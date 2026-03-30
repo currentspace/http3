@@ -133,16 +133,8 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    if (this._shutdownObserved) return;
-    const settled = new Promise<void>((resolve) => {
-      if (this._shutdownObserved) {
-        resolve();
-        return;
-      }
-      this._shutdownResolve = resolve;
-    });
-    this.worker.shutdown();
-    await settled;
+    this.worker.requestShutdown();
+    this.worker.joinWorker();
   }
 }
 

@@ -63,6 +63,7 @@ export interface NativeOutboundPacket {
 export interface NativeWorkerServerBinding {
   listen(port: number, host: string): { address: string; family: string; port: number };
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): boolean;
+  sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): boolean;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): boolean;
@@ -81,6 +82,8 @@ export interface NativeWorkerServerBinding {
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -108,6 +111,8 @@ export interface NativeWorkerClientBinding {
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -178,6 +183,8 @@ export interface NativeQuicServerBinding {
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -199,6 +206,8 @@ export interface NativeQuicClientBinding {
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -399,6 +408,7 @@ export type EventCallback = (events: NativeEvent[]) => void;
 /** Common interface for worker-based server command adapters. */
 export interface ServerEventLoopLike {
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): void;
+  sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): void;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number;
   streamClose(connHandle: number, streamId: number, errorCode: number): void;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): void;
@@ -449,6 +459,10 @@ export class WorkerEventLoop implements ServerEventLoopLike {
 
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): void {
     this.worker.sendResponseHeaders(connHandle, streamId, headers, fin);
+  }
+
+  sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): void {
+    this.worker.sendResponse(connHandle, streamId, headers, data, fin);
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
@@ -503,18 +517,8 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    if (this._shutdownObserved) return;
-    // Wire up sentinel promise BEFORE shutdown so no race.
-    const settled = new Promise<void>((resolve) => {
-      if (this._shutdownObserved) {
-        resolve();
-        return;
-      }
-      this._shutdownResolve = resolve;
-    });
-    this.worker.shutdown(); // sync N-API: joins all Rust worker threads
-    // All TSFN callbacks (including sentinels) are now queued in libuv.
-    await settled;
+    this.worker.requestShutdown();
+    this.worker.joinWorker();
   }
 }
 
@@ -593,16 +597,8 @@ export class ClientEventLoop {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    if (this._shutdownObserved) return;
     this.worker.close(0, 'client close');
-    const settled = new Promise<void>((resolve) => {
-      if (this._shutdownObserved) {
-        resolve();
-        return;
-      }
-      this._shutdownResolve = resolve;
-    });
-    this.worker.shutdown();
-    await settled;
+    this.worker.requestShutdown();
+    this.worker.joinWorker();
   }
 }
