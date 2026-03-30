@@ -46,7 +46,7 @@ jobs:
       - name: Ensure Rust >= 1.94
         run: rustup update stable && rustc --version
 
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
 
       - name: Build native prebuild
         run: pnpm exec napi build --release --platform --target ${{ matrix.target }}
@@ -77,7 +77,7 @@ jobs:
           cache: pnpm
           registry-url: "https://registry.npmjs.org"
 
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
 
       - name: Download prebuild artifacts
         uses: actions/download-artifact@v8
