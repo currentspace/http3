@@ -9,6 +9,7 @@ import { generateTestCerts } from '../support/generate-certs.js';
 import { createQuicServer, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServer, QuicServerSession, QuicClientSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { echoStream } from '../support/echo-stream.js';
 
 const IS_CI = process.env.GITHUB_ACTIONS === 'true' || process.env.CI === 'true';
 
@@ -139,7 +140,7 @@ describe('QUIC stress tests', () => {
 
     server.on('session', (session: QuicServerSession) => {
       session.on('stream', (stream: QuicStream) => {
-        stream.pipe(stream);
+        echoStream(stream);
       });
     });
 

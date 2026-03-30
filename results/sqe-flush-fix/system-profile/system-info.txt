@@ -1,0 +1,36 @@
+=== System Info ===
+Linux onosendai 6.16.0-1002-asahi-arm #2-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep 10 15:11:09 UTC 2025 aarch64 GNU/Linux
+10
+               total        used        free      shared  buff/cache   available
+Mem:            61Gi       6.8Gi        50Gi       1.5Gi       6.5Gi        54Gi
+Swap:             0B          0B          0B
+processor	: 0
+BogoMIPS	: 48.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint
+CPU implementer	: 0x61
+CPU architecture: 8
+CPU variant	: 0x2
+CPU part	: 0x028
+CPU revision	: 0
+
+processor	: 1
+BogoMIPS	: 48.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint
+CPU implementer	: 0x61
+CPU architecture: 8
+CPU variant	: 0x2
+CPU part	: 0x028
+CPU revision	: 0
+
+processor	: 2
+BogoMIPS	: 48.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint
+CPU implementer	: 0x61
+CPU architecture: 8
+CPU variant	: 0x2
+CPU part	: 0x029
+CPU revision	: 0
+
+processor	: 3
+BogoMIPS	: 48.00
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint

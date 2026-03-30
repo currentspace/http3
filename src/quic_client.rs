@@ -8,16 +8,18 @@ use crate::config::{JsQuicClientOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsSessionMetrics};
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 #[napi]
 pub struct NativeQuicClient {
     handle: Option<crate::quic_worker::QuicClientHandle>,
     quiche_config: Option<quiche::Config>,
-    tsfn: Option<crate::worker::EventTsfn>,
+    /// Kept alive so the TSFN reference count stays > 0 while the worker
+    /// thread is shutting down, ensuring pending callbacks are delivered.
+    tsfn: Option<Arc<crate::worker::EventTsfn>>,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
-    user_set_mtu: bool,
     runtime_mode: TransportRuntimeMode,
 }
 
@@ -29,18 +31,16 @@ impl NativeQuicClient {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let user_set_mtu = options.max_udp_payload_size.is_some();
-        let quiche_config = crate::config::new_quic_client_config(&options)
-            .map_err(napi::Error::from)?;
+        let quiche_config =
+            crate::config::new_quic_client_config(&options).map_err(napi::Error::from)?;
 
         Ok(Self {
             handle: None,
             quiche_config: Some(quiche_config),
-            tsfn: Some(callback),
+            tsfn: Some(Arc::new(callback)),
             session_ticket: options.session_ticket.map(|t| t.to_vec()),
             qlog_dir: options.qlog_dir,
             qlog_level: options.qlog_level,
-            user_set_mtu,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
         })
@@ -62,7 +62,7 @@ impl NativeQuicClient {
             .ok_or_else(|| napi::Error::from_reason("already connected"))?;
         let tsfn = self
             .tsfn
-            .take()
+            .as_ref()
             .ok_or_else(|| napi::Error::from_reason("already connected"))?;
 
         let handle = crate::quic_worker::spawn_quic_client(
@@ -72,9 +72,8 @@ impl NativeQuicClient {
             self.session_ticket.take(),
             self.qlog_dir.clone(),
             self.qlog_level.clone(),
-            self.user_set_mtu,
             self.runtime_mode,
-            tsfn,
+            Arc::clone(tsfn),
         )
         .map_err(napi::Error::from)?;
         let local = handle.local_addr();
@@ -172,11 +171,34 @@ impl NativeQuicClient {
         handle.get_qlog_path().map_err(napi::Error::from)
     }
 
+    /// Send the Shutdown command without joining the worker thread.
+    #[napi]
+    pub fn request_shutdown(&self) -> bool {
+        match &self.handle {
+            Some(h) => {
+                h.request_shutdown();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Join the worker thread. Safe to call after `request_shutdown()`.
+    /// Also releases the TSFN reference held by this struct.
+    #[napi]
+    pub fn join_worker(&mut self) {
+        if let Some(mut h) = self.handle.take() {
+            h.join();
+        }
+        self.tsfn = None;
+    }
+
     #[napi]
     pub fn shutdown(&mut self) -> napi::Result<()> {
         if let Some(mut h) = self.handle.take() {
             h.shutdown();
         }
+        self.tsfn = None;
         Ok(())
     }
 }

@@ -1,7 +1,7 @@
 import { Http3ClientSessionBase } from './session.js';
 import { ClientHttp3Stream } from './stream.js';
 import type { IncomingHeaders } from './stream.js';
-import { ClientEventLoop, binding } from './event-loop.js';
+import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
@@ -244,8 +244,13 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   }
 
   private _cleanupStreams(): void {
+    const err = new Error('session closed');
     for (const stream of this._streams.values()) {
-      stream.destroy();
+      if (stream.listenerCount('error') > 0) {
+        stream.destroy(err);
+      } else {
+        stream.destroy();
+      }
     }
     this._streams.clear();
   }
@@ -268,14 +273,14 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const stream = this._streams.get(event.streamId);
     if (stream && event.data) {
       stream._onActivity();
-      stream.push(Buffer.from(event.data));
+      stream._pushData(event.data);
     }
   }
 
   private _onFinished(event: NativeEvent): void {
     const stream = this._streams.get(event.streamId);
     if (stream) {
-      stream.push(null);
+      stream._pushData(null);
       this._streams.delete(event.streamId);
     }
   }
@@ -328,12 +333,12 @@ export class Http3ClientSession extends Http3ClientSessionBase {
 
   private _onSessionTicket(event: NativeEvent): void {
     if (!event.data) return;
-    this.emit('sessionTicket', Buffer.from(event.data));
+    this.emit('sessionTicket', event.data);
   }
 
   private _onDatagram(event: NativeEvent): void {
     if (!event.data) return;
-    this.emit('datagram', Buffer.from(event.data));
+    this.emit('datagram', event.data);
   }
 
   /** @internal */
@@ -425,7 +430,18 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
           qlogDir: options?.qlogDir,
           qlogLevel: options?.qlogLevel,
         }, (_err: Error | null, events: NativeEvent[]) => {
-          session._dispatchEvents(events);
+          let hasShutdown = false;
+          for (const event of events) {
+            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+              hasShutdown = true;
+            }
+          }
+          if (!hasShutdown) {
+            session._dispatchEvents(events);
+          } else {
+            session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+            eventLoop._onShutdownSentinel();
+          }
         });
 
         const eventLoop = new ClientEventLoop(nativeClient);

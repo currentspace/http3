@@ -597,11 +597,9 @@ fn test_connection_level_flow_control() {
                 Ok((len, info)) => {
                     exchanged = true;
                     if server.is_none() {
-                        let hdr = quiche::Header::from_slice(
-                            &mut buf[..len],
-                            quiche::MAX_CONN_ID_LEN,
-                        )
-                        .unwrap();
+                        let hdr =
+                            quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN)
+                                .unwrap();
                         let srv_scid = vec![0xab; quiche::MAX_CONN_ID_LEN];
                         let srv_scid = quiche::ConnectionId::from_ref(&srv_scid);
                         server = Some(
@@ -619,7 +617,11 @@ fn test_connection_level_flow_control() {
                         from: client_addr,
                         to: info.to,
                     };
-                    server.as_mut().unwrap().recv(&mut buf[..len], recv_info).unwrap();
+                    server
+                        .as_mut()
+                        .unwrap()
+                        .recv(&mut buf[..len], recv_info)
+                        .unwrap();
                 }
                 Err(quiche::Error::Done) => break,
                 Err(e) => panic!("client send: {e}"),
@@ -669,7 +671,10 @@ fn test_connection_level_flow_control() {
             match client.send(&mut buf) {
                 Ok((len, info)) => {
                     exchanged = true;
-                    let ri = quiche::RecvInfo { from: client_addr, to: info.to };
+                    let ri = quiche::RecvInfo {
+                        from: client_addr,
+                        to: info.to,
+                    };
                     server.as_mut().unwrap().recv(&mut buf[..len], ri).unwrap();
                 }
                 Err(quiche::Error::Done) => break,
@@ -693,7 +698,10 @@ fn test_connection_level_flow_control() {
             match srv.send(&mut buf) {
                 Ok((len, info)) => {
                     exchanged = true;
-                    let ri = quiche::RecvInfo { from: server_addr, to: info.to };
+                    let ri = quiche::RecvInfo {
+                        from: server_addr,
+                        to: info.to,
+                    };
                     client.recv(&mut buf[..len], ri).unwrap();
                 }
                 Err(quiche::Error::Done) => break,
@@ -704,9 +712,341 @@ fn test_connection_level_flow_control() {
         if total_read >= payload.len() {
             break;
         }
-        assert!(exchanged || round < 5, "deadlock at round {round}: written={total_written} read={total_read}");
+        assert!(
+            exchanged || round < 5,
+            "deadlock at round {round}: written={total_written} read={total_read}"
+        );
     }
 
     assert_eq!(total_read, payload.len(), "server should read all 64KB");
     assert_eq!(total_written, payload.len(), "client should write all 64KB");
+}
+
+// ---------------------------------------------------------------------------
+// Raw QUIC pair helper (no HTTP/3 framing)
+// ---------------------------------------------------------------------------
+
+struct RawQuicPair {
+    client: quiche::Connection,
+    server: Option<quiche::Connection>,
+    server_config: quiche::Config,
+    client_addr: SocketAddr,
+    server_addr: SocketAddr,
+}
+
+impl RawQuicPair {
+    /// Create a raw QUIC pair using the given ALPN and optional datagram support.
+    fn new(enable_datagrams: bool) -> Self {
+        let (cert_pem, key_pem) = generate_test_certs();
+        let id = std::thread::current().id();
+        let cert_path = std::env::temp_dir().join(format!("test_cert_raw_{id:?}.pem"));
+        let key_path = std::env::temp_dir().join(format!("test_key_raw_{id:?}.pem"));
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+        std::fs::write(&key_path, &key_pem).unwrap();
+
+        let alpn: &[&[u8]] = &[b"quic-test"];
+
+        let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+        client_config.set_application_protos(alpn).unwrap();
+        client_config.verify_peer(false);
+        client_config.set_max_idle_timeout(5000);
+        client_config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+        client_config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+        client_config.set_initial_max_data(10_000_000);
+        client_config.set_initial_max_stream_data_bidi_local(1_000_000);
+        client_config.set_initial_max_stream_data_bidi_remote(1_000_000);
+        client_config.set_initial_max_stream_data_uni(1_000_000);
+        client_config.set_initial_max_streams_bidi(100);
+        client_config.set_initial_max_streams_uni(100);
+        if enable_datagrams {
+            client_config.enable_dgram(true, 1000, 1000);
+        }
+
+        let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+        server_config
+            .load_cert_chain_from_pem_file(cert_path.to_str().unwrap())
+            .unwrap();
+        server_config
+            .load_priv_key_from_pem_file(key_path.to_str().unwrap())
+            .unwrap();
+        server_config.set_application_protos(alpn).unwrap();
+        server_config.set_max_idle_timeout(5000);
+        server_config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+        server_config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+        server_config.set_initial_max_data(10_000_000);
+        server_config.set_initial_max_stream_data_bidi_local(1_000_000);
+        server_config.set_initial_max_stream_data_bidi_remote(1_000_000);
+        server_config.set_initial_max_stream_data_uni(1_000_000);
+        server_config.set_initial_max_streams_bidi(100);
+        server_config.set_initial_max_streams_uni(100);
+        if enable_datagrams {
+            server_config.enable_dgram(true, 1000, 1000);
+        }
+
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+
+        let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let server_addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+
+        let scid = vec![0xca; quiche::MAX_CONN_ID_LEN];
+        let scid = quiche::ConnectionId::from_ref(&scid);
+
+        let client = quiche::connect(
+            Some("localhost"),
+            &scid,
+            client_addr,
+            server_addr,
+            &mut client_config,
+        )
+        .unwrap();
+
+        RawQuicPair {
+            client,
+            server: None,
+            server_config,
+            client_addr,
+            server_addr,
+        }
+    }
+
+    /// Exchange packets between client and server until quiescent.
+    fn exchange_packets(&mut self) -> usize {
+        let mut count = 0;
+        let mut buf = vec![0u8; 65535];
+
+        for _ in 0..100 {
+            let mut exchanged = false;
+
+            // Client -> Server
+            loop {
+                match self.client.send(&mut buf) {
+                    Ok((len, info)) => {
+                        exchanged = true;
+                        count += 1;
+
+                        if self.server.is_none() {
+                            let hdr = quiche::Header::from_slice(
+                                &mut buf[..len],
+                                quiche::MAX_CONN_ID_LEN,
+                            )
+                            .unwrap();
+
+                            let server_scid = vec![0xac; quiche::MAX_CONN_ID_LEN];
+                            let server_scid = quiche::ConnectionId::from_ref(&server_scid);
+
+                            let conn = quiche::accept(
+                                &server_scid,
+                                Some(&hdr.dcid),
+                                self.server_addr,
+                                self.client_addr,
+                                &mut self.server_config,
+                            )
+                            .unwrap();
+                            self.server = Some(conn);
+                        }
+
+                        let recv_info = quiche::RecvInfo {
+                            from: self.client_addr,
+                            to: info.to,
+                        };
+                        self.server
+                            .as_mut()
+                            .unwrap()
+                            .recv(&mut buf[..len], recv_info)
+                            .unwrap();
+                    }
+                    Err(quiche::Error::Done) => break,
+                    Err(e) => panic!("client send error: {e}"),
+                }
+            }
+
+            // Server -> Client
+            if let Some(server) = self.server.as_mut() {
+                loop {
+                    match server.send(&mut buf) {
+                        Ok((len, info)) => {
+                            exchanged = true;
+                            count += 1;
+                            let recv_info = quiche::RecvInfo {
+                                from: self.server_addr,
+                                to: info.to,
+                            };
+                            self.client.recv(&mut buf[..len], recv_info).unwrap();
+                        }
+                        Err(quiche::Error::Done) => break,
+                        Err(e) => panic!("server send error: {e}"),
+                    }
+                }
+            }
+
+            if !exchanged {
+                break;
+            }
+        }
+        count
+    }
+
+    /// Complete the QUIC handshake (no H3).
+    fn handshake(&mut self) {
+        self.exchange_packets();
+        assert!(self.client.is_established());
+        assert!(self.server.as_ref().unwrap().is_established());
+    }
+
+    fn server_mut(&mut self) -> &mut quiche::Connection {
+        self.server.as_mut().unwrap()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raw QUIC tests
+// ---------------------------------------------------------------------------
+
+/// Verify a raw QUIC handshake completes with custom ALPN "quic-test" and no
+/// HTTP/3 framing layer.
+#[test]
+fn test_raw_quic_handshake() {
+    let mut pair = RawQuicPair::new(false);
+    let packets = pair.exchange_packets();
+    assert!(packets > 0, "should exchange at least one packet");
+    assert!(pair.client.is_established());
+    assert!(pair.server.as_ref().unwrap().is_established());
+
+    // Confirm the negotiated ALPN is "quic-test".
+    assert_eq!(
+        pair.client.application_proto(),
+        b"quic-test",
+        "client ALPN mismatch"
+    );
+    assert_eq!(
+        pair.server.as_ref().unwrap().application_proto(),
+        b"quic-test",
+        "server ALPN mismatch"
+    );
+}
+
+/// Open a client-initiated bidirectional stream (id 0), send data in both
+/// directions, and verify each side reads what the other wrote.
+#[test]
+fn test_raw_quic_bidirectional_stream() {
+    let mut pair = RawQuicPair::new(false);
+    pair.handshake();
+
+    let stream_id: u64 = 0; // Client-initiated bidi
+
+    // Client sends data.
+    let client_msg = b"hello from client";
+    pair.client
+        .stream_send(stream_id, client_msg, false)
+        .unwrap();
+
+    pair.exchange_packets();
+
+    // Server reads data.
+    let mut buf = vec![0u8; 1024];
+    let (len, fin) = pair.server_mut().stream_recv(stream_id, &mut buf).unwrap();
+    assert_eq!(&buf[..len], client_msg);
+    assert!(!fin, "stream should not be finished yet");
+
+    // Server responds.
+    let server_msg = b"hello from server";
+    pair.server_mut()
+        .stream_send(stream_id, server_msg, false)
+        .unwrap();
+
+    pair.exchange_packets();
+
+    // Client reads response.
+    let (len, fin) = pair.client.stream_recv(stream_id, &mut buf).unwrap();
+    assert_eq!(&buf[..len], server_msg);
+    assert!(!fin);
+}
+
+/// Open three client-initiated bidi streams, send unique data on each,
+/// and verify every stream's data is received by the server.
+#[test]
+fn test_raw_quic_multi_stream_interleave() {
+    let mut pair = RawQuicPair::new(false);
+    pair.handshake();
+
+    // Client-initiated bidi stream IDs: 0, 4, 8 (increment by 4 per QUIC spec).
+    let stream_ids: [u64; 3] = [0, 4, 8];
+    let payloads: [&[u8]; 3] = [b"stream-zero", b"stream-four", b"stream-eight"];
+
+    // Client writes on all three streams.
+    for (sid, payload) in stream_ids.iter().zip(payloads.iter()) {
+        pair.client.stream_send(*sid, payload, true).unwrap();
+    }
+
+    pair.exchange_packets();
+
+    // Server reads each stream and verifies content.
+    let mut buf = vec![0u8; 1024];
+    for (sid, expected) in stream_ids.iter().zip(payloads.iter()) {
+        let (len, fin) = pair.server_mut().stream_recv(*sid, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..len],
+            *expected,
+            "payload mismatch on stream {sid}"
+        );
+        assert!(fin, "stream {sid} should be finished");
+    }
+}
+
+/// Send with fin=true and verify `stream_finished()` returns true on the
+/// receiving side after the data is read.
+#[test]
+fn test_raw_quic_stream_fin_detection() {
+    let mut pair = RawQuicPair::new(false);
+    pair.handshake();
+
+    let stream_id: u64 = 0;
+    let msg = b"final message";
+
+    // Client sends with FIN.
+    pair.client.stream_send(stream_id, msg, true).unwrap();
+
+    pair.exchange_packets();
+
+    // Server must read all data before stream_finished can return true.
+    let mut buf = vec![0u8; 1024];
+    let (len, fin) = pair.server_mut().stream_recv(stream_id, &mut buf).unwrap();
+    assert_eq!(&buf[..len], msg);
+    assert!(fin, "stream_recv should report fin=true");
+
+    // After reading through FIN, stream_finished() should be true.
+    assert!(
+        pair.server_mut().stream_finished(stream_id),
+        "stream_finished() should be true after reading FIN"
+    );
+}
+
+/// Enable QUIC datagrams on both sides, send a datagram from client to server
+/// and back, and verify the roundtrip.
+#[test]
+fn test_raw_quic_datagram() {
+    let mut pair = RawQuicPair::new(true);
+    pair.handshake();
+
+    // Client sends a datagram.
+    let payload = b"datagram-ping";
+    pair.client.dgram_send(payload).unwrap();
+
+    pair.exchange_packets();
+
+    // Server receives the datagram.
+    let mut buf = vec![0u8; 1024];
+    let len = pair.server_mut().dgram_recv(&mut buf).unwrap();
+    assert_eq!(&buf[..len], payload, "server should receive client datagram");
+
+    // Server sends a datagram back.
+    let reply = b"datagram-pong";
+    pair.server_mut().dgram_send(reply).unwrap();
+
+    pair.exchange_packets();
+
+    // Client receives the reply.
+    let len = pair.client.dgram_recv(&mut buf).unwrap();
+    assert_eq!(&buf[..len], reply, "client should receive server datagram");
 }

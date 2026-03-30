@@ -19,7 +19,9 @@ use serde::Serialize;
 #[cfg(feature = "node-api")]
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
+use crate::buffer_pool::AdaptiveBufferPool;
 use crate::h3_event::JsH3Event;
+use crate::reactor_metrics::{self, WorkerLoopExitCause};
 use crate::transport::{Driver, TxDatagram};
 
 /// TSFN type for delivering event batches to the JS main thread.
@@ -28,7 +30,7 @@ use crate::transport::{Driver, TxDatagram};
 pub type EventTsfn = ThreadsafeFunction<Vec<JsH3Event>>;
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct EventBatcherStatsSnapshot {
+pub struct EventBatcherStatsSnapshot {
     pub sink_kind: &'static str,
     pub flush_count: u64,
     pub attempted_events: u64,
@@ -48,7 +50,7 @@ struct EventBatcherStatsInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct EventBatcherStatsHandle {
+pub struct EventBatcherStatsHandle {
     sink_kind: &'static str,
     inner: Arc<EventBatcherStatsInner>,
 }
@@ -69,16 +71,19 @@ impl EventBatcherStatsHandle {
         self.inner
             .max_batch_size
             .fetch_max(count, Ordering::Relaxed);
+        reactor_metrics::record_event_batch_flush(count);
     }
 
     pub(crate) fn record_drop(&self, count: usize) {
         self.inner
             .dropped_events
             .fetch_add(count as u64, Ordering::Relaxed);
+        reactor_metrics::record_event_batch_drop(count);
     }
 
     pub(crate) fn record_sink_error(&self) {
         self.inner.sink_errors.fetch_add(1, Ordering::Relaxed);
+        reactor_metrics::record_event_batch_sink_error();
     }
 
     pub(crate) fn snapshot(&self) -> EventBatcherStatsSnapshot {
@@ -100,7 +105,7 @@ impl EventBatcherStatsHandle {
 /// At 2048 events × ~50 bytes ≈ 100KB per batch — well within comfort.
 /// Larger batches amortize TSFN (Rust→JS thread boundary) overhead: at 10K
 /// streams, ~30K events per cycle ÷ 2048 ≈ 15 calls vs 60 at 512.
-pub(crate) const MAX_BATCH_SIZE: usize = 2048;
+pub const MAX_BATCH_SIZE: usize = 2048;
 
 /// Per-connection QUIC packet scratch buffer size.
 pub(crate) const SEND_BUF_SIZE: usize = 65535;
@@ -149,6 +154,9 @@ pub(crate) trait ProtocolHandler {
     /// Soonest quiche timeout, or `None`.
     fn next_deadline(&mut self) -> Option<Instant>;
 
+    /// Drain returned buffers from V8 GC back into connection data pools.
+    fn drain_recycled_buffers(&mut self) {}
+
     /// Recycle TX buffers back into the handler's pool.
     fn recycle_tx_buffers(&mut self, _buffers: Vec<Vec<u8>>) {}
 
@@ -161,7 +169,7 @@ pub(crate) trait ProtocolHandler {
 
 // ── Event batcher ───────────────────────────────────────────────────
 
-pub(crate) trait EventSink: Send {
+pub trait EventSink: Send {
     fn kind(&self) -> &'static str;
     fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool;
 }
@@ -193,12 +201,28 @@ impl EventSink for TsfnEventSink {
             napi::Status::Ok => true,
             napi::Status::Closing => {
                 stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "tsfn-closing",
+                    None,
+                    Some(count),
+                    None,
+                    Some("tsfn".to_string()),
+                );
                 log::debug!("TSFN closing, dropped {count} events");
                 false
             }
             status => {
                 stats.record_sink_error();
                 stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "tsfn-call-failed",
+                    None,
+                    Some(count),
+                    None,
+                    Some(format!("{status:?}")),
+                );
                 log::warn!(
                     "TSFN call failed ({status:?}), dropped {count} events (total dropped: {})",
                     stats.snapshot().dropped_events
@@ -209,10 +233,89 @@ impl EventSink for TsfnEventSink {
     }
 }
 
-pub(crate) struct EventBatcher {
+#[cfg(feature = "node-api")]
+pub(crate) struct SharedTsfnEventSink {
+    tsfn: Arc<EventTsfn>,
+}
+
+#[cfg(feature = "node-api")]
+impl SharedTsfnEventSink {
+    pub(crate) fn new(tsfn: Arc<EventTsfn>) -> Self {
+        Self { tsfn }
+    }
+}
+
+#[cfg(feature = "node-api")]
+impl EventSink for SharedTsfnEventSink {
+    fn kind(&self) -> &'static str {
+        "tsfn-shared"
+    }
+
+    fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool {
+        let count = events.len();
+        match self
+            .tsfn
+            .call(Ok(events), ThreadsafeFunctionCallMode::NonBlocking)
+        {
+            napi::Status::Ok => true,
+            napi::Status::Closing => {
+                stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "shared-tsfn-closing",
+                    None,
+                    Some(count),
+                    None,
+                    Some("tsfn-shared".to_string()),
+                );
+                false
+            }
+            status => {
+                stats.record_sink_error();
+                stats.record_drop(count);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-sink",
+                    "shared-tsfn-call-failed",
+                    None,
+                    Some(count),
+                    None,
+                    Some(format!("{status:?}")),
+                );
+                log::warn!(
+                    "shared TSFN call failed ({status:?}), dropped {count} events (total dropped: {})",
+                    stats.snapshot().dropped_events
+                );
+                true
+            }
+        }
+    }
+}
+
+pub struct EventBatcher {
     pub batch: Vec<JsH3Event>,
     sink: Box<dyn EventSink>,
     stats: EventBatcherStatsHandle,
+}
+
+struct WorkerLoopStopGuard;
+
+impl Drop for WorkerLoopStopGuard {
+    fn drop(&mut self) {
+        reactor_metrics::record_worker_thread_stop();
+    }
+}
+
+fn push_shutdown_complete(batcher: &mut EventBatcher) {
+    reactor_metrics::record_shutdown_complete_emitted();
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "shutdown-complete-emitted",
+        None,
+        None,
+        None,
+        None,
+    );
+    batcher.batch.push(JsH3Event::shutdown_complete());
 }
 
 fn flush_runtime_error<D: Driver>(
@@ -222,6 +325,15 @@ fn flush_runtime_error<D: Driver>(
     reason_code: &str,
     err: &io::Error,
 ) -> bool {
+    reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::RuntimeError);
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "runtime-error",
+        Some(driver.driver_kind()),
+        None,
+        Some(driver.pending_tx_count()),
+        Some(format!("{syscall}:{reason_code}:{err}")),
+    );
     batcher.batch.push(JsH3Event::runtime_error(
         0,
         driver.driver_kind().as_str(),
@@ -229,6 +341,9 @@ fn flush_runtime_error<D: Driver>(
         reason_code,
         err,
     ));
+    let _ = batcher.flush();
+    // Emit shutdown sentinel so JS close() can resolve.
+    push_shutdown_complete(batcher);
     batcher.flush()
 }
 
@@ -236,6 +351,11 @@ impl EventBatcher {
     #[cfg(feature = "node-api")]
     pub fn new_tsfn(tsfn: EventTsfn) -> Self {
         Self::with_sink(TsfnEventSink::new(tsfn))
+    }
+
+    #[cfg(feature = "node-api")]
+    pub fn new_shared_tsfn(tsfn: Arc<EventTsfn>) -> Self {
+        Self::with_sink(SharedTsfnEventSink::new(tsfn))
     }
 
     pub fn with_sink<S: EventSink + 'static>(sink: S) -> Self {
@@ -261,8 +381,17 @@ impl EventBatcher {
         if self.batch.is_empty() {
             return true;
         }
-        let to_send = std::mem::take(&mut self.batch);
+        let mut to_send = Vec::with_capacity(MAX_BATCH_SIZE);
+        std::mem::swap(&mut self.batch, &mut to_send);
         self.stats.record_flush(to_send.len());
+        reactor_metrics::record_lifecycle_trace(
+            "event-batcher",
+            "flush",
+            None,
+            Some(to_send.len()),
+            None,
+            Some(self.stats.sink_kind.to_string()),
+        );
         self.sink.emit(to_send, &self.stats)
     }
 }
@@ -279,8 +408,24 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     mut batcher: EventBatcher,
     local_addr: SocketAddr,
 ) {
+    let _stop_guard = WorkerLoopStopGuard;
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "worker-loop-start",
+        Some(driver.driver_kind()),
+        None,
+        Some(driver.pending_tx_count()),
+        None,
+    );
+    // Use pkt.local (from IP_PKTINFO) only when the socket is bound to a
+    // specific address.  When bound to a wildcard (0.0.0.0 / [::]), quiche
+    // creates connections with that wildcard as the local addr.  Passing a
+    // more-specific pktinfo addr (e.g. 127.0.0.1) causes a mismatch and
+    // quiche rejects the packet.  This flag gates pkt.local usage.
+    let use_pktinfo_local = !local_addr.ip().is_unspecified();
     let mut outbound: Vec<TxDatagram> = Vec::new();
     let mut pending_outbound: Vec<TxDatagram> = Vec::new();
+    let mut gro_segment_pool = AdaptiveBufferPool::new(256, 4 * 1024);
 
     // Initial flush — sends Client Hello for client handlers, no-op for servers.
     handler.flush_sends(&mut outbound);
@@ -305,13 +450,8 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         let outcome = match driver.poll(deadline) {
             Ok(o) => o,
             Err(err) => {
-                let _ = flush_runtime_error(
-                    &mut batcher,
-                    driver,
-                    "poll",
-                    "driver-poll-failed",
-                    &err,
-                );
+                let _ =
+                    flush_runtime_error(&mut batcher, driver, "poll", "driver-poll-failed", &err);
                 return;
             }
         };
@@ -330,8 +470,23 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                             "driver-submit-sends-failed",
                             &err,
                         );
+                        return;
                     }
                 }
+                // Deliver any accumulated events, then a sentinel so JS
+                // knows all worker events have been delivered.
+                let _ = batcher.flush();
+                reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::Command);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-loop",
+                    "exit-command",
+                    Some(driver.driver_kind()),
+                    None,
+                    Some(driver.pending_tx_count()),
+                    None,
+                );
+                push_shutdown_complete(&mut batcher);
+                let _ = batcher.flush();
                 return;
             }
         }
@@ -357,15 +512,50 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         //    packets before any sends causes congestion-window stalls under
         //    fan-out (many connections sending concurrently).
         let rx_count = outcome.rx.len();
+        let mut rx_recycled: Vec<Vec<u8>> = Vec::new();
         for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
             pending_outbound.clear();
-            handler.process_packet(
-                &mut pkt.data,
-                pkt.peer,
-                local_addr,
-                &mut pending_outbound,
-                &mut batcher.batch,
-            );
+            if rx_idx == 0 {
+                log::trace!(
+                    "event_loop: processing {rx_count} rx pkts, first: len={} peer={} local={} gro={:?} tid={:?}",
+                    pkt.data.len(),
+                    pkt.peer,
+                    pkt.local,
+                    pkt.segment_size,
+                    std::thread::current().id(),
+                );
+            }
+            let pkt_local = if use_pktinfo_local {
+                pkt.local
+            } else {
+                local_addr
+            };
+            // Split by segment_size and call process_packet for each.
+            if let Some(seg_size) = pkt.segment_size {
+                let seg = seg_size as usize;
+                for chunk in pkt.data.chunks(seg) {
+                    let (mut buf, reused) = gro_segment_pool.copy_from_slice(chunk);
+                    reactor_metrics::record_gro_segment_buffer_checkout(reused, chunk.len());
+                    handler.process_packet(
+                        &mut buf,
+                        pkt.peer,
+                        pkt_local,
+                        &mut pending_outbound,
+                        &mut batcher.batch,
+                    );
+                    let retained = gro_segment_pool.checkin(buf);
+                    reactor_metrics::record_gro_segment_buffer_checkin(retained);
+                }
+            } else {
+                handler.process_packet(
+                    &mut pkt.data,
+                    pkt.peer,
+                    pkt_local,
+                    &mut pending_outbound,
+                    &mut batcher.batch,
+                );
+            }
+            rx_recycled.push(pkt.data);
             // Submit retry / version-negotiation packets immediately
             if !pending_outbound.is_empty() {
                 if let Err(err) = driver.submit_sends(std::mem::take(&mut pending_outbound)) {
@@ -397,8 +587,20 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             }
             // Mid-batch flush if needed
             if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
+                reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+                reactor_metrics::record_lifecycle_trace(
+                    "event-loop",
+                    "exit-sink-close",
+                    Some(driver.driver_kind()),
+                    None,
+                    Some(driver.pending_tx_count()),
+                    None,
+                );
                 return;
             }
+        }
+        if !rx_recycled.is_empty() {
+            driver.recycle_rx_buffers(rx_recycled);
         }
 
         // 5. Process protocol timers (always — cheap when nothing is expired)
@@ -410,6 +612,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 
         // Mid-batch flush if timer/drain processing pushed us over the cap
         if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
+            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+            reactor_metrics::record_lifecycle_trace(
+                "event-loop",
+                "exit-sink-close",
+                Some(driver.driver_kind()),
+                None,
+                Some(driver.pending_tx_count()),
+                None,
+            );
             return;
         }
 
@@ -437,14 +648,330 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         // 8. Cleanup closed connections
         handler.cleanup_closed(&mut batcher.batch);
 
+        // 8b. Drain returned data buffers from V8 GC back into connection pools.
+        handler.drain_recycled_buffers();
+
         // 9. Flush events to JS
         if !batcher.flush() {
+            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+            reactor_metrics::record_lifecycle_trace(
+                "event-loop",
+                "exit-sink-close",
+                Some(driver.driver_kind()),
+                None,
+                Some(driver.pending_tx_count()),
+                None,
+            );
+            push_shutdown_complete(&mut batcher);
+            let _ = batcher.flush();
             return;
         }
 
         // 10. Client exit: handler done and all packets drained
         if handler.is_done() && driver.pending_tx_count() == 0 {
+            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::HandlerDone);
+            reactor_metrics::record_lifecycle_trace(
+                "event-loop",
+                "exit-handler-done",
+                Some(driver.driver_kind()),
+                None,
+                Some(driver.pending_tx_count()),
+                None,
+            );
+            push_shutdown_complete(&mut batcher);
+            let _ = batcher.flush();
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Tracks the sizes of each batch delivered via `emit()`.
+    type DeliveryLog = Arc<Mutex<Vec<usize>>>;
+
+    /// A test-only sink that captures every batch delivered via `emit()`.
+    struct CaptureSink {
+        delivered: DeliveryLog,
+        should_close: bool,
+    }
+
+    impl CaptureSink {
+        fn new() -> (Self, DeliveryLog) {
+            let log: DeliveryLog = Arc::new(Mutex::new(Vec::new()));
+            let sink = Self {
+                delivered: Arc::clone(&log),
+                should_close: false,
+            };
+            (sink, log)
+        }
+
+        fn closing() -> Self {
+            Self {
+                delivered: Arc::new(Mutex::new(Vec::new())),
+                should_close: true,
+            }
+        }
+    }
+
+    impl EventSink for CaptureSink {
+        fn kind(&self) -> &'static str {
+            "capture"
+        }
+
+        fn emit(&mut self, events: Vec<JsH3Event>, stats: &EventBatcherStatsHandle) -> bool {
+            if self.should_close {
+                let count = events.len();
+                stats.record_drop(count);
+                return false;
+            }
+            self.delivered.lock().unwrap().push(events.len());
+            true
+        }
+    }
+
+    fn dummy_event() -> JsH3Event {
+        JsH3Event::data(0, 0, vec![1, 2, 3], false, crate::h3_event::NO_RECYCLER)
+    }
+
+    #[test]
+    fn test_batcher_empty_flush() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let ok = batcher.flush();
+        assert!(ok, "flush on empty batch should return true");
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "no batches should be delivered"
+        );
+    }
+
+    #[test]
+    fn test_batcher_flush_sends_to_sink() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        let ok = batcher.flush();
+        assert!(ok);
+        assert_eq!(log.lock().unwrap().len(), 1, "one batch should be delivered");
+        assert_eq!(log.lock().unwrap()[0], 2, "batch should contain 2 events");
+    }
+
+    #[test]
+    fn test_batcher_flush_clears_batch() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+        assert!(batcher.batch.is_empty(), "batch should be empty after flush");
+    }
+
+    #[test]
+    fn test_batcher_len() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        assert_eq!(batcher.len(), 0);
+        batcher.batch.push(dummy_event());
+        assert_eq!(batcher.len(), 1);
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        assert_eq!(batcher.len(), 3);
+    }
+
+    #[test]
+    fn test_batcher_stats_flush_count() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.flush_count, 3);
+    }
+
+    #[test]
+    fn test_batcher_stats_attempted_events() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        // flush 2 events
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        // flush 3 events
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.attempted_events, 5);
+    }
+
+    #[test]
+    fn test_batcher_stats_max_batch_size() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        // flush 1 event
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        // flush 4 events (new high-water mark)
+        for _ in 0..4 {
+            batcher.batch.push(dummy_event());
+        }
+        batcher.flush();
+
+        // flush 2 events (below high-water mark)
+        batcher.batch.push(dummy_event());
+        batcher.batch.push(dummy_event());
+        batcher.flush();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.max_batch_size, 4);
+    }
+
+    #[test]
+    fn test_batcher_stats_delivered_vs_dropped() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        // flush 5 events via sink
+        for _ in 0..5 {
+            batcher.batch.push(dummy_event());
+        }
+        batcher.flush();
+
+        // manually record 2 dropped
+        handle.record_drop(2);
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.attempted_events, 5);
+        assert_eq!(snap.dropped_events, 2);
+        assert_eq!(
+            snap.delivered_events,
+            snap.attempted_events.saturating_sub(snap.dropped_events)
+        );
+        assert_eq!(snap.delivered_events, 3);
+    }
+
+    #[test]
+    fn test_batcher_sink_close_returns_false() {
+        let sink = CaptureSink::closing();
+        let mut batcher = EventBatcher::with_sink(sink);
+        batcher.batch.push(dummy_event());
+        let ok = batcher.flush();
+        assert!(!ok, "flush should return false when sink signals close");
+    }
+
+    #[test]
+    fn test_batcher_stats_drop_recording() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        handle.record_drop(3);
+        handle.record_drop(7);
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.dropped_events, 10);
+    }
+
+    #[test]
+    fn test_batcher_stats_sink_error_recording() {
+        let (sink, _log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        handle.record_sink_error();
+        handle.record_sink_error();
+        handle.record_sink_error();
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.sink_errors, 3);
+    }
+
+    #[test]
+    fn test_batcher_exactly_max_batch_size() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        for _ in 0..MAX_BATCH_SIZE {
+            batcher.batch.push(dummy_event());
+        }
+        let ok = batcher.flush();
+        assert!(ok, "flush should succeed");
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 1, "exactly one batch should be delivered");
+        assert_eq!(delivered[0], 2048);
+    }
+
+    #[test]
+    fn test_batcher_exceeds_max_batch_size() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        for _ in 0..MAX_BATCH_SIZE + 1 {
+            batcher.batch.push(dummy_event());
+        }
+        let ok = batcher.flush();
+        assert!(ok, "flush should succeed");
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 1, "batcher does not split internally");
+        assert_eq!(delivered[0], 2049);
+    }
+
+    #[test]
+    fn test_batcher_stats_handle_clone_shares_state() {
+        let (sink, _log) = CaptureSink::new();
+        let batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+        let cloned = handle.clone();
+
+        cloned.record_drop(5);
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.dropped_events, 5);
+    }
+
+    #[test]
+    fn test_batcher_multiple_flush_cycles() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+        let handle = batcher.stats_handle();
+
+        for _ in 0..10 {
+            for _ in 0..3 {
+                batcher.batch.push(dummy_event());
+            }
+            batcher.flush();
+
+            for _ in 0..5 {
+                batcher.batch.push(dummy_event());
+            }
+            batcher.flush();
+        }
+
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 20, "20 flush cycles");
+        let total: usize = delivered.iter().sum();
+        assert_eq!(total, 80, "total events across all flushes");
+
+        let snap = handle.snapshot();
+        assert_eq!(snap.flush_count, 20);
+        assert_eq!(snap.attempted_events, 80);
     }
 }

@@ -17,6 +17,13 @@ export declare class NativeQuicClient {
   getSessionMetrics(): JsSessionMetrics
   ping(): boolean
   getQlogPath(): string | null
+  /** Send the Shutdown command without joining the worker thread. */
+  requestShutdown(): boolean
+  /**
+   * Join the worker thread. Safe to call after `request_shutdown()`.
+   * Also releases the TSFN reference held by this struct.
+   */
+  joinWorker(): void
   shutdown(): void
 }
 
@@ -31,6 +38,13 @@ export declare class NativeQuicServer {
   getSessionMetrics(connHandle: number): JsSessionMetrics
   pingSession(connHandle: number): boolean
   getQlogPath(connHandle: number): string | null
+  /** Send the Shutdown command without joining the worker threads. */
+  requestShutdown(): boolean
+  /**
+   * Join all worker threads. Safe to call after `request_shutdown()`.
+   * Also releases the TSFN reference held by this struct.
+   */
+  joinWorker(): void
   shutdown(): void
 }
 
@@ -48,6 +62,10 @@ export declare class NativeWorkerClient {
   getRemoteSettings(): Array<JsSetting>
   ping(): boolean
   getQlogPath(): string | null
+  /** Send the Shutdown command without joining the worker thread. */
+  requestShutdown(): boolean
+  /** Join the worker thread. Safe to call after `request_shutdown()`. */
+  joinWorker(): void
   shutdown(): void
 }
 
@@ -60,6 +78,11 @@ export declare class NativeWorkerServer {
   listen(port: number, host: string): JsAddressInfo
   /** Send a command to the worker. Returns false if backpressure (queue full). */
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<JsHeader>, fin: boolean): boolean
+  /**
+   * Combined headers + body + FIN in a single NAPI call — avoids 2 extra
+   * FFI boundary crossings for the common respond-then-end pattern.
+   */
+  sendResponse(connHandle: number, streamId: number, headers: Array<JsHeader>, data: Buffer, fin: boolean): boolean
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean
   sendTrailers(connHandle: number, streamId: number, headers: Array<JsHeader>): boolean
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean
@@ -70,6 +93,10 @@ export declare class NativeWorkerServer {
   getRemoteSettings(connHandle: number): Array<JsSetting>
   pingSession(connHandle: number): boolean
   getQlogPath(connHandle: number): string | null
+  /** Send the Shutdown command without joining the worker threads. */
+  requestShutdown(): boolean
+  /** Join all worker threads. Safe to call after `request_shutdown()`. */
+  joinWorker(): void
   shutdown(): void
 }
 
@@ -132,6 +159,25 @@ export interface JsH3Event {
 export interface JsHeader {
   name: string
   value: string
+}
+
+export interface JsLifecycleTraceEvent {
+  seq: number
+  timestampMs: number
+  component: string
+  action: string
+  driver?: string
+  batchSize?: number
+  pendingTx?: number
+  note?: string
+}
+
+export interface JsLifecycleTraceSnapshot {
+  enabled: boolean
+  capacity: number
+  droppedEvents: number
+  eventCount: number
+  events: Array<JsLifecycleTraceEvent>
 }
 
 export interface JsMockQuicProfileOptions {
@@ -206,6 +252,18 @@ export interface JsReactorTelemetrySnapshot {
   kqueueDriverSetupSuccesses: number
   kqueueDriverSetupFailures: number
   workerThreadSpawnsTotal: number
+  workerThreadStopsTotal: number
+  workerLoopExitByCommandTotal: number
+  workerLoopExitByHandlerDoneTotal: number
+  workerLoopExitBySinkCloseTotal: number
+  workerLoopExitByRuntimeErrorTotal: number
+  shutdownCompleteEmittedTotal: number
+  eventBatchFlushesTotal: number
+  eventBatchAttemptedEventsTotal: number
+  eventBatchDeliveredEventsTotal: number
+  eventBatchDroppedEventsTotal: number
+  eventBatchSinkErrorsTotal: number
+  eventBatchMaxSizeHighWatermark: number
   rawQuicServerWorkerSpawns: number
   rawQuicClientDedicatedWorkerSpawns: number
   rawQuicClientSharedWorkersCreated: number
@@ -238,6 +296,10 @@ export interface JsReactorTelemetrySnapshot {
   ioUringRxInFlightHighWatermark: number
   ioUringTxInFlightHighWatermark: number
   ioUringPendingTxHighWatermark: number
+  ioUringTier2DrainRounds: number
+  ioUringTier2TaskrunPrefetches: number
+  ioUringTier2BlockingWaits: number
+  ioUringTier2CapHits: number
   ioUringRetryableSendCompletions: number
   ioUringSubmitCalls: number
   ioUringSubmitWithArgsCalls: number
@@ -254,6 +316,23 @@ export interface JsReactorTelemetrySnapshot {
   kqueueUnsentHighWatermark: number
   kqueueWouldBlockSends: number
   kqueueWriteWakeups: number
+  rxBufferReuses: number
+  rxBufferAllocations: number
+  rxBufferCheckins: number
+  rxBufferDrops: number
+  rxBufferCopiedBytes: number
+  groSegmentBufferReuses: number
+  groSegmentBufferAllocations: number
+  groSegmentBufferCheckins: number
+  groSegmentBufferDrops: number
+  groSegmentBufferCopiedBytes: number
+  pendingWriteBufferReuses: number
+  pendingWriteBufferAllocations: number
+  pendingWriteBufferCheckins: number
+  pendingWriteBufferDrops: number
+  pendingWriteCopiedBytes: number
+  pendingWriteTailAllocations: number
+  pendingWriteGrowthReallocations: number
   txBuffersRecycled: number
 }
 
@@ -292,6 +371,7 @@ export interface JsSessionMetrics {
   handshakeTimeMs: number
   rttMs: number
   cwnd: number
+  pmtu: number
 }
 
 export interface JsSetting {
@@ -299,8 +379,14 @@ export interface JsSetting {
   value: number
 }
 
+export declare function lifecycleTraceSnapshot(): JsLifecycleTraceSnapshot
+
+export declare function resetLifecycleTrace(): void
+
 export declare function resetRuntimeTelemetry(): void
 
 export declare function runtimeTelemetry(): JsReactorTelemetrySnapshot
+
+export declare function setLifecycleTraceEnabled(enabled: boolean): void
 
 export declare function version(): string

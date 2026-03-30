@@ -6,6 +6,9 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+/** Sentinel event emitted by each Rust worker thread before exit. */
+export const EVENT_SHUTDOWN_COMPLETE = 15;
+
 // ----- Native binding type definitions -----
 
 /**
@@ -60,6 +63,7 @@ export interface NativeOutboundPacket {
 export interface NativeWorkerServerBinding {
   listen(port: number, host: string): { address: string; family: string; port: number };
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): boolean;
+  sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): boolean;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): boolean;
@@ -78,6 +82,8 @@ export interface NativeWorkerServerBinding {
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -105,6 +111,8 @@ export interface NativeWorkerClientBinding {
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -175,6 +183,8 @@ export interface NativeQuicServerBinding {
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -196,6 +206,8 @@ export interface NativeQuicClientBinding {
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  requestShutdown(): boolean;
+  joinWorker(): void;
   shutdown(): void;
 }
 
@@ -257,6 +269,18 @@ export interface ReactorTelemetrySnapshot {
   kqueueDriverSetupSuccesses: number;
   kqueueDriverSetupFailures: number;
   workerThreadSpawnsTotal: number;
+  workerThreadStopsTotal: number;
+  workerLoopExitByCommandTotal: number;
+  workerLoopExitByHandlerDoneTotal: number;
+  workerLoopExitBySinkCloseTotal: number;
+  workerLoopExitByRuntimeErrorTotal: number;
+  shutdownCompleteEmittedTotal: number;
+  eventBatchFlushesTotal: number;
+  eventBatchAttemptedEventsTotal: number;
+  eventBatchDeliveredEventsTotal: number;
+  eventBatchDroppedEventsTotal: number;
+  eventBatchSinkErrorsTotal: number;
+  eventBatchMaxSizeHighWatermark: number;
   rawQuicServerWorkerSpawns: number;
   rawQuicClientDedicatedWorkerSpawns: number;
   rawQuicClientSharedWorkersCreated: number;
@@ -308,6 +332,25 @@ export interface ReactorTelemetrySnapshot {
   txBuffersRecycled: number;
 }
 
+export interface LifecycleTraceEvent {
+  seq: number;
+  timestampMs: number;
+  component: string;
+  action: string;
+  driver?: string;
+  batchSize?: number;
+  pendingTx?: number;
+  note?: string;
+}
+
+export interface LifecycleTraceSnapshot {
+  enabled: boolean;
+  capacity: number;
+  droppedEvents: number;
+  eventCount: number;
+  events: LifecycleTraceEvent[];
+}
+
 interface NativeBinding {
   NativeWorkerServer: new (
     options: NativeServerOptions,
@@ -328,6 +371,9 @@ interface NativeBinding {
   version(): string;
   runtimeTelemetry(): ReactorTelemetrySnapshot;
   resetRuntimeTelemetry(): void;
+  setLifecycleTraceEnabled(enabled: boolean): void;
+  resetLifecycleTrace(): void;
+  lifecycleTraceSnapshot(): LifecycleTraceSnapshot;
 }
 
 // ----- Binding loader -----
@@ -362,6 +408,7 @@ export type EventCallback = (events: NativeEvent[]) => void;
 /** Common interface for worker-based server command adapters. */
 export interface ServerEventLoopLike {
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): void;
+  sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): void;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number;
   streamClose(connHandle: number, streamId: number, errorCode: number): void;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): void;
@@ -389,13 +436,33 @@ export interface ServerEventLoopLike {
 export class WorkerEventLoop implements ServerEventLoopLike {
   private readonly worker: NativeWorkerServerBinding;
   private closed = false;
+  private _shutdownObserved = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeWorkerServerBinding) {
     this.worker = worker;
   }
 
+  /**
+   * Called by the TSFN callback when a SHUTDOWN_COMPLETE sentinel arrives.
+   * Resolves the promise that close() is awaiting.
+   * @internal
+   */
+  _onShutdownSentinel(): void {
+    this._shutdownObserved = true;
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
+  }
+
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): void {
     this.worker.sendResponseHeaders(connHandle, streamId, headers, fin);
+  }
+
+  sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): void {
+    this.worker.sendResponse(connHandle, streamId, headers, data, fin);
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
@@ -450,8 +517,8 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.worker.shutdown();
-    await Promise.resolve();
+    this.worker.requestShutdown();
+    this.worker.joinWorker();
   }
 }
 
@@ -464,9 +531,21 @@ export class WorkerEventLoop implements ServerEventLoopLike {
 export class ClientEventLoop {
   private readonly worker: NativeWorkerClientBinding;
   private closed = false;
+  private _shutdownObserved = false;
+  private _shutdownResolve: (() => void) | null = null;
 
   constructor(worker: NativeWorkerClientBinding) {
     this.worker = worker;
+  }
+
+  /** @internal */
+  _onShutdownSentinel(): void {
+    this._shutdownObserved = true;
+    if (this._shutdownResolve) {
+      const resolve = this._shutdownResolve;
+      this._shutdownResolve = null;
+      resolve();
+    }
   }
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
@@ -518,12 +597,8 @@ export class ClientEventLoop {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const queued = this.worker.close(0, 'client close');
-    if (queued) {
-      // Give the worker a brief chance to flush CONNECTION_CLOSE packets
-      // before forcing shutdown.
-      await new Promise<void>((resolve) => { setTimeout(resolve, 20); });
-    }
-    this.worker.shutdown();
+    this.worker.close(0, 'client close');
+    this.worker.requestShutdown();
+    this.worker.joinWorker();
   }
 }
