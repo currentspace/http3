@@ -4,17 +4,20 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
+use crate::arc_buf::{ArcBuf, ArcBufFactory};
+use crate::buffer_pool::{AdaptiveBufferPool, BufferRecycler};
 use crate::connection::ConnectionMetrics;
 use crate::error::Http3NativeError;
-use crate::h3_event::JsH3Event;
+use crate::h3_event::{EventRecycler, JsH3Event};
 use crate::reactor_metrics;
 
 /// A raw QUIC connection (no HTTP/3 framing).
 /// Streams carry opaque byte data, not HTTP semantics.
 pub struct QuicConnection {
-    pub quiche_conn: quiche::Connection,
+    pub quiche_conn: quiche::Connection<ArcBufFactory>,
     pub conn_id: Vec<u8>,
     pub created_at: Instant,
     pub is_established: bool,
@@ -26,8 +29,21 @@ pub struct QuicConnection {
     pub blocked_set: HashSet<u64>,
     /// Tracks which stream IDs we have already emitted NEW_STREAM for.
     pub known_streams: HashSet<u64>,
+    /// Streams where stream_recv returned Done but stream_finished() was false.
+    /// Only these are checked in sweep_finished_streams (avoids O(all_streams) scan).
+    pub pending_fin: HashSet<u64>,
     pub qlog_path: Option<String>,
     pub session_ticket: Option<Vec<u8>>,
+    /// Pool for stream_recv output buffers — each checkout becomes the event data
+    /// Vec directly, avoiding an intermediate copy. Buffers returned from V8 GC
+    /// via the recycler channel are pulled back into this pool periodically.
+    pub data_pool: AdaptiveBufferPool,
+    /// Thread-safe handle cloned into each data event so V8 GC can return
+    /// the buffer to `data_pool` instead of freeing it.
+    pub(crate) data_recycler: Arc<BufferRecycler>,
+    /// Receiving end of the recycler channel — drained periodically on the
+    /// worker thread to pull returned buffers back into `data_pool`.
+    pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 pub struct QuicConnectionInit<'a> {
@@ -37,8 +53,13 @@ pub struct QuicConnectionInit<'a> {
 }
 
 impl QuicConnection {
+    fn is_local_stream(&self, stream_id: u64) -> bool {
+        let local_initiator_bit = u64::from(self.quiche_conn.is_server());
+        (stream_id & 0x1) == local_initiator_bit
+    }
+
     pub fn new(
-        mut quiche_conn: quiche::Connection,
+        mut quiche_conn: quiche::Connection<ArcBufFactory>,
         conn_id: Vec<u8>,
         init: QuicConnectionInit<'_>,
     ) -> Self {
@@ -49,6 +70,8 @@ impl QuicConnection {
             init.qlog_dir,
             init.qlog_level,
         );
+        let (data_pool, data_recycler, data_recycle_rx) =
+            AdaptiveBufferPool::with_recycler(64, 4096);
         Self {
             quiche_conn,
             conn_id,
@@ -59,8 +82,12 @@ impl QuicConnection {
             blocked_queue: VecDeque::new(),
             blocked_set: HashSet::new(),
             known_streams: HashSet::new(),
+            pending_fin: HashSet::new(),
             qlog_path,
             session_ticket: None,
+            data_pool,
+            data_recycler,
+            data_recycle_rx,
         }
     }
 
@@ -110,30 +137,35 @@ impl QuicConnection {
     /// For new streams, the first `stream_recv` is coalesced into the
     /// NEW_STREAM event — saving one TSFN event per new stream (~33% fewer
     /// events for the typical new-stream lifecycle).
+    /// Max buffer size for stream_recv. 16KB matches the H3 path and covers
+    /// typical QUIC receive windows. quiche returns partial data and we loop.
+    const RECV_CHUNK: usize = 16_384;
+
     pub fn poll_quic_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
         let readable: Vec<u64> = self.quiche_conn.readable().collect();
 
-        let mut recv_buf = [0u8; 65535];
         for stream_id in readable {
             let is_new = self.known_streams.insert(stream_id);
 
             if is_new {
                 // Coalesce first recv into NEW_STREAM event.
-                match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
+                // Checkout a pool buffer as the direct recv target — quiche copies
+                // into it, then we truncate and move ownership to the event (no
+                // intermediate copy).
+                let (mut buf, _) = self.data_pool.checkout(Self::RECV_CHUNK);
+                match self.quiche_conn.stream_recv(stream_id, &mut buf) {
                     Ok((len, fin)) => {
+                        buf.truncate(len);
                         events.push(JsH3Event::new_stream_with_data(
                             conn_handle,
                             stream_id,
-                            recv_buf[..len].to_vec(),
+                            buf,
                             fin,
+                            self.event_recycler(),
                         ));
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
-                            // Don't emit separate FINISHED — the NEW_STREAM event
-                            // carries fin=true and TS handler will push(null).
                             self.known_streams.remove(&stream_id);
-                            // Proactive shutdown: tell quiche to release internal
-                            // per-stream state (ACK tracking, retransmit buffers).
                             self.quiche_conn
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .ok();
@@ -142,10 +174,12 @@ impl QuicConnection {
                         // Fall through to drain remaining data on this stream.
                     }
                     Err(quiche::Error::Done) => {
+                        self.data_pool.checkin(buf);
                         events.push(JsH3Event::new_stream(conn_handle, stream_id));
                         continue;
                     }
                     Err(e) => {
+                        self.data_pool.checkin(buf);
                         events.push(JsH3Event::new_stream(conn_handle, stream_id));
                         events.push(JsH3Event::error(
                             conn_handle,
@@ -160,22 +194,20 @@ impl QuicConnection {
             }
 
             loop {
-                match self.quiche_conn.stream_recv(stream_id, &mut recv_buf) {
+                let (mut buf, _) = self.data_pool.checkout(Self::RECV_CHUNK);
+                match self.quiche_conn.stream_recv(stream_id, &mut buf) {
                     Ok((len, fin)) => {
                         if len > 0 {
-                            events.push(JsH3Event::data(
-                                conn_handle,
-                                stream_id,
-                                recv_buf[..len].to_vec(),
-                                fin,
-                            ));
+                            buf.truncate(len);
+                            events.push(JsH3Event::data(conn_handle, stream_id, buf, fin, self.event_recycler()));
+                        } else {
+                            self.data_pool.checkin(buf);
                         }
                         if fin {
                             reactor_metrics::record_raw_quic_fin_observed();
                             reactor_metrics::record_raw_quic_finished_event();
                             events.push(JsH3Event::finished(conn_handle, stream_id));
                             self.known_streams.remove(&stream_id);
-                            // Change 8: proactive stream_shutdown on FIN
                             self.quiche_conn
                                 .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .ok();
@@ -185,8 +217,24 @@ impl QuicConnection {
                             break;
                         }
                     }
-                    Err(quiche::Error::Done) => break,
+                    Err(quiche::Error::Done) => {
+                        self.data_pool.checkin(buf);
+                        if self.quiche_conn.stream_finished(stream_id) {
+                            reactor_metrics::record_raw_quic_fin_observed();
+                            reactor_metrics::record_raw_quic_finished_event();
+                            events.push(JsH3Event::finished(conn_handle, stream_id));
+                            self.known_streams.remove(&stream_id);
+                            self.pending_fin.remove(&stream_id);
+                            self.quiche_conn
+                                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .ok();
+                        } else {
+                            self.pending_fin.insert(stream_id);
+                        }
+                        break;
+                    }
                     Err(e) => {
+                        self.data_pool.checkin(buf);
                         events.push(JsH3Event::error(
                             conn_handle,
                             stream_id as i64,
@@ -200,8 +248,39 @@ impl QuicConnection {
             }
         }
 
+        // NOTE: sweep_finished_streams is called by the handler at lower frequency
+        // (timer ticks) to avoid O(pending_fin) on every packet.
         self.poll_datagram_events(conn_handle, events);
         self.poll_drain_events(conn_handle, events);
+    }
+
+    /// Check only the `pending_fin` set for streams where quiche received FIN
+    /// after we already drained all data via `stream_recv`. This is O(pending)
+    /// instead of the previous O(all_known_streams) — typically near zero.
+    pub fn sweep_finished_streams(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
+        if self.pending_fin.is_empty() {
+            return;
+        }
+        let mut newly_finished = Vec::new();
+        for &stream_id in &self.pending_fin {
+            if self.quiche_conn.stream_finished(stream_id)
+                && !self.quiche_conn.stream_readable(stream_id)
+            {
+                newly_finished.push(stream_id);
+            }
+        }
+        for stream_id in newly_finished {
+            self.pending_fin.remove(&stream_id);
+            if !self.known_streams.remove(&stream_id) {
+                continue;
+            }
+            reactor_metrics::record_raw_quic_fin_observed();
+            reactor_metrics::record_raw_quic_finished_event();
+            events.push(JsH3Event::finished(conn_handle, stream_id));
+            self.quiche_conn
+                .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                .ok();
+        }
     }
 
     pub fn poll_drain_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
@@ -233,18 +312,57 @@ impl QuicConnection {
         }
     }
 
-    /// Send raw data on a QUIC stream. Returns bytes written.
+    /// Send raw data on a QUIC stream using zero-copy. Returns
+    /// `(bytes_written, optional remainder)`.
+    ///
+    /// Takes ownership of the data `Vec`, wraps it in an `ArcBuf`, and hands
+    /// it to quiche's `stream_send_zc` — avoiding an internal memcpy.
     ///
     /// For FIN-only sends (empty data + fin=true), quiche returns Ok(0) on
     /// success. To distinguish that from `Err(Done)` (blocked), this method
-    /// returns `Ok(1)` when a FIN-only send is accepted by quiche — callers
+    /// returns written=1 when a FIN-only send is accepted by quiche — callers
     /// can treat any non-zero return as "progress was made."
-    ///
-    /// This sentinel is needed regardless of quiche version because the
-    /// quiche API uses Ok(0) for both "FIN accepted" and maps Err(Done)
-    /// to 0 in callers — there is no way to distinguish success from
-    /// flow-control block without it.
     pub fn stream_send(
+        &mut self,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+    ) -> Result<(usize, Option<Vec<u8>>), Http3NativeError> {
+        let data_len = data.len();
+        let buf = ArcBuf::from_vec(data);
+        match self.quiche_conn.stream_send_zc(stream_id, buf, None, fin) {
+            Ok((written, remaining)) => {
+                if written < data_len && self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                    reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
+                }
+                if self.is_local_stream(stream_id) {
+                    self.known_streams.insert(stream_id);
+                }
+                // Convert remaining ArcBuf back to Vec for pending-write storage.
+                let remainder = remaining.map(|r| r.as_ref().to_vec());
+                // Sentinel for FIN-only sends.
+                if data_len == 0 && fin && written == 0 {
+                    Ok((1, None))
+                } else {
+                    Ok((written, remainder))
+                }
+            }
+            Err(quiche::Error::Done) => {
+                if self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                    reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
+                }
+                Ok((0, None))
+            }
+            Err(e) => Err(Http3NativeError::Quiche(e)),
+        }
+    }
+
+    /// Borrow-based stream send: writes data without taking ownership.
+    /// The caller retains the data and can track partial writes via the
+    /// returned byte count. Uses quiche's non-zero-copy path.
+    pub fn stream_send_borrowed(
         &mut self,
         stream_id: u64,
         data: &[u8],
@@ -256,10 +374,10 @@ impl QuicConnection {
                     self.blocked_queue.push_back(stream_id);
                     reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
-                self.known_streams.insert(stream_id);
-                // Signal progress for FIN-only sends (0 data bytes written
-                // but FIN was accepted). Without this, callers can't
-                // distinguish a successful FIN from a blocked one.
+                if self.is_local_stream(stream_id) {
+                    self.known_streams.insert(stream_id);
+                }
+                // Sentinel for FIN-only sends.
                 if data.is_empty() && fin && written == 0 {
                     Ok(1)
                 } else {
@@ -282,6 +400,18 @@ impl QuicConnection {
         stream_id: u64,
         error_code: u64,
     ) -> Result<(), Http3NativeError> {
+        reactor_metrics::record_lifecycle_trace(
+            "quic-connection",
+            "stream-close",
+            None,
+            None,
+            None,
+            Some(format!(
+                "stream_id={stream_id} error_code={error_code} blocked_streams={} known_streams={}",
+                self.blocked_set.len(),
+                self.known_streams.len()
+            )),
+        );
         // .ok() intentional: shutdown may fail with Done (already closed) or
         // InvalidStreamState (peer reset). Either way we want to clean up
         // our tracking state — the stream is going away.
@@ -298,6 +428,22 @@ impl QuicConnection {
         Ok(())
     }
 
+    /// Pull returned buffers from the recycler channel back into the data pool.
+    /// Called once per event-loop iteration on the worker thread.
+    pub fn drain_recycled(&mut self) {
+        self.data_pool.drain_returned(&self.data_recycle_rx);
+    }
+
+    /// Return the event recycler for data buffers. Under `node-api`, this is
+    /// `Some(Arc<BufferRecycler>)` so V8 GC can return buffers to the pool.
+    /// Without `node-api`, it is `()` (zero-cost no-op).
+    fn event_recycler(&self) -> EventRecycler {
+        #[cfg(feature = "node-api")]
+        { Some(Arc::clone(&self.data_recycler)) }
+        #[cfg(not(feature = "node-api"))]
+        { () }
+    }
+
     pub fn is_closed(&self) -> bool {
         self.quiche_conn.is_closed()
     }
@@ -310,14 +456,22 @@ impl QuicConnection {
     }
 
     pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        let mut recv_buf = [0u8; 65535];
         loop {
-            match self.quiche_conn.dgram_recv(&mut recv_buf) {
+            // Datagrams are at most one MTU (~1500 bytes).
+            let (mut buf, _) = self.data_pool.checkout(1500);
+            match self.quiche_conn.dgram_recv(&mut buf) {
                 Ok(len) => {
-                    events.push(JsH3Event::datagram(conn_handle, recv_buf[..len].to_vec()));
+                    buf.truncate(len);
+                    events.push(JsH3Event::datagram(conn_handle, buf, self.event_recycler()));
                 }
-                Err(quiche::Error::Done) => break,
-                Err(_) => break,
+                Err(quiche::Error::Done) => {
+                    self.data_pool.checkin(buf);
+                    break;
+                }
+                Err(_) => {
+                    self.data_pool.checkin(buf);
+                    break;
+                }
             }
         }
     }
@@ -354,10 +508,14 @@ impl QuicConnection {
             .next()
             .map_or(0, |s| s.cwnd as u64)
     }
+
+    pub fn pmtu(&self) -> usize {
+        self.quiche_conn.path_stats().next().map_or(0, |s| s.pmtu)
+    }
 }
 
 fn maybe_enable_qlog(
-    quiche_conn: &mut quiche::Connection,
+    quiche_conn: &mut quiche::Connection<ArcBufFactory>,
     conn_id: &[u8],
     role: &str,
     qlog_dir: Option<&str>,

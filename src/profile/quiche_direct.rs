@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::arc_buf::ArcBufFactory;
 use crate::config::{
     JsQuicClientOptions, JsQuicServerOptions, new_quic_client_config, new_quic_server_config,
 };
@@ -53,8 +54,8 @@ struct DirectOptions {
 }
 
 struct DirectPair {
-    client_conn: quiche::Connection,
-    server_conn: Option<quiche::Connection>,
+    client_conn: quiche::Connection<ArcBufFactory>,
+    server_conn: Option<quiche::Connection<ArcBufFactory>>,
     server_config: quiche::Config,
     client_addr: SocketAddr,
     server_addr: SocketAddr,
@@ -79,7 +80,7 @@ impl DirectPair {
         let server_config = build_server_config(options)?;
         let scid = vec![0xba; quiche::MAX_CONN_ID_LEN];
         let scid_ref = quiche::ConnectionId::from_ref(&scid);
-        let client_conn = quiche::connect(
+        let client_conn = quiche::connect_with_buffer_factory::<ArcBufFactory>(
             Some(&options.server_name),
             &scid_ref,
             client_addr,
@@ -118,7 +119,8 @@ pub fn cli_main() -> Result<(), String> {
     while completed_streams < requested_streams && start.elapsed() < options.timeout {
         let mut made_progress = false;
         for pair in &mut pairs {
-            made_progress |= advance_pair(pair, &options, &payload, &mut latencies_ms, &mut errors)?;
+            made_progress |=
+                advance_pair(pair, &options, &payload, &mut latencies_ms, &mut errors)?;
         }
         completed_streams = pairs.iter().map(|pair| pair.completed_streams).sum();
         response_bytes = pairs.iter().map(|pair| pair.client_response_bytes).sum();
@@ -174,7 +176,10 @@ fn advance_pair(
     progressed |= handle_timeouts(pair);
 
     if pair.client_conn.is_established()
-        && pair.server_conn.as_ref().is_some_and(quiche::Connection::is_established)
+        && pair
+            .server_conn
+            .as_ref()
+            .is_some_and(|c| c.is_established())
         && !pair.workload_sent
     {
         for stream_index in 0..options.streams_per_connection {
@@ -201,7 +206,10 @@ fn advance_pair(
     Ok(progressed)
 }
 
-fn flush_client_packets(pair: &mut DirectPair, latencies_ms: &mut Vec<f64>) -> Result<bool, String> {
+fn flush_client_packets(
+    pair: &mut DirectPair,
+    latencies_ms: &mut Vec<f64>,
+) -> Result<bool, String> {
     let mut buf = vec![0u8; 65535];
     let mut progressed = false;
     loop {
@@ -209,11 +217,12 @@ fn flush_client_packets(pair: &mut DirectPair, latencies_ms: &mut Vec<f64>) -> R
             Ok((len, send_info)) => {
                 progressed = true;
                 if pair.server_conn.is_none() {
-                    let header = quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN)
-                        .map_err(|err| err.to_string())?;
+                    let header =
+                        quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN)
+                            .map_err(|err| err.to_string())?;
                     let server_scid = vec![0xab; quiche::MAX_CONN_ID_LEN];
                     let server_scid_ref = quiche::ConnectionId::from_ref(&server_scid);
-                    let server_conn = quiche::accept(
+                    let server_conn = quiche::accept_with_buf_factory::<ArcBufFactory>(
                         &server_scid_ref,
                         Some(&header.dcid),
                         pair.server_addr,
@@ -245,7 +254,10 @@ fn flush_client_packets(pair: &mut DirectPair, latencies_ms: &mut Vec<f64>) -> R
     Ok(progressed)
 }
 
-fn flush_server_packets(pair: &mut DirectPair, latencies_ms: &mut Vec<f64>) -> Result<bool, String> {
+fn flush_server_packets(
+    pair: &mut DirectPair,
+    latencies_ms: &mut Vec<f64>,
+) -> Result<bool, String> {
     if pair.server_conn.is_none() {
         return Ok(false);
     }
@@ -253,7 +265,10 @@ fn flush_server_packets(pair: &mut DirectPair, latencies_ms: &mut Vec<f64>) -> R
     let mut progressed = false;
     loop {
         let send_result = {
-            let server_conn = pair.server_conn.as_mut().expect("server conn checked above");
+            let server_conn = pair
+                .server_conn
+                .as_mut()
+                .expect("server conn checked above");
             server_conn.send(&mut buf)
         };
         match send_result {

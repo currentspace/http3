@@ -10,6 +10,71 @@ use crate::h3_event::{JsAddressInfo, JsHeader, JsSessionMetrics, JsSetting};
 
 use std::net::SocketAddr;
 
+/// Snapshot of server options with owned byte vectors (no napi Buffers)
+/// so they can be used to rebuild quiche configs for additional workers.
+pub(crate) struct StoredServerOptions {
+    key: Vec<u8>,
+    cert: Vec<u8>,
+    ca: Option<Vec<u8>>,
+    max_idle_timeout_ms: Option<u32>,
+    max_udp_payload_size: Option<u32>,
+    initial_max_data: Option<u32>,
+    initial_max_stream_data_bidi_local: Option<u32>,
+    initial_max_streams_bidi: Option<u32>,
+    disable_active_migration: Option<bool>,
+    enable_datagrams: Option<bool>,
+    session_ticket_keys: Option<Vec<u8>>,
+    keylog: Option<bool>,
+}
+
+impl StoredServerOptions {
+    fn from_js(options: &JsServerOptions) -> Self {
+        Self {
+            key: options.key.to_vec(),
+            cert: options.cert.to_vec(),
+            ca: options.ca.as_ref().map(|ca| ca.to_vec()),
+            max_idle_timeout_ms: options.max_idle_timeout_ms,
+            max_udp_payload_size: options.max_udp_payload_size,
+            initial_max_data: options.initial_max_data,
+            initial_max_stream_data_bidi_local: options.initial_max_stream_data_bidi_local,
+            initial_max_streams_bidi: options.initial_max_streams_bidi,
+            disable_active_migration: options.disable_active_migration,
+            enable_datagrams: options.enable_datagrams,
+            session_ticket_keys: options.session_ticket_keys.as_ref().map(|t| t.to_vec()),
+            keylog: options.keylog,
+        }
+    }
+
+    pub(crate) fn to_js_server_options(&self) -> JsServerOptions {
+        JsServerOptions {
+            key: self.key.clone().into(),
+            cert: self.cert.clone().into(),
+            ca: self.ca.as_ref().map(|ca| ca.clone().into()),
+            runtime_mode: None,
+            max_idle_timeout_ms: self.max_idle_timeout_ms,
+            max_udp_payload_size: self.max_udp_payload_size,
+            initial_max_data: self.initial_max_data,
+            initial_max_stream_data_bidi_local: self.initial_max_stream_data_bidi_local,
+            initial_max_streams_bidi: self.initial_max_streams_bidi,
+            disable_active_migration: self.disable_active_migration,
+            enable_datagrams: self.enable_datagrams,
+            qpack_max_table_capacity: None,
+            qpack_blocked_streams: None,
+            recv_batch_size: None,
+            send_batch_size: None,
+            qlog_dir: None,
+            qlog_level: None,
+            session_ticket_keys: self.session_ticket_keys.as_ref().map(|t| t.clone().into()),
+            max_connections: None,
+            disable_retry: None,
+            reuse_port: None,
+            keylog: self.keylog,
+            quic_lb: None,
+            server_id: None,
+        }
+    }
+}
+
 // ----- Worker Thread Server -----
 
 #[napi]
@@ -19,7 +84,9 @@ pub struct NativeWorkerServer {
     quiche_config: Option<quiche::Config>,
     http3_config: Option<Http3Config>,
     tsfn: Option<crate::worker::EventTsfn>,
-    user_set_mtu: bool,
+    /// Retained for creating additional quiche configs for sharded workers.
+    /// All napi Buffers are copied to Vec<u8> so they can be used across threads.
+    server_options_snapshot: Option<StoredServerOptions>,
 }
 
 #[napi]
@@ -30,18 +97,18 @@ impl NativeWorkerServer {
         #[napi(ts_arg_type = "(err: Error | null, events: Array<JsH3Event>) => void")]
         callback: crate::worker::EventTsfn,
     ) -> napi::Result<Self> {
-        let user_set_mtu = options.max_udp_payload_size.is_some();
         let quiche_config =
             Http3Config::new_server_quiche_config(&options).map_err(napi::Error::from)?;
         let http3_config = Http3Config::from_server_options(&options).map_err(napi::Error::from)?;
         let tsfn = callback;
 
+        let stored = StoredServerOptions::from_js(&options);
         Ok(Self {
             handle: None,
             quiche_config: Some(quiche_config),
             http3_config: Some(http3_config),
             tsfn: Some(tsfn),
-            user_set_mtu,
+            server_options_snapshot: Some(stored),
         })
     }
 
@@ -71,8 +138,12 @@ impl NativeWorkerServer {
             .take()
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
 
+        let stored = self
+            .server_options_snapshot
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("already listening"))?;
         let worker_handle =
-            crate::worker::spawn_worker(quiche_config, http3_config, addr, self.user_set_mtu, tsfn)
+            crate::worker::spawn_worker(quiche_config, http3_config, addr, tsfn, stored)
                 .map_err(napi::Error::from)?;
 
         let local = worker_handle.local_addr();
@@ -110,6 +181,30 @@ impl NativeWorkerServer {
         })
     }
 
+    /// Combined headers + body + FIN in a single NAPI call — avoids 2 extra
+    /// FFI boundary crossings for the common respond-then-end pattern.
+    #[napi]
+    pub fn send_response(
+        &self,
+        conn_handle: u32,
+        stream_id: i64,
+        headers: Vec<JsHeader>,
+        data: Buffer,
+        fin: bool,
+    ) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        let h: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
+        handle.send_command(crate::worker::WorkerCommand::SendResponse {
+            conn_handle,
+            stream_id: stream_id as u64,
+            headers: h,
+            body: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
+            fin,
+        })
+    }
+
     #[napi]
     pub fn stream_send(&self, conn_handle: u32, stream_id: i64, data: Buffer, fin: bool) -> bool {
         let Some(handle) = &self.handle else {
@@ -118,7 +213,7 @@ impl NativeWorkerServer {
         handle.send_command(crate::worker::WorkerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            data: data.to_vec(),
+            chunk: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
             fin,
         })
     }
@@ -235,6 +330,26 @@ impl NativeWorkerServer {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("worker not running"))?;
         handle.get_qlog_path(conn_handle).map_err(napi::Error::from)
+    }
+
+    /// Send the Shutdown command without joining the worker threads.
+    #[napi]
+    pub fn request_shutdown(&self) -> bool {
+        match &self.handle {
+            Some(h) => {
+                h.request_shutdown();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Join all worker threads. Safe to call after `request_shutdown()`.
+    #[napi]
+    pub fn join_worker(&mut self) {
+        if let Some(mut h) = self.handle.take() {
+            h.join();
+        }
     }
 
     #[napi]

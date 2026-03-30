@@ -14,12 +14,25 @@ type ByteBuf = napi::bindgen_prelude::Buffer;
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
 
-const MAX_DATAGRAM_SIZE: usize = 1350;
+/// Fallback DPLPMTUD probe ceiling used when path MTU auto-detection is
+/// unavailable (non-Linux, unresolvable destination, etc.).
+///
+/// 1472 = 1500 (Ethernet MTU) - 20 (IPv4) - 8 (UDP).  quiche probes from
+/// 1200 up to this ceiling; on standard Ethernet the first probe succeeds
+/// immediately.
+pub(crate) const FALLBACK_MAX_UDP_PAYLOAD: usize = 1472;
 
-/// Loopback-optimized datagram size. macOS loopback MTU is 16384; Linux is
-/// 65536. Using 8192-byte payloads reduces packet count ~6× vs 1350 on
-/// loopback, meaning fewer syscalls and higher throughput.
-const LOOPBACK_DATAGRAM_SIZE: usize = 8192;
+/// Return the PMTUD probe ceiling for a connection to `peer`.
+///
+/// Queries the kernel routing table for the interface MTU on the path to
+/// `peer` and caps at 16383 (quiche's max data packet size, limited by
+/// 2-byte QUIC varint encoding).  On loopback this returns 16383; on
+/// standard Ethernet it returns 1472; on jumbo frames ~8972.
+///
+/// Falls back to `FALLBACK_MAX_UDP_PAYLOAD` (1472) if the query fails.
+pub fn effective_pmtud_ceiling(peer: &std::net::SocketAddr) -> usize {
+    crate::transport::socket::query_path_mtu(peer).unwrap_or(FALLBACK_MAX_UDP_PAYLOAD)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TransportRuntimeMode {
@@ -95,14 +108,24 @@ impl ClientAuthMode {
     }
 }
 
-/// Return the effective max datagram size for `addr`.
-/// Loopback addresses get 8192; everything else gets the standard 1350.
-pub fn effective_max_datagram_size(addr: &std::net::SocketAddr) -> usize {
-    if addr.ip().is_loopback() {
-        LOOPBACK_DATAGRAM_SIZE
-    } else {
-        MAX_DATAGRAM_SIZE
-    }
+/// Apply standard congestion and PMTU tuning to a quiche `Config`.
+///
+/// Enables DPLPMTUD (RFC 8899) so quiche discovers the actual path MTU per
+/// connection.  The probe ceiling is `FALLBACK_MAX_UDP_PAYLOAD` (1472, standard
+/// Ethernet).  On Ethernet the first probe succeeds immediately; the discovery
+/// completes in one RTT with zero wasted probes.
+///
+/// `max_probes = 1`: each probe size is abandoned after a single loss instead
+/// of the RFC default of 3.  This prevents the stall pattern where a large
+/// failed probe charges the congestion window, waits for 3× PTO loss timeout,
+/// and blocks all subsequent probes via the `in_flight` flag.  With max_probes=1
+/// the binary search converges in O(log2(ceiling - 1200)) RTTs with one
+/// loss-detection delay per level instead of three.
+fn apply_congestion_tuning(config: &mut quiche::Config) {
+    config.set_send_capacity_factor(20.0);
+    config.set_initial_congestion_window_packets(1000);
+    config.discover_pmtu(true);
+    config.set_pmtud_max_probes(1);
 }
 
 /// Write bytes to a temp file and return the path.
@@ -230,12 +253,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -257,21 +280,7 @@ impl Http3Config {
                 .map_err(Http3NativeError::Quiche)?;
         }
 
-        // Congestion tuning: allow quiche to buffer well beyond the congestion
-        // window so burst stream creation doesn't hit StreamBlocked before the
-        // event loop flushes packets and receives ACKs. These are intentional
-        // production tuning values, not workarounds. The large IW (1000 pkts)
-        // suits loopback and datacenter paths; for WAN deployments consider
-        // reducing to ~10.
-        //
-        // Caveat: with these aggressive values, quiche may overshoot
-        // connection-level flow control (initial_max_data) by ~1 MTU on
-        // the first burst, because stream_send accepts all data into the
-        // large send buffer and conn.send generates one extra packet before
-        // the flow control check kicks in. This only matters when
-        // initial_max_data is very small (< ~64KB).
-        config.set_send_capacity_factor(20.0);
-        config.set_initial_congestion_window_packets(1000);
+        apply_congestion_tuning(&mut config);
 
         if options.enable_datagrams.unwrap_or(false) {
             config.enable_dgram(true, 1000, 1000);
@@ -314,12 +323,12 @@ impl Http3Config {
         config.set_max_recv_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_max_send_udp_payload_size(
             options
                 .max_udp_payload_size
-                .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
         config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
         config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -334,9 +343,7 @@ impl Http3Config {
         ));
         config.set_initial_max_streams_uni(1_000);
 
-        // See server config for congestion tuning rationale.
-        config.set_send_capacity_factor(20.0);
-        config.set_initial_congestion_window_packets(1000);
+        apply_congestion_tuning(&mut config);
 
         if options.allow_0rtt.unwrap_or(false) {
             config.enable_early_data();
@@ -443,8 +450,7 @@ pub fn new_quic_server_config(
 ) -> Result<quiche::Config, Http3NativeError> {
     let mut config =
         quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(Http3NativeError::Quiche)?;
-    let client_auth =
-        ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
+    let client_auth = ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
 
     let cert_path = TempFileGuard::new(&options.cert, "_qcert.pem")?;
     let key_path = TempFileGuard::new(&options.key, "_qkey.pem")?;
@@ -475,12 +481,12 @@ pub fn new_quic_server_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -502,9 +508,7 @@ pub fn new_quic_server_config(
             .map_err(Http3NativeError::Quiche)?;
     }
 
-    // See Http3Config::new_server_quiche_config for congestion tuning rationale.
-    config.set_send_capacity_factor(20.0);
-    config.set_initial_congestion_window_packets(1000);
+    apply_congestion_tuning(&mut config);
 
     if options.enable_datagrams.unwrap_or(false) {
         config.enable_dgram(true, 1000, 1000);
@@ -577,12 +581,12 @@ pub fn new_quic_client_config(
     config.set_max_recv_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_max_send_udp_payload_size(
         options
             .max_udp_payload_size
-            .unwrap_or(MAX_DATAGRAM_SIZE as u32) as usize,
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
     config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
     config.set_initial_max_stream_data_bidi_local(u64::from(
@@ -597,9 +601,7 @@ pub fn new_quic_client_config(
     ));
     config.set_initial_max_streams_uni(1_000);
 
-    // See Http3Config::new_server_quiche_config for congestion tuning rationale.
-    config.set_send_capacity_factor(20.0);
-    config.set_initial_congestion_window_packets(1000);
+    apply_congestion_tuning(&mut config);
 
     if options.allow_0rtt.unwrap_or(false) {
         config.enable_early_data();
@@ -693,4 +695,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_runtime_mode_parse_fast() {
+        assert_eq!(
+            TransportRuntimeMode::parse(Some("fast")).unwrap(),
+            TransportRuntimeMode::Fast
+        );
+        assert_eq!(
+            TransportRuntimeMode::parse(None).unwrap(),
+            TransportRuntimeMode::Fast,
+            "None should default to Fast"
+        );
+    }
+
+    #[test]
+    fn test_runtime_mode_parse_portable() {
+        assert_eq!(
+            TransportRuntimeMode::parse(Some("portable")).unwrap(),
+            TransportRuntimeMode::Portable
+        );
+    }
+
+    #[test]
+    fn test_runtime_mode_parse_invalid_rejects() {
+        let err = TransportRuntimeMode::parse(Some("turbo")).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid runtimeMode"),
+            "error should mention invalid runtimeMode, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_client_auth_mode_none_with_ca_rejects() {
+        let err = ClientAuthMode::parse(Some("none"), true).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be combined with ca"),
+            "error should mention ca conflict, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_client_auth_mode_require_without_ca_rejects() {
+        let err = ClientAuthMode::parse(Some("require"), false).unwrap_err();
+        assert!(
+            err.to_string().contains("requires ca"),
+            "error should mention ca requirement, got: {}",
+            err
+        );
+    }
 }

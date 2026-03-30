@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { Http2ServerSessionAdapter, Http3ServerSession } from './session.js';
 import { ServerHttp2StreamAdapter, ServerHttp3Stream, normalizeIncomingHeaders } from './stream.js';
 import type { IncomingHeaders, StreamFlags } from './stream.js';
-import { WorkerEventLoop, binding } from './event-loop.js';
+import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from './event-loop.js';
 import {
   Http3Error,
@@ -223,7 +223,18 @@ export class Http3SecureServer extends EventEmitter {
           disableRetry: this._options.disableRetry,
           reusePort: this._options.reusePort,
         }, (_err: Error | null, events: NativeEvent[]) => {
-          this._dispatchEvents(events);
+          let hasShutdown = false;
+          for (const event of events) {
+            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+              hasShutdown = true;
+            }
+          }
+          if (!hasShutdown) {
+            this._dispatchEvents(events);
+          } else {
+            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+            eventLoop._onShutdownSentinel();
+          }
         });
 
         const eventLoop = new WorkerEventLoop(workerServer);
@@ -526,8 +537,13 @@ export class Http3SecureServer extends EventEmitter {
   private _destroyH2SessionStreams(h2Session: Http2Session): void {
     const streams = this._h2SessionStreams.get(h2Session);
     if (!streams) return;
+    const err = new Error('session closed');
     for (const stream of streams) {
-      stream.destroy();
+      if (stream.listenerCount('error') > 0) {
+        stream.destroy(err);
+      } else {
+        stream.destroy();
+      }
     }
     this._h2SessionStreams.delete(h2Session);
   }
@@ -545,6 +561,27 @@ export class Http3SecureServer extends EventEmitter {
     if (!this._h2Server) return;
     const h2Server = this._h2Server;
     this._h2Server = null;
+    const closeAllConnections = (h2Server as Http2SecureServer & {
+      closeAllConnections?: () => void;
+      closeIdleConnections?: () => void;
+      unref?: () => void;
+    }).closeAllConnections;
+    const closeIdleConnections = (h2Server as Http2SecureServer & {
+      closeAllConnections?: () => void;
+      closeIdleConnections?: () => void;
+      unref?: () => void;
+    }).closeIdleConnections;
+    const unref = (h2Server as Http2SecureServer & {
+      closeAllConnections?: () => void;
+      closeIdleConnections?: () => void;
+      unref?: () => void;
+    }).unref;
+
+    // Best-effort: once shutdown begins, don't let stale H2 sockets pin the
+    // process if Node keeps the TLS server referenced longer than expected.
+    try { closeAllConnections?.call(h2Server); } catch { /* ignore */ }
+    try { closeIdleConnections?.call(h2Server); } catch { /* ignore */ }
+    try { unref?.call(h2Server); } catch { /* ignore */ }
     await new Promise<void>((resolve, reject) => {
       try {
         h2Server.close((err?: Error) => {
@@ -660,7 +697,7 @@ export class Http3SecureServer extends EventEmitter {
     const stream = this._streams.get(streamKey);
     if (stream && event.data) {
       stream._onActivity();
-      stream.push(Buffer.from(event.data));
+      stream._pushData(event.data);
     }
   }
 
@@ -668,7 +705,13 @@ export class Http3SecureServer extends EventEmitter {
     const streamKey = `${event.connHandle}:${event.streamId}`;
     const stream = this._streams.get(streamKey);
     if (stream) {
-      stream.push(null); // EOF on readable side
+      stream._pushData(null); // EOF on readable side
+      // If the readable side was never consumed (e.g., a GET handler that
+      // only writes a response), it stays in non-flowing mode and 'close'
+      // never fires.  Resume it so Node's Duplex can fully destroy.
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
       // Don't remove from _streams yet — the writable side may still
       // have pending drain callbacks. Stream is cleaned up on session close
       // or when both sides complete naturally via 'close' event.
@@ -699,9 +742,14 @@ export class Http3SecureServer extends EventEmitter {
       this._sessions.delete(event.connHandle);
     }
     // Clean up any streams belonging to this session
+    const err = new Error('session closed');
     for (const [key, stream] of this._streams) {
       if (key.startsWith(`${event.connHandle}:`)) {
-        stream.destroy();
+        if (stream.listenerCount('error') > 0) {
+          stream.destroy(err);
+        } else {
+          stream.destroy();
+        }
         this._streams.delete(key);
       }
     }
@@ -743,7 +791,7 @@ export class Http3SecureServer extends EventEmitter {
     if (!event.data) return;
     const session = this._sessions.get(event.connHandle);
     if (session) {
-      session.emit('datagram', Buffer.from(event.data));
+      session.emit('datagram', event.data);
     }
   }
 }

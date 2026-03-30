@@ -6,3 +6,4 @@ node_modules/
 perf-results/
 examples/certs/server.key
 examples/certs/server.crt
+package-lock.json

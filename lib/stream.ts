@@ -2,6 +2,15 @@ import { Duplex } from 'node:stream';
 import { constants as http2Constants } from 'node:http2';
 import type { IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from 'node:http2';
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
+import {
+  type BackpressureState,
+  cancelDrainCallbacks,
+  createBackpressureState,
+  ensureBackpressureState,
+  pushData,
+  drainPendingReads,
+  fireDrainCallbacks,
+} from './stream-backpressure.js';
 
 /** HTTP header map where each value is a string or string array. */
 export type IncomingHeaders = Record<string, string | string[]>;
@@ -83,7 +92,8 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _eventLoop: ServerEventLoopLike | null = null;
   /** @internal */ _headersSent = false;
-  /** @internal */ _drainCallbacks: Array<() => void> = [];
+  /** @internal */ _finSent = false;
+  /** @internal */ _bp: BackpressureState | null = createBackpressureState();
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
 
@@ -115,6 +125,36 @@ export class ServerHttp3Stream extends Duplex {
     );
   }
 
+  /**
+   * Send response headers, body, and FIN in a single NAPI call.
+   * This is an optimization for the common respond-then-end pattern.
+   * Equivalent to `respond(headers); end(body);` but avoids 2 extra
+   * NAPI boundary crossings.
+   */
+  respondWithBody(headers: IncomingHeaders, body: Buffer | string): void {
+    if (this._headersSent) return;
+    this._headersSent = true;
+    this._finSent = true;
+
+    const h = Object.entries(headers).map(([name, value]) => ({
+      name,
+      value: Array.isArray(value) ? value[0] : value,
+    }));
+
+    const buf = typeof body === 'string' ? Buffer.from(body) : body;
+
+    this._eventLoop?.sendResponse(
+      this._connHandle,
+      this._streamId,
+      h,
+      buf,
+      true,
+    );
+
+    // End the Duplex writable side. _final will be a no-op since _finSent is true.
+    this.end();
+  }
+
   /** Send trailing headers after the response body is complete. */
   sendTrailers(trailers: IncomingHeaders): void {
     const h = Object.entries(trailers).map(([name, value]) => ({
@@ -130,11 +170,7 @@ export class ServerHttp3Stream extends Duplex {
    */
   close(code?: number): void {
     this._eventLoop?.streamClose(this._connHandle, this._streamId, code ?? 0);
-    // Flush any pending drain callbacks before destroying
-    for (const cb of this._drainCallbacks) {
-      cb();
-    }
-    this._drainCallbacks.length = 0;
+    cancelDrainCallbacks(this._bp);
     this._clearTimeout();
     this.destroy();
   }
@@ -159,15 +195,17 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal — called by event dispatcher when flow control window opens */
   _onNativeDrain(): void {
     this._onActivity();
-    const cbs = this._drainCallbacks.splice(0);
-    for (const cb of cbs) {
-      cb();
-    }
+    fireDrainCallbacks(this._bp);
   }
 
   _read(_size: number): void {
-    // Data is pushed by the event dispatcher — no pull needed
     this._onActivity();
+    drainPendingReads(this, this._bp);
+  }
+
+  /** @internal — push data respecting Readable backpressure. */
+  _pushData(chunk: Buffer | null): void {
+    this._bp = pushData(this, this._bp, chunk);
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -193,7 +231,8 @@ export class ServerHttp3Stream extends Duplex {
     } else {
       // Partial write or fully blocked — retry remainder on drain
       const remaining = chunk.subarray(written);
-      this._drainCallbacks.push(() => {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push(() => {
         this._writeChunk(remaining, callback);
       });
     }
@@ -201,10 +240,11 @@ export class ServerHttp3Stream extends Duplex {
 
   _final(callback: (error?: Error | null) => void): void {
     this._onActivity();
-    if (!this._eventLoop) {
+    if (this._finSent || !this._eventLoop) {
       callback();
       return;
     }
+    this._finSent = true;
     const written = this._eventLoop.streamSend(
       this._connHandle,
       this._streamId,
@@ -212,7 +252,8 @@ export class ServerHttp3Stream extends Duplex {
       true,
     );
     if (written === 0) {
-      this._drainCallbacks.push(() => {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push(() => {
         this._eventLoop?.streamSend(
           this._connHandle,
           this._streamId,
@@ -245,6 +286,12 @@ export class ServerHttp3Stream extends Duplex {
     clearTimeout(this._timeout);
     this._timeout = null;
   }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    cancelDrainCallbacks(this._bp);
+    this._clearTimeout();
+    callback(error);
+  }
 }
 
 /**
@@ -272,7 +319,7 @@ export interface ClientHttp3Stream {
 export class ClientHttp3Stream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _eventLoop: ClientEventLoop | null = null;
-  /** @internal */ _drainCallbacks: Array<() => void> = [];
+  /** @internal */ _bp: BackpressureState | null = createBackpressureState();
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
 
@@ -286,10 +333,7 @@ export class ClientHttp3Stream extends Duplex {
   close(code?: number): void {
     const closeCode = code ?? 0;
     this._eventLoop?.streamClose(this._streamId, closeCode);
-    for (const cb of this._drainCallbacks) {
-      cb();
-    }
-    this._drainCallbacks.length = 0;
+    cancelDrainCallbacks(this._bp);
     this._clearTimeout();
     this.destroy();
   }
@@ -314,15 +358,17 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */
   _onNativeDrain(): void {
     this._onActivity();
-    const cbs = this._drainCallbacks.splice(0);
-    for (const cb of cbs) {
-      cb();
-    }
+    fireDrainCallbacks(this._bp);
   }
 
   _read(_size: number): void {
-    // Data is pushed by the event dispatcher
     this._onActivity();
+    drainPendingReads(this, this._bp);
+  }
+
+  /** @internal — push data respecting Readable backpressure. */
+  _pushData(chunk: Buffer | null): void {
+    this._bp = pushData(this, this._bp, chunk);
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -341,7 +387,8 @@ export class ClientHttp3Stream extends Duplex {
       callback();
     } else {
       const remaining = chunk.subarray(written);
-      this._drainCallbacks.push(() => {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push(() => {
         this._writeChunk(remaining, callback);
       });
     }
@@ -355,7 +402,8 @@ export class ClientHttp3Stream extends Duplex {
     }
     const written = this._eventLoop.streamSend(this._streamId, Buffer.alloc(0), true);
     if (written === 0) {
-      this._drainCallbacks.push(() => {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push(() => {
         this._eventLoop?.streamSend(this._streamId, Buffer.alloc(0), true);
         callback();
       });
@@ -382,6 +430,12 @@ export class ClientHttp3Stream extends Duplex {
     if (!this._timeout) return;
     clearTimeout(this._timeout);
     this._timeout = null;
+  }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    cancelDrainCallbacks(this._bp);
+    this._clearTimeout();
+    callback(error);
   }
 }
 
@@ -461,10 +515,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
     } catch {
       // Ignore close errors while cleaning up.
     }
-    for (const cb of this._drainCallbacks) {
-      cb();
-    }
-    this._drainCallbacks.length = 0;
+    cancelDrainCallbacks(this._bp);
     this.destroy();
   }
 
