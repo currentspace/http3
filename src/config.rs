@@ -3,6 +3,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::cid::{CidEncoding, parse_server_id_bytes};
 use crate::error::Http3NativeError;
@@ -187,6 +188,7 @@ pub struct JsServerOptions {
     pub keylog: Option<bool>,
     pub quic_lb: Option<bool>,
     pub server_id: Option<ByteBuf>,
+    pub keepalive_interval_ms: Option<u32>,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]
@@ -205,6 +207,7 @@ pub struct JsClientOptions {
     pub keylog: Option<bool>,
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
+    pub keepalive_interval_ms: Option<u32>,
 }
 
 pub struct Http3Config {
@@ -217,6 +220,7 @@ pub struct Http3Config {
     pub reuse_port: bool,
     pub cid_encoding: CidEncoding,
     pub runtime_mode: TransportRuntimeMode,
+    pub keepalive_interval: Option<Duration>,
 }
 
 impl Http3Config {
@@ -387,6 +391,9 @@ impl Http3Config {
             reuse_port: options.reuse_port.unwrap_or(false),
             cid_encoding,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())?,
+            keepalive_interval: options
+                .keepalive_interval_ms
+                .map(|ms| Duration::from_millis(u64::from(ms))),
         })
     }
 }
@@ -414,6 +421,7 @@ pub struct JsQuicServerOptions {
     pub qlog_level: Option<String>,
     pub session_ticket_keys: Option<ByteBuf>,
     pub keylog: Option<bool>,
+    pub keepalive_interval_ms: Option<u32>,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]
@@ -435,6 +443,7 @@ pub struct JsQuicClientOptions {
     pub keylog: Option<bool>,
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
+    pub keepalive_interval_ms: Option<u32>,
 }
 
 fn alpn_to_bytes(protocols: &[String]) -> Vec<Vec<u8>> {
@@ -650,6 +659,7 @@ mod tests {
             keylog: None,
             quic_lb: None,
             server_id: None,
+            keepalive_interval_ms: None,
         }
     }
 

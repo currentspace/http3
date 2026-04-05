@@ -72,6 +72,12 @@ export interface ConnectOptions {
   qlogDir?: string;
   /** qlog verbosity level. */
   qlogLevel?: string;
+  /**
+   * Interval in milliseconds between automatic QUIC PING frames.
+   * Keeps idle connections alive when streams are open but no data is flowing.
+   * Must be less than `maxIdleTimeoutMs` to be effective. Default: disabled.
+   */
+  keepAliveIntervalMs?: number;
 }
 
 /** Options for creating a new HTTP/3 request stream. */

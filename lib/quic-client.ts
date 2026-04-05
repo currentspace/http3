@@ -63,6 +63,12 @@ export interface QuicConnectOptions {
   qlogDir?: string;
   /** qlog verbosity level. */
   qlogLevel?: string;
+  /**
+   * Interval in milliseconds between automatic QUIC PING frames.
+   * Keeps idle connections alive when streams are open but no data is flowing.
+   * Must be less than `maxIdleTimeoutMs` to be effective. Default: disabled.
+   */
+  keepAliveIntervalMs?: number;
 }
 
 interface NormalizedQuicClientTlsOptions {
@@ -163,7 +169,6 @@ export class QuicClientSession extends EventEmitter {
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
   private _nextBidiStreamId = 0; // Client-initiated bidi: 0, 4, 8, ...
-
   constructor() {
     super();
     this._readyPromise = new Promise<void>((resolve, reject) => {

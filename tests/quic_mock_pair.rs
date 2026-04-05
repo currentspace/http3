@@ -89,6 +89,7 @@ fn setup_quic_pair_with_datagrams(enable_datagrams: bool) -> QuicPair {
         disable_retry: Some(true),
         qlog_dir: None,
         qlog_level: None,
+        keepalive_interval_ms: None,
         session_ticket_keys: None,
         keylog: None,
     };
@@ -110,6 +111,7 @@ fn setup_quic_pair_with_datagrams(enable_datagrams: bool) -> QuicPair {
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        keepalive_interval_ms: None,
     };
 
     let (server_quiche, client_quiche) = {
@@ -127,6 +129,7 @@ fn setup_quic_pair_with_datagrams(enable_datagrams: bool) -> QuicPair {
         client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        keepalive_interval: None,
     };
 
     let ((client_driver, client_waker), (server_driver, server_waker)) =
@@ -157,6 +160,7 @@ fn setup_quic_pair_with_datagrams(enable_datagrams: bool) -> QuicPair {
         client_quiche,
         server_addr,
         "localhost".to_string(),
+        None,
         None,
         None,
         None,

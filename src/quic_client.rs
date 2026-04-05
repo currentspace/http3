@@ -9,6 +9,7 @@ use crate::h3_event::{JsAddressInfo, JsSessionMetrics};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[napi]
 pub struct NativeQuicClient {
@@ -21,6 +22,7 @@ pub struct NativeQuicClient {
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    keepalive_interval: Option<Duration>,
 }
 
 #[napi]
@@ -43,6 +45,9 @@ impl NativeQuicClient {
             qlog_level: options.qlog_level,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
+            keepalive_interval: options
+                .keepalive_interval_ms
+                .map(|ms| Duration::from_millis(u64::from(ms))),
         })
     }
 
@@ -73,6 +78,7 @@ impl NativeQuicClient {
             self.qlog_dir.clone(),
             self.qlog_level.clone(),
             self.runtime_mode,
+            self.keepalive_interval,
             Arc::clone(tsfn),
         )
         .map_err(napi::Error::from)?;

@@ -143,6 +143,7 @@ fn setup_h3_pair_with_flow_control(
         reuse_port: false,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        keepalive_interval: None,
     };
 
     let ((client_driver, client_waker), (server_driver, server_waker)) =
@@ -172,6 +173,7 @@ fn setup_h3_pair_with_flow_control(
         client_quiche,
         server_addr,
         "localhost".to_string(),
+        None,
         None,
         None,
         None,

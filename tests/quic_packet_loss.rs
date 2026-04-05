@@ -70,6 +70,7 @@ fn setup_quic_pair_with_loss(drop_pct: u32) -> QuicPairWithLoss {
         qlog_level: None,
         session_ticket_keys: None,
         keylog: None,
+        keepalive_interval_ms: None,
     };
     let client_options = JsQuicClientOptions {
         ca: None,
@@ -89,6 +90,7 @@ fn setup_quic_pair_with_loss(drop_pct: u32) -> QuicPairWithLoss {
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        keepalive_interval_ms: None,
     };
 
     let (server_quiche, client_quiche) = {
@@ -106,6 +108,7 @@ fn setup_quic_pair_with_loss(drop_pct: u32) -> QuicPairWithLoss {
         client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        keepalive_interval: None,
     };
 
     let loss = PacketLossConfig::new(drop_pct);
@@ -137,6 +140,7 @@ fn setup_quic_pair_with_loss(drop_pct: u32) -> QuicPairWithLoss {
         client_quiche,
         server_addr,
         "localhost".to_string(),
+        None,
         None,
         None,
         None,

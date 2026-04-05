@@ -99,6 +99,12 @@ export interface ServerOptions extends TlsOptions {
   disableRetry?: boolean;
   /** Maximum number of concurrent QUIC connections. Default: 10_000. */
   maxConnections?: number;
+  /**
+   * Interval in milliseconds between automatic QUIC PING frames per session.
+   * Keeps idle connections alive when streams are open but no data is flowing.
+   * Must be less than `maxIdleTimeoutMs` to be effective. Default: disabled.
+   */
+  keepAliveIntervalMs?: number;
   /** Enable SO_REUSEPORT for the UDP socket. Default: `false`. */
   reusePort?: boolean;
   /** Enable QUIC-LB connection-ID routing. Requires `serverId`. Default: `false`. */

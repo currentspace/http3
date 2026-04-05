@@ -43,6 +43,9 @@ impl NativeQuicServer {
             cid_encoding: crate::cid::CidEncoding::random(),
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
+            keepalive_interval: options
+                .keepalive_interval_ms
+                .map(|ms| std::time::Duration::from_millis(u64::from(ms))),
         };
 
         Ok(Self {

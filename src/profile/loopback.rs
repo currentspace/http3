@@ -324,6 +324,7 @@ fn run_client(options: ClientOptions) -> Result<(), String> {
             None,
             None,
             options.common.runtime_mode,
+            None,
             batcher,
         )
         .map_err(|err| err.to_string())?;
@@ -593,6 +594,7 @@ fn build_server_config(options: &ServerOptions) -> Result<QuicServerConfig, Stri
         client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: options.common.runtime_mode,
+        keepalive_interval: None,
     })
 }
 
@@ -619,6 +621,7 @@ fn build_server_quiche_config(options: &ServerOptions) -> Result<quiche::Config,
         qlog_level: None,
         session_ticket_keys: None,
         keylog: Some(false),
+        keepalive_interval_ms: None,
     };
     new_quic_server_config(&server_options).map_err(|err| err.to_string())
 }
@@ -642,6 +645,7 @@ fn build_client_quiche_config(options: &ClientOptions) -> Result<quiche::Config,
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        keepalive_interval_ms: None,
     };
     new_quic_client_config(&client_options).map_err(|err| err.to_string())
 }

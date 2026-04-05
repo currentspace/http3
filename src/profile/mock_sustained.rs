@@ -372,6 +372,7 @@ fn run_quic(args: &CliArgs) -> Result<SustainedResult, String> {
         qlog_level: None,
         session_ticket_keys: None,
         keylog: Some(false),
+        keepalive_interval_ms: None,
     };
     let client_options = JsQuicClientOptions {
         ca: None,
@@ -391,6 +392,7 @@ fn run_quic(args: &CliArgs) -> Result<SustainedResult, String> {
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        keepalive_interval_ms: None,
     };
 
     let server_quiche = new_quic_server_config(&server_options).map_err(|e| e.to_string())?;
@@ -404,6 +406,7 @@ fn run_quic(args: &CliArgs) -> Result<SustainedResult, String> {
         client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        keepalive_interval: None,
     };
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42_000);
@@ -434,6 +437,7 @@ fn run_quic(args: &CliArgs) -> Result<SustainedResult, String> {
         client_quiche,
         server_addr,
         DEFAULT_SERVER_NAME.to_string(),
+        None,
         None,
         None,
         None,
@@ -590,6 +594,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         keylog: Some(false),
         quic_lb: None,
         server_id: None,
+        keepalive_interval_ms: None,
     };
     let client_js_options = crate::config::JsClientOptions {
         ca: None,
@@ -606,6 +611,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        keepalive_interval_ms: None,
     };
 
     let server_quiche =
@@ -623,6 +629,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         reuse_port: false,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        keepalive_interval: None,
     };
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42_000);
@@ -655,6 +662,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         client_quiche,
         server_addr,
         DEFAULT_SERVER_NAME.to_string(),
+        None,
         None,
         None,
         None,

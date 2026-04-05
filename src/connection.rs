@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use quiche::h3::NameValue;
 
@@ -40,6 +40,10 @@ pub struct H3Connection {
     /// Receiving end of the recycler channel — drained periodically on the
     /// worker thread to pull returned buffers back into `data_pool`.
     pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    /// Keepalive ping interval. `None` = disabled.
+    pub keepalive_interval: Option<Duration>,
+    /// Next keepalive deadline. `None` until handshake completes.
+    pub next_keepalive: Option<Instant>,
 }
 
 pub struct H3ConnectionInit<'a> {
@@ -48,6 +52,7 @@ pub struct H3ConnectionInit<'a> {
     pub qlog_level: Option<&'a str>,
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
+    pub keepalive_interval: Option<Duration>,
 }
 
 pub struct ConnectionMetrics {
@@ -104,6 +109,8 @@ impl H3Connection {
             data_pool,
             data_recycler,
             data_recycle_rx,
+            keepalive_interval: init.keepalive_interval,
+            next_keepalive: None,
         }
     }
 
@@ -275,6 +282,33 @@ impl H3Connection {
     /// Process a timeout event.
     pub fn on_timeout(&mut self) {
         self.quiche_conn.on_timeout();
+    }
+
+    /// Returns the earliest deadline: `min(protocol timeout, keepalive deadline)`.
+    pub fn effective_deadline(&self, now: Instant) -> Option<Instant> {
+        let protocol = self.timeout().map(|t| now + t);
+        match (protocol, self.next_keepalive) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Reset the keepalive deadline to `now + interval`. Call after handshake
+    /// completes and after receiving application data.
+    pub fn reset_keepalive(&mut self, now: Instant) {
+        self.next_keepalive = self.keepalive_interval.map(|iv| now + iv);
+    }
+
+    /// If the keepalive deadline has expired, send a PING frame and reschedule.
+    /// Returns `true` if a ping was sent.
+    pub fn maybe_send_keepalive(&mut self, now: Instant) -> bool {
+        if self.next_keepalive.is_some_and(|deadline| deadline <= now) {
+            let _ = self.quiche_conn.send_ack_eliciting();
+            self.reset_keepalive(now);
+            true
+        } else {
+            false
+        }
     }
 
     /// Send response headers on a stream.

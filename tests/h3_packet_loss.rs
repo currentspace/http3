@@ -102,6 +102,7 @@ fn setup_h3_pair_with_loss(drop_pct: u32) -> H3PairWithLoss {
         reuse_port: false,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        keepalive_interval: None,
     };
 
     let loss = PacketLossConfig::new(drop_pct);
@@ -132,6 +133,7 @@ fn setup_h3_pair_with_loss(drop_pct: u32) -> H3PairWithLoss {
         client_quiche,
         server_addr,
         "localhost".to_string(),
+        None,
         None,
         None,
         None,
