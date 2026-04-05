@@ -23,6 +23,13 @@ export interface SessionOptions {
   qpackMaxTableCapacity?: number;
   /** Maximum QPACK blocked streams. Default: 0. */
   qpackBlockedStreams?: number;
+  /**
+   * Interval in milliseconds between automatic QUIC PING frames.
+   * Prevents idle connections from being closed by the idle timeout
+   * when application streams are open but no data is flowing.
+   * Must be less than `maxIdleTimeoutMs` to be effective. Default: disabled.
+   */
+  keepAliveIntervalMs?: number;
 }
 
 /** Point-in-time snapshot of session-level transport metrics. */

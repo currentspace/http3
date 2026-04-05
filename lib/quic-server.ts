@@ -79,6 +79,12 @@ export interface QuicServerOptions {
   qlogLevel?: string;
   /** Enable TLS keylog. Default: `false`. */
   keylog?: boolean;
+  /**
+   * Interval in milliseconds between automatic QUIC PING frames per session.
+   * Keeps idle connections alive when streams are open but no data is flowing.
+   * Must be less than `maxIdleTimeoutMs` to be effective. Default: disabled.
+   */
+  keepAliveIntervalMs?: number;
 }
 
 class QuicWorkerEventLoop implements QuicServerEventLoopLike {
@@ -160,7 +166,6 @@ export class QuicServerSession extends EventEmitter {
   private readonly _eventLoop: QuicWorkerEventLoop;
   /** @internal */ readonly _streams = new Map<number, QuicStream>();
   /** @internal */ _nextBidiStreamId = 1; // Server-initiated bidi: 1, 5, 9, ...
-
   /** @internal */
   constructor(connHandle: number, remoteAddress: string, remotePort: number, eventLoop: QuicWorkerEventLoop) {
     super();

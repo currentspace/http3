@@ -8,6 +8,7 @@ use crate::config::{Http3Config, JsClientOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsHeader, JsSessionMetrics, JsSetting};
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 /// Worker-thread client: Rust owns UDP I/O, polling, timers, and QUIC/H3 processing.
 #[napi]
@@ -20,6 +21,7 @@ pub struct NativeWorkerClient {
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    keepalive_interval: Option<Duration>,
 }
 
 #[napi]
@@ -42,6 +44,9 @@ impl NativeWorkerClient {
             qlog_level: options.qlog_level,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
+            keepalive_interval: options
+                .keepalive_interval_ms
+                .map(|ms| Duration::from_millis(u64::from(ms))),
         })
     }
 
@@ -72,6 +77,7 @@ impl NativeWorkerClient {
             self.qlog_dir.clone(),
             self.qlog_level.clone(),
             self.runtime_mode,
+            self.keepalive_interval,
             tsfn,
         )
         .map_err(napi::Error::from)?;

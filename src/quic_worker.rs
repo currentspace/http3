@@ -350,6 +350,7 @@ enum SharedQuicClientCommand {
         session_ticket: Option<Vec<u8>>,
         qlog_dir: Option<String>,
         qlog_level: Option<String>,
+        keepalive_interval: Option<Duration>,
         batcher: EventBatcher,
         resp_tx: Sender<Result<u32, Http3NativeError>>,
     },
@@ -911,6 +912,7 @@ impl QuicConnectionMap {
         config: &mut quiche::Config,
         qlog_dir: Option<&str>,
         qlog_level: Option<&str>,
+        keepalive_interval: Option<Duration>,
     ) -> Result<usize, Http3NativeError> {
         if self.connections.len() >= self.max_connections {
             return Err(Http3NativeError::Config(format!(
@@ -930,6 +932,7 @@ impl QuicConnectionMap {
                 role: "server",
                 qlog_dir,
                 qlog_level,
+                keepalive_interval,
             },
         );
         let handle = self.connections.insert(conn);
@@ -997,6 +1000,7 @@ pub struct QuicServerConfig {
     pub client_auth: ClientAuthMode,
     pub cid_encoding: CidEncoding,
     pub runtime_mode: TransportRuntimeMode,
+    pub keepalive_interval: Option<Duration>,
 }
 
 pub fn spawn_server_worker_on_driver<D>(
@@ -1039,6 +1043,7 @@ pub fn spawn_dedicated_quic_client_on_driver<D>(
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
+    keepalive_interval: Option<Duration>,
     driver: D,
     waker: D::Waker,
     local_addr: SocketAddr,
@@ -1064,6 +1069,7 @@ where
             session_ticket.as_deref(),
             qlog_dir.as_deref(),
             qlog_level.as_deref(),
+            keepalive_interval,
             &mut quiche_config,
         );
         let Some(mut handler) = handler else { return };
@@ -1183,6 +1189,7 @@ where
                 client_auth: server_config.client_auth,
                 cid_encoding: server_config.cid_encoding.clone(),
                 runtime_mode: server_config.runtime_mode,
+                keepalive_interval: server_config.keepalive_interval,
             },
             0,
             driver,
@@ -1232,6 +1239,7 @@ where
                 client_auth: server_config.client_auth,
                 cid_encoding: server_config.cid_encoding.clone(),
                 runtime_mode: server_config.runtime_mode,
+                keepalive_interval: server_config.keepalive_interval,
             },
             i as u32,
             driver,
@@ -1259,6 +1267,7 @@ pub fn spawn_quic_client(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    keepalive_interval: Option<Duration>,
     tsfn: std::sync::Arc<EventTsfn>,
 ) -> Result<QuicClientHandle, Http3NativeError> {
     spawn_quic_client_with_batcher(
@@ -1269,6 +1278,7 @@ pub fn spawn_quic_client(
         qlog_dir,
         qlog_level,
         runtime_mode,
+        keepalive_interval,
         EventBatcher::new_shared_tsfn(tsfn),
     )
 }
@@ -1281,6 +1291,7 @@ pub(crate) fn spawn_quic_client_with_batcher(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    keepalive_interval: Option<Duration>,
     batcher: EventBatcher,
 ) -> Result<QuicClientHandle, Http3NativeError> {
     // Query the path MTU to the server and raise the PMTUD ceiling if
@@ -1298,6 +1309,7 @@ pub(crate) fn spawn_quic_client_with_batcher(
             qlog_dir,
             qlog_level,
             runtime_mode,
+            keepalive_interval,
             batcher,
         );
     }
@@ -1314,6 +1326,7 @@ pub(crate) fn spawn_quic_client_with_batcher(
         session_ticket,
         qlog_dir,
         qlog_level,
+        keepalive_interval,
         driver,
         waker,
         local_addr,
@@ -1389,6 +1402,7 @@ fn spawn_shared_quic_client(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    keepalive_interval: Option<Duration>,
     batcher: EventBatcher,
 ) -> Result<QuicClientHandle, Http3NativeError> {
     let worker = acquire_shared_quic_client_worker(server_addr, runtime_mode)?;
@@ -1403,6 +1417,7 @@ fn spawn_shared_quic_client(
             session_ticket,
             qlog_dir,
             qlog_level,
+            keepalive_interval,
             batcher,
             resp_tx,
         })
@@ -1573,6 +1588,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     session_ticket,
                     qlog_dir,
                     qlog_level,
+                    keepalive_interval,
                     batcher,
                     resp_tx,
                 } => {
@@ -1583,6 +1599,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                         session_ticket.as_deref(),
                         qlog_dir.as_deref(),
                         qlog_level.as_deref(),
+                        keepalive_interval,
                         &mut quiche_config,
                     );
                     let result = handler.map_or_else(
@@ -2085,6 +2102,7 @@ impl ProtocolHandler for QuicServerHandler {
                     &mut self.quiche_config,
                     self.server_config.qlog_dir.as_deref(),
                     self.server_config.qlog_level.as_deref(),
+                    self.server_config.keepalive_interval,
                 ) {
                     Ok(h) => {
                         self.conn_map.add_dcid(h, client_dcid);
@@ -2112,6 +2130,7 @@ impl ProtocolHandler for QuicServerHandler {
                             &mut self.quiche_config,
                             self.server_config.qlog_dir.as_deref(),
                             self.server_config.qlog_level.as_deref(),
+                            self.server_config.keepalive_interval,
                         ) {
                             Ok(h) => {
                                 self.conn_map.add_dcid(h, odcid);
@@ -2166,6 +2185,7 @@ impl ProtocolHandler for QuicServerHandler {
             if conn.recv(buf, recv_info).is_err() {
                 return;
             }
+            conn.reset_keepalive(Instant::now());
             if conn.quiche_conn.is_established() && !conn.is_established {
                 conn.mark_established();
             }
@@ -2192,6 +2212,7 @@ impl ProtocolHandler for QuicServerHandler {
                                 .map(|certificate| vec![certificate.to_vec()])
                         });
                     conn.handshake_complete_emitted = true;
+                    conn.reset_keepalive(Instant::now());
                     batch.push(JsH3Event::handshake_complete_with_peer_certificate(
                         offset | (handle as u32),
                         conn.quiche_conn.peer_cert().is_some(),
@@ -2213,8 +2234,9 @@ impl ProtocolHandler for QuicServerHandler {
                 retired_scids.push(retired.into_owned().to_vec());
             }
 
+            let now = Instant::now();
             (
-                conn.timeout(),
+                conn.effective_deadline(now),
                 current_scid,
                 needs_dcid_update,
                 retired_scids,
@@ -2229,8 +2251,7 @@ impl ProtocolHandler for QuicServerHandler {
         }
         top_up_server_scids(&mut self.conn_map, handle);
 
-        self.timer_heap
-            .set_deadline(handle, timeout.map(|timeout| Instant::now() + timeout));
+        self.timer_heap.set_deadline(handle, timeout);
     }
 
     fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
@@ -2240,7 +2261,10 @@ impl ProtocolHandler for QuicServerHandler {
         self.last_expired.dedup();
         for &handle in &self.last_expired {
             if let Some(conn) = self.conn_map.get_mut(handle) {
-                conn.on_timeout();
+                conn.maybe_send_keepalive(now);
+                if conn.timeout().map_or(true, |t| t.is_zero()) {
+                    conn.on_timeout();
+                }
                 if conn.is_closed() {
                     reactor_metrics::record_lifecycle_trace(
                         "quic-server",
@@ -2260,7 +2284,7 @@ impl ProtocolHandler for QuicServerHandler {
                 } else {
                     conn.poll_quic_events(offset | (handle as u32), batch);
                     self.timer_heap
-                        .set_deadline(handle, conn.timeout().map(|timeout| now + timeout));
+                        .set_deadline(handle, conn.effective_deadline(now));
                 }
             }
         }
@@ -2316,12 +2340,11 @@ impl ProtocolHandler for QuicServerHandler {
         }
         let now = Instant::now();
         for &handle in &self.handles_buf {
-            let timeout = self
+            let deadline = self
                 .conn_map
                 .get_mut(handle)
-                .and_then(|conn| conn.timeout());
-            self.timer_heap
-                .set_deadline(handle, timeout.map(|timeout| now + timeout));
+                .and_then(|conn| conn.effective_deadline(now));
+            self.timer_heap.set_deadline(handle, deadline);
         }
     }
 
@@ -2431,6 +2454,7 @@ impl QuicClientHandler {
         session_ticket: Option<&[u8]>,
         qlog_dir: Option<&str>,
         qlog_level: Option<&str>,
+        keepalive_interval: Option<Duration>,
         quiche_config: &mut quiche::Config,
     ) -> Option<Self> {
         let Ok(scid) = CidEncoding::random().generate_scid() else {
@@ -2456,9 +2480,10 @@ impl QuicClientHandler {
                 role: "client",
                 qlog_dir,
                 qlog_level,
+                keepalive_interval,
             },
         );
-        let timer_deadline = conn.timeout().map(|t| Instant::now() + t);
+        let timer_deadline = conn.effective_deadline(Instant::now());
         reactor_metrics::record_session_open(SessionKind::RawQuicClient);
         let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
             ChunkPool::with_return_channel(64);
@@ -2517,7 +2542,7 @@ impl QuicClientHandler {
     }
 
     fn refresh_timeout_deadline(&mut self) {
-        self.timer_deadline = self.conn.timeout().map(|timeout| Instant::now() + timeout);
+        self.timer_deadline = self.conn.effective_deadline(Instant::now());
     }
 
     fn queue_stream_send(&mut self, stream_id: u64, mut chunk: Chunk, fin: bool, batch: &mut Vec<JsH3Event>) {
@@ -2625,18 +2650,20 @@ impl QuicClientHandler {
         if self.conn.recv(buf, recv_info).is_err() {
             return;
         }
+        self.conn.reset_keepalive(Instant::now());
         if self.conn.quiche_conn.is_established() && !self.conn.is_established {
             self.conn.mark_established();
         }
         if self.conn.quiche_conn.is_established() && !self.conn.handshake_complete_emitted {
             self.conn.handshake_complete_emitted = true;
+            self.conn.reset_keepalive(Instant::now());
             batch.push(JsH3Event::handshake_complete(conn_handle));
         }
         self.conn.poll_quic_events(conn_handle, batch);
         if let Some(ticket) = self.conn.update_session_ticket() {
             batch.push(JsH3Event::session_ticket(conn_handle, ticket));
         }
-        self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
+        self.timer_deadline = self.conn.effective_deadline(Instant::now());
 
         if self.conn.is_closed() && !self.session_closed_emitted {
             self.emit_session_close(batch, conn_handle, RawQuicClientCloseCause::Packet);
@@ -2650,7 +2677,10 @@ impl QuicClientHandler {
         conn_handle: u32,
     ) {
         if self.timer_deadline.is_some_and(|deadline| deadline <= now) {
-            self.conn.on_timeout();
+            self.conn.maybe_send_keepalive(now);
+            if self.conn.timeout().map_or(true, |t| t.is_zero()) {
+                self.conn.on_timeout();
+            }
             if self.conn.is_closed() && !self.session_closed_emitted {
                 self.emit_session_close(batch, conn_handle, RawQuicClientCloseCause::Timeout);
             } else {
@@ -2659,7 +2689,7 @@ impl QuicClientHandler {
                 if let Some(ticket) = self.conn.update_session_ticket() {
                     batch.push(JsH3Event::session_ticket(conn_handle, ticket));
                 }
-                self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
+                self.timer_deadline = self.conn.effective_deadline(Instant::now());
             }
         }
     }

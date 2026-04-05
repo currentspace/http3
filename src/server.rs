@@ -71,6 +71,7 @@ impl StoredServerOptions {
             keylog: self.keylog,
             quic_lb: None,
             server_id: None,
+            keepalive_interval_ms: None,
         }
     }
 }

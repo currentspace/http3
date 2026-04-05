@@ -103,6 +103,7 @@ impl NativeMockQuicProfiler {
             qlog_level: None,
             session_ticket_keys: None,
             keylog: Some(false),
+            keepalive_interval_ms: None,
         };
         let client_options = JsQuicClientOptions {
             ca,
@@ -122,6 +123,7 @@ impl NativeMockQuicProfiler {
             keylog: Some(false),
             qlog_dir: None,
             qlog_level: None,
+            keepalive_interval_ms: None,
         };
         let runner = spawn_mock_quic_profile(
             MockQuicProfileConfig {

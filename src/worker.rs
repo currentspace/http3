@@ -452,6 +452,7 @@ enum SharedClientWorkerCommand {
         session_ticket: Option<Vec<u8>>,
         qlog_dir: Option<String>,
         qlog_level: Option<String>,
+        keepalive_interval: Option<Duration>,
         tsfn: EventTsfn,
         resp_tx: Sender<Result<u32, Http3NativeError>>,
     },
@@ -990,6 +991,7 @@ pub fn spawn_client_worker(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    keepalive_interval: Option<Duration>,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
     if default_h3_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
@@ -1001,6 +1003,7 @@ pub fn spawn_client_worker(
             qlog_dir,
             qlog_level,
             runtime_mode,
+            keepalive_interval,
             tsfn,
         );
     }
@@ -1025,6 +1028,7 @@ pub fn spawn_client_worker(
             session_ticket.as_deref(),
             qlog_dir.as_deref(),
             qlog_level.as_deref(),
+            keepalive_interval,
             &mut quiche_config,
         );
         let Some(mut handler) = handler else { return };
@@ -1117,6 +1121,7 @@ fn spawn_shared_client_worker(
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    keepalive_interval: Option<Duration>,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
     let worker = acquire_shared_client_worker(server_addr, runtime_mode)?;
@@ -1131,6 +1136,7 @@ fn spawn_shared_client_worker(
             session_ticket,
             qlog_dir,
             qlog_level,
+            keepalive_interval,
             tsfn,
             resp_tx,
         })
@@ -1283,6 +1289,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     session_ticket,
                     qlog_dir,
                     qlog_level,
+                    keepalive_interval,
                     tsfn,
                     resp_tx,
                 } => {
@@ -1293,6 +1300,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                         session_ticket.as_deref(),
                         qlog_dir.as_deref(),
                         qlog_level.as_deref(),
+                        keepalive_interval,
                         &mut quiche_config,
                     );
                     let result = handler.map_or_else(
@@ -1674,6 +1682,7 @@ where
             reuse_port: http3_config.reuse_port,
             cid_encoding: http3_config.cid_encoding.clone(),
             runtime_mode: http3_config.runtime_mode,
+            keepalive_interval: http3_config.keepalive_interval,
         };
 
         reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
@@ -1739,6 +1748,7 @@ where
             reuse_port: http3_config.reuse_port,
             cid_encoding: http3_config.cid_encoding.clone(),
             runtime_mode: http3_config.runtime_mode,
+            keepalive_interval: http3_config.keepalive_interval,
         };
         let worker_index = i as u32;
 
@@ -1815,6 +1825,7 @@ pub fn spawn_h3_client_on_driver<D>(
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
+    keepalive_interval: Option<Duration>,
     driver: D,
     waker: D::Waker,
     local_addr: SocketAddr,
@@ -1840,6 +1851,7 @@ where
             session_ticket.as_deref(),
             qlog_dir.as_deref(),
             qlog_level.as_deref(),
+            keepalive_interval,
             &mut quiche_config,
         );
         let Some(mut handler) = handler else { return };
@@ -2187,6 +2199,7 @@ impl ProtocolHandler for H3ServerHandler {
                     self.http3_config.qlog_level.as_deref(),
                     self.http3_config.qpack_max_table_capacity,
                     self.http3_config.qpack_blocked_streams,
+                    self.http3_config.keepalive_interval,
                 ) {
                     Ok(h) => {
                         self.conn_map.add_dcid(h, client_dcid);
@@ -2216,6 +2229,7 @@ impl ProtocolHandler for H3ServerHandler {
                             self.http3_config.qlog_level.as_deref(),
                             self.http3_config.qpack_max_table_capacity,
                             self.http3_config.qpack_blocked_streams,
+                            self.http3_config.keepalive_interval,
                         ) {
                             Ok(h) => {
                                 self.conn_map.add_dcid(h, odcid);
@@ -2271,6 +2285,7 @@ impl ProtocolHandler for H3ServerHandler {
             if conn.recv(buf, recv_info).is_err() {
                 return;
             }
+            conn.reset_keepalive(Instant::now());
 
             if (conn.quiche_conn.is_established() || conn.quiche_conn.is_in_early_data())
                 && !conn.is_established
@@ -2279,6 +2294,7 @@ impl ProtocolHandler for H3ServerHandler {
             }
             if conn.quiche_conn.is_established() && !conn.handshake_complete_emitted {
                 conn.handshake_complete_emitted = true;
+                conn.reset_keepalive(Instant::now());
                 batch.push(JsH3Event::handshake_complete(offset | (handle as u32)));
             }
 
@@ -2295,8 +2311,9 @@ impl ProtocolHandler for H3ServerHandler {
                 retired_scids.push(retired.into_owned().to_vec());
             }
 
+            let now = Instant::now();
             (
-                conn.timeout(),
+                conn.effective_deadline(now),
                 current_scid,
                 needs_dcid_update,
                 retired_scids,
@@ -2313,8 +2330,7 @@ impl ProtocolHandler for H3ServerHandler {
 
         top_up_server_scids(&mut self.conn_map, handle);
 
-        self.timer_heap
-            .set_deadline(handle, timeout.map(|timeout| Instant::now() + timeout));
+        self.timer_heap.set_deadline(handle, timeout);
     }
 
     fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>) {
@@ -2324,7 +2340,10 @@ impl ProtocolHandler for H3ServerHandler {
         self.last_expired.dedup();
         for &handle in &self.last_expired {
             if let Some(conn) = self.conn_map.get_mut(handle) {
-                conn.on_timeout();
+                conn.maybe_send_keepalive(now);
+                if conn.timeout().map_or(true, |t| t.is_zero()) {
+                    conn.on_timeout();
+                }
                 if conn.is_closed() {
                     reactor_metrics::record_lifecycle_trace(
                         "h3-server",
@@ -2343,7 +2362,7 @@ impl ProtocolHandler for H3ServerHandler {
                 } else {
                     conn.poll_h3_events(offset | (handle as u32), batch);
                     self.timer_heap
-                        .set_deadline(handle, conn.timeout().map(|timeout| now + timeout));
+                        .set_deadline(handle, conn.effective_deadline(now));
                 }
             }
         }
@@ -2420,12 +2439,11 @@ impl ProtocolHandler for H3ServerHandler {
         }
         let now = Instant::now();
         for &handle in &self.handles_buf {
-            let timeout = self
+            let deadline = self
                 .conn_map
                 .get_mut(handle)
-                .and_then(|conn| conn.timeout());
-            self.timer_heap
-                .set_deadline(handle, timeout.map(|timeout| now + timeout));
+                .and_then(|conn| conn.effective_deadline(now));
+            self.timer_heap.set_deadline(handle, deadline);
         }
     }
 
@@ -2540,6 +2558,7 @@ impl H3ClientHandler {
         session_ticket: Option<&[u8]>,
         qlog_dir: Option<&str>,
         qlog_level: Option<&str>,
+        keepalive_interval: Option<Duration>,
         quiche_config: &mut quiche::Config,
     ) -> Option<Self> {
         let Ok(scid) = ConnectionMap::generate_random_scid() else {
@@ -2567,9 +2586,10 @@ impl H3ClientHandler {
                 qlog_level,
                 qpack_max_table_capacity: None,
                 qpack_blocked_streams: None,
+                keepalive_interval,
             },
         );
-        let timer_deadline = conn.timeout().map(|t| Instant::now() + t);
+        let timer_deadline = conn.effective_deadline(Instant::now());
         reactor_metrics::record_session_open(SessionKind::H3Client);
         let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
             ChunkPool::with_return_channel(64);
@@ -2732,6 +2752,7 @@ impl H3ClientHandler {
         if self.conn.recv(buf, recv_info).is_err() {
             return;
         }
+        self.conn.reset_keepalive(Instant::now());
 
         if (self.conn.quiche_conn.is_established() || self.conn.quiche_conn.is_in_early_data())
             && !self.conn.is_established
@@ -2740,13 +2761,14 @@ impl H3ClientHandler {
         }
         if self.conn.quiche_conn.is_established() && !self.conn.handshake_complete_emitted {
             self.conn.handshake_complete_emitted = true;
+            self.conn.reset_keepalive(Instant::now());
             batch.push(JsH3Event::handshake_complete(conn_handle));
         }
         self.conn.poll_h3_events(conn_handle, batch);
         if let Some(ticket) = self.conn.update_session_ticket() {
             batch.push(JsH3Event::session_ticket(conn_handle, ticket));
         }
-        self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
+        self.timer_deadline = self.conn.effective_deadline(Instant::now());
 
         if self.conn.is_closed() {
             self.emit_session_close(batch, conn_handle);
@@ -2760,7 +2782,10 @@ impl H3ClientHandler {
         conn_handle: u32,
     ) {
         if self.timer_deadline.is_some_and(|deadline| deadline <= now) {
-            self.conn.on_timeout();
+            self.conn.maybe_send_keepalive(now);
+            if self.conn.timeout().map_or(true, |t| t.is_zero()) {
+                self.conn.on_timeout();
+            }
             if self.conn.is_closed() {
                 self.emit_session_close(batch, conn_handle);
             } else {
@@ -2768,7 +2793,7 @@ impl H3ClientHandler {
                 if let Some(ticket) = self.conn.update_session_ticket() {
                     batch.push(JsH3Event::session_ticket(conn_handle, ticket));
                 }
-                self.timer_deadline = self.conn.timeout().map(|t| Instant::now() + t);
+                self.timer_deadline = self.conn.effective_deadline(Instant::now());
             }
         }
     }
@@ -2912,7 +2937,7 @@ impl ProtocolHandler for H3ClientHandler {
         while let Some(packet) = self.try_send_next() {
             outbound.push(packet);
         }
-        self.timer_deadline = self.conn.timeout().map(|timeout| Instant::now() + timeout);
+        self.timer_deadline = self.conn.effective_deadline(Instant::now());
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {

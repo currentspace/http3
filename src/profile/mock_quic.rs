@@ -330,6 +330,7 @@ fn run_mock_quic_profile(
         client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        keepalive_interval: None,
     };
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41_000);
@@ -373,6 +374,7 @@ fn run_mock_quic_profile(
         } else {
             config.server_name.clone()
         },
+        None,
         None,
         None,
         None,

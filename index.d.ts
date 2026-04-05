@@ -121,6 +121,7 @@ export interface JsClientOptions {
   keylog?: boolean
   qlogDir?: string
   qlogLevel?: string
+  keepaliveIntervalMs?: number
 }
 
 /**
@@ -214,6 +215,7 @@ export interface JsQuicClientOptions {
   keylog?: boolean
   qlogDir?: string
   qlogLevel?: string
+  keepaliveIntervalMs?: number
 }
 
 export interface JsQuicServerOptions {
@@ -236,6 +238,7 @@ export interface JsQuicServerOptions {
   qlogLevel?: string
   sessionTicketKeys?: ByteBuf
   keylog?: boolean
+  keepaliveIntervalMs?: number
 }
 
 export interface JsReactorTelemetrySnapshot {
@@ -361,6 +364,7 @@ export interface JsServerOptions {
   keylog?: boolean
   quicLb?: boolean
   serverId?: ByteBuf
+  keepaliveIntervalMs?: number
 }
 
 export interface JsSessionMetrics {

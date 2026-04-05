@@ -253,6 +253,7 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
         client_auth: ClientAuthMode::None,
         cid_encoding: CidEncoding::random(),
         runtime_mode: options.runtime_mode,
+        keepalive_interval: None,
     };
     let num_workers = options.server_workers;
     let mut server_sink_stats_list = Vec::new();
@@ -298,6 +299,7 @@ fn run_benchmark(options: BenchOptions) -> Result<(), String> {
             None,
             None,
             options.runtime_mode,
+            None,
             batcher,
         )
         .map_err(|err| err.to_string())?;

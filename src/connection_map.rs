@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ring::hmac;
 use ring::rand::SecureRandom;
@@ -207,6 +207,7 @@ impl ConnectionMap {
         qlog_level: Option<&str>,
         qpack_max_table_capacity: Option<u64>,
         qpack_blocked_streams: Option<u64>,
+        keepalive_interval: Option<Duration>,
     ) -> Result<usize, Http3NativeError> {
         if self.connections.len() >= self.max_connections {
             return Err(Http3NativeError::Config(format!(
@@ -231,6 +232,7 @@ impl ConnectionMap {
                 qlog_level,
                 qpack_max_table_capacity,
                 qpack_blocked_streams,
+                keepalive_interval,
             },
         );
         let handle = self.connections.insert(conn);
