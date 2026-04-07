@@ -14,22 +14,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   strace \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.85.0
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm install --ignore-scripts
+RUN npm install -g pnpm@10
+
+COPY package.json pnpm-lock.yaml ./
+COPY npm ./npm
+RUN pnpm install --ignore-scripts --no-frozen-lockfile
 
 COPY build.rs Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 COPY lib ./lib
 COPY scripts ./scripts
 COPY test ./test
 COPY index.js index.d.ts tsconfig.json tsconfig.test.json ./
 
-RUN npm run build
-RUN npm run build:test
+RUN pnpm run build
+RUN pnpm run build:test
 
 CMD ["node", "--version"]

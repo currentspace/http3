@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -153,7 +153,7 @@
     "perf:load-smoke-gate": "npm run test:load-smoke",
     "smoke:install": "npm run build && node scripts/smoke-install.mjs",
     "safari:checklist": "node scripts/safari-validation-checklist.mjs",
-    "sbom": "npm sbom --omit=dev > sbom.spdx.json",
+    "sbom": "npm install --package-lock-only --ignore-scripts --legacy-peer-deps && npm sbom --omit=dev > sbom.spdx.json",
     "release:check": "npm run lint && npm run typecheck && npm test && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate && npm run test:rust",
     "release:local-gate": "npm run release:check && npm run smoke:install",
     "release:publish:npm": "node scripts/publish-npm-release.mjs",
@@ -179,9 +179,9 @@
     "typescript-eslint": "^8.57.1"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.7.1",
-    "@currentspace/http3-linux-arm64-gnu": "0.7.1",
-    "@currentspace/http3-linux-x64-gnu": "0.7.1"
+    "@currentspace/http3-darwin-arm64": "0.7.2",
+    "@currentspace/http3-linux-arm64-gnu": "0.7.2",
+    "@currentspace/http3-linux-x64-gnu": "0.7.2"
   },
   "overrides": {
     "flatted": "^3.4.2"

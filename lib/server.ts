@@ -18,6 +18,7 @@ import {
   ERR_HTTP3_TLS_CONFIG_ERROR,
 } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
+import { safeEmitError, safeDestroyStream } from './safe-emit.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
@@ -474,7 +475,7 @@ export class Http3SecureServer extends EventEmitter {
   private _attachH2ServerListeners(h2Server: Http2SecureServer): void {
     h2Server.on('error', (err: Error) => {
       if (!this._starting) {
-        this.emit('error', err);
+        safeEmitError(this, err);
       }
     });
     h2Server.on('request', (req: IncomingMessage, res: ServerResponse) => {
@@ -628,7 +629,7 @@ export class Http3SecureServer extends EventEmitter {
       this._streams.clear();
       this._keylogPath = null;
     }
-    process.nextTick(() => this.emit('error', error));
+    process.nextTick(() => safeEmitError(this, error));
   }
 
   private _onNewSession(event: NativeEvent): void {
@@ -775,15 +776,15 @@ export class Http3SecureServer extends EventEmitter {
       const streamKey = `${event.connHandle}:${event.streamId}`;
       const stream = this._streams.get(streamKey);
       if (stream) {
-        stream.destroy(toStreamError(event));
+        safeDestroyStream(stream, toStreamError(event));
       }
     } else {
       const session = this._sessions.get(event.connHandle);
       if (session) {
-        session.emit('error', toSessionError(event));
+        safeEmitError(session, toSessionError(event));
         return;
       }
-      this.emit('error', toSessionError(event));
+      safeEmitError(this, toSessionError(event));
     }
   }
 

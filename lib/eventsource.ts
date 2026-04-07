@@ -276,7 +276,11 @@ export class Http3EventSource extends EventEmitter {
   }
 
   private _emitError(err: Error): void {
-    this.emit('error', err);
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', err);
+    } else {
+      this.emit('sessionError', err);
+    }
     this.onerror?.(err);
   }
 
