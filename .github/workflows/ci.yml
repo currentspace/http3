@@ -8,6 +8,7 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -56,29 +57,36 @@ jobs:
       - name: Build native + TypeScript
         run: pnpm run build
 
-      - name: Run full test suite
-        run: pnpm test
+      # The full `pnpm test` lane was previously a single 6h-prone
+      # invocation against a glob. Split into per-suite steps with
+      # tight per-step timeouts so a hang fails fast and is
+      # identifiable. Interop is covered by the dedicated Interop
+      # workflow's curl-interop / quiche-loopback jobs and is not
+      # repeated here.
 
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium firefox
+      - name: Run core tests
+        timeout-minutes: 10
+        run: pnpm run test:core
 
-      - name: Run browser compatibility smoke
-        run: pnpm run test:browser:e2e
+      - name: Run runtime tests
+        timeout-minutes: 10
+        run: pnpm run test:runtime
 
-      - name: Run concurrency performance gate
-        env:
-          HTTP3_CONCURRENCY_MAX_MS: '12000'
-        run: pnpm run perf:concurrency-gate
+      - name: Run release tests
+        timeout-minutes: 10
+        run: pnpm run test:release
 
-      - name: Run load smoke gate
-        env:
-          HTTP3_LOAD_SMOKE_TOTAL: '150'
-          HTTP3_LOAD_SMOKE_CONCURRENCY: '25'
-          HTTP3_LOAD_SMOKE_MAX_MS: '10000'
-        run: pnpm run perf:load-smoke-gate
+      - name: Run FFI tests
+        timeout-minutes: 10
+        run: pnpm run test:ffi
 
       - name: Smoke install from packed artifact
+        timeout-minutes: 10
         run: pnpm run smoke:install
+
+      # Browser e2e + perf gates are slow and frequently flaky on
+      # hosted runners; they are not part of this PR's scope and run
+      # on schedule via the longhaul lane.
 
   docker-runtime-matrix-arm64:
     runs-on: ubuntu-latest
