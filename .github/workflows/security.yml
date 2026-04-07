@@ -23,15 +23,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        run: pnpm audit --audit-level high
       - name: Generate SBOM
-        run: npm run sbom
+        run: pnpm run sbom
       - name: Upload SBOM
         uses: actions/upload-artifact@v7
         with:
@@ -53,10 +56,14 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci
-      - run: npm run build
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
       - uses: github/codeql-action/analyze@v4
