@@ -27,6 +27,7 @@ RUN pnpm install --ignore-scripts --no-frozen-lockfile
 
 COPY build.rs Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 COPY lib ./lib
 COPY scripts ./scripts
 COPY test ./test
