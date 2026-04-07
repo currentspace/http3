@@ -11,6 +11,7 @@ import {
   drainPendingReads,
   fireDrainCallbacks,
 } from './stream-backpressure.js';
+import { safeDestroyStream } from './safe-emit.js';
 
 /** HTTP header map where each value is a string or string array. */
 export type IncomingHeaders = Record<string, string | string[]>;
@@ -476,7 +477,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
       this.emit('drain');
     });
     this._h2Stream.on('error', (err: Error) => {
-      this.destroy(err);
+      safeDestroyStream(this, err);
     });
     this._h2Stream.on('close', () => {
       if (!this.destroyed) this.destroy();

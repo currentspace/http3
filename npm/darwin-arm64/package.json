@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3-darwin-arm64",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "cpu": [
     "arm64"
   ],

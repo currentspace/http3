@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.2
+
+### Crash fix: ECONNRESET / abrupt client disconnect
+
+- Fixed a crash where a client dropping its TLS connection mid-session
+  (browser tab close, page reload, network hiccup) would emit an
+  unhandled `'error'` event on `Http2ServerSessionAdapter` and bring
+  down the Node process. Reported against 0.7.1; pre-existing.
+- Hardened the same class of bug across the H3 and QUIC server and
+  client paths, the H2 stream adapter, the native worker error
+  dispatch, and EventSource. None of these can crash the process
+  anymore when no `'error'` listener is attached.
+- Added two new events that adapters now emit instead of letting
+  errors escape unhandled:
+  - `'peerDisconnect'` — routine peer disconnects (`ECONNRESET`,
+    `EPIPE`, `ECANCELED`, `ENOTCONN`, `ETIMEDOUT`,
+    `ERR_HTTP2_STREAM_CANCEL`, `ERR_HTTP2_INVALID_SESSION`,
+    `ERR_HTTP2_INVALID_STREAM`, `ERR_HTTP2_SESSION_ERROR`,
+    `ERR_STREAM_PREMATURE_CLOSE`).
+  - `'sessionError'` — unknown errors that arrived with no
+    `'error'` listener attached. Existing consumers that *do*
+    attach `'error'` continue to receive errors there.
+- New `lib/safe-emit.ts` helper (`safeEmitError`,
+  `safeDestroyStream`, `isBenignDisconnect`,
+  `BENIGN_DISCONNECT_CODES`) centralises the policy.
+
 ## 0.7.1
 
 - Fixed `optionalDependencies` in the root package to reference the matching `0.7.1` native sidecar versions instead of the stale `0.6.0` references shipped in 0.7.0.

@@ -7,6 +7,7 @@ import type { ConnectionEndpoint } from './endpoint.js';
 import { resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import { Http3Error, ERR_HTTP3_INVALID_STATE, ERR_HTTP3_STREAM_ERROR } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
+import { safeEmitError, safeDestroyStream } from './safe-emit.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
@@ -307,7 +308,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     if (event.streamId >= 0) {
       const stream = this._streams.get(event.streamId);
       if (stream) {
-        stream.destroy(toStreamError(event));
+        safeDestroyStream(stream, toStreamError(event));
       }
     } else {
       this._emitSessionError(toSessionError(event));
@@ -328,7 +329,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       return;
     }
 
-    this.emit('error', err);
+    safeEmitError(this, err);
   }
 
   private _onSessionTicket(event: NativeEvent): void {
