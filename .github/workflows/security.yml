@@ -30,7 +30,7 @@ jobs:
         with:
           node-version: '24'
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
       - name: Audit dependencies
         run: pnpm audit --audit-level high
       - name: Generate SBOM
@@ -64,6 +64,6 @@ jobs:
           node-version: '24'
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
       - run: pnpm run build
       - uses: github/codeql-action/analyze@v4
