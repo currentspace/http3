@@ -5,6 +5,7 @@ import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
 import { toSessionError } from './error-map.js';
+import { safeEmitError, safeDestroyStream } from './safe-emit.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
 import { resolveServerClientAuthMode } from './tls-client-auth.js';
@@ -517,16 +518,16 @@ export class QuicServer extends EventEmitter {
   private _onError(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
     if (!session) {
-      this.emit('error', toSessionError(event));
+      safeEmitError(this, toSessionError(event));
       return;
     }
     if (event.streamId >= 0) {
       const stream = session._streams.get(event.streamId);
       if (stream) {
-        stream.destroy(new Error(event.meta?.errorReason ?? 'stream error'));
+        safeDestroyStream(stream, new Error(event.meta?.errorReason ?? 'stream error'));
       }
     } else {
-      session.emit('error', toSessionError(event));
+      safeEmitError(session, toSessionError(event));
     }
   }
 

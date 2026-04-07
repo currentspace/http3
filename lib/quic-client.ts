@@ -4,6 +4,7 @@ import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { resolveConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
+import { safeEmitError, safeDestroyStream } from './safe-emit.js';
 import { ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
@@ -344,7 +345,7 @@ export class QuicClientSession extends EventEmitter {
     if (event.streamId >= 0) {
       const stream = this._streams.get(event.streamId);
       if (stream) {
-        stream.destroy(new Error(event.meta?.errorReason ?? 'stream error'));
+        safeDestroyStream(stream, new Error(event.meta?.errorReason ?? 'stream error'));
       }
     } else {
       this._emitSessionError(toSessionError(event));
@@ -365,7 +366,7 @@ export class QuicClientSession extends EventEmitter {
       return;
     }
 
-    this.emit('error', err);
+    safeEmitError(this, err);
   }
 
   private _getOrCreateStream(streamId: number): QuicStream {

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { Http2Session } from 'node:http2';
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
 import type { RuntimeInfo } from './runtime.js';
+import { safeEmitError } from './safe-emit.js';
 
 /** QUIC transport tuning parameters shared by server and client. */
 export interface SessionOptions {
@@ -353,7 +354,13 @@ export class Http2ServerSessionAdapter extends Http3ServerSession {
       this.emit('close');
     });
     h2Session.on('error', (err: Error) => {
-      this.emit('error', err);
+      safeEmitError(this, err);
+    });
+    // The TLS socket beneath the H2 session can surface errors directly
+    // (e.g. ECONNRESET from `TLSWrap.onStreamRead`) without first
+    // propagating through the session. Guard that path too.
+    socket.on('error', (err: Error) => {
+      safeEmitError(this, err);
     });
     h2Session.on('goaway', () => {
       this.emit('goaway');
