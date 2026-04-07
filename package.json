@@ -153,7 +153,7 @@
     "perf:load-smoke-gate": "npm run test:load-smoke",
     "smoke:install": "npm run build && node scripts/smoke-install.mjs",
     "safari:checklist": "node scripts/safari-validation-checklist.mjs",
-    "sbom": "npm install --package-lock-only --ignore-scripts && npm sbom --omit=dev > sbom.spdx.json",
+    "sbom": "npm install --package-lock-only --ignore-scripts --legacy-peer-deps && npm sbom --omit=dev > sbom.spdx.json",
     "release:check": "npm run lint && npm run typecheck && npm test && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate && npm run test:rust",
     "release:local-gate": "npm run release:check && npm run smoke:install",
     "release:publish:npm": "node scripts/publish-npm-release.mjs",
