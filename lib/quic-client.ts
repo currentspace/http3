@@ -184,7 +184,15 @@ export class QuicClientSession extends EventEmitter {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
-    void this._readyPromise.catch(() => undefined);
+    // Swallow unobserved rejections via try/await (project rule: no `.catch`).
+    const readyPromise = this._readyPromise;
+    void (async (): Promise<void> => {
+      try {
+        await readyPromise;
+      } catch {
+        /* unobserved — caller chose event-driven flow */
+      }
+    })();
   }
 
   /** Whether the QUIC/TLS handshake has completed. */

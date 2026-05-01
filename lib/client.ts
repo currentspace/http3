@@ -124,8 +124,16 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
-    // ready() is optional for event-driven callers; swallow unobserved rejections.
-    void this._readyPromise.catch(() => undefined);
+    // ready() is optional for event-driven callers; swallow unobserved
+    // rejections via an explicit try/await (project rule: no `.catch`).
+    const readyPromise = this._readyPromise;
+    void (async (): Promise<void> => {
+      try {
+        await readyPromise;
+      } catch {
+        /* unobserved — caller chose event-driven flow */
+      }
+    })();
   }
 
   /** The authority (host:port) this session is connected to. */
