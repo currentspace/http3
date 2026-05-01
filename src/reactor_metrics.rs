@@ -196,6 +196,15 @@ static EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_DROPPED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_SINK_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+
+/// Buffers handed to a `BufferRecycler` whose receiver was already
+/// dropped (or whose channel was full at the moment). Audit finding #31.
+static RECYCLER_DROPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// io_uring multishot recv CQEs that arrived without a buffer-id flag,
+/// indicating the kernel's provided-buffer ring was exhausted and a
+/// datagram was dropped. Audit finding #32.
+static IOURING_BUF_EXHAUSTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_SERVER_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED: AtomicU64 = AtomicU64::new(0);
@@ -375,6 +384,14 @@ pub(crate) fn record_event_batch_drop(count: usize) {
 
 pub(crate) fn record_event_batch_sink_error() {
     bump(&EVENT_BATCH_SINK_ERRORS_TOTAL);
+}
+
+pub(crate) fn record_recycler_drop() {
+    bump(&RECYCLER_DROPS_TOTAL);
+}
+
+pub(crate) fn record_iouring_buf_exhausted() {
+    bump(&IOURING_BUF_EXHAUSTED_TOTAL);
 }
 
 pub fn set_lifecycle_trace_enabled(enabled: bool) {

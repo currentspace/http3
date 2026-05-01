@@ -142,9 +142,16 @@ impl AdaptiveBufferPool {
 pub struct BufferRecycler(crossbeam_channel::Sender<Vec<u8>>);
 
 impl BufferRecycler {
-    /// Return a buffer to the pool. If the channel is full, the buffer is dropped.
+    /// Return a buffer to the pool. If the channel is full or the
+    /// receiver has been dropped (connection cleanup, worker exit), the
+    /// buffer is freed normally — but we increment the metric so a
+    /// steady stream of drops is visible to operators rather than
+    /// silently slowing the pool back down to fresh allocations.
+    /// Audit finding #31.
     pub fn recycle(&self, buf: Vec<u8>) {
-        let _ = self.0.try_send(buf);
+        if self.0.try_send(buf).is_err() {
+            crate::reactor_metrics::record_recycler_drop();
+        }
     }
 }
 

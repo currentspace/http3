@@ -782,6 +782,10 @@ mod inner {
                             } else {
                                 // result > 0 but no buffer — the kernel ran out of
                                 // provided buffers and dropped the datagram.
+                                // Audit finding #32: bump a metric so a steady
+                                // stream of drops is observable in operator
+                                // dashboards instead of buried in logs.
+                                reactor_metrics::record_iouring_buf_exhausted();
                                 log::warn!(
                                     "io_uring: RX buffer ring exhausted — datagram dropped \
                                      (result={result}, ring_size={RX_RING_SIZE})"
