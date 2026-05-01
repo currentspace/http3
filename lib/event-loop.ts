@@ -9,6 +9,13 @@ import { join, resolve } from 'node:path';
 /** Sentinel event emitted by each Rust worker thread before exit. */
 export const EVENT_SHUTDOWN_COMPLETE = 15;
 
+/**
+ * Maximum time `close()` will wait for the worker's SHUTDOWN_COMPLETE
+ * sentinel before falling through to `joinWorker()`. A wedged worker
+ * shouldn't hang the host process indefinitely.
+ */
+export const SHUTDOWN_TIMEOUT_MS = 5000;
+
 // ----- Native binding type definitions -----
 
 /**
@@ -517,11 +524,25 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+
+    // Audit finding #33: await the SHUTDOWN_COMPLETE sentinel before
+    // joinWorker so late TSFN events can't land on cleared maps.
+    // Bounded by SHUTDOWN_TIMEOUT_MS so a wedged worker can't hang the
+    // host process indefinitely.
+    const sentinel = this._shutdownObserved
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          this._shutdownResolve = resolve;
+        });
+
     this.worker.requestShutdown();
-    // TODO Step 4.1 (#33): await the shutdown sentinel here so late TSFN
-    // events can't land after close resolves. For now, yield once so the
-    // method has at least one suspension point.
-    await Promise.resolve();
+
+    const timer = new Promise<void>((resolve) => {
+      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS).unref();
+    });
+    await Promise.race([sentinel, timer]);
+    this._shutdownResolve = null;
+
     this.worker.joinWorker();
   }
 }
@@ -601,10 +622,22 @@ export class ClientEventLoop {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+
+    const sentinel = this._shutdownObserved
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          this._shutdownResolve = resolve;
+        });
+
     this.worker.close(0, 'client close');
     this.worker.requestShutdown();
-    // TODO Step 4.1 (#33): await the shutdown sentinel.
-    await Promise.resolve();
+
+    const timer = new Promise<void>((resolve) => {
+      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS).unref();
+    });
+    await Promise.race([sentinel, timer]);
+    this._shutdownResolve = null;
+
     this.worker.joinWorker();
   }
 }

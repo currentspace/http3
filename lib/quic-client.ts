@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { resolveConnectionEndpoint } from './endpoint.js';
@@ -124,10 +124,22 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+
+    const sentinel = this._shutdownObserved
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          this._shutdownResolve = resolve;
+        });
+
     this.worker.close(0, 'client close');
     this.worker.requestShutdown();
-    // TODO Step 4.1 (#33): await the shutdown sentinel.
-    await Promise.resolve();
+
+    const timer = new Promise<void>((resolve) => {
+      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS).unref();
+    });
+    await Promise.race([sentinel, timer]);
+    this._shutdownResolve = null;
+
     this.worker.joinWorker();
   }
 }
