@@ -33,30 +33,33 @@ pub(crate) fn set_socket_buffers(socket: &UdpSocket, hint: usize) -> Result<(), 
     Ok(())
 }
 
-/// Bind a UDP socket, optionally with `SO_REUSEPORT`.
-/// Target UDP socket buffer size (2 MB). QUIC implementations typically need
-/// large buffers to absorb packet bursts without kernel drops.  The kernel may
-/// cap this at `net.core.rmem_max` / `net.core.wmem_max`, but `setsockopt`
-/// silently clamps — it never fails.
-const SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
+/// Minimum socket buffer size we'll accept after kernel clamping. Below this
+/// QUIC will likely drop packets under bursts; we warn the operator.
+const MIN_SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
 
-/// Try to enlarge the socket's receive and send buffers.  Best-effort: if the
-/// kernel clamps the value we still proceed with whatever size we got.
-/// Logs the effective sizes so operators can diagnose buffer-related drops.
+/// Try to enlarge the socket's receive and send buffers using the same 8 MB
+/// → 4 MB → 2 MB tier list as `set_socket_buffers`. Logs a `warn!` if the
+/// kernel clamped below the minimum acceptable size. Audit finding #21:
+/// previously this function only attempted 2 MB, while
+/// `set_socket_buffers` (used by client paths) tried 8 MB first — server
+/// sockets ended up at 2 MB while clients got 8 MB.
 fn set_socket_buffer_sizes(socket: &socket2::Socket) {
-    let _ = socket.set_recv_buffer_size(SOCKET_BUF_SIZE);
-    let _ = socket.set_send_buffer_size(SOCKET_BUF_SIZE);
+    for &size in BUFFER_SIZES {
+        if socket.set_send_buffer_size(size).is_ok()
+            && socket.set_recv_buffer_size(size).is_ok()
+        {
+            break;
+        }
+    }
     let effective_rcv = socket.recv_buffer_size().unwrap_or(0);
     let effective_snd = socket.send_buffer_size().unwrap_or(0);
-    if effective_rcv < SOCKET_BUF_SIZE || effective_snd < SOCKET_BUF_SIZE {
+    if effective_rcv < MIN_SOCKET_BUF_SIZE || effective_snd < MIN_SOCKET_BUF_SIZE {
         log::warn!(
-            "UDP socket buffer sizes clamped by kernel: rcvbuf={}KB (wanted {}KB) sndbuf={}KB (wanted {}KB). \
-             Raise net.core.rmem_max / net.core.wmem_max to at least {} for best QUIC performance.",
+            "UDP socket buffer sizes clamped by kernel: rcvbuf={}KB sndbuf={}KB (wanted at least {}KB). \
+             Raise net.core.rmem_max / net.core.wmem_max for best QUIC performance.",
             effective_rcv / 1024,
-            SOCKET_BUF_SIZE / 1024,
             effective_snd / 1024,
-            SOCKET_BUF_SIZE / 1024,
-            SOCKET_BUF_SIZE,
+            MIN_SOCKET_BUF_SIZE / 1024,
         );
     }
 }
