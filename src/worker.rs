@@ -2292,6 +2292,9 @@ impl ProtocolHandler for H3ServerHandler {
                     pending_outbound.push(TxDatagram {
                         data: out[..len].to_vec(),
                         to: peer,
+                        // Retry/version-negotiation: pre-handshake, no per-
+                        // connection PMTU yet — fall back to default cap.
+                        max_segment_size: None,
                     });
                 }
                 self.buffer_pool.checkin(out);
@@ -2440,10 +2443,14 @@ impl ProtocolHandler for H3ServerHandler {
                 let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
                     let mut tx_buf = self.tx_pool.checkout();
                     if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
+                        let mtu =
+                            u16::try_from(conn.quiche_conn.max_send_udp_payload_size())
+                                .ok();
                         tx_buf.truncate(len);
                         outbound.push(TxDatagram {
                             data: tx_buf,
                             to: send_info.to,
+                            max_segment_size: mtu,
                         });
                         true
                     } else {
@@ -2869,10 +2876,12 @@ impl H3ClientHandler {
             tx_pool.checkin(tx_buf);
             return None;
         };
+        let mtu = u16::try_from(conn.quiche_conn.max_send_udp_payload_size()).ok();
         tx_buf.truncate(len);
         Some(TxDatagram {
             data: tx_buf,
             to: send_info.to,
+            max_segment_size: mtu,
         })
     }
 

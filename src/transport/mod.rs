@@ -28,6 +28,12 @@ pub struct RxDatagram {
 pub struct TxDatagram {
     pub data: Vec<u8>,
     pub to: SocketAddr,
+    /// Quiche's negotiated max_send_udp_payload_size for this connection
+    /// at the moment the packet was emitted, used by the GSO grouper to
+    /// cap (or extend) coalescing per real PMTU instead of the hardcoded
+    /// `GSO_MAX_SEGMENT` Ethernet default. Audit finding #19. `None` =
+    /// caller didn't supply a hint, fall back to the Ethernet cap.
+    pub max_segment_size: Option<u16>,
 }
 
 /// A batch of same-size packets to the same peer, coalesced for UDP GSO.
@@ -62,10 +68,15 @@ pub(crate) fn group_for_gso(packets: Vec<TxDatagram>) -> Vec<GsoBatch> {
     let mut batches: Vec<GsoBatch> = Vec::new();
     for pkt in packets {
         let seg_size = pkt.data.len() as u16;
+        // Per-packet cap from quiche's negotiated PMTU when supplied;
+        // falls back to the Ethernet default for callers that don't set it.
+        let seg_cap = pkt
+            .max_segment_size
+            .map_or(GSO_MAX_SEGMENT, |s| s as usize);
         if let Some(last) = batches.last_mut() {
             if last.to == pkt.to
                 && last.segment_size == seg_size
-                && (seg_size as usize) <= GSO_MAX_SEGMENT
+                && (seg_size as usize) <= seg_cap
                 && (last.data.len() / seg_size as usize) < 64
                 && last.data.len() + pkt.data.len() <= GSO_MAX_PAYLOAD
             {
@@ -414,6 +425,15 @@ mod tests {
         TxDatagram {
             data: vec![0xAB; size],
             to: addr(port),
+            max_segment_size: None,
+        }
+    }
+
+    fn pkt_with_cap(size: usize, port: u16, cap: u16) -> TxDatagram {
+        TxDatagram {
+            data: vec![0xAB; size],
+            to: addr(port),
+            max_segment_size: Some(cap),
         }
     }
 
@@ -508,5 +528,32 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].data.len(), big);
         assert_eq!(batches[1].data.len(), big);
+    }
+
+    /// Audit finding #19: with a per-packet PMTU hint above GSO_MAX_SEGMENT,
+    /// jumbo-sized packets should now coalesce. Before the fix, the
+    /// hardcoded 1472 cap would refuse coalescing on jumbo paths.
+    #[test]
+    fn test_gso_jumbo_coalesces_when_pmtu_supplied() {
+        let jumbo = 4000usize; // > GSO_MAX_SEGMENT (1472)
+        let packets = vec![
+            pkt_with_cap(jumbo, 4433, 4000),
+            pkt_with_cap(jumbo, 4433, 4000),
+        ];
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 1, "jumbo packets must coalesce when PMTU permits");
+        assert_eq!(batches[0].data.len(), jumbo * 2);
+        assert_eq!(batches[0].segment_size as usize, jumbo);
+    }
+
+    /// And a per-packet hint *below* the packet size still rejects.
+    #[test]
+    fn test_gso_packet_above_pmtu_hint_does_not_coalesce() {
+        let packets = vec![
+            pkt_with_cap(1500, 4433, 1200),
+            pkt_with_cap(1500, 4433, 1200),
+        ];
+        let batches = group_for_gso(packets);
+        assert_eq!(batches.len(), 2);
     }
 }

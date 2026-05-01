@@ -2167,6 +2167,7 @@ impl ProtocolHandler for QuicServerHandler {
                     pending_outbound.push(TxDatagram {
                         data: out[..len].to_vec(),
                         to: peer,
+                        max_segment_size: None,
                     });
                 }
                 self.buffer_pool.checkin(out);
@@ -2315,10 +2316,14 @@ impl ProtocolHandler for QuicServerHandler {
                     // Write directly into a pool buffer — no intermediate copy.
                     let mut tx_buf = self.tx_pool.checkout();
                     if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
+                        let mtu =
+                            u16::try_from(conn.quiche_conn.max_send_udp_payload_size())
+                                .ok();
                         tx_buf.truncate(len);
                         outbound.push(TxDatagram {
                             data: tx_buf,
                             to: send_info.to,
+                            max_segment_size: mtu,
                         });
                         true
                     } else {
@@ -2730,10 +2735,12 @@ impl QuicClientHandler {
             tx_pool.checkin(tx_buf);
             return None;
         };
+        let mtu = u16::try_from(conn.quiche_conn.max_send_udp_payload_size()).ok();
         tx_buf.truncate(len);
         Some(TxDatagram {
             data: tx_buf,
             to: send_info.to,
+            max_segment_size: mtu,
         })
     }
 
