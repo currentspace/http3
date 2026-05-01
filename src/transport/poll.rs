@@ -374,21 +374,30 @@ mod inner {
                 )
             };
 
-            let sent_count = if sent < 0 {
+            // Audit finding #7: distinguish WouldBlock (transient → queue
+            // for drain_unsent) from permanent errors (EINVAL/ENETUNREACH/…
+            // → log + drop, since requeueing would just retry forever).
+            // quiche handles loss recovery via retransmission, so the layer
+            // above doesn't need every datagram to actually go out.
+            let (sent_count, requeue_remainder) = if sent < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::WouldBlock {
-                    0usize
+                    (0usize, true)
                 } else {
-                    // On other errors, treat as 0 sent and queue all.
-                    0
+                    log::warn!(
+                        "poll driver: sendmmsg failed with permanent error {err}; dropping {} datagrams",
+                        pkt_data.len()
+                    );
+                    (0usize, false)
                 }
             } else {
-                sent as usize
+                (sent as usize, true)
             };
 
-            // Recycle sent buffers, queue unsent as pending.
+            // Recycle sent buffers; remainder is either re-queued (transient)
+            // or dropped (permanent).
             for (i, data) in pkt_data.into_iter().enumerate() {
-                if i < sent_count {
+                if i < sent_count || !requeue_remainder {
                     self.recycled_tx.push(data);
                 } else {
                     self.unsent.push_back(TxDatagram {
@@ -459,19 +468,27 @@ mod inner {
                 )
             };
 
-            let sent_count = if sent < 0 {
-                if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
-                    0usize
+            // Same WouldBlock-vs-permanent distinction as the non-GSO path.
+            // For EMSGSIZE specifically the existing chunks() split below
+            // re-fragments the GSO batch into individual datagrams, which
+            // gives quiche a path forward without infinite retry.
+            let (sent_count, requeue_remainder) = if sent < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    (0usize, true)
                 } else {
-                    0
+                    log::warn!(
+                        "poll driver: GSO sendmmsg failed with permanent error {err}; dropping {} batches",
+                        batch_data.len()
+                    );
+                    (0usize, false)
                 }
             } else {
-                sent as usize
+                (sent as usize, true)
             };
 
-            // Recycle sent batch buffers, split unsent batches back to individual packets.
             for (i, data) in batch_data.into_iter().enumerate() {
-                if i < sent_count {
+                if i < sent_count || !requeue_remainder {
                     self.recycled_tx.push(data);
                 } else {
                     let seg = batch_seg_sizes[i] as usize;
@@ -493,11 +510,22 @@ mod inner {
         }
 
         fn drain_unsent(&mut self) {
-            // Drain unsent one at a time (backpressure recovery).
+            // Drain unsent one at a time (backpressure recovery). Audit
+            // finding #7: log permanent errors at warn so a steady stream of
+            // dropped packets doesn't disappear silently. Both Ok and
+            // permanent-error pop the packet; only WouldBlock keeps it.
             while let Some(front) = self.unsent.front() {
                 match self.socket.send_to(&front.data, front.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
-                    Ok(_) | Err(_) => {
+                    Ok(_) => {
+                        if let Some(pkt) = self.unsent.pop_front() {
+                            self.recycled_tx.push(pkt.data);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "poll driver: drain_unsent send_to failed: {e}; dropping datagram"
+                        );
                         if let Some(pkt) = self.unsent.pop_front() {
                             self.recycled_tx.push(pkt.data);
                         }
