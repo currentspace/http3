@@ -44,6 +44,10 @@ pub struct QuicConnection {
     /// Receiving end of the recycler channel — drained periodically on the
     /// worker thread to pull returned buffers back into `data_pool`.
     pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    /// Reusable scratch buffer for `quiche_conn.readable()` collection.
+    /// Avoids a fresh `Vec<u64>` allocation per `poll_quic_events` call.
+    /// Audit finding #25.
+    readable_scratch: Vec<u64>,
 }
 
 pub struct QuicConnectionInit<'a> {
@@ -88,6 +92,7 @@ impl QuicConnection {
             data_pool,
             data_recycler,
             data_recycle_rx,
+            readable_scratch: Vec::new(),
         }
     }
 
@@ -142,9 +147,16 @@ impl QuicConnection {
     const RECV_CHUNK: usize = 16_384;
 
     pub fn poll_quic_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        let readable: Vec<u64> = self.quiche_conn.readable().collect();
+        // Reuse the scratch buffer instead of allocating a fresh Vec per
+        // call (audit finding #25).
+        self.readable_scratch.clear();
+        self.readable_scratch.extend(self.quiche_conn.readable());
 
-        for stream_id in readable {
+        // Borrow-checker dance: take the streams out so the loop body can
+        // freely call `&mut self` methods (stream_recv etc.). We restore
+        // the empty Vec at the end so the allocation is reused next call.
+        let mut readable = std::mem::take(&mut self.readable_scratch);
+        for stream_id in readable.drain(..) {
             let is_new = self.known_streams.insert(stream_id);
 
             if is_new {
@@ -247,6 +259,8 @@ impl QuicConnection {
                 }
             }
         }
+        // Restore the empty (but capacity-preserving) Vec for next call.
+        self.readable_scratch = readable;
 
         // NOTE: sweep_finished_streams is called by the handler at lower frequency
         // (timer ticks) to avoid O(pending_fin) on every packet.
