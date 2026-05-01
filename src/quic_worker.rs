@@ -888,7 +888,11 @@ impl QuicConnectionMap {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if now.saturating_sub(timestamp) > TOKEN_LIFETIME_SECS {
+        // Audit finding #4: signed window guards both directions of clock
+        // skew. saturating_sub by itself would underflow to 0 on a
+        // backwards jump and accept all in-flight tokens.
+        let skew = (now as i64).saturating_sub(timestamp as i64).abs();
+        if skew > TOKEN_LIFETIME_SECS as i64 {
             return None;
         }
         if pos >= payload.len() {
