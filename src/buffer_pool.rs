@@ -34,13 +34,15 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool. Only keeps it if capacity is sufficient.
-    #[allow(unsafe_code)]
     pub fn checkin(&mut self, mut buf: Vec<u8>) {
         if buf.capacity() >= self.buf_size {
+            // Audit finding #23: zero-init instead of `set_len` on uninit
+            // memory. Eliminates the foot-gun where any future caller that
+            // reads before writing would see stale bytes from a prior
+            // connection. ~300 ns for 16 KB on modern CPUs — negligible
+            // vs network I/O.
             buf.clear();
-            // SAFETY: checkout() contract requires callers write before reading.
-            // Matches AdaptiveBufferPool::checkout() which uses the same pattern.
-            unsafe { buf.set_len(self.buf_size); }
+            buf.resize(self.buf_size, 0);
             self.buffers.push(buf);
         }
         // Undersized buffers are dropped
@@ -73,24 +75,19 @@ impl AdaptiveBufferPool {
 
     /// Take a buffer with at least `len` bytes of capacity.
     /// Returns `(buffer, reused_from_pool)`.
-    #[allow(unsafe_code)]
     pub fn checkout(&mut self, len: usize) -> (Vec<u8>, bool) {
+        // Audit finding #23: zero-init both reuse and fresh-alloc paths so
+        // a caller that reads before writing can't see uninitialized
+        // memory or stale bytes from a prior connection.
         if let Some(index) = self.buffers.iter().rposition(|buf| buf.capacity() >= len) {
             let mut buf = self.buffers.swap_remove(index);
             buf.clear();
-            // SAFETY: callers write every byte before reading. The buffer already
-            // has enough capacity for `len`.
-            unsafe {
-                buf.set_len(len);
-            }
+            buf.resize(len, 0);
             return (buf, true);
         }
 
         let mut buf = Vec::with_capacity(len.max(self.min_capacity));
-        // SAFETY: callers write every byte before reading.
-        unsafe {
-            buf.set_len(len);
-        }
+        buf.resize(len, 0);
         (buf, false)
     }
 
