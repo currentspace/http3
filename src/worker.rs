@@ -2782,6 +2782,14 @@ impl H3ClientHandler {
                 self.conn.blocked_set.len()
             )),
         );
+        // Audit findings #12 and #35: drain abandoned pending writes here
+        // so JS-side stream callbacks fire (via _onReset → destroy) and
+        // is_reapable() can return true without waiting on dead-state
+        // pending_writes that will never flush.
+        for stream_id in self.pending_writes.keys().copied().collect::<Vec<_>>() {
+            batch.push(JsH3Event::reset(conn_handle, stream_id, 0));
+        }
+        self.pending_writes.clear();
         reactor_metrics::record_session_close(SessionKind::H3Client);
         batch.push(JsH3Event::session_close(conn_handle));
         self.session_closed_emitted = true;
@@ -2893,7 +2901,11 @@ impl H3ClientHandler {
     }
 
     fn is_reapable(&self) -> bool {
-        self.session_closed_emitted && self.pending_writes.is_empty()
+        // Audit finding #35: once we've emitted session_close, the connection
+        // is terminal. emit_session_close drains pending_writes so this is
+        // already a tautology, but the explicit check guards against any
+        // future code path that could leave entries behind.
+        self.session_closed_emitted
     }
 }
 
