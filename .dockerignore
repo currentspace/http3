@@ -1,11 +1,16 @@
 .git
 .github
 node_modules
+dist
 dist-test
 target
 *.tgz
 *.log
+*.node
 coverage
+results
+playwright-report
+test-results
 .DS_Store
 examples/certs/server.key
 examples/certs/server.crt

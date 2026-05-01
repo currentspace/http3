@@ -1,0 +1,67 @@
+name: Verify
+
+# Single-entry full-suite gate. Runs the canonical scripts/verify.sh
+# locally on ubuntu and inside Dockerfile.verify (debian latest). Both
+# must pass on every push and PR.
+#
+# kqueue-specific Rust integration tests are gated by #[cfg(target_os =
+# "macos")] in the Rust source — they don't compile or run on Linux, so
+# this CI matrix doesn't need to skip them explicitly.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-local:
+    name: verify (ubuntu, native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run full verify
+        run: pnpm verify
+
+  verify-docker:
+    name: verify (debian latest, docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build verify image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.verify
+          tags: http3-verify:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run verify inside container
+        run: docker run --rm http3-verify:latest
