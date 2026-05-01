@@ -715,10 +715,21 @@ mod inner {
                 match op {
                     OP_RECV => {
                         // Multishot recvmsg: check if more completions coming.
+                        // Audit finding #6: if F_MORE is absent, rearm
+                        // *immediately* to minimize the window during which
+                        // no recv is posted (the kernel drops datagrams at
+                        // the socket buffer if no provided-buffer SQE is
+                        // available). The trailing rearm at the end of the
+                        // CQE loop is kept as a fallback in case the SQ is
+                        // full at this moment.
                         let has_more = io_uring::cqueue::more(flags);
                         if !has_more {
                             driver_trace!("io_uring: multishot disarmed (no IORING_CQE_F_MORE)");
-                            self.rx_armed = false;
+                            if self.arm_multishot_recv().is_err() {
+                                // SQ full or other push error — fall through
+                                // to the trailing rearm at the end of poll().
+                                self.rx_armed = false;
+                            }
                         }
 
                         if result > 0 {
@@ -1462,9 +1473,13 @@ mod inner {
 
                 match op {
                     OP_RECV => {
+                        // Same inline-rearm fix as the main poll() loop.
+                        // Audit finding #6.
                         let has_more = io_uring::cqueue::more(flags);
                         if !has_more {
-                            self.rx_armed = false;
+                            if self.arm_multishot_recv().is_err() {
+                                self.rx_armed = false;
+                            }
                         }
                         if result > 0 {
                             if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
