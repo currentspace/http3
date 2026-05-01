@@ -1157,7 +1157,16 @@ mod inner {
         /// This makes the current thread the SINGLE_ISSUER submitter, allowing
         /// DEFER_TASKRUN to work. Then arms the initial SQEs.
         fn enable_on_worker_thread(&mut self) -> io::Result<()> {
-            let _ = env_logger::try_init();
+            // Audit finding #36: env_logger::try_init under a Once so
+            // concurrent worker spawns don't race the global logger init.
+            // (The Once isn't strictly necessary because log::set_logger
+            // is itself one-shot, but it makes the intent obvious and
+            // suppresses redundant try_init calls on every worker spawn.)
+            use std::sync::Once;
+            static LOGGER_INIT: Once = Once::new();
+            LOGGER_INIT.call_once(|| {
+                let _ = env_logger::try_init();
+            });
             log::info!(
                 "IoUringDriver::enable_on_worker_thread tid={:?}",
                 std::thread::current().id(),
