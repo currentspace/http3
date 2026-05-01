@@ -61,6 +61,13 @@ mod inner {
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
 
+            // Audit finding #20: enable IP_RECVDSTADDR / IPV6_RECVPKTINFO so
+            // recvmsg's cmsg carries the per-datagram destination IP. Servers
+            // bound to 0.0.0.0 need this to route by the actual local IP each
+            // datagram arrived on (matters for connection-ID DCID multiplexing
+            // on multi-homed hosts).
+            crate::transport::socket::set_pktinfo(&socket);
+
             // Register EVFILT_READ permanently (EV_ADD | EV_CLEAR = edge-triggered, auto-rearm)
             let read_ev = KEvent::new(
                 socket_fd as usize,
@@ -198,20 +205,37 @@ mod inner {
                 self.drain_unsent();
             }
 
-            // Drain socket: recv_from loop, capped to avoid starving the send path.
-            // Under fan-out (many connections), an unbounded loop delays ACKs and
-            // causes congestion-window stalls.  The cap lets flush_sends() run
-            // between batches; the next poll() returns immediately because
-            // EV_CLEAR re-arms on any remaining data.
+            // Drain socket via recvmsg (audit finding #20) so the cmsg
+            // delivers per-datagram destination IP. Cap iterations to
+            // avoid starving the send path. Under fan-out an unbounded
+            // loop delays ACKs and causes congestion-window stalls; the
+            // cap lets flush_sends() run between batches and the next
+            // poll() returns immediately because EV_CLEAR re-arms on any
+            // remaining data.
+            let bound_to_specific = !self.local_addr.ip().is_unspecified();
             for _ in 0..MAX_RX_PER_POLL {
-                match self.socket.recv_from(&mut self.recv_buf) {
-                    Ok((len, peer)) => {
-                        let (data, reused) = self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
+                match self.recvmsg_once() {
+                    Ok((len, peer, parsed_local)) => {
+                        let (data, reused) =
+                            self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
                         reactor_metrics::record_rx_buffer_checkout(reused, len);
+                        // When bound to a concrete IP, use it directly — the
+                        // bind addr is authoritative and avoids picking up an
+                        // alternate-family pktinfo on dual-stack sockets.
+                        // When bound to 0.0.0.0 or [::], use the parsed cmsg
+                        // local so multi-homed servers can route by the actual
+                        // local IP each datagram arrived on.
+                        let local = if bound_to_specific {
+                            self.local_addr
+                        } else {
+                            parsed_local.map_or(self.local_addr, |ip| {
+                                SocketAddr::new(ip, self.local_addr.port())
+                            })
+                        };
                         outcome.rx.push(RxDatagram {
                             data,
                             peer,
-                            local: self.local_addr,
+                            local,
                             segment_size: None,
                         });
                     }
@@ -264,6 +288,58 @@ mod inner {
     }
 
     impl KqueueDriver {
+        /// Receive a single datagram via `recvmsg`, returning the payload
+        /// length, peer address, and any per-packet local IP parsed from
+        /// the control message (`IP_RECVDSTADDR` / `IPV6_PKTINFO`).
+        ///
+        /// Used in place of `recv_from` so that servers bound to `0.0.0.0`
+        /// can recover the actual destination IP each datagram arrived on
+        /// (audit finding #20). The recv buffer is `self.recv_buf`; the
+        /// caller copies out before the next call.
+        fn recvmsg_once(
+            &mut self,
+        ) -> io::Result<(usize, SocketAddr, Option<std::net::IpAddr>)> {
+            // SAFETY: zeroed sockaddr_storage is a valid initial state.
+            #[allow(unsafe_code)]
+            let mut name: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut control = [0u8; crate::transport::socket::CMSG_CONTROL_LEN];
+            let mut iov = libc::iovec {
+                iov_base: self.recv_buf.as_mut_ptr().cast(),
+                iov_len: self.recv_buf.len(),
+            };
+            // SAFETY: zeroed msghdr is valid; we wire up name/iov/control below.
+            #[allow(unsafe_code)]
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_name = (&raw mut name).cast();
+            msg.msg_namelen =
+                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            msg.msg_iov = &raw mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr().cast();
+            msg.msg_controllen = control.len() as libc::socklen_t;
+
+            // SAFETY: msg points to a valid msghdr; name, iov.iov_base, and
+            // control all live for the duration of the recvmsg call.
+            #[allow(unsafe_code)]
+            let n = unsafe { libc::recvmsg(self.socket_fd, &raw mut msg, 0) };
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let len = n as usize;
+
+            let peer = sockaddr_to_socketaddr(&name, msg.msg_namelen).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "unrecognised peer address")
+            })?;
+            let parsed_local = if msg.msg_controllen > 0 {
+                crate::transport::socket::parse_pktinfo_cmsg(
+                    &control[..msg.msg_controllen as usize],
+                )
+            } else {
+                None
+            };
+            Ok((len, peer, parsed_local))
+        }
+
         fn drain_unsent(&mut self) {
             while let Some(front) = self.unsent.front() {
                 match self.socket.send_to(&front.data, front.to) {
@@ -323,6 +399,35 @@ mod inner {
 
     fn nix_to_io(e: nix::errno::Errno) -> io::Error {
         io::Error::from_raw_os_error(e as i32)
+    }
+
+    fn sockaddr_to_socketaddr(
+        addr: &libc::sockaddr_storage,
+        len: libc::socklen_t,
+    ) -> Option<SocketAddr> {
+        if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
+            && i32::from(addr.ss_family) == libc::AF_INET
+        {
+            // SAFETY: ss_family is AF_INET and len covers sockaddr_in.
+            #[allow(unsafe_code)]
+            let sin: &libc::sockaddr_in =
+                unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in>() };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            let port = u16::from_be(sin.sin_port);
+            Some(SocketAddr::from((ip, port)))
+        } else if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
+            && i32::from(addr.ss_family) == libc::AF_INET6
+        {
+            // SAFETY: ss_family is AF_INET6 and len covers sockaddr_in6.
+            #[allow(unsafe_code)]
+            let sin6: &libc::sockaddr_in6 =
+                unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in6>() };
+            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            let port = u16::from_be(sin6.sin6_port);
+            Some(SocketAddr::from((ip, port)))
+        } else {
+            None
+        }
     }
 }
 
