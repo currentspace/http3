@@ -156,6 +156,8 @@
     "verify": "bash scripts/verify.sh",
     "verify:fast": "bash scripts/verify.sh --fast",
     "verify:docker": "docker build -f Dockerfile.verify -t http3-verify . && docker run --rm http3-verify",
+    "docker:interop:build": "docker build -f Dockerfile.verify -t http3-verify . && docker build -f Dockerfile.interop -t http3-interop .",
+    "test:interop:cross-platform": "HTTP3_INTEROP_DOCKER=1 node --test --test-isolation=none --test-timeout=60000 dist-test/test/interop/cross-platform.test.js",
     "sbom": "npm sbom --omit=dev > sbom.spdx.json",
     "release:check": "npm run lint && npm run typecheck && npm test && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate && npm run test:rust",
     "release:local-gate": "npm run release:check && npm run smoke:install",
