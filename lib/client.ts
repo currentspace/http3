@@ -18,6 +18,7 @@ const EVENT_FINISHED = 5;
 const EVENT_RESET = 6;
 const EVENT_SESSION_CLOSE = 7;
 const EVENT_DRAIN = 8;
+const EVENT_STREAM_BLOCKED = 16;
 const EVENT_GOAWAY = 9;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
@@ -235,6 +236,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
         case EVENT_DRAIN:
           this._onDrain(event);
           break;
+        case EVENT_STREAM_BLOCKED:
+          this._onStreamBlocked(event);
+          break;
         case EVENT_GOAWAY:
           this.emit('goaway');
           break;
@@ -320,6 +324,13 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const stream = this._streams.get(event.streamId);
     if (stream) {
       stream._onNativeDrain();
+    }
+  }
+
+  private _onStreamBlocked(event: NativeEvent): void {
+    const stream = this._streams.get(event.streamId);
+    if (stream) {
+      stream._onNativeBlocked();
     }
   }
 

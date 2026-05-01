@@ -103,6 +103,16 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal */ _eventLoop: ServerEventLoopLike | null = null;
   /** @internal */ _headersSent = false;
   /** @internal */ _finSent = false;
+  /**
+   * Set by EVENT_STREAM_BLOCKED (audit #8/#16/#29). Native worker emits
+   * this when a chunk could not be fully accepted by quiche flow control
+   * and was buffered into pending_writes. While true, `_writeChunk` and
+   * `_final` route directly to drainCallbacks instead of calling
+   * streamSend — surfacing real backpressure so `Duplex.write()` returns
+   * false. Cleared by EVENT_DRAIN.
+   * @internal
+   */
+  _blocked = false;
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
@@ -215,7 +225,17 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal — called by event dispatcher when flow control window opens */
   _onNativeDrain(): void {
     this._onActivity();
+    this._blocked = false;
     fireDrainCallbacks(this._bp);
+  }
+
+  /**
+   * @internal — called by event dispatcher when the native worker has
+   * buffered a chunk into pending_writes (quiche flow control). Future
+   * writes route to drainCallbacks until EVENT_DRAIN clears the flag.
+   */
+  _onNativeBlocked(): void {
+    this._blocked = true;
   }
 
   _read(_size: number): void {
@@ -239,6 +259,16 @@ export class ServerHttp3Stream extends Duplex {
 
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
+    if (this._blocked) {
+      // Native is backed up — skip streamSend (it would just queue more
+      // into pending_writes) and wait for EVENT_DRAIN.
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeChunk(chunk, callback);
+      });
+      return;
+    }
     const written = this._eventLoop?.streamSend(
       this._connHandle,
       this._streamId,
@@ -268,12 +298,14 @@ export class ServerHttp3Stream extends Duplex {
       return;
     }
     this._finSent = true;
-    const written = this._eventLoop.streamSend(
-      this._connHandle,
-      this._streamId,
-      Buffer.alloc(0),
-      true,
-    );
+    const written = this._blocked
+      ? 0
+      : this._eventLoop.streamSend(
+          this._connHandle,
+          this._streamId,
+          Buffer.alloc(0),
+          true,
+        );
     if (written === 0) {
       // Audit finding #9: bound the wait so a wedged worker can't hang
       // end() forever. Settled flag prevents double-firing if the timer
@@ -360,6 +392,7 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
+  /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
 
   /** The HTTP/3 stream ID. */
   get id(): number { return this._streamId; }
@@ -396,7 +429,13 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */
   _onNativeDrain(): void {
     this._onActivity();
+    this._blocked = false;
     fireDrainCallbacks(this._bp);
+  }
+
+  /** @internal — see ServerHttp3Stream._onNativeBlocked. */
+  _onNativeBlocked(): void {
+    this._blocked = true;
   }
 
   _read(_size: number): void {
@@ -420,6 +459,14 @@ export class ClientHttp3Stream extends Duplex {
 
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
+    if (this._blocked) {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeChunk(chunk, callback);
+      });
+      return;
+    }
     const written = this._eventLoop?.streamSend(this._streamId, chunk, false) ?? 0;
     if (written >= chunk.length) {
       callback();
@@ -439,7 +486,9 @@ export class ClientHttp3Stream extends Duplex {
       callback();
       return;
     }
-    const written = this._eventLoop.streamSend(this._streamId, Buffer.alloc(0), true);
+    const written = this._blocked
+      ? 0
+      : this._eventLoop.streamSend(this._streamId, Buffer.alloc(0), true);
     if (written === 0) {
       // Audit finding #9: bound the wait, mirror server-side _final.
       let settled = false;

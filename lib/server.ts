@@ -34,6 +34,7 @@ const EVENT_GOAWAY = 9;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
+const EVENT_STREAM_BLOCKED = 16;
 
 /** TLS credential options accepted by the server. */
 export interface TlsOptions {
@@ -337,6 +338,9 @@ export class Http3SecureServer extends EventEmitter {
           break;
         case EVENT_DRAIN:
           this._onDrain(event);
+          break;
+        case EVENT_STREAM_BLOCKED:
+          this._onStreamBlocked(event);
           break;
         case EVENT_GOAWAY:
           this._onGoaway(event);
@@ -760,6 +764,14 @@ export class Http3SecureServer extends EventEmitter {
     const stream = this._streams.get(streamKey);
     if (stream) {
       stream._onNativeDrain();
+    }
+  }
+
+  private _onStreamBlocked(event: NativeEvent): void {
+    const streamKey = `${event.connHandle}:${event.streamId}`;
+    const stream = this._streams.get(streamKey);
+    if (stream) {
+      stream._onNativeBlocked();
     }
   }
 

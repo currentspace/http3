@@ -44,6 +44,7 @@ export class QuicStream extends Duplex {
   /** @internal */ _serverLoop: QuicServerEventLoopLike | null = null;
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
+  /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
   private _finalChunk: Buffer | null = null;
 
   constructor(opts?: { highWaterMark?: number }) {
@@ -73,7 +74,13 @@ export class QuicStream extends Duplex {
 
   /** @internal — called by event dispatcher when flow control window opens */
   _onNativeDrain(): void {
+    this._blocked = false;
     fireDrainCallbacks(this._bp);
+  }
+
+  /** @internal — see ServerHttp3Stream._onNativeBlocked. */
+  _onNativeBlocked(): void {
+    this._blocked = true;
   }
 
   _read(_size: number): void {
@@ -123,6 +130,14 @@ export class QuicStream extends Duplex {
   }
 
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    if (this._blocked) {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeChunk(chunk, callback);
+      });
+      return;
+    }
     const written = this._doSend(chunk, false);
     if (written >= chunk.length) {
       callback();
@@ -137,7 +152,7 @@ export class QuicStream extends Duplex {
   }
 
   private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
-    const written = this._doSend(chunk, true);
+    const written = this._blocked ? 0 : this._doSend(chunk, true);
     if (chunk.length === 0) {
       if (written > 0) {
         callback();
