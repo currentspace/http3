@@ -276,6 +276,41 @@ impl From<Http3NativeError> for napi::Error {
             | Http3NativeError::Config(_)
             | Http3NativeError::ConnectionNotFound(_) => Status::InvalidArg,
         };
-        napi::Error::new(status, err.to_string())
+        // Audit finding #30: prefix the message with a structured tag so
+        // a TS-side helper (lib/error-map.ts::fromNapiError) can recover
+        // category + metadata without scraping free-form English. The
+        // tag is `[h3:CATEGORY|key=value|...] ...` followed by the
+        // existing human-readable message — backward-compat with any
+        // regex match on the trailing text.
+        let tag = match &err {
+            Http3NativeError::Quiche(_) => "[h3:quic]".to_string(),
+            Http3NativeError::H3(_) => "[h3:h3]".to_string(),
+            Http3NativeError::Io(io) => match io.raw_os_error() {
+                Some(errno) => format!("[h3:io|errno={errno}]"),
+                None => "[h3:io]".to_string(),
+            },
+            Http3NativeError::FastPathUnavailable { driver, syscall, errno, .. } => {
+                let errno_part = errno
+                    .map(|e| format!("|errno={e}"))
+                    .unwrap_or_default();
+                format!(
+                    "[h3:fast-path|driver={driver}|syscall={syscall}{errno_part}]"
+                )
+            }
+            Http3NativeError::RuntimeIo { driver, syscall, errno, reason_code, .. } => {
+                let errno_part = errno
+                    .map(|e| format!("|errno={e}"))
+                    .unwrap_or_default();
+                format!(
+                    "[h3:runtime-io|driver={driver}|syscall={syscall}|reason={reason_code}{errno_part}]"
+                )
+            }
+            Http3NativeError::InvalidState(_) => "[h3:invalid-state]".to_string(),
+            Http3NativeError::Config(_) => "[h3:config]".to_string(),
+            Http3NativeError::ConnectionNotFound(handle) => {
+                format!("[h3:not-found|handle={handle}]")
+            }
+        };
+        napi::Error::new(status, format!("{tag} {err}"))
     }
 }
