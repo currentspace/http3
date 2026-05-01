@@ -1550,6 +1550,10 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
     let mut handles_buf = Vec::new();
     let mut outbound = Vec::new();
     let mut closed_sessions = Vec::new();
+    // Sessions queued by ReleaseSession; deferred until after the
+    // per-iteration flush so the CONNECTION_CLOSE frame queued by a
+    // preceding `Close` reaches the wire before the session is removed.
+    let mut pending_release: Vec<u32> = Vec::new();
 
     loop {
         let deadline = timer_heap.next_deadline();
@@ -1677,21 +1681,9 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     }
                 }
                 SharedQuicClientCommand::ReleaseSession { session_handle } => {
-                    // Audit Step 4.1 followup: emit SHUTDOWN_COMPLETE on
-                    // this session's TSFN before removing it so the JS
-                    // QuicClientEventLoop's `close()` await on the
-                    // sentinel resolves quickly instead of hitting the
-                    // 5 s timer fallback.
-                    if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.batcher.batch.push(JsH3Event::shutdown_complete());
-                        let _ = session.batcher.flush();
-                    }
-                    remove_shared_quic_client_session(
-                        &mut sessions,
-                        &mut route_by_dcid,
-                        &mut timer_heap,
-                        session_handle as usize,
-                    );
+                    // Defer until after flush so the CLOSE frame goes out
+                    // before the session disappears.
+                    pending_release.push(session_handle);
                 }
             }
         }
@@ -1718,6 +1710,22 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                 );
                 return;
             }
+        }
+
+        // Finalize sessions queued for release: emit SHUTDOWN_COMPLETE so
+        // JS-side close() resolves, then remove from routing maps. CLOSE
+        // frames have already gone out via the flush + submit above.
+        for session_handle in pending_release.drain(..) {
+            if let Some(session) = sessions.get_mut(session_handle as usize) {
+                session.batcher.batch.push(JsH3Event::shutdown_complete());
+                let _ = session.batcher.flush();
+            }
+            remove_shared_quic_client_session(
+                &mut sessions,
+                &mut route_by_dcid,
+                &mut timer_heap,
+                session_handle as usize,
+            );
         }
 
         let rx_count = outcome.rx.len();
@@ -1862,6 +1870,13 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
             }
         }
         for handle in closed_sessions.drain(..) {
+            // Emit SHUTDOWN_COMPLETE before removing so the JS-side
+            // QuicClientEventLoop.close() await resolves on auto-reap
+            // (peer CONNECTION_CLOSE etc.) just like on explicit release.
+            if let Some(session) = sessions.get_mut(handle) {
+                session.batcher.batch.push(JsH3Event::shutdown_complete());
+                let _ = session.batcher.flush();
+            }
             remove_shared_quic_client_session(
                 &mut sessions,
                 &mut route_by_dcid,

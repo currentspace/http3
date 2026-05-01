@@ -1256,6 +1256,13 @@ fn run_shared_client_event_loop<D: transport::Driver>(
     let mut handles_buf = Vec::new();
     let mut outbound = Vec::new();
     let mut closed_sessions = Vec::new();
+    // Sessions queued by ReleaseSession; their CONNECTION_CLOSE frame
+    // (set up by a preceding Close command) needs `flush_shared_client_sends`
+    // to run *before* the session is actually removed, otherwise the
+    // peer never sees the close. We park them here, let the per-iteration
+    // flush deliver any pending packets, then remove + emit
+    // SHUTDOWN_COMPLETE below.
+    let mut pending_release: Vec<u32> = Vec::new();
 
     loop {
         let deadline = timer_heap.next_deadline();
@@ -1405,23 +1412,11 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     }
                 }
                 SharedClientWorkerCommand::ReleaseSession { session_handle } => {
-                    // Audit Step 4.1 followup: emit SHUTDOWN_COMPLETE on
-                    // this session's TSFN before removing it, so the JS
-                    // ClientEventLoop's `close()` await on the shutdown
-                    // sentinel resolves quickly instead of hitting the
-                    // 5 s timer fallback. The shared worker stays
-                    // running for other sessions; only this session is
-                    // signalled.
-                    if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.batcher.batch.push(JsH3Event::shutdown_complete());
-                        let _ = session.batcher.flush();
-                    }
-                    remove_shared_client_session(
-                        &mut sessions,
-                        &mut route_by_dcid,
-                        &mut timer_heap,
-                        session_handle as usize,
-                    );
+                    // Defer the actual removal until after this iteration's
+                    // flush_shared_client_sends, so any
+                    // CONNECTION_CLOSE frame queued by a preceding `Close`
+                    // command reaches the wire before the session is gone.
+                    pending_release.push(session_handle);
                 }
             }
         }
@@ -1438,6 +1433,23 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                 );
                 return;
             }
+        }
+
+        // Now that pending sends (CLOSE frames included) have hit the
+        // wire, finalize any sessions queued for release: emit the
+        // SHUTDOWN_COMPLETE sentinel so the JS `close()` await resolves,
+        // then remove the session from routing maps.
+        for session_handle in pending_release.drain(..) {
+            if let Some(session) = sessions.get_mut(session_handle as usize) {
+                session.batcher.batch.push(JsH3Event::shutdown_complete());
+                let _ = session.batcher.flush();
+            }
+            remove_shared_client_session(
+                &mut sessions,
+                &mut route_by_dcid,
+                &mut timer_heap,
+                session_handle as usize,
+            );
         }
 
         let rx_count = outcome.rx.len();
@@ -1569,6 +1581,15 @@ fn run_shared_client_event_loop<D: transport::Driver>(
             }
         }
         for handle in closed_sessions.drain(..) {
+            // Emit SHUTDOWN_COMPLETE before removing so the JS-side
+            // ClientEventLoop.close() await on the sentinel resolves
+            // even when the session was auto-reaped (e.g., via peer
+            // CONNECTION_CLOSE) rather than via an explicit
+            // ReleaseSession command.
+            if let Some(session) = sessions.get_mut(handle) {
+                session.batcher.batch.push(JsH3Event::shutdown_complete());
+                let _ = session.batcher.flush();
+            }
             remove_shared_client_session(
                 &mut sessions,
                 &mut route_by_dcid,

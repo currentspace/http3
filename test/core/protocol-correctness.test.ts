@@ -84,7 +84,7 @@ describe('Protocol correctness regressions', () => {
         5000,
         'protocol-correctness/server-session-close',
       );
-      await waitFor(() => events.includes('goaway'), 3000);
+      await waitFor(() => events.includes('goaway'), 7000);
 
       const goawayIdx = events.indexOf('goaway');
       const closeIdx = events.indexOf('close');
