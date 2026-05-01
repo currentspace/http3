@@ -122,8 +122,13 @@ impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
         std::mem::forget(data);
 
         if let Some(recycler) = val.recycler {
-            // Recyclable — finalize callback returns to pool
+            // Recyclable — finalize callback returns to pool. Audit
+            // finding #22: capture the raw Box pointer so we can reclaim
+            // it on the failure paths where NAPI never registered the
+            // finalize callback. Otherwise the Box (and its inner Arc)
+            // leak.
             let hint = Box::new(RecycleHint { ptr, cap, recycler });
+            let hint_ptr = Box::into_raw(hint);
             let mut ret = std::ptr::null_mut();
             let status = unsafe {
                 napi::sys::napi_create_external_buffer(
@@ -131,17 +136,25 @@ impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
                     len,
                     ptr as *mut c_void,
                     Some(finalize_recycle),
-                    Box::into_raw(hint) as *mut c_void,
+                    hint_ptr as *mut c_void,
                     &mut ret,
                 )
             };
             if status == napi::sys::Status::napi_no_external_buffers_allowed {
-                // Fallback: reconstruct and use copy path
+                // Fallback: reconstruct and use copy path. NAPI rejected
+                // the external pointer, so reclaim the Box ourselves
+                // (drop disconnects the recycler, which is the right
+                // behavior — JS will own a copy instead).
+                drop(unsafe { Box::from_raw(hint_ptr) });
                 let data = unsafe { Vec::from_raw_parts(ptr, len, cap) };
                 let buf = napi::bindgen_prelude::Buffer::from(data);
                 return unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) };
             }
             if status != napi::sys::Status::napi_ok {
+                // Unexpected status — NAPI didn't register the finalize.
+                // Reclaim the Box AND the underlying Vec so neither leaks.
+                drop(unsafe { Box::from_raw(hint_ptr) });
+                drop(unsafe { Vec::from_raw_parts(ptr, len, cap) });
                 return Err(napi::Error::from_status(status.into()));
             }
             Ok(ret)
