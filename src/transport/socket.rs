@@ -157,8 +157,9 @@ pub(crate) fn query_path_mtu(peer: &SocketAddr) -> Option<usize> {
 
 // ── Control message (cmsg) utilities ────────────────────────────────
 
-/// Control message buffer size for IP_PKTINFO / IPV6_PKTINFO.
-#[cfg(target_os = "linux")]
+/// Control message buffer size for IP_PKTINFO / IPV6_PKTINFO (Linux) or
+/// IP_RECVDSTADDR / IPV6_PKTINFO (Darwin).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const CMSG_CONTROL_LEN: usize = 128;
 
 /// Enable IP_PKTINFO (v4) and IPV6_RECVPKTINFO (v6) on the socket so that
@@ -238,6 +239,85 @@ fn cmsg_data_offset() -> usize {
 #[cfg(all(target_os = "linux", test))]
 pub(crate) fn cmsg_data_offset_for_test() -> usize {
     cmsg_data_offset()
+}
+
+// ── macOS / Darwin variants ─────────────────────────────────────────
+
+/// Enable `IP_RECVDSTADDR` (v4) and `IPV6_RECVPKTINFO` (v6) on the socket so
+/// that `recvmsg` returns the per-packet *destination* address as a cmsg.
+/// Audit finding #20: needed so a server bound to `0.0.0.0` can route by
+/// the actual local IP each datagram arrived on, not the bind address.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_pktinfo(socket: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let enable: libc::c_int = 1;
+    // SAFETY: fd is a valid socket descriptor, enable points to a valid int.
+    // The wrong family silently fails (per setsockopt semantics).
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_RECVDSTADDR,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+    }
+}
+
+/// Parse cmsg control data for `IP_RECVDSTADDR` (v4) / `IPV6_PKTINFO` (v6).
+/// Returns the destination IP address if a recognised cmsg is present.
+#[cfg(target_os = "macos")]
+pub(crate) fn parse_pktinfo_cmsg(control: &[u8]) -> Option<std::net::IpAddr> {
+    let mut offset = 0;
+    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
+        // SAFETY: bounds checked above; read_unaligned handles alignment.
+        let hdr: libc::cmsghdr =
+            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
+        if hdr.cmsg_len == 0 {
+            break;
+        }
+        let data_off = offset + cmsg_data_offset();
+
+        if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_RECVDSTADDR {
+            // IP_RECVDSTADDR delivers a bare `struct in_addr` (4 bytes).
+            if data_off + std::mem::size_of::<libc::in_addr>() <= control.len() {
+                let addr: libc::in_addr =
+                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+                let ip = std::net::Ipv4Addr::from(u32::from_be(addr.s_addr));
+                return Some(std::net::IpAddr::V4(ip));
+            }
+        } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
+            if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
+                let info: libc::in6_pktinfo =
+                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+                let ip = std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr);
+                return Some(std::net::IpAddr::V6(ip));
+            }
+        }
+
+        offset += cmsg_align(hdr.cmsg_len as usize);
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn cmsg_align(len: usize) -> usize {
+    let align = std::mem::size_of::<usize>();
+    (len + align - 1) & !(align - 1)
+}
+
+#[cfg(target_os = "macos")]
+fn cmsg_data_offset() -> usize {
+    cmsg_align(std::mem::size_of::<libc::cmsghdr>())
 }
 
 // ── UDP GSO (Generic Segmentation Offload) ──────────────────────────
