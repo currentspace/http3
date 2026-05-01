@@ -116,6 +116,13 @@ export class ServerHttp3Stream extends Duplex {
       name,
       value: Array.isArray(value) ? value[0] : value,
     }));
+    // Audit finding #17: auto-inject :status: 200 when the caller didn't
+    // supply one. Brings H3 to parity with the H2 adapter (which already
+    // defaults to 200 in toHttp2OutgoingHeaders) and avoids a quiche-
+    // level rejection that surfaces only as a generic stream error.
+    if (!h.some((entry) => entry.name === ':status')) {
+      h.unshift({ name: ':status', value: '200' });
+    }
 
     this._eventLoop?.sendResponseHeaders(
       this._connHandle,
@@ -140,6 +147,9 @@ export class ServerHttp3Stream extends Duplex {
       name,
       value: Array.isArray(value) ? value[0] : value,
     }));
+    if (!h.some((entry) => entry.name === ':status')) {
+      h.unshift({ name: ':status', value: '200' });
+    }
 
     const buf = typeof body === 'string' ? Buffer.from(body) : body;
 
