@@ -85,7 +85,7 @@ pub struct QuicServerWorker {
     pub waker: Arc<dyn ErasedWaker>,
 }
 
-use crate::server_sharding::{self, WORKER_SHIFT};
+use crate::server_sharding;
 
 pub struct QuicServerHandle {
     workers: Vec<QuicServerWorker>,

@@ -26,7 +26,7 @@ use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_and_counting_batcher, channel_batcher};
 use crate::profile::mock_trace::MockReplayTrace;
 use crate::quic_worker::{
-    QuicClientHandle, QuicServerCommand, QuicServerConfig, QuicServerHandle, QuicServerWorker,
+    QuicClientHandle, QuicServerCommand, QuicServerConfig, QuicServerHandle,
     spawn_dedicated_quic_client_on_driver, spawn_server_worker_on_driver,
 };
 use crate::reactor_metrics::{self, JsReactorTelemetrySnapshot};

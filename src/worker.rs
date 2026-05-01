@@ -21,7 +21,7 @@ use crate::client_topology::{
     ClientSocketStrategy, SharedClientWorkerKey as SharedH3ClientWorkerKey,
     default_h3_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
 };
-use crate::config::{Http3Config, JsServerOptions, TransportRuntimeMode};
+use crate::config::{Http3Config, TransportRuntimeMode};
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::connection_map::ConnectionMap;
 use crate::error::Http3NativeError;
