@@ -1677,6 +1677,15 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     }
                 }
                 SharedQuicClientCommand::ReleaseSession { session_handle } => {
+                    // Audit Step 4.1 followup: emit SHUTDOWN_COMPLETE on
+                    // this session's TSFN before removing it so the JS
+                    // QuicClientEventLoop's `close()` await on the
+                    // sentinel resolves quickly instead of hitting the
+                    // 5 s timer fallback.
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.batcher.batch.push(JsH3Event::shutdown_complete());
+                        let _ = session.batcher.flush();
+                    }
                     remove_shared_quic_client_session(
                         &mut sessions,
                         &mut route_by_dcid,
