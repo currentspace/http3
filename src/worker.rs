@@ -1948,7 +1948,19 @@ impl ProtocolHandler for H3ServerHandler {
                         .iter()
                         .map(|(n, v)| quiche::h3::Header::new(n.as_bytes(), v.as_bytes()))
                         .collect();
-                    let _ = conn.send_response(stream_id, &h3_headers, fin);
+                    // Audit finding #3: surface failures to JS instead of
+                    // silently swallowing. Without this, `Done`/`StreamBlocked`
+                    // leaves the stream with no headers ever on the wire,
+                    // and subsequent body writes fail with FrameUnexpected
+                    // because quiche's H3 framer requires headers first.
+                    if let Err(e) = conn.send_response(stream_id, &h3_headers, fin) {
+                        _batch.push(JsH3Event::error(
+                            conn_handle,
+                            stream_id as i64,
+                            0,
+                            format!("send_response_headers failed: {e}"),
+                        ));
+                    }
                 }
             }
             WorkerCommand::SendResponse {
@@ -1964,7 +1976,19 @@ impl ProtocolHandler for H3ServerHandler {
                         .iter()
                         .map(|(n, v)| quiche::h3::Header::new(n.as_bytes(), v.as_bytes()))
                         .collect();
-                    let _ = conn.send_response(stream_id, &h3_headers, false);
+                    // Audit finding #3: don't call send_body if send_response
+                    // failed — that would emit DATA frames on a stream with
+                    // no HEADERS, an H3 protocol violation. Surface the
+                    // failure to JS so the caller can retry the request.
+                    if let Err(e) = conn.send_response(stream_id, &h3_headers, false) {
+                        _batch.push(JsH3Event::error(
+                            conn_handle,
+                            stream_id as i64,
+                            0,
+                            format!("send_response failed: {e}"),
+                        ));
+                        return false;
+                    }
                     // Step 2: send body + FIN
                     let key = (conn_handle, stream_id);
                     match conn.send_body(stream_id, body.remaining(), fin) {
