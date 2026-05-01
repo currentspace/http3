@@ -41,7 +41,7 @@ function makeStubLoop(): ClientLoopStub {
     sendDatagram: () => true,
     getSessionMetrics: () => ({
       packetsIn: 0, packetsOut: 0, bytesIn: 0, bytesOut: 0,
-      handshakeTimeMs: 0, rttMs: 0, cwnd: 0,
+      handshakeTimeMs: 0, rttMs: 0, cwnd: 0, datagramQueueDepth: 0,
     }),
     getRemoteSettings: () => [],
     ping: () => true,

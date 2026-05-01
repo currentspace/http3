@@ -340,10 +340,42 @@ export interface MemorySnapshot {
   heapTotal: number;
 }
 
+export type MemoryDriftSnapshot = Pick<MemorySnapshot, 'rss' | 'heapUsed'>;
+
+export const MEMORY_DRIFT_LIMIT_BYTES = 50 * 1024 * 1024;
+
 /**
  * Capture a point-in-time memory snapshot for leak detection in long-haul tests.
  */
 export function snapshotMemory(): MemorySnapshot {
   const m = process.memoryUsage();
   return { rss: m.rss, heapUsed: m.heapUsed, heapTotal: m.heapTotal };
+}
+
+/**
+ * Assert that post-warmup memory drift stays bounded. Long-haul tests use a
+ * post-warmup baseline so startup and native allocator ramp do not look like
+ * steady-state leaks.
+ */
+export function assertMemoryDriftWithinLimit(
+  label: string,
+  baseline: MemoryDriftSnapshot,
+  final: MemoryDriftSnapshot,
+  limitBytes = MEMORY_DRIFT_LIMIT_BYTES,
+): void {
+  const limitMB = (limitBytes / 1024 / 1024).toFixed(1);
+  const rssDrift = final.rss - baseline.rss;
+  const heapDrift = final.heapUsed - baseline.heapUsed;
+  if (rssDrift > limitBytes) {
+    throw new Error(
+      `${label} RSS drift ${(rssDrift / 1024 / 1024).toFixed(1)}MB exceeds ${limitMB}MB ` +
+      `(${(baseline.rss / 1024 / 1024).toFixed(1)}MB -> ${(final.rss / 1024 / 1024).toFixed(1)}MB)`,
+    );
+  }
+  if (heapDrift > limitBytes) {
+    throw new Error(
+      `${label} heap drift ${(heapDrift / 1024 / 1024).toFixed(1)}MB exceeds ${limitMB}MB ` +
+      `(${(baseline.heapUsed / 1024 / 1024).toFixed(1)}MB -> ${(final.heapUsed / 1024 / 1024).toFixed(1)}MB)`,
+    );
+  }
 }

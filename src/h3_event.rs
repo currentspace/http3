@@ -5,9 +5,14 @@
 use napi_derive::napi;
 
 #[cfg(feature = "node-api")]
-use std::sync::Arc;
-#[cfg(feature = "node-api")]
 use crate::buffer_pool::BufferRecycler;
+#[cfg(feature = "node-api")]
+use std::sync::Arc;
+#[cfg(all(feature = "node-api", test))]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(all(feature = "node-api", test))]
+static NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
@@ -29,7 +34,10 @@ impl RecyclableBuffer {
 
     /// Create a non-recyclable buffer (for rare events like session_ticket).
     pub fn owned(data: Vec<u8>) -> Self {
-        Self { data, recycler: None }
+        Self {
+            data,
+            recycler: None,
+        }
     }
 }
 
@@ -89,7 +97,10 @@ impl napi::bindgen_prelude::FromNapiValue for RecyclableBuffer {
         napi_val: napi::sys::napi_value,
     ) -> napi::Result<Self> {
         let buf = unsafe { napi::bindgen_prelude::Buffer::from_napi_value(env, napi_val)? };
-        Ok(Self { data: buf.to_vec(), recycler: None })
+        Ok(Self {
+            data: buf.to_vec(),
+            recycler: None,
+        })
     }
 }
 
@@ -108,9 +119,8 @@ impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
         if len == 0 {
             // Empty buffer — use standard NAPI path
             let mut ret = std::ptr::null_mut();
-            let status = unsafe {
-                napi::sys::napi_create_buffer(env, 0, std::ptr::null_mut(), &mut ret)
-            };
+            let status =
+                unsafe { napi::sys::napi_create_buffer(env, 0, std::ptr::null_mut(), &mut ret) };
             if status != napi::sys::Status::napi_ok {
                 return Err(napi::Error::from_status(status.into()));
             }
@@ -131,7 +141,7 @@ impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
             let hint_ptr = Box::into_raw(hint);
             let mut ret = std::ptr::null_mut();
             let status = unsafe {
-                napi::sys::napi_create_external_buffer(
+                create_external_buffer(
                     env,
                     len,
                     ptr as *mut c_void,
@@ -164,6 +174,26 @@ impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
             let buf = napi::bindgen_prelude::Buffer::from(data);
             unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) }
         }
+    }
+}
+
+#[cfg(feature = "node-api")]
+unsafe fn create_external_buffer(
+    env: napi::sys::napi_env,
+    len: usize,
+    data: *mut std::ffi::c_void,
+    finalize_cb: napi::sys::napi_finalize,
+    finalize_hint: *mut std::ffi::c_void,
+    result: *mut napi::sys::napi_value,
+) -> napi::sys::napi_status {
+    #[cfg(test)]
+    {
+        if NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE.load(Ordering::SeqCst) {
+            return napi::sys::Status::napi_generic_failure;
+        }
+    }
+    unsafe {
+        napi::sys::napi_create_external_buffer(env, len, data, finalize_cb, finalize_hint, result)
     }
 }
 
@@ -211,9 +241,13 @@ pub const NO_RECYCLER: EventRecycler = ();
 
 fn make_data_buf(data: Vec<u8>, _recycler: EventRecycler) -> ByteBuf {
     #[cfg(feature = "node-api")]
-    { RecyclableBuffer::new(data, _recycler) }
+    {
+        RecyclableBuffer::new(data, _recycler)
+    }
     #[cfg(not(feature = "node-api"))]
-    { data }
+    {
+        data
+    }
 }
 
 pub const EVENT_NEW_SESSION: u8 = 1;
@@ -284,6 +318,7 @@ pub struct JsSessionMetrics {
     pub rtt_ms: f64,
     pub cwnd: i64,
     pub pmtu: i64,
+    pub datagram_queue_depth: u32,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]
@@ -337,6 +372,7 @@ impl JsSessionMetrics {
             rtt_ms: 0.0,
             cwnd: 0,
             pmtu: 0,
+            datagram_queue_depth: 0,
         }
     }
 }
@@ -415,7 +451,13 @@ impl JsH3Event {
         }
     }
 
-    pub fn data(conn_handle: u32, stream_id: u64, data: Vec<u8>, fin: bool, recycler: EventRecycler) -> Self {
+    pub fn data(
+        conn_handle: u32,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+        recycler: EventRecycler,
+    ) -> Self {
         Self {
             event_type: EVENT_DATA,
             conn_handle,
@@ -857,5 +899,27 @@ mod tests {
         assert!(ev.data.is_none());
         assert!(ev.meta.is_some());
         assert!(ev.metrics.is_some());
+    }
+
+    #[cfg(feature = "node-api")]
+    #[test]
+    fn recyclable_buffer_reclaims_vec_on_external_buffer_error() {
+        use napi::bindgen_prelude::ToNapiValue;
+
+        let (_pool, recycler, rx) = crate::buffer_pool::AdaptiveBufferPool::with_recycler(8, 1);
+        NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE.store(true, Ordering::SeqCst);
+        let result = unsafe {
+            RecyclableBuffer::to_napi_value(
+                std::ptr::null_mut(),
+                RecyclableBuffer::new(vec![1, 2, 3, 4], Some(recycler)),
+            )
+        };
+        NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE.store(false, Ordering::SeqCst);
+
+        assert!(result.is_err());
+        assert!(
+            rx.try_recv().is_err(),
+            "unexpected NAPI failure must reclaim the Vec directly, not hand it to recycler"
+        );
     }
 }

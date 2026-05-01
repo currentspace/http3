@@ -281,6 +281,7 @@ export interface JsReactorTelemetrySnapshot {
   eventBatchAckedEventsTotal: number
   eventBatchOutstanding: number
   eventBatchOutstandingHighWatermark: number
+  eventBatchSelfHealedTotal: number
   /**
    * Audit #14, step 5.2: count of poll iterations where the worker
    * skipped RX processing because the outstanding-events gauge was
@@ -404,6 +405,7 @@ export interface JsSessionMetrics {
   rttMs: number
   cwnd: number
   pmtu: number
+  datagramQueueDepth: number
 }
 
 export interface JsSetting {

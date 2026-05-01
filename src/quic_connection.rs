@@ -14,6 +14,8 @@ use crate::error::Http3NativeError;
 use crate::h3_event::{EventRecycler, JsH3Event};
 use crate::reactor_metrics;
 
+const MAX_OUTBOUND_DATAGRAM_QUEUE: usize = 64;
+
 /// A raw QUIC connection (no HTTP/3 framing).
 /// Streams carry opaque byte data, not HTTP semantics.
 pub struct QuicConnection {
@@ -48,6 +50,9 @@ pub struct QuicConnection {
     /// Avoids a fresh `Vec<u64>` allocation per `poll_quic_events` call.
     /// Audit finding #25.
     readable_scratch: Vec<u64>,
+    /// Bounded retry queue for outbound QUIC DATAGRAM frames that quiche
+    /// temporarily refuses with `Done`.
+    outbound_datagrams: VecDeque<Vec<u8>>,
 }
 
 pub struct QuicConnectionInit<'a> {
@@ -95,6 +100,7 @@ impl QuicConnection {
             data_recycler,
             data_recycle_rx,
             readable_scratch: Vec::new(),
+            outbound_datagrams: VecDeque::new(),
         }
     }
 
@@ -213,7 +219,13 @@ impl QuicConnection {
                     Ok((len, fin)) => {
                         if len > 0 {
                             buf.truncate(len);
-                            events.push(JsH3Event::data(conn_handle, stream_id, buf, fin, self.event_recycler()));
+                            events.push(JsH3Event::data(
+                                conn_handle,
+                                stream_id,
+                                buf,
+                                fin,
+                                self.event_recycler(),
+                            ));
                         } else {
                             self.data_pool.checkin(buf);
                         }
@@ -346,6 +358,7 @@ impl QuicConnection {
     ) -> Result<(usize, Option<Vec<u8>>), Http3NativeError> {
         let data_len = data.len();
         let buf = ArcBuf::from_vec(data);
+        let original = buf.clone();
         match self.quiche_conn.stream_send_zc(stream_id, buf, None, fin) {
             Ok((written, remaining)) => {
                 if written < data_len && self.blocked_set.insert(stream_id) {
@@ -369,7 +382,7 @@ impl QuicConnection {
                     self.blocked_queue.push_back(stream_id);
                     reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
-                Ok((0, None))
+                Ok((0, Some(original.as_ref().to_vec())))
             }
             Err(e) => Err(Http3NativeError::Quiche(e)),
         }
@@ -455,9 +468,13 @@ impl QuicConnection {
     /// Without `node-api`, it is `()` (zero-cost no-op).
     fn event_recycler(&self) -> EventRecycler {
         #[cfg(feature = "node-api")]
-        { Some(Arc::clone(&self.data_recycler)) }
+        {
+            Some(Arc::clone(&self.data_recycler))
+        }
         #[cfg(not(feature = "node-api"))]
-        { () }
+        {
+            ()
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -469,6 +486,40 @@ impl QuicConnection {
             .dgram_send(data)
             .map(|_| ())
             .map_err(Http3NativeError::Quiche)
+    }
+
+    pub fn queue_datagram(&mut self, data: Vec<u8>) -> Result<bool, Http3NativeError> {
+        match self.quiche_conn.dgram_send(&data) {
+            Ok(_) => Ok(true),
+            Err(quiche::Error::Done) => {
+                if self.outbound_datagrams.len() >= MAX_OUTBOUND_DATAGRAM_QUEUE {
+                    return Ok(false);
+                }
+                self.outbound_datagrams.push_back(data);
+                Ok(true)
+            }
+            Err(e) => Err(Http3NativeError::Quiche(e)),
+        }
+    }
+
+    pub fn drain_outbound_datagrams(&mut self) {
+        while let Some(data) = self.outbound_datagrams.pop_front() {
+            match self.quiche_conn.dgram_send(&data) {
+                Ok(_) => {}
+                Err(quiche::Error::Done) => {
+                    self.outbound_datagrams.push_front(data);
+                    break;
+                }
+                Err(e) => {
+                    log::debug!("dropping queued QUIC datagram after send failure: {e}");
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn outbound_datagram_queue_len(&self) -> usize {
+        self.outbound_datagrams.len()
     }
 
     pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {

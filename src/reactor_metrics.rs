@@ -42,6 +42,7 @@ pub struct JsReactorTelemetrySnapshot {
     pub eventBatchAckedEventsTotal: i64,
     pub eventBatchOutstanding: i64,
     pub eventBatchOutstandingHighWatermark: i64,
+    pub eventBatchSelfHealedTotal: i64,
     /// Audit #14, step 5.2: count of poll iterations where the worker
     /// skipped RX processing because the outstanding-events gauge was
     /// over the high-water mark. Coarse backpressure signal — if this
@@ -217,6 +218,8 @@ static EVENT_BATCH_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_ACKED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_RX_PAUSES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_SELF_HEALED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_LAST_PROGRESS_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Audit finding #18: ECN code point counts on inbound datagrams,
 /// observed via IP_RECVTOS / IPV6_RECVTCLASS cmsg. quiche 0.28 doesn't
@@ -345,6 +348,13 @@ fn lifecycle_trace_timestamp_ms() -> i64 {
         .as_millis() as i64
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 pub(crate) fn record_driver_setup_attempt(kind: RuntimeDriverKind) {
     bump(&DRIVER_SETUP_ATTEMPTS_TOTAL);
     match kind {
@@ -405,11 +415,12 @@ pub(crate) fn record_shutdown_complete_emitted() {
 }
 
 pub(crate) fn record_event_batch_flush(count: usize) {
+    EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
     bump(&EVENT_BATCH_FLUSHES_TOTAL);
     EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
     observe_max(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK, count);
-    let outstanding = EVENT_BATCH_OUTSTANDING.fetch_add(count as u64, Ordering::Relaxed)
-        + count as u64;
+    let outstanding =
+        EVENT_BATCH_OUTSTANDING.fetch_add(count as u64, Ordering::Relaxed) + count as u64;
     let mut hwm = EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK.load(Ordering::Relaxed);
     while outstanding > hwm {
         match EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK.compare_exchange_weak(
@@ -425,6 +436,7 @@ pub(crate) fn record_event_batch_flush(count: usize) {
 }
 
 pub(crate) fn record_event_batch_drop(count: usize) {
+    EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
     EVENT_BATCH_DROPPED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
     // Drops never reach JS, so they shouldn't sit in the outstanding gauge.
     EVENT_BATCH_OUTSTANDING.fetch_sub(count as u64, Ordering::Relaxed);
@@ -438,6 +450,7 @@ pub(crate) fn record_event_batch_sink_error() {
 /// TSFN batch. Releases credit on the outstanding gauge so the worker
 /// can quantify how far JS is behind real-time.
 pub(crate) fn record_event_batch_ack(count: usize) {
+    EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
     let count = count as u64;
     EVENT_BATCH_ACKED_EVENTS_TOTAL.fetch_add(count, Ordering::Relaxed);
     let prev = EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed);
@@ -447,9 +460,35 @@ pub(crate) fn record_event_batch_ack(count: usize) {
     EVENT_BATCH_OUTSTANDING.store(new, Ordering::Relaxed);
 }
 
-/// Current best-effort snapshot of the outstanding-events gauge.
-pub fn event_batch_outstanding() -> u64 {
-    EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed)
+pub(crate) fn self_heal_event_batch_if_stuck(high_water: u64, stuck_after_ms: u64) -> u64 {
+    self_heal_event_batch_if_stuck_at(high_water, stuck_after_ms, now_ms())
+}
+
+fn self_heal_event_batch_if_stuck_at(high_water: u64, stuck_after_ms: u64, now_ms: u64) -> u64 {
+    let outstanding = EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed);
+    if outstanding <= high_water {
+        return outstanding;
+    }
+    let last_progress = EVENT_BATCH_LAST_PROGRESS_MS.load(Ordering::Relaxed);
+    if last_progress == 0 || now_ms.saturating_sub(last_progress) <= stuck_after_ms {
+        return outstanding;
+    }
+    match EVENT_BATCH_OUTSTANDING.compare_exchange(
+        outstanding,
+        0,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        Ok(stuck) => {
+            EVENT_BATCH_SELF_HEALED_TOTAL.fetch_add(stuck, Ordering::Relaxed);
+            EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms, Ordering::Relaxed);
+            log::warn!(
+                "event batch outstanding gauge self-healed stuck_events={stuck} high_water={high_water} stuck_after_ms={stuck_after_ms}"
+            );
+            0
+        }
+        Err(actual) => actual,
+    }
 }
 
 /// Audit #14, step 5.2: increment the count of RX pause iterations.
@@ -823,6 +862,7 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         eventBatchAckedEventsTotal: load(&EVENT_BATCH_ACKED_EVENTS_TOTAL),
         eventBatchOutstanding: load(&EVENT_BATCH_OUTSTANDING),
         eventBatchOutstandingHighWatermark: load(&EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK),
+        eventBatchSelfHealedTotal: load(&EVENT_BATCH_SELF_HEALED_TOTAL),
         eventBatchRxPausesTotal: load(&EVENT_BATCH_RX_PAUSES_TOTAL),
         ecnRecvNotEctTotal: load(&ECN_RECV_NOT_ECT_TOTAL),
         ecnRecvEct0Total: load(&ECN_RECV_ECT0_TOTAL),
@@ -931,6 +971,8 @@ pub fn reset() {
         &EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK,
         &EVENT_BATCH_ACKED_EVENTS_TOTAL,
         &EVENT_BATCH_RX_PAUSES_TOTAL,
+        &EVENT_BATCH_SELF_HEALED_TOTAL,
+        &EVENT_BATCH_LAST_PROGRESS_MS,
         &ECN_RECV_NOT_ECT_TOTAL,
         &ECN_RECV_ECT0_TOTAL,
         &ECN_RECV_ECT1_TOTAL,
@@ -1013,19 +1055,26 @@ pub fn reset() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{MutexGuard, OnceLock};
 
     /// Reset all global counters and lifecycle trace state before each test
     /// to isolate from other tests (global atomics are shared across the
     /// process, but `cargo test` runs tests on separate threads).
-    fn setup() {
+    fn setup() -> MutexGuard<'static, ()> {
+        static TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        let guard = TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         reset();
         set_lifecycle_trace_enabled(false);
         reset_lifecycle_trace();
+        guard
     }
 
     #[test]
     fn test_snapshot_after_reset() {
-        setup();
+        let _guard = setup();
         let snap = snapshot();
         assert_eq!(snap.driverSetupAttemptsTotal, 0);
         assert_eq!(snap.driverSetupSuccessTotal, 0);
@@ -1041,6 +1090,7 @@ mod tests {
         assert_eq!(snap.eventBatchAckedEventsTotal, 0);
         assert_eq!(snap.eventBatchOutstanding, 0);
         assert_eq!(snap.eventBatchOutstandingHighWatermark, 0);
+        assert_eq!(snap.eventBatchSelfHealedTotal, 0);
         assert_eq!(snap.eventBatchRxPausesTotal, 0);
         assert_eq!(snap.ecnRecvNotEctTotal, 0);
         assert_eq!(snap.ecnRecvEct0Total, 0);
@@ -1053,7 +1103,7 @@ mod tests {
 
     #[test]
     fn test_record_driver_setup_attempt() {
-        setup();
+        let _guard = setup();
         record_driver_setup_attempt(RuntimeDriverKind::Poll);
         record_driver_setup_attempt(RuntimeDriverKind::Poll);
         let snap = snapshot();
@@ -1065,7 +1115,7 @@ mod tests {
 
     #[test]
     fn test_record_worker_thread_spawn() {
-        setup();
+        let _guard = setup();
         record_worker_thread_spawn(WorkerSpawnKind::RawQuicServer);
         record_worker_thread_spawn(WorkerSpawnKind::H3Server);
         record_worker_thread_spawn(WorkerSpawnKind::H3Server);
@@ -1080,7 +1130,7 @@ mod tests {
 
     #[test]
     fn test_record_event_batch_flush() {
-        setup();
+        let _guard = setup();
         record_event_batch_flush(10);
         record_event_batch_flush(20);
         let snap = snapshot();
@@ -1095,7 +1145,7 @@ mod tests {
 
     #[test]
     fn test_record_event_batch_ack() {
-        setup();
+        let _guard = setup();
         record_event_batch_flush(50);
         record_event_batch_ack(20);
         let snap = snapshot();
@@ -1106,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_record_event_batch_ack_saturates() {
-        setup();
+        let _guard = setup();
         record_event_batch_flush(5);
         // Stray ack with count > outstanding shouldn't underflow.
         record_event_batch_ack(100);
@@ -1117,7 +1167,7 @@ mod tests {
 
     #[test]
     fn test_record_event_batch_drop_releases_outstanding() {
-        setup();
+        let _guard = setup();
         record_event_batch_flush(50);
         record_event_batch_drop(50);
         let snap = snapshot();
@@ -1128,7 +1178,7 @@ mod tests {
 
     #[test]
     fn test_record_event_batch_rx_pause() {
-        setup();
+        let _guard = setup();
         record_event_batch_rx_pause();
         record_event_batch_rx_pause();
         let snap = snapshot();
@@ -1136,9 +1186,24 @@ mod tests {
     }
 
     #[test]
+    fn test_event_batch_self_heal_only_after_stuck_window() {
+        let _guard = setup();
+        record_event_batch_flush(100);
+        EVENT_BATCH_LAST_PROGRESS_MS.store(1_000, Ordering::Relaxed);
+
+        assert_eq!(self_heal_event_batch_if_stuck_at(50, 5_000, 5_999), 100);
+        assert_eq!(snapshot().eventBatchOutstanding, 100);
+
+        assert_eq!(self_heal_event_batch_if_stuck_at(50, 5_000, 6_001), 0);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchSelfHealedTotal, 100);
+    }
+
+    #[test]
     fn test_record_ecn_recv_classification() {
         use crate::transport::socket::EcnCodePoint;
-        setup();
+        let _guard = setup();
         record_ecn_recv(EcnCodePoint::NotEct);
         record_ecn_recv(EcnCodePoint::Ect0);
         record_ecn_recv(EcnCodePoint::Ect0);
@@ -1155,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_lifecycle_trace_enable_disable() {
-        setup();
+        let _guard = setup();
 
         // Initially disabled
         let trace = lifecycle_trace_snapshot();
@@ -1178,6 +1243,9 @@ mod tests {
         assert!(!trace.enabled);
         record_lifecycle_trace("test-component", "ignored", None, None, None, None);
         let trace = lifecycle_trace_snapshot();
-        assert_eq!(trace.eventCount, 1, "event should not be recorded when trace is disabled");
+        assert_eq!(
+            trace.eventCount, 1,
+            "event should not be recorded when trace is disabled"
+        );
     }
 }

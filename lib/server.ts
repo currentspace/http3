@@ -224,22 +224,24 @@ export class Http3SecureServer extends EventEmitter {
           disableRetry: this._options.disableRetry,
           reusePort: this._options.reusePort,
         }, (_err: Error | null, events: NativeEvent[]) => {
-          let hasShutdown = false;
-          for (const event of events) {
-            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-              hasShutdown = true;
+          try {
+            let hasShutdown = false;
+            for (const event of events) {
+              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                hasShutdown = true;
+              }
             }
+            if (!hasShutdown) {
+              this._dispatchEvents(events);
+            } else {
+              this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+              eventLoop._onShutdownSentinel();
+            }
+          } finally {
+            // Audit finding #14: release credit on the native outstanding-events
+            // gauge so dispatch exceptions cannot wedge RX pause indefinitely.
+            workerServer.ackEventBatch(events.length);
           }
-          if (!hasShutdown) {
-            this._dispatchEvents(events);
-          } else {
-            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-            eventLoop._onShutdownSentinel();
-          }
-          // Audit finding #14: release credit on the native outstanding-events
-          // gauge so the worker can quantify how far behind real-time JS is.
-          // Step 5.2 will use this signal to pause RX when JS falls behind.
-          workerServer.ackEventBatch(events.length);
         });
 
         const eventLoop = new WorkerEventLoop(workerServer);

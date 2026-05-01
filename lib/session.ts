@@ -41,7 +41,11 @@ export interface SessionMetrics {
   rttMs: number;
   /** Current congestion window in bytes. */
   cwnd: number;
+  /** Current outbound DATAGRAM retry queue depth. */
+  datagramQueueDepth: number;
 }
+
+export type PingCallback = (err: Error | null, duration: number) => void;
 
 /**
  * Typed event declarations for {@link Http3Session}.
@@ -149,8 +153,10 @@ export class Http3Session extends EventEmitter {
   }
 
   /** Send a PING frame and return the last known RTT in milliseconds. */
-  ping(): number {
-    return this._lastMetrics?.rttMs ?? 0;
+  ping(cb?: PingCallback): number {
+    const snapshot = this._lastMetrics?.rttMs ?? 0;
+    if (cb) process.nextTick(cb, null, snapshot);
+    return snapshot;
   }
 
   /** Return the peer's advertised QUIC transport settings, or `null`. */
@@ -269,6 +275,7 @@ export class Http3ServerSession extends Http3Session {
         handshakeTimeMs: metrics.handshakeTimeMs,
         rttMs: metrics.rttMs,
         cwnd: metrics.cwnd,
+        datagramQueueDepth: metrics.datagramQueueDepth,
       };
     } catch {
       // Keep the last known snapshot on transient native-read failures.
@@ -276,23 +283,26 @@ export class Http3ServerSession extends Http3Session {
     return this._lastMetrics;
   }
 
-  override ping(): number {
+  override ping(cb?: PingCallback): number {
     if (this._h2Session) {
-      this._h2Session.ping((_err: Error | null, duration: number) => {
+      this._h2Session.ping((err: Error | null, duration: number) => {
         if (this._lastMetrics) {
           this._lastMetrics.rttMs = duration;
         }
+        cb?.(err, duration);
       });
       return this._lastMetrics?.rttMs ?? 0;
     }
-    if (!this._eventLoop) return 0;
+    if (!this._eventLoop) return super.ping(cb);
     try {
       this._eventLoop.pingSession(this._connHandle);
     } catch {
-      return this._lastMetrics?.rttMs ?? 0;
+      return super.ping(cb);
     }
     const metrics = this.getMetrics();
-    return metrics?.rttMs ?? 0;
+    const snapshot = metrics?.rttMs ?? 0;
+    if (cb) process.nextTick(cb, null, snapshot);
+    return snapshot;
   }
 
   override getRemoteSettings(): Record<string, number | boolean> | null {
@@ -372,6 +382,7 @@ export class Http2ServerSessionAdapter extends Http3ServerSession {
       handshakeTimeMs: 0,
       rttMs: 0,
       cwnd: 0,
+      datagramQueueDepth: 0,
     };
     return this._lastMetrics;
   }
@@ -423,6 +434,7 @@ export class Http3ClientSessionBase extends Http3Session {
         handshakeTimeMs: metrics.handshakeTimeMs,
         rttMs: metrics.rttMs,
         cwnd: metrics.cwnd,
+        datagramQueueDepth: metrics.datagramQueueDepth,
       };
     } catch {
       // Keep the previous snapshot on transient native-read failures.
@@ -430,15 +442,17 @@ export class Http3ClientSessionBase extends Http3Session {
     return this._lastMetrics;
   }
 
-  override ping(): number {
-    if (!this._eventLoop) return 0;
+  override ping(cb?: PingCallback): number {
+    if (!this._eventLoop) return super.ping(cb);
     try {
       this._eventLoop.ping();
     } catch {
-      return this._lastMetrics?.rttMs ?? 0;
+      return super.ping(cb);
     }
     const metrics = this.getMetrics();
-    return metrics?.rttMs ?? 0;
+    const snapshot = metrics?.rttMs ?? 0;
+    if (cb) process.nextTick(cb, null, snapshot);
+    return snapshot;
   }
 
   override getRemoteSettings(): Record<string, number | boolean> | null {

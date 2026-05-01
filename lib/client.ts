@@ -469,20 +469,24 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
           qlogDir: options?.qlogDir,
           qlogLevel: options?.qlogLevel,
         }, (_err: Error | null, events: NativeEvent[]) => {
-          let hasShutdown = false;
-          for (const event of events) {
-            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-              hasShutdown = true;
+          try {
+            let hasShutdown = false;
+            for (const event of events) {
+              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                hasShutdown = true;
+              }
             }
+            if (!hasShutdown) {
+              session._dispatchEvents(events);
+            } else {
+              session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+              eventLoop._onShutdownSentinel();
+            }
+          } finally {
+            // Audit #14: release credit on the outstanding-events gauge even
+            // when user event handlers throw during dispatch.
+            nativeClient.ackEventBatch(events.length);
           }
-          if (!hasShutdown) {
-            session._dispatchEvents(events);
-          } else {
-            session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-            eventLoop._onShutdownSentinel();
-          }
-          // Audit #14: release credit on the outstanding-events gauge.
-          nativeClient.ackEventBatch(events.length);
         });
 
         const eventLoop = new ClientEventLoop(nativeClient);

@@ -122,7 +122,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   getSessionMetrics(connHandle: number): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   } {
     return this.worker.getSessionMetrics(connHandle);
   }
@@ -218,7 +218,7 @@ export class QuicServerSession extends EventEmitter {
   getMetrics(): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   } | null {
     try {
       return this._eventLoop.getSessionMetrics(this.connHandle);
@@ -231,6 +231,8 @@ export class QuicServerSession extends EventEmitter {
   ping(): boolean {
     return this._eventLoop.pingSession(this.connHandle);
   }
+
+  // Raw QUIC has no HTTP/3 SETTINGS frames; intentionally no getRemoteSettings().
 
   /** Return the peer leaf certificate, or `null` when the peer did not present one. */
   getPeerCertificate(): X509Certificate | null {
@@ -360,20 +362,24 @@ export class QuicServer extends EventEmitter {
           keylog: opts.keylog,
         },
         (_err: Error | null, events: NativeEvent[]) => {
-          let hasShutdown = false;
-          for (const event of events) {
-            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-              hasShutdown = true;
+          try {
+            let hasShutdown = false;
+            for (const event of events) {
+              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                hasShutdown = true;
+              }
             }
+            if (!hasShutdown) {
+              this._dispatchEvents(events);
+            } else {
+              this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+              eventLoop._onShutdownSentinel();
+            }
+          } finally {
+            // Audit #14: release credit on the outstanding-events gauge even
+            // when user event handlers throw during dispatch.
+            native.ackEventBatch(events.length);
           }
-          if (!hasShutdown) {
-            this._dispatchEvents(events);
-          } else {
-            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-            eventLoop._onShutdownSentinel();
-          }
-          // Audit #14: release credit on the outstanding-events gauge.
-          native.ackEventBatch(events.length);
         },
       );
 

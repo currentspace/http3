@@ -6,7 +6,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
-import { snapshotMemory } from '../support/native-test-helpers.js';
+import { assertMemoryDriftWithinLimit, snapshotMemory } from '../support/native-test-helpers.js';
+import type { MemorySnapshot } from '../support/native-test-helpers.js';
 import { createSecureServer, connectAsync } from '../../lib/index.js';
 import type { Http3SecureServer, Http3ClientSession, ServerHttp3Stream, IncomingHeaders, StreamFlags } from '../../lib/index.js';
 import type { ClientHttp3Stream } from '../../lib/stream.js';
@@ -134,6 +135,7 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
     let errors = 0;
     const start = Date.now();
     let lastCheckpoint = start;
+    let baselineMem: MemorySnapshot | null = null;
 
     while ((Date.now() - start) / 1000 < DURATION_S) {
       // Send a batch of 10 concurrent GET requests
@@ -151,6 +153,7 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       const now = Date.now();
       if ((now - lastCheckpoint) / 1000 >= CHECKPOINT_INTERVAL_S) {
         const mem = snapshotMemory();
+        baselineMem ??= mem;
         const elapsedS = (now - start) / 1000;
         console.log(
           `  [longhaul] ${elapsedS.toFixed(0)}s: ` +
@@ -181,6 +184,7 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       finalMem.heapUsed < 100 * 1024 * 1024,
       `heap grew too much: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
     );
+    assertMemoryDriftWithinLimit('h3 sustained post-warmup', baselineMem ?? finalMem, finalMem);
 
     await session.close();
   });
@@ -193,11 +197,13 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
 
     const initialMem = snapshotMemory();
     console.log(`  [longhaul/idle] initial RSS=${formatMB(initialMem.rss)}MB`);
+    let baselineMem: MemorySnapshot | null = null;
 
     // First idle phase: 150 seconds with 30s checkpoint logging
     for (let checkpoint = 1; checkpoint <= 5; checkpoint++) {
       await new Promise<void>((resolve) => { setTimeout(resolve, 30_000); });
       const mem = snapshotMemory();
+      baselineMem ??= mem;
       console.log(
         `  [longhaul/idle] ${checkpoint * 30}s: RSS=${formatMB(mem.rss)}MB ` +
         `heap=${formatMB(mem.heapUsed)}MB`,
@@ -235,6 +241,7 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       rssGrowthMB < 50,
       `RSS grew by ${rssGrowthMB.toFixed(1)}MB during idle (limit 50MB)`,
     );
+    assertMemoryDriftWithinLimit('h3 idle post-warmup', baselineMem ?? finalMem, finalMem);
 
     await session.close();
   });

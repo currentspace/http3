@@ -34,7 +34,11 @@ impl ChunkPool {
     /// Create a pool with a thread-safe return channel for cross-thread recycling.
     pub fn with_return_channel(
         max_per_bin: usize,
-    ) -> (Self, Arc<ChunkPoolReturn>, crossbeam_channel::Receiver<Vec<u8>>) {
+    ) -> (
+        Self,
+        Arc<ChunkPoolReturn>,
+        crossbeam_channel::Receiver<Vec<u8>>,
+    ) {
         let total_capacity = max_per_bin * NUM_BINS * 2;
         let (tx, rx) = crossbeam_channel::bounded(total_capacity);
         let pool = Self::new(max_per_bin);
@@ -217,6 +221,16 @@ impl Chunk {
     pub fn into_vec(mut self) -> Vec<u8> {
         self.pool_return = None; // Prevent Drop from recycling.
         std::mem::take(&mut self.data)
+    }
+
+    /// Extract only the unwritten bytes, consuming the chunk.
+    /// The Vec is NOT returned to the pool — caller takes ownership.
+    pub fn into_remaining_vec(mut self) -> Vec<u8> {
+        self.pool_return = None; // Prevent Drop from recycling.
+        if self.offset == 0 {
+            return std::mem::take(&mut self.data);
+        }
+        self.data.split_off(self.offset)
     }
 
     /// Append additional data to this chunk's unwritten region.

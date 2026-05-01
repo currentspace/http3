@@ -17,8 +17,8 @@ use ring::rand::SecureRandom;
 use slab::Slab;
 
 use crate::arc_buf::ArcBufFactory;
-use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
-use crate::chunk_pool::{Chunk, ChunkPool, ChunkPoolReturn};
+use crate::buffer_pool::BufferPool;
+use crate::chunk_pool::{Chunk, ChunkPool};
 use crate::cid::CidEncoding;
 use crate::client_topology::{
     ClientSocketStrategy, SharedClientWorkerKey as SharedQuicClientWorkerKey,
@@ -28,7 +28,9 @@ use crate::config::{ClientAuthMode, TransportRuntimeMode};
 use crate::error::Http3NativeError;
 #[cfg(feature = "node-api")]
 use crate::event_loop::EventTsfn;
-use crate::event_loop::{self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, SEND_BUF_SIZE};
+use crate::event_loop::{
+    self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, RX_PAUSE_HIGH_WATER, SEND_BUF_SIZE,
+};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{self, RawQuicClientCloseCause, SessionKind, WorkerSpawnKind};
@@ -714,11 +716,9 @@ impl QuicClientHandle {
                 session_handle,
                 worker,
             } => {
-                let _ = worker
-                    .cmd_tx
-                    .send(SharedQuicClientCommand::ReleaseSession {
-                        session_handle: *session_handle,
-                    });
+                let _ = worker.cmd_tx.send(SharedQuicClientCommand::ReleaseSession {
+                    session_handle: *session_handle,
+                });
                 worker.wake();
             }
         }
@@ -735,10 +735,7 @@ impl QuicClientHandle {
                     let _ = handle.join();
                 }
             }
-            QuicClientHandleKind::Shared {
-                worker,
-                ..
-            } => {
+            QuicClientHandleKind::Shared { worker, .. } => {
                 if worker.session_count.fetch_sub(1, Ordering::AcqRel) == 1 {
                     if let Ok(mut join_handle) = worker.join_handle.lock() {
                         if let Some(handle) = join_handle.take() {
@@ -981,12 +978,9 @@ impl QuicConnectionMap {
 // ── Pending write ──────────────────────────────────────────────────
 
 struct PendingWrite {
-    chunk: Chunk,
+    data: Vec<u8>,
     fin: bool,
 }
-
-const PENDING_WRITE_POOL_SIZE: usize = 256;
-const PENDING_WRITE_MIN_CAPACITY: usize = 4 * 1024;
 
 // Old checkout_pending_write_tail / recycle_pending_write_buffer / append_pending_write
 // have been replaced by the Chunk type which handles pooling internally.
@@ -1622,7 +1616,12 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     fin,
                 } => {
                     if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.handler.queue_stream_send(stream_id, chunk, fin, &mut session.batcher.batch);
+                        session.handler.queue_stream_send(
+                            stream_id,
+                            chunk,
+                            fin,
+                            &mut session.batcher.batch,
+                        );
                     }
                 }
                 SharedQuicClientCommand::StreamClose {
@@ -1641,7 +1640,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                 } => {
                     let ok = sessions
                         .get_mut(session_handle as usize)
-                        .is_some_and(|session| session.handler.send_datagram(&data));
+                        .is_some_and(|session| session.handler.send_datagram(data));
                     let _ = resp_tx.send(ok);
                 }
                 SharedQuicClientCommand::GetSessionMetrics {
@@ -1729,60 +1728,68 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
         }
 
         let rx_count = outcome.rx.len();
-        for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
-            let Ok(header) = quiche::Header::from_slice(pkt.data.as_mut_slice(), SCID_LEN) else {
-                continue;
-            };
-            let Some(handle) = route_by_dcid.get(header.dcid.as_ref()).copied() else {
-                continue;
-            };
-            let mut should_remove = false;
-            if let Some(session) = sessions.get_mut(handle) {
-                if pkt.peer == session.server_addr {
-                    session.handler.process_packet_for_handle(
-                        pkt.data.as_mut_slice(),
-                        pkt.peer,
-                        local_addr,
-                        &mut session.batcher.batch,
-                        handle as u32,
-                    );
-                    refresh_shared_quic_client_dcid(&mut route_by_dcid, handle, session);
-                    sync_shared_quic_client_timer(&mut timer_heap, handle, session);
-                    if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
-                        should_remove = true;
+        let outstanding =
+            reactor_metrics::self_heal_event_batch_if_stuck(RX_PAUSE_HIGH_WATER, 5_000);
+        if rx_count > 0 && outstanding > RX_PAUSE_HIGH_WATER {
+            reactor_metrics::record_event_batch_rx_pause();
+            driver.recycle_rx_buffers(outcome.rx.into_iter().map(|pkt| pkt.data).collect());
+        } else {
+            for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
+                let Ok(header) = quiche::Header::from_slice(pkt.data.as_mut_slice(), SCID_LEN)
+                else {
+                    continue;
+                };
+                let Some(handle) = route_by_dcid.get(header.dcid.as_ref()).copied() else {
+                    continue;
+                };
+                let mut should_remove = false;
+                if let Some(session) = sessions.get_mut(handle) {
+                    if pkt.peer == session.server_addr {
+                        session.handler.process_packet_for_handle(
+                            pkt.data.as_mut_slice(),
+                            pkt.peer,
+                            local_addr,
+                            &mut session.batcher.batch,
+                            handle as u32,
+                        );
+                        refresh_shared_quic_client_dcid(&mut route_by_dcid, handle, session);
+                        sync_shared_quic_client_timer(&mut timer_heap, handle, session);
+                        if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                            should_remove = true;
+                        }
                     }
                 }
-            }
-            if should_remove {
-                remove_shared_quic_client_session(
-                    &mut sessions,
-                    &mut route_by_dcid,
-                    &mut timer_heap,
-                    handle,
-                );
-            }
-            if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
-                flush_shared_quic_client_sends(
-                    &mut sessions,
-                    &mut handles_buf,
-                    &mut tx_pool,
-                    &mut outbound,
-                );
-                refresh_shared_quic_client_timers_after_sends(
-                    &mut sessions,
-                    &mut timer_heap,
-                    &mut handles_buf,
-                );
-                if !outbound.is_empty() {
-                    if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
-                        emit_shared_quic_client_runtime_error(
-                            &mut sessions,
-                            driver,
-                            "submit_sends",
-                            "driver-submit-sends-failed",
-                            &err,
-                        );
-                        return;
+                if should_remove {
+                    remove_shared_quic_client_session(
+                        &mut sessions,
+                        &mut route_by_dcid,
+                        &mut timer_heap,
+                        handle,
+                    );
+                }
+                if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
+                    flush_shared_quic_client_sends(
+                        &mut sessions,
+                        &mut handles_buf,
+                        &mut tx_pool,
+                        &mut outbound,
+                    );
+                    refresh_shared_quic_client_timers_after_sends(
+                        &mut sessions,
+                        &mut timer_heap,
+                        &mut handles_buf,
+                    );
+                    if !outbound.is_empty() {
+                        if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                            emit_shared_quic_client_runtime_error(
+                                &mut sessions,
+                                driver,
+                                "submit_sends",
+                                "driver-submit-sends-failed",
+                                &err,
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -1898,7 +1905,6 @@ struct QuicServerHandler {
     timer_heap: TimerHeap,
     buffer_pool: BufferPool,
     tx_pool: BufferPool,
-    pending_write_pool: AdaptiveBufferPool,
     pending_writes: HashMap<(u32, u64), PendingWrite>,
     conn_send_buffers: HashMap<usize, Vec<u8>>,
     handles_buf: Vec<usize>,
@@ -1911,7 +1917,6 @@ struct QuicServerHandler {
     /// Worker 0 uses offset 0, worker 1 uses `1 << WORKER_SHIFT`, etc.
     handle_offset: u32,
     chunk_pool: ChunkPool,
-    chunk_pool_return: Arc<ChunkPoolReturn>,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
@@ -1922,8 +1927,7 @@ impl QuicServerHandler {
         worker_index: u32,
     ) -> Self {
         let disable_retry = server_config.disable_retry;
-        let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
-            ChunkPool::with_return_channel(64);
+        let (chunk_pool, _chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
         Self {
             conn_map: QuicConnectionMap::new(
                 server_config.max_connections,
@@ -1932,10 +1936,6 @@ impl QuicServerHandler {
             timer_heap: TimerHeap::new(),
             buffer_pool: BufferPool::default(),
             tx_pool: BufferPool::new(256, 65535),
-            pending_write_pool: AdaptiveBufferPool::new(
-                PENDING_WRITE_POOL_SIZE,
-                PENDING_WRITE_MIN_CAPACITY,
-            ),
             pending_writes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
             handles_buf: Vec::new(),
@@ -1945,7 +1945,6 @@ impl QuicServerHandler {
             last_expired: Vec::new(),
             handle_offset: server_sharding::handle_offset(worker_index),
             chunk_pool,
-            chunk_pool_return,
             chunk_pool_rx,
         }
     }
@@ -1969,9 +1968,7 @@ impl ProtocolHandler for QuicServerHandler {
                 self.conn_map.fill_handles(&mut handles);
                 for handle in handles {
                     if let Some(conn) = self.conn_map.get_mut(handle) {
-                        if !conn.quiche_conn.is_closed()
-                            && !conn.quiche_conn.is_draining()
-                        {
+                        if !conn.quiche_conn.is_closed() && !conn.quiche_conn.is_draining() {
                             let _ = conn.quiche_conn.close(true, 0, b"server shutdown");
                         }
                     }
@@ -1981,32 +1978,28 @@ impl ProtocolHandler for QuicServerHandler {
             QuicServerCommand::StreamSend {
                 conn_handle,
                 stream_id,
-                mut chunk,
+                chunk,
                 fin,
             } => {
                 let key = (conn_handle, stream_id);
                 if let Some(pw) = self.pending_writes.get_mut(&key) {
-                    pw.chunk.append(chunk.remaining());
+                    pw.data.extend_from_slice(chunk.remaining());
                     pw.fin = pw.fin || fin;
                     // chunk drops here -> recycles to pool
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    match conn.stream_send_borrowed(stream_id, chunk.remaining(), fin) {
-                        Ok(written) => {
-                            if written < chunk.remaining_len() {
-                                chunk.advance(written);
-                                self.pending_writes.insert(key, PendingWrite { chunk, fin });
-                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
-                            } else if fin && written == 0 && chunk.remaining_len() == 0 {
-                                self.pending_writes.insert(
-                                    key,
-                                    PendingWrite {
-                                        chunk: Chunk::unpooled(Vec::new()),
-                                        fin: true,
-                                    },
-                                );
-                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
-                            }
-                            // else: full write — chunk drops → recycles to pool
+                    match conn.stream_send(stream_id, chunk.into_remaining_vec(), fin) {
+                        Ok((_written, Some(remainder))) => {
+                            self.pending_writes.insert(
+                                key,
+                                PendingWrite {
+                                    data: remainder,
+                                    fin,
+                                },
+                            );
+                            batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
+                        }
+                        Ok((_written, None)) => {
+                            // Full write — chunk backing Vec was donated to quiche.
                         }
                         Err(e) => {
                             batch.push(JsH3Event::error(
@@ -2025,7 +2018,26 @@ impl ProtocolHandler for QuicServerHandler {
                 error_code,
             } => {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    let _ = conn.stream_close(stream_id, u64::from(error_code));
+                    match conn.stream_close(stream_id, u64::from(error_code)) {
+                        Ok(()) => {
+                            if self
+                                .pending_writes
+                                .remove(&(conn_handle, stream_id))
+                                .is_some()
+                            {
+                                batch.push(JsH3Event::reset(
+                                    conn_handle,
+                                    stream_id,
+                                    u64::from(error_code),
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "quic stream_close failed conn_handle={conn_handle} stream_id={stream_id} error_code={error_code}: {e}"
+                            );
+                        }
+                    }
                 }
             }
             QuicServerCommand::CloseSession {
@@ -2060,7 +2072,7 @@ impl ProtocolHandler for QuicServerHandler {
                 let ok = self
                     .conn_map
                     .get_mut(conn_handle as usize)
-                    .is_some_and(|conn| conn.send_datagram(&data).is_ok());
+                    .is_some_and(|conn| conn.queue_datagram(data).unwrap_or(false));
                 let _ = resp_tx.send(ok);
             }
             QuicServerCommand::GetSessionMetrics {
@@ -2339,12 +2351,11 @@ impl ProtocolHandler for QuicServerHandler {
                 }
                 let handle = self.handles_buf[i];
                 let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
+                    conn.drain_outbound_datagrams();
                     // Write directly into a pool buffer — no intermediate copy.
                     let mut tx_buf = self.tx_pool.checkout();
                     if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
-                        let mtu =
-                            u16::try_from(conn.quiche_conn.max_send_udp_payload_size())
-                                .ok();
+                        let mtu = u16::try_from(conn.quiche_conn.max_send_udp_payload_size()).ok();
                         tx_buf.truncate(len);
                         outbound.push(TxDatagram {
                             data: tx_buf,
@@ -2377,11 +2388,7 @@ impl ProtocolHandler for QuicServerHandler {
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
-        let flushed = flush_quic_pending_writes(
-            &mut self.conn_map,
-            &mut self.pending_writes,
-            &self.chunk_pool_return,
-        );
+        let flushed = flush_quic_pending_writes(&mut self.conn_map, &mut self.pending_writes);
         for (local_handle, stream_id) in flushed {
             reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(
@@ -2493,11 +2500,9 @@ struct QuicClientHandler {
     pending_writes: HashMap<u64, PendingWrite>,
     send_buf: Vec<u8>,
     tx_pool: BufferPool,
-    pending_write_pool: AdaptiveBufferPool,
     timer_deadline: Option<Instant>,
     session_closed_emitted: bool,
     chunk_pool: ChunkPool,
-    chunk_pool_return: Arc<ChunkPoolReturn>,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
@@ -2538,21 +2543,15 @@ impl QuicClientHandler {
         );
         let timer_deadline = conn.timeout().map(|t| Instant::now() + t);
         reactor_metrics::record_session_open(SessionKind::RawQuicClient);
-        let (chunk_pool, chunk_pool_return, chunk_pool_rx) =
-            ChunkPool::with_return_channel(64);
+        let (chunk_pool, _chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
         Some(Self {
             conn,
             pending_writes: HashMap::new(),
             send_buf: vec![0u8; SEND_BUF_SIZE],
             tx_pool: BufferPool::new(256, 65535),
-            pending_write_pool: AdaptiveBufferPool::new(
-                PENDING_WRITE_POOL_SIZE,
-                PENDING_WRITE_MIN_CAPACITY,
-            ),
             timer_deadline,
             session_closed_emitted: false,
             chunk_pool,
-            chunk_pool_return,
             chunk_pool_rx,
         })
     }
@@ -2598,29 +2597,36 @@ impl QuicClientHandler {
         self.timer_deadline = self.conn.timeout().map(|timeout| Instant::now() + timeout);
     }
 
-    fn queue_stream_send(&mut self, stream_id: u64, mut chunk: Chunk, fin: bool, batch: &mut Vec<JsH3Event>) {
+    fn queue_stream_send(
+        &mut self,
+        stream_id: u64,
+        chunk: Chunk,
+        fin: bool,
+        batch: &mut Vec<JsH3Event>,
+    ) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
-            pw.chunk.append(chunk.remaining());
+            pw.data.extend_from_slice(chunk.remaining());
             pw.fin = pw.fin || fin;
             return;
         }
 
-        match self.conn.stream_send_borrowed(stream_id, chunk.remaining(), fin) {
-            Ok(written) => {
-                if written < chunk.remaining_len() {
-                    chunk.advance(written);
-                    self.pending_writes.insert(stream_id, PendingWrite { chunk, fin });
-                    reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
-                    batch.push(JsH3Event::stream_blocked(0, stream_id));
-                } else if fin && written == 0 && chunk.remaining_len() == 0 {
-                    self.pending_writes.insert(
-                        stream_id,
-                        PendingWrite { chunk: Chunk::unpooled(Vec::new()), fin: true },
-                    );
-                    reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
-                    batch.push(JsH3Event::stream_blocked(0, stream_id));
-                }
-                // else: full write — chunk drops → recycles to pool
+        match self
+            .conn
+            .stream_send(stream_id, chunk.into_remaining_vec(), fin)
+        {
+            Ok((_written, Some(remainder))) => {
+                self.pending_writes.insert(
+                    stream_id,
+                    PendingWrite {
+                        data: remainder,
+                        fin,
+                    },
+                );
+                reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
+                batch.push(JsH3Event::stream_blocked(0, stream_id));
+            }
+            Ok((_written, None)) => {
+                // Full write — chunk backing Vec was donated to quiche.
             }
             Err(e) => {
                 batch.push(JsH3Event::error(
@@ -2634,11 +2640,21 @@ impl QuicClientHandler {
     }
 
     fn close_stream(&mut self, stream_id: u64, error_code: u32) {
-        let _ = self.conn.stream_close(stream_id, u64::from(error_code));
+        match self.conn.stream_close(stream_id, u64::from(error_code)) {
+            Ok(()) => {
+                self.pending_writes.remove(&stream_id);
+                reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
+            }
+            Err(e) => {
+                log::debug!(
+                    "quic client stream_close failed stream_id={stream_id} error_code={error_code}: {e}"
+                );
+            }
+        }
     }
 
-    fn send_datagram(&mut self, data: &[u8]) -> bool {
-        self.conn.send_datagram(data).is_ok()
+    fn send_datagram(&mut self, data: Vec<u8>) -> bool {
+        self.conn.queue_datagram(data).unwrap_or(false)
     }
 
     fn metrics_snapshot(&self) -> JsSessionMetrics {
@@ -2757,6 +2773,7 @@ impl QuicClientHandler {
         _send_buf: &mut [u8],
         tx_pool: &mut BufferPool,
     ) -> Option<TxDatagram> {
+        conn.drain_outbound_datagrams();
         // Write directly into pool buffer — no intermediate copy.
         let mut tx_buf = tx_pool.checkout();
         let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) else {
@@ -2773,11 +2790,7 @@ impl QuicClientHandler {
     }
 
     fn flush_pending_writes_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
-        let flushed = flush_quic_client_pending_writes(
-            &mut self.conn,
-            &mut self.pending_writes,
-            &self.chunk_pool_return,
-        );
+        let flushed = flush_quic_client_pending_writes(&mut self.conn, &mut self.pending_writes);
         for stream_id in flushed {
             reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(conn_handle, stream_id));
@@ -2848,7 +2861,7 @@ impl ProtocolHandler for QuicClientHandler {
                 self.close_stream(stream_id, error_code);
             }
             QuicClientCommand::SendDatagram { data, resp_tx } => {
-                let _ = resp_tx.send(self.send_datagram(&data));
+                let _ = resp_tx.send(self.send_datagram(data));
             }
             QuicClientCommand::GetSessionMetrics { resp_tx } => {
                 let _ = resp_tx.send(Some(self.metrics_snapshot()));
@@ -2975,33 +2988,32 @@ fn snapshot_quic_metrics(conn: &QuicConnection) -> JsSessionMetrics {
         rtt_ms: conn.rtt_ms(),
         cwnd: conn.cwnd() as i64,
         pmtu: conn.pmtu() as i64,
+        datagram_queue_depth: conn.outbound_datagram_queue_len() as u32,
     }
 }
 
 fn flush_quic_pending_writes(
     conn_map: &mut QuicConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
-    _pool_return: &Arc<ChunkPoolReturn>,
 ) -> Vec<(u32, u64)> {
     let mut flushed = Vec::new();
     pending.retain(|&(conn_handle, stream_id), pw| {
         let Some(conn) = conn_map.get_mut(conn_handle as usize) else {
             return false;
         };
-        match conn.stream_send_borrowed(stream_id, pw.chunk.remaining(), pw.fin) {
-            Ok(written) if written >= pw.chunk.remaining_len() => {
+        let data = std::mem::take(&mut pw.data);
+        match conn.stream_send(stream_id, data, pw.fin) {
+            Ok((_written, None)) => {
                 flushed.push((conn_handle, stream_id));
-                false // Remove → PendingWrite drops → chunk recycles
+                false
             }
-            Ok(written) => {
-                if written > 0 {
-                    pw.chunk.advance(written);
-                }
-                true // Keep
+            Ok((_written, Some(remainder))) => {
+                pw.data = remainder;
+                true
             }
             Err(e) => {
                 log::warn!("flush pending write failed for stream {stream_id}: {e}");
-                false // Remove — stream is dead
+                false
             }
         }
     });
@@ -3011,24 +3023,22 @@ fn flush_quic_pending_writes(
 fn flush_quic_client_pending_writes(
     conn: &mut QuicConnection,
     pending: &mut HashMap<u64, PendingWrite>,
-    _pool_return: &Arc<ChunkPoolReturn>,
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
-        match conn.stream_send_borrowed(stream_id, pw.chunk.remaining(), pw.fin) {
-            Ok(written) if written >= pw.chunk.remaining_len() => {
+        let data = std::mem::take(&mut pw.data);
+        match conn.stream_send(stream_id, data, pw.fin) {
+            Ok((_written, None)) => {
                 flushed.push(stream_id);
-                false // Remove → PendingWrite drops → chunk recycles
+                false
             }
-            Ok(written) => {
-                if written > 0 {
-                    pw.chunk.advance(written);
-                }
-                true // Keep
+            Ok((_written, Some(remainder))) => {
+                pw.data = remainder;
+                true
             }
             Err(e) => {
                 log::warn!("flush pending write failed for stream {stream_id}: {e}");
-                false // Remove — stream is dead
+                false
             }
         }
     });

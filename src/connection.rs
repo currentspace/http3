@@ -176,41 +176,35 @@ impl H3Connection {
                             !more_frames,
                         ));
                     }
-                    Ok((stream_id, quiche::h3::Event::Data)) => {
-                        loop {
-                            let (mut buf, _) = self.data_pool.checkout(16384);
-                            match h3_conn.recv_body(
-                                &mut self.quiche_conn,
-                                stream_id,
-                                &mut buf,
-                            ) {
-                                Ok(len) => {
-                                    buf.truncate(len);
-                                    events.push(JsH3Event::data(
-                                        conn_handle,
-                                        stream_id,
-                                        buf,
-                                        false,
-                                        recycler.clone(),
-                                    ));
-                                }
-                                Err(quiche::h3::Error::Done) => {
-                                    self.data_pool.checkin(buf);
-                                    break;
-                                }
-                                Err(e) => {
-                                    self.data_pool.checkin(buf);
-                                    events.push(JsH3Event::error(
-                                        conn_handle,
-                                        stream_id as i64,
-                                        0,
-                                        e.to_string(),
-                                    ));
-                                    break;
-                                }
+                    Ok((stream_id, quiche::h3::Event::Data)) => loop {
+                        let (mut buf, _) = self.data_pool.checkout(16384);
+                        match h3_conn.recv_body(&mut self.quiche_conn, stream_id, &mut buf) {
+                            Ok(len) => {
+                                buf.truncate(len);
+                                events.push(JsH3Event::data(
+                                    conn_handle,
+                                    stream_id,
+                                    buf,
+                                    false,
+                                    recycler.clone(),
+                                ));
+                            }
+                            Err(quiche::h3::Error::Done) => {
+                                self.data_pool.checkin(buf);
+                                break;
+                            }
+                            Err(e) => {
+                                self.data_pool.checkin(buf);
+                                events.push(JsH3Event::error(
+                                    conn_handle,
+                                    stream_id as i64,
+                                    0,
+                                    e.to_string(),
+                                ));
+                                break;
                             }
                         }
-                    }
+                    },
                     Ok((stream_id, quiche::h3::Event::Finished)) => {
                         events.push(JsH3Event::finished(conn_handle, stream_id));
                     }
@@ -321,6 +315,7 @@ impl H3Connection {
     ///
     /// Wraps the input slice into an `ArcBuf` and uses quiche's
     /// `send_body_zc` to avoid an internal copy inside the H3 framer.
+    #[deprecated(note = "use send_body_owned to avoid copying outbound body data")]
     pub fn send_body(
         &mut self,
         stream_id: u64,
@@ -461,9 +456,13 @@ impl H3Connection {
     /// Without `node-api`, it is `()` (zero-cost no-op).
     fn event_recycler(&self) -> EventRecycler {
         #[cfg(feature = "node-api")]
-        { Some(Arc::clone(&self.data_recycler)) }
+        {
+            Some(Arc::clone(&self.data_recycler))
+        }
         #[cfg(not(feature = "node-api"))]
-        { () }
+        {
+            ()
+        }
     }
 
     /// Is the connection closed?
@@ -509,11 +508,7 @@ impl H3Connection {
             match self.quiche_conn.dgram_recv(&mut buf) {
                 Ok(len) => {
                     buf.truncate(len);
-                    events.push(JsH3Event::datagram(
-                        conn_handle,
-                        buf,
-                        self.event_recycler(),
-                    ));
+                    events.push(JsH3Event::datagram(conn_handle, buf, self.event_recycler()));
                 }
                 Err(quiche::Error::Done) => {
                     self.data_pool.checkin(buf);

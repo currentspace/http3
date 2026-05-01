@@ -10,6 +10,7 @@ import type { QuicServer, QuicServerSession, QuicClientSession } from '../../lib
 import type { QuicStream } from '../../lib/quic-stream.js';
 import { generateTestCerts } from '../support/generate-certs.js';
 import { LatencyTracker, pickWeighted } from '../support/scenario-helpers.js';
+import { assertMemoryDriftWithinLimit } from '../support/native-test-helpers.js';
 
 function formatMB(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1);
@@ -112,6 +113,7 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
     let errors = 0;
     const start = Date.now();
     let lastCheckpoint = start;
+    let baselineMem: ReturnType<typeof process.memoryUsage> | null = null;
 
     const scenarios: Array<[string, number]> = [
       ['echo-256', 40],
@@ -228,6 +230,7 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       if ((now - lastCheckpoint) / 1000 >= CHECKPOINT_INTERVAL_S) {
         if (typeof global.gc === 'function') global.gc();
         const mem = process.memoryUsage();
+        baselineMem ??= mem;
         const elapsedS = (now - start) / 1000;
         const stats = tracker.stats();
         console.log(
@@ -267,6 +270,7 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       finalMem.heapUsed < 100 * 1024 * 1024,
       `heap too large: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
     );
+    assertMemoryDriftWithinLimit('quic-mix post-warmup', baselineMem ?? finalMem, finalMem);
 
     await client.close();
     await server.close();

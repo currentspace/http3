@@ -54,6 +54,7 @@ export interface NativeEvent {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
 }
 
@@ -84,6 +85,7 @@ export interface NativeWorkerServerBinding {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
   getRemoteSettings(connHandle: number): Array<{ id: number; value: number }>;
   pingSession(connHandle: number): boolean;
@@ -114,6 +116,7 @@ export interface NativeWorkerClientBinding {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
   getRemoteSettings(): Array<{ id: number; value: number }>;
   ping(): boolean;
@@ -189,7 +192,7 @@ export interface NativeQuicServerBinding {
   getSessionMetrics(connHandle: number): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   };
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
@@ -213,7 +216,7 @@ export interface NativeQuicClientBinding {
   getSessionMetrics(): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   };
   ping(): boolean;
   getQlogPath(): string | null;
@@ -299,6 +302,7 @@ export interface ReactorTelemetrySnapshot {
   eventBatchAckedEventsTotal: number;
   eventBatchOutstanding: number;
   eventBatchOutstandingHighWatermark: number;
+  eventBatchSelfHealedTotal: number;
   eventBatchRxPausesTotal: number;
   ecnRecvNotEctTotal: number;
   ecnRecvEct0Total: number;
@@ -445,6 +449,7 @@ export interface ServerEventLoopLike {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
   getRemoteSettings(connHandle: number): Array<{ id: number; value: number }>;
   pingSession(connHandle: number): boolean;
@@ -521,6 +526,7 @@ export class WorkerEventLoop implements ServerEventLoopLike {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   } {
     return this.worker.getSessionMetrics(connHandle);
   }
@@ -619,6 +625,7 @@ export class ClientEventLoop {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   } {
     return this.worker.getSessionMetrics();
   }

@@ -6,7 +6,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
-import { snapshotMemory } from '../support/native-test-helpers.js';
+import { assertMemoryDriftWithinLimit, snapshotMemory } from '../support/native-test-helpers.js';
+import type { MemorySnapshot } from '../support/native-test-helpers.js';
 import { createQuicServer, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServer, QuicServerSession, QuicClientSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
@@ -71,6 +72,7 @@ describe('QUIC sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
     let errors = 0;
     const start = Date.now();
     let lastCheckpoint = start;
+    let baselineMem: MemorySnapshot | null = null;
 
     while ((Date.now() - start) / 1000 < DURATION_S) {
       // Open 10 streams, send 1KB each, await echo
@@ -96,6 +98,7 @@ describe('QUIC sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       const now = Date.now();
       if ((now - lastCheckpoint) / 1000 >= CHECKPOINT_INTERVAL_S) {
         const mem = snapshotMemory();
+        baselineMem ??= mem;
         const elapsedS = (now - start) / 1000;
         const total = totalStreams + errors;
         console.log(
@@ -132,6 +135,7 @@ describe('QUIC sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       finalMem.heapUsed < 100 * 1024 * 1024,
       `heap grew too much: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
     );
+    assertMemoryDriftWithinLimit('quic sustained post-warmup', baselineMem ?? finalMem, finalMem);
 
     await client.close();
     await server.close();
@@ -164,6 +168,7 @@ describe('QUIC sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
     let errors = 0;
     const start = Date.now();
     let lastCheckpoint = start;
+    let baselineMem: MemorySnapshot | null = null;
 
     while ((Date.now() - start) / 1000 < DURATION_S) {
       try {
@@ -190,6 +195,7 @@ describe('QUIC sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       const now = Date.now();
       if ((now - lastCheckpoint) / 1000 >= CHECKPOINT_INTERVAL_S) {
         const mem = snapshotMemory();
+        baselineMem ??= mem;
         const elapsedS = (now - start) / 1000;
         console.log(
           `  [longhaul/churn] ${elapsedS.toFixed(0)}s: ` +
@@ -223,6 +229,7 @@ describe('QUIC sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       errorRate < 5,
       `error rate ${errorRate.toFixed(2)}% exceeds 5% limit (${errors}/${total})`,
     );
+    assertMemoryDriftWithinLimit('quic churn post-warmup', baselineMem ?? finalMem, finalMem);
 
     await server.close();
   });

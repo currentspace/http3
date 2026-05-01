@@ -14,7 +14,7 @@ export { connect, connectAsync, Http3ClientSession } from './client.js';
 export type { ConnectOptions, RequestOptions } from './client.js';
 
 export { Http3Session, Http3ServerSession } from './session.js';
-export type { SessionOptions, SessionMetrics } from './session.js';
+export type { SessionOptions, SessionMetrics, PingCallback } from './session.js';
 
 export { ServerHttp3Stream, ClientHttp3Stream } from './stream.js';
 export type { IncomingHeaders, StreamFlags, RespondOptions } from './stream.js';

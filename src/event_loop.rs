@@ -554,7 +554,8 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         //    naturally.
         let rx_count = outcome.rx.len();
         let mut rx_recycled: Vec<Vec<u8>> = Vec::new();
-        let outstanding = reactor_metrics::event_batch_outstanding();
+        let outstanding =
+            reactor_metrics::self_heal_event_batch_if_stuck(RX_PAUSE_HIGH_WATER, 5_000);
         if rx_count > 0 && outstanding > RX_PAUSE_HIGH_WATER {
             reactor_metrics::record_event_batch_rx_pause();
             for pkt in outcome.rx {
@@ -828,7 +829,11 @@ mod tests {
         batcher.batch.push(dummy_event());
         let ok = batcher.flush();
         assert!(ok);
-        assert_eq!(log.lock().unwrap().len(), 1, "one batch should be delivered");
+        assert_eq!(
+            log.lock().unwrap().len(),
+            1,
+            "one batch should be delivered"
+        );
         assert_eq!(log.lock().unwrap()[0], 2, "batch should contain 2 events");
     }
 
@@ -838,7 +843,10 @@ mod tests {
         let mut batcher = EventBatcher::with_sink(sink);
         batcher.batch.push(dummy_event());
         batcher.flush();
-        assert!(batcher.batch.is_empty(), "batch should be empty after flush");
+        assert!(
+            batcher.batch.is_empty(),
+            "batch should be empty after flush"
+        );
     }
 
     #[test]

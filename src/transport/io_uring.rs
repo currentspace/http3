@@ -21,8 +21,7 @@ mod inner {
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::socket::{
-        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso,
-        set_pktinfo,
+        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso, set_pktinfo,
     };
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
@@ -181,8 +180,12 @@ mod inner {
 
         /// Get a reference to the buffer data for a given buffer ID.
         fn buffer_data(&self, bid: u16) -> &[u8] {
+            assert!(
+                bid < RX_RING_SIZE as u16,
+                "kernel returned out-of-range bid: {bid}"
+            );
             let offset = (bid as usize) * RX_BUF_SIZE;
-            // SAFETY: bid is within [0, RX_RING_SIZE), buffer region is valid.
+            // SAFETY: the bid invariant is enforced by the assert above; buffer region is valid.
             unsafe { std::slice::from_raw_parts(self.buf_base.add(offset), RX_BUF_SIZE) }
         }
     }
@@ -740,6 +743,11 @@ mod inner {
 
                         if result > 0 {
                             if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
+                                if bid >= RX_RING_SIZE as u16 {
+                                    log::error!(
+                                        "io_uring recv CQE returned out-of-range bid={bid} flags={flags:#x}"
+                                    );
+                                }
                                 let buf = self.rx_ring.buffer_data(bid);
                                 let buf_len = result as usize;
 
@@ -762,7 +770,9 @@ mod inner {
                                         // Audit #18: ECN observability.
                                         if let Some(tos) = cmsgs.tos {
                                             reactor_metrics::record_ecn_recv(
-                                                crate::transport::socket::EcnCodePoint::from_tos(tos),
+                                                crate::transport::socket::EcnCodePoint::from_tos(
+                                                    tos,
+                                                ),
                                             );
                                         }
                                         let payload = parsed.payload_data();
@@ -1517,6 +1527,11 @@ mod inner {
                         }
                         if result > 0 {
                             if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
+                                if bid >= RX_RING_SIZE as u16 {
+                                    log::error!(
+                                        "io_uring recv CQE returned out-of-range bid={bid} flags={flags:#x}"
+                                    );
+                                }
                                 let buf = self.rx_ring.buffer_data(bid);
                                 let buf_len = result as usize;
                                 if let Ok(parsed) = io_uring::types::RecvMsgOut::parse(
@@ -1536,7 +1551,9 @@ mod inner {
                                         // Audit #18: ECN observability.
                                         if let Some(tos) = cmsgs.tos {
                                             reactor_metrics::record_ecn_recv(
-                                                crate::transport::socket::EcnCodePoint::from_tos(tos),
+                                                crate::transport::socket::EcnCodePoint::from_tos(
+                                                    tos,
+                                                ),
                                             );
                                         }
                                         let payload = parsed.payload_data();

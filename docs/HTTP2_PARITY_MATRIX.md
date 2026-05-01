@@ -29,7 +29,7 @@ This matrix defines compatibility expectations for users migrating from
 | Session close | `session.close()` | `session.close()` | Supported for graceful shutdown. |
 | Session destroy | `session.destroy()` | `session.destroy()` | Supported for immediate teardown. |
 | Settings access | `remoteSettings` | `getRemoteSettings()` | Returned as normalized key/value map. |
-| Ping | `session.ping()` | `session.ping()` | Returns most recent RTT snapshot. |
+| Ping | `session.ping([callback])` | `session.ping([callback])` | Returns most recent RTT snapshot; optional callback receives `(err, duration)`. |
 
 ## Stream semantics
 
@@ -57,4 +57,3 @@ This matrix defines compatibility expectations for users migrating from
 - Behaviors in this matrix are semver-protected for v1.
 - Additive parity improvements are minor releases.
 - Breaking compatibility behavior changes require a major release.
-
