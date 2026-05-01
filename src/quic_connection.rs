@@ -75,7 +75,9 @@ impl QuicConnection {
             init.qlog_level,
         );
         let (data_pool, data_recycler, data_recycle_rx) =
-            AdaptiveBufferPool::with_recycler(64, 4096);
+            // Audit finding #27: align min_capacity with the dominant
+            // checkout size (RECV_CHUNK = 16 KB) so the pool is uniform.
+            AdaptiveBufferPool::with_recycler(64, 16_384);
         Self {
             quiche_conn,
             conn_id,

@@ -41,9 +41,28 @@ impl ChunkPool {
         (pool, Arc::new(ChunkPoolReturn(tx)), rx)
     }
 
-    /// Find the bin index for a given length. Returns None if > largest class.
+    /// Find the bin a `len`-byte allocation should be served from on
+    /// checkout: the smallest class that can hold `len`. Returns `None`
+    /// if `len` exceeds every class.
     fn bin_for(len: usize) -> Option<usize> {
         CHUNK_CLASSES.iter().position(|&class| len <= class)
+    }
+
+    /// Find the bin a `cap`-capacity Vec should return to on checkin: the
+    /// largest class whose threshold the Vec fully covers. Audit finding
+    /// #28: previously checkin reused `bin_for(cap)` (smallest class >=
+    /// cap) and then required `cap >= CHUNK_CLASSES[bin_idx]`, which only
+    /// retained exact-class capacities. A 1500-byte Vec would map to bin
+    /// 2048 and be rejected. With `bin_for_cap`, that 1500-byte Vec maps
+    /// to the 1024 class and is correctly retained. Vecs larger than the
+    /// largest class are still rejected (avoids stuffing oversized
+    /// allocations into smaller bins, which would waste memory).
+    fn bin_for_cap(cap: usize) -> Option<usize> {
+        let max_class = *CHUNK_CLASSES.last()?;
+        if cap > max_class {
+            return None;
+        }
+        CHUNK_CLASSES.iter().rposition(|&class| class <= cap)
     }
 
     /// Check out a buffer with capacity >= `len`.
@@ -78,17 +97,17 @@ impl ChunkPool {
         (buf, reused)
     }
 
-    /// Return a buffer to the pool. Dropped if wrong size class or bin full.
+    /// Return a buffer to the pool. Dropped if smaller than every class
+    /// or if the matching bin is full.
     pub fn checkin(&mut self, buf: Vec<u8>) -> bool {
         let cap = buf.capacity();
-        if let Some(bin_idx) = Self::bin_for(cap) {
-            // Only accept if capacity matches the class (not undersized).
-            if cap >= CHUNK_CLASSES[bin_idx] && self.bins[bin_idx].len() < self.max_per_bin {
+        if let Some(bin_idx) = Self::bin_for_cap(cap) {
+            if self.bins[bin_idx].len() < self.max_per_bin {
                 self.bins[bin_idx].push(buf);
                 return true;
             }
         }
-        false // Dropped — oversized or bin full.
+        false // Dropped — under smallest class or bin full.
     }
 
     /// Drain returned buffers from the recycler channel back into the pool.
@@ -295,6 +314,21 @@ mod tests {
         let (buf, _) = pool.checkout(8000);
         assert_eq!(buf.len(), 8000);
         assert!(!pool.checkin(buf)); // Rejected — too large.
+    }
+
+    /// Audit finding #28: a Vec smaller than its target class but >= the
+    /// next-smaller class should map to the smaller class and be retained.
+    /// Before the fix, only exact-class capacities were retained.
+    #[test]
+    fn between_classes_retained_at_smaller_class() {
+        let mut pool = ChunkPool::new(4);
+        // 1500 bytes — between 1024 and 2048 classes. Previously rejected.
+        let buf = Vec::with_capacity(1500);
+        assert!(pool.checkin(buf));
+        // Should land in the 1024-class bin (largest class <= 1500).
+        assert_eq!(pool.bins[0].len(), 1);
+        assert_eq!(pool.bins[1].len(), 0);
+        assert_eq!(pool.bins[2].len(), 0);
     }
 
     #[test]

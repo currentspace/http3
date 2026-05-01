@@ -88,7 +88,11 @@ impl H3Connection {
             init.qlog_level,
         );
         let (data_pool, data_recycler, data_recycle_rx) =
-            AdaptiveBufferPool::with_recycler(64, 4096);
+            // Audit finding #27: min_capacity matches the dominant
+            // checkout size (RECV_CHUNK = 16 KB). Datagram-recv checkouts
+            // (1500 bytes) still get 16 KB Vecs, which is fine — the pool
+            // is then uniform and a recycled buffer can serve any path.
+            AdaptiveBufferPool::with_recycler(64, 16_384);
         Self {
             quiche_conn,
             h3_conn: None,
