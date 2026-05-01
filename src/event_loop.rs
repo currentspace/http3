@@ -107,6 +107,19 @@ impl EventBatcherStatsHandle {
 /// streams, ~30K events per cycle ÷ 2048 ≈ 15 calls vs 60 at 512.
 pub const MAX_BATCH_SIZE: usize = 2048;
 
+/// Audit finding #14, step 5.2: when the JS-side outstanding-events gauge
+/// exceeds this threshold, the worker skips RX processing for one poll
+/// iteration. The kernel UDP recv buffer absorbs the unread datagrams;
+/// once it fills, the kernel drops further inbound packets, peers
+/// observe loss, and quiche-level loss recovery throttles them.
+///
+/// 16× MAX_BATCH_SIZE is conservative: each batch holds at most
+/// ~100 KB of TSFN payload, so a 32 K-event backlog represents ~1.6 MB
+/// of unprocessed JS work — well past any reasonable steady-state
+/// dispatch latency, well below the kernel UDP buffer's spillover
+/// threshold on default configs.
+pub const RX_PAUSE_HIGH_WATER: u64 = (MAX_BATCH_SIZE as u64) * 16;
+
 /// Per-connection QUIC packet scratch buffer size.
 pub(crate) const SEND_BUF_SIZE: usize = 65535;
 
@@ -532,8 +545,42 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         //    peers promptly.  Without this, processing hundreds of inbound
         //    packets before any sends causes congestion-window stalls under
         //    fan-out (many connections sending concurrently).
+        //
+        //    Audit finding #14: when JS dispatch is too far behind real-time
+        //    (outstanding gauge > RX_PAUSE_HIGH_WATER), skip the RX loop this
+        //    iteration. Buffers go straight to the recycler; the kernel
+        //    socket buffer absorbs further inbound until it spills. Quiche
+        //    loss recovery handles the resulting drops, throttling the peer
+        //    naturally.
         let rx_count = outcome.rx.len();
         let mut rx_recycled: Vec<Vec<u8>> = Vec::new();
+        let outstanding = reactor_metrics::event_batch_outstanding();
+        if rx_count > 0 && outstanding > RX_PAUSE_HIGH_WATER {
+            reactor_metrics::record_event_batch_rx_pause();
+            for pkt in outcome.rx {
+                rx_recycled.push(pkt.data);
+            }
+            driver.recycle_rx_buffers(rx_recycled);
+            // Skip mid-RX flush, drain & timer steps below — they all
+            // depend on having processed packets. Loop back to poll().
+            handler.flush_sends(&mut outbound);
+            if !outbound.is_empty() {
+                if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                    let _ = flush_runtime_error(
+                        &mut batcher,
+                        driver,
+                        handler,
+                        "submit_sends",
+                        "driver-submit-sends-failed",
+                        &err,
+                    );
+                    return;
+                }
+            }
+            handler.drain_recycled_buffers();
+            let _ = batcher.flush();
+            continue;
+        }
         for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
             pending_outbound.clear();
             if rx_idx == 0 {

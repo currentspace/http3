@@ -42,6 +42,11 @@ pub struct JsReactorTelemetrySnapshot {
     pub eventBatchAckedEventsTotal: i64,
     pub eventBatchOutstanding: i64,
     pub eventBatchOutstandingHighWatermark: i64,
+    /// Audit #14, step 5.2: count of poll iterations where the worker
+    /// skipped RX processing because the outstanding-events gauge was
+    /// over the high-water mark. Coarse backpressure signal — if this
+    /// climbs without bound, JS dispatch is the bottleneck.
+    pub eventBatchRxPausesTotal: i64,
     pub rawQuicServerWorkerSpawns: i64,
     pub rawQuicClientDedicatedWorkerSpawns: i64,
     pub rawQuicClientSharedWorkersCreated: i64,
@@ -205,6 +210,7 @@ static EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_ACKED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_RX_PAUSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Buffers handed to a `BufferRecycler` whose receiver was already
 /// dropped (or whose channel was full at the moment). Audit finding #31.
@@ -427,6 +433,11 @@ pub(crate) fn record_event_batch_ack(count: usize) {
 /// Current best-effort snapshot of the outstanding-events gauge.
 pub fn event_batch_outstanding() -> u64 {
     EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed)
+}
+
+/// Audit #14, step 5.2: increment the count of RX pause iterations.
+pub(crate) fn record_event_batch_rx_pause() {
+    bump(&EVENT_BATCH_RX_PAUSES_TOTAL);
 }
 
 pub(crate) fn record_recycler_drop() {
@@ -780,6 +791,7 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         eventBatchAckedEventsTotal: load(&EVENT_BATCH_ACKED_EVENTS_TOTAL),
         eventBatchOutstanding: load(&EVENT_BATCH_OUTSTANDING),
         eventBatchOutstandingHighWatermark: load(&EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK),
+        eventBatchRxPausesTotal: load(&EVENT_BATCH_RX_PAUSES_TOTAL),
         rawQuicServerWorkerSpawns: load(&RAW_QUIC_SERVER_WORKER_SPAWNS),
         rawQuicClientDedicatedWorkerSpawns: load(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         rawQuicClientSharedWorkersCreated: load(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
@@ -882,6 +894,7 @@ pub fn reset() {
         &EVENT_BATCH_OUTSTANDING,
         &EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK,
         &EVENT_BATCH_ACKED_EVENTS_TOTAL,
+        &EVENT_BATCH_RX_PAUSES_TOTAL,
         &RAW_QUIC_SERVER_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED,
@@ -988,6 +1001,7 @@ mod tests {
         assert_eq!(snap.eventBatchAckedEventsTotal, 0);
         assert_eq!(snap.eventBatchOutstanding, 0);
         assert_eq!(snap.eventBatchOutstandingHighWatermark, 0);
+        assert_eq!(snap.eventBatchRxPausesTotal, 0);
         assert_eq!(snap.rawQuicServerWorkerSpawns, 0);
         assert_eq!(snap.h3ServerWorkerSpawns, 0);
         assert_eq!(snap.txBuffersRecycled, 0);
@@ -1066,6 +1080,15 @@ mod tests {
         // Dropped events never reach JS, so they shouldn't sit in the gauge.
         assert_eq!(snap.eventBatchOutstanding, 0);
         assert_eq!(snap.eventBatchDroppedEventsTotal, 50);
+    }
+
+    #[test]
+    fn test_record_event_batch_rx_pause() {
+        setup();
+        record_event_batch_rx_pause();
+        record_event_batch_rx_pause();
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchRxPausesTotal, 2);
     }
 
     #[test]

@@ -281,6 +281,13 @@ export interface JsReactorTelemetrySnapshot {
   eventBatchAckedEventsTotal: number
   eventBatchOutstanding: number
   eventBatchOutstandingHighWatermark: number
+  /**
+   * Audit #14, step 5.2: count of poll iterations where the worker
+   * skipped RX processing because the outstanding-events gauge was
+   * over the high-water mark. Coarse backpressure signal — if this
+   * climbs without bound, JS dispatch is the bottleneck.
+   */
+  eventBatchRxPausesTotal: number
   rawQuicServerWorkerSpawns: number
   rawQuicClientDedicatedWorkerSpawns: number
   rawQuicClientSharedWorkersCreated: number
