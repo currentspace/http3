@@ -486,16 +486,29 @@ impl H3Connection {
     }
 
     pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        let mut recv_buf = [0u8; 65535];
+        // Audit finding #24: take a buffer from the pool instead of using
+        // a 64 KB stack array per call (which under fan-out becomes
+        // significant per-connection per-iteration stack pressure).
+        // Mirrors quic_connection::poll_datagram_events.
         loop {
-            match self.quiche_conn.dgram_recv(&mut recv_buf) {
-                Ok(len) => events.push(JsH3Event::datagram(
-                    conn_handle,
-                    recv_buf[..len].to_vec(),
-                    self.event_recycler(),
-                )),
-                Err(quiche::Error::Done) => break,
-                Err(_) => break,
+            let (mut buf, _) = self.data_pool.checkout(1500);
+            match self.quiche_conn.dgram_recv(&mut buf) {
+                Ok(len) => {
+                    buf.truncate(len);
+                    events.push(JsH3Event::datagram(
+                        conn_handle,
+                        buf,
+                        self.event_recycler(),
+                    ));
+                }
+                Err(quiche::Error::Done) => {
+                    self.data_pool.checkin(buf);
+                    break;
+                }
+                Err(_) => {
+                    self.data_pool.checkin(buf);
+                    break;
+                }
             }
         }
     }
