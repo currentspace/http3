@@ -12,6 +12,7 @@ node-api = []
 profile-binary = ["rcgen"]
 bench-internals = []
 driver-tracing = []
+fuzzing = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -100,4 +101,3 @@ unnecessary_wraps = "allow"        # napi requires Result return types on all me
 unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
-

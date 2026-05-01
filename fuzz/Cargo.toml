@@ -1,0 +1,23 @@
+[package]
+name = "http3-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.http3]
+path = ".."
+default-features = false
+features = ["fuzzing"]
+
+[[bin]]
+name = "parse_recv_cmsgs"
+path = "fuzz_targets/parse_recv_cmsgs.rs"
+test = false
+doc = false
+bench = false

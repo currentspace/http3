@@ -89,6 +89,19 @@ pub mod bench_exports {
     };
 }
 
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_exports {
+    /// Exercise recvmsg control-buffer parsing without exposing transport
+    /// internals in normal builds.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn parse_recv_cmsgs(control: &[u8]) {
+        let _ = crate::transport::socket::parse_recv_cmsgs(control);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn parse_recv_cmsgs(_control: &[u8]) {}
+}
+
 #[cfg(feature = "node-api")]
 use napi_derive::napi;
 
