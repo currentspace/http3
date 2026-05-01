@@ -157,6 +157,12 @@ pub(crate) trait ProtocolHandler {
     /// Drain returned buffers from V8 GC back into connection data pools.
     fn drain_recycled_buffers(&mut self) {}
 
+    /// Emit `session_close` events for every connection currently held by
+    /// the handler. Used by the runtime-error path so JS-side sessions
+    /// don't sit "open" forever after a driver poll error. Audit finding
+    /// #34. Default is no-op for handlers with no multi-connection state.
+    fn emit_session_close_for_all_active(&mut self, _batch: &mut Vec<JsH3Event>) {}
+
     /// Recycle TX buffers back into the handler's pool.
     fn recycle_tx_buffers(&mut self, _buffers: Vec<Vec<u8>>) {}
 
@@ -318,9 +324,10 @@ fn push_shutdown_complete(batcher: &mut EventBatcher) {
     batcher.batch.push(JsH3Event::shutdown_complete());
 }
 
-fn flush_runtime_error<D: Driver>(
+fn flush_runtime_error<D: Driver, H: ProtocolHandler>(
     batcher: &mut EventBatcher,
     driver: &D,
+    handler: &mut H,
     syscall: &str,
     reason_code: &str,
     err: &io::Error,
@@ -334,6 +341,11 @@ fn flush_runtime_error<D: Driver>(
         Some(driver.pending_tx_count()),
         Some(format!("{syscall}:{reason_code}:{err}")),
     );
+    // Audit finding #34: emit a session_close per active connection so
+    // JS-side sessions don't sit "open" forever waiting on a close that
+    // would otherwise never come. Order: per-conn close → runtime_error
+    // → shutdown_complete.
+    handler.emit_session_close_for_all_active(&mut batcher.batch);
     batcher.batch.push(JsH3Event::runtime_error(
         0,
         driver.driver_kind().as_str(),
@@ -434,6 +446,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             let _ = flush_runtime_error(
                 &mut batcher,
                 driver,
+                handler,
                 "submit_sends",
                 "driver-submit-sends-failed",
                 &err,
@@ -450,8 +463,14 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         let outcome = match driver.poll(deadline) {
             Ok(o) => o,
             Err(err) => {
-                let _ =
-                    flush_runtime_error(&mut batcher, driver, "poll", "driver-poll-failed", &err);
+                let _ = flush_runtime_error(
+                    &mut batcher,
+                    driver,
+                    handler,
+                    "poll",
+                    "driver-poll-failed",
+                    &err,
+                );
                 return;
             }
         };
@@ -466,6 +485,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                         let _ = flush_runtime_error(
                             &mut batcher,
                             driver,
+                            handler,
                             "submit_sends",
                             "driver-submit-sends-failed",
                             &err,
@@ -498,6 +518,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 let _ = flush_runtime_error(
                     &mut batcher,
                     driver,
+                    handler,
                     "submit_sends",
                     "driver-submit-sends-failed",
                     &err,
@@ -562,6 +583,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                     let _ = flush_runtime_error(
                         &mut batcher,
                         driver,
+                        handler,
                         "submit_sends",
                         "driver-submit-sends-failed",
                         &err,
@@ -577,6 +599,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                         let _ = flush_runtime_error(
                             &mut batcher,
                             driver,
+                            handler,
                             "submit_sends",
                             "driver-submit-sends-failed",
                             &err,
@@ -631,6 +654,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 let _ = flush_runtime_error(
                     &mut batcher,
                     driver,
+                    handler,
                     "submit_sends",
                     "driver-submit-sends-failed",
                     &err,

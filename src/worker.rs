@@ -2561,6 +2561,18 @@ impl ProtocolHandler for H3ServerHandler {
         self.last_expired.clear();
     }
 
+    fn emit_session_close_for_all_active(&mut self, batch: &mut Vec<JsH3Event>) {
+        // Audit finding #34: on driver runtime error we exit without going
+        // through cleanup_closed, so emit a session_close per active
+        // connection here. JS-side sessions otherwise sit "open" forever.
+        let mut handles = Vec::new();
+        self.conn_map.fill_handles(&mut handles);
+        let offset = self.handle_offset;
+        for handle in handles {
+            batch.push(JsH3Event::session_close(offset | (handle as u32)));
+        }
+    }
+
     fn next_deadline(&mut self) -> Option<Instant> {
         let timer_deadline = self.timer_heap.next_deadline();
         let close_deadline = self
@@ -2992,6 +3004,15 @@ impl ProtocolHandler for H3ClientHandler {
 
     fn cleanup_closed(&mut self, _batch: &mut Vec<JsH3Event>) {
         // Client session_close is emitted in process_packet / process_timers.
+    }
+
+    fn emit_session_close_for_all_active(&mut self, batch: &mut Vec<JsH3Event>) {
+        // Audit finding #34: H3 client single-session — emit the close so
+        // JS doesn't sit waiting on an open session forever.
+        if !self.session_closed_emitted {
+            batch.push(JsH3Event::session_close(0));
+            self.session_closed_emitted = true;
+        }
     }
 
     fn next_deadline(&mut self) -> Option<Instant> {

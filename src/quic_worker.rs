@@ -2439,6 +2439,17 @@ impl ProtocolHandler for QuicServerHandler {
         self.last_expired.clear();
     }
 
+    fn emit_session_close_for_all_active(&mut self, batch: &mut Vec<JsH3Event>) {
+        // Audit finding #34: ensure JS-side sessions close on driver
+        // runtime errors instead of staying open forever.
+        let mut handles = Vec::new();
+        self.conn_map.fill_handles(&mut handles);
+        let offset = self.handle_offset;
+        for handle in handles {
+            batch.push(JsH3Event::session_close(offset | (handle as u32)));
+        }
+    }
+
     fn next_deadline(&mut self) -> Option<Instant> {
         self.timer_heap.next_deadline()
     }
@@ -2858,6 +2869,15 @@ impl ProtocolHandler for QuicClientHandler {
 
     fn cleanup_closed(&mut self, _batch: &mut Vec<JsH3Event>) {
         // Client session_close is emitted in process_packet / process_timers.
+    }
+
+    fn emit_session_close_for_all_active(&mut self, batch: &mut Vec<JsH3Event>) {
+        // Audit finding #34: client side has a single session at handle 0.
+        // Skip if we've already emitted to avoid a duplicate close.
+        if !self.session_closed_emitted {
+            batch.push(JsH3Event::session_close(0));
+            self.session_closed_emitted = true;
+        }
     }
 
     fn next_deadline(&mut self) -> Option<Instant> {
