@@ -15,10 +15,9 @@ import {
 
 /**
  * Maximum time `_final` will wait for the worker to accept the FIN before
- * destroying the stream with a timeout error. Audit finding #9: prevents
- * `end()` from hanging forever if the worker is wedged. Today's
- * `streamSend` contract makes the wait branch unreachable, but the
- * watchdog protects future paths (see deferred Phase 3 redesign).
+ * destroying the stream with a timeout error. Prevents `end()` from
+ * hanging forever if the worker is wedged or quiche flow control never
+ * opens for the FIN.
  */
 const STREAM_FINISH_TIMEOUT_MS = 30_000;
 

@@ -21,8 +21,8 @@ mod inner {
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::socket::{
-        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_gro_cmsg, parse_pktinfo_cmsg,
-        probe_gso, set_pktinfo,
+        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso,
+        set_pktinfo,
     };
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
@@ -751,13 +751,14 @@ mod inner {
                                     let peer = parse_sockaddr(name_data);
                                     if let Some(peer) = peer {
                                         let control = parsed.control_data();
-                                        let local_ip = parse_pktinfo_cmsg(control);
-                                        let local = local_ip
+                                        let parsed = parse_recv_cmsgs(control);
+                                        let local = parsed
+                                            .local_ip
                                             .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                                             .unwrap_or(self.local_addr);
-                                        let segment_size = parse_gro_cmsg(control);
+                                        let segment_size = parsed.segment_size;
                                         // Audit #18: ECN observability.
-                                        if let Some(tos) = crate::transport::socket::parse_tos_cmsg(control) {
+                                        if let Some(tos) = parsed.tos {
                                             reactor_metrics::record_ecn_recv(
                                                 crate::transport::socket::EcnCodePoint::from_tos(tos),
                                             );
@@ -1516,13 +1517,14 @@ mod inner {
                                     let peer = parse_sockaddr(name_data);
                                     if let Some(peer) = peer {
                                         let control = parsed.control_data();
-                                        let local_ip = parse_pktinfo_cmsg(control);
-                                        let local = local_ip
+                                        let parsed = parse_recv_cmsgs(control);
+                                        let local = parsed
+                                            .local_ip
                                             .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                                             .unwrap_or(self.local_addr);
-                                        let segment_size = parse_gro_cmsg(control);
+                                        let segment_size = parsed.segment_size;
                                         // Audit #18: ECN observability.
-                                        if let Some(tos) = crate::transport::socket::parse_tos_cmsg(control) {
+                                        if let Some(tos) = parsed.tos {
                                             reactor_metrics::record_ecn_recv(
                                                 crate::transport::socket::EcnCodePoint::from_tos(tos),
                                             );

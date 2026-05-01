@@ -332,18 +332,20 @@ mod inner {
             }
             let len = n as usize;
 
-            let peer = sockaddr_to_socketaddr(&name, msg.msg_namelen).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "unrecognised peer address")
-            })?;
+            let peer = crate::transport::socket::sockaddr_to_socketaddr(&name, msg.msg_namelen)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "unrecognised peer address")
+                })?;
             let parsed_local = if msg.msg_controllen > 0 {
-                let ctrl = &control[..msg.msg_controllen as usize];
-                // Audit #18: read the ECN code point if present.
-                if let Some(tos) = crate::transport::socket::parse_tos_cmsg(ctrl) {
+                let parsed = crate::transport::socket::parse_recv_cmsgs(
+                    &control[..msg.msg_controllen as usize],
+                );
+                if let Some(tos) = parsed.tos {
                     reactor_metrics::record_ecn_recv(
                         crate::transport::socket::EcnCodePoint::from_tos(tos),
                     );
                 }
-                crate::transport::socket::parse_pktinfo_cmsg(ctrl)
+                parsed.local_ip
             } else {
                 None
             };
@@ -409,35 +411,6 @@ mod inner {
 
     fn nix_to_io(e: nix::errno::Errno) -> io::Error {
         io::Error::from_raw_os_error(e as i32)
-    }
-
-    fn sockaddr_to_socketaddr(
-        addr: &libc::sockaddr_storage,
-        len: libc::socklen_t,
-    ) -> Option<SocketAddr> {
-        if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
-            && i32::from(addr.ss_family) == libc::AF_INET
-        {
-            // SAFETY: ss_family is AF_INET and len covers sockaddr_in.
-            #[allow(unsafe_code)]
-            let sin: &libc::sockaddr_in =
-                unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in>() };
-            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-            let port = u16::from_be(sin.sin_port);
-            Some(SocketAddr::from((ip, port)))
-        } else if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
-            && i32::from(addr.ss_family) == libc::AF_INET6
-        {
-            // SAFETY: ss_family is AF_INET6 and len covers sockaddr_in6.
-            #[allow(unsafe_code)]
-            let sin6: &libc::sockaddr_in6 =
-                unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in6>() };
-            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-            let port = u16::from_be(sin6.sin6_port);
-            Some(SocketAddr::from((ip, port)))
-        } else {
-            None
-        }
     }
 }
 

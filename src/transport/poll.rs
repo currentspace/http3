@@ -14,8 +14,8 @@ mod inner {
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::socket::{
-        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_gro_cmsg, parse_pktinfo_cmsg,
-        probe_gso, set_pktinfo,
+        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso,
+        set_pktinfo, sockaddr_to_socketaddr,
     };
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
@@ -300,13 +300,14 @@ mod inner {
                 if let Some(peer) = peer {
                     let cmsg_data = &self.rx_batch.slots[i].cmsg_buf
                         [..self.rx_batch.hdrs[i].msg_hdr.msg_controllen];
-                    let local_ip = parse_pktinfo_cmsg(cmsg_data);
-                    let local = local_ip
+                    let parsed = parse_recv_cmsgs(cmsg_data);
+                    let local = parsed
+                        .local_ip
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
-                    let segment_size = parse_gro_cmsg(cmsg_data);
+                    let segment_size = parsed.segment_size;
                     // Audit #18: ECN observability.
-                    if let Some(tos) = crate::transport::socket::parse_tos_cmsg(cmsg_data) {
+                    if let Some(tos) = parsed.tos {
                         reactor_metrics::record_ecn_recv(
                             crate::transport::socket::EcnCodePoint::from_tos(tos),
                         );
@@ -584,31 +585,6 @@ mod inner {
             } else {
                 Ok(())
             }
-        }
-    }
-
-    fn sockaddr_to_socketaddr(
-        addr: &libc::sockaddr_storage,
-        len: libc::socklen_t,
-    ) -> Option<SocketAddr> {
-        if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
-            && i32::from(addr.ss_family) == libc::AF_INET
-        {
-            // SAFETY: ss_family is AF_INET and len is sufficient.
-            let sin: &libc::sockaddr_in = unsafe { &*(addr as *const _ as *const _) };
-            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-            let port = u16::from_be(sin.sin_port);
-            Some(SocketAddr::from((ip, port)))
-        } else if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
-            && i32::from(addr.ss_family) == libc::AF_INET6
-        {
-            // SAFETY: ss_family is AF_INET6 and len is sufficient.
-            let sin6: &libc::sockaddr_in6 = unsafe { &*(addr as *const _ as *const _) };
-            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-            let port = u16::from_be(sin6.sin6_port);
-            Some(SocketAddr::from((ip, port)))
-        } else {
-            None
         }
     }
 

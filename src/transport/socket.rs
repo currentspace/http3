@@ -190,57 +190,6 @@ pub(crate) fn set_pktinfo(socket: &UdpSocket) {
     }
 }
 
-/// Parse cmsg control data for IP_PKTINFO / IPV6_PKTINFO.
-/// Returns the local IP address if found.
-#[cfg(target_os = "linux")]
-pub(crate) fn parse_pktinfo_cmsg(control: &[u8]) -> Option<std::net::IpAddr> {
-    let mut offset = 0;
-    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
-        // SAFETY: bounds checked above; read_unaligned handles alignment.
-        let hdr: libc::cmsghdr =
-            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
-        if hdr.cmsg_len == 0 {
-            break;
-        }
-        let data_off = offset + cmsg_data_offset();
-
-        if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_PKTINFO {
-            if data_off + std::mem::size_of::<libc::in_pktinfo>() <= control.len() {
-                let info: libc::in_pktinfo =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                let ip = std::net::Ipv4Addr::from(u32::from_be(info.ipi_spec_dst.s_addr));
-                return Some(std::net::IpAddr::V4(ip));
-            }
-        } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
-            if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
-                let info: libc::in6_pktinfo =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                let ip = std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr);
-                return Some(std::net::IpAddr::V6(ip));
-            }
-        }
-
-        offset += cmsg_align(hdr.cmsg_len as usize);
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn cmsg_align(len: usize) -> usize {
-    let align = std::mem::size_of::<usize>();
-    (len + align - 1) & !(align - 1)
-}
-
-#[cfg(target_os = "linux")]
-fn cmsg_data_offset() -> usize {
-    cmsg_align(std::mem::size_of::<libc::cmsghdr>())
-}
-
-#[cfg(all(target_os = "linux", test))]
-pub(crate) fn cmsg_data_offset_for_test() -> usize {
-    cmsg_data_offset()
-}
-
 // ── macOS / Darwin variants ─────────────────────────────────────────
 
 /// Enable `IP_RECVDSTADDR` (v4) and `IPV6_RECVPKTINFO` (v6) on the socket so
@@ -271,42 +220,6 @@ pub(crate) fn set_pktinfo(socket: &UdpSocket) {
             std::mem::size_of_val(&enable) as libc::socklen_t,
         );
     }
-}
-
-/// Parse cmsg control data for `IP_RECVDSTADDR` (v4) / `IPV6_PKTINFO` (v6).
-/// Returns the destination IP address if a recognised cmsg is present.
-#[cfg(target_os = "macos")]
-pub(crate) fn parse_pktinfo_cmsg(control: &[u8]) -> Option<std::net::IpAddr> {
-    let mut offset = 0;
-    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
-        // SAFETY: bounds checked above; read_unaligned handles alignment.
-        let hdr: libc::cmsghdr =
-            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
-        if hdr.cmsg_len == 0 {
-            break;
-        }
-        let data_off = offset + cmsg_data_offset();
-
-        if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_RECVDSTADDR {
-            // IP_RECVDSTADDR delivers a bare `struct in_addr` (4 bytes).
-            if data_off + std::mem::size_of::<libc::in_addr>() <= control.len() {
-                let addr: libc::in_addr =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                let ip = std::net::Ipv4Addr::from(u32::from_be(addr.s_addr));
-                return Some(std::net::IpAddr::V4(ip));
-            }
-        } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
-            if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
-                let info: libc::in6_pktinfo =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                let ip = std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr);
-                return Some(std::net::IpAddr::V6(ip));
-            }
-        }
-
-        offset += cmsg_align(hdr.cmsg_len as usize);
-    }
-    None
 }
 
 // ── ECN (audit #18) ─────────────────────────────────────────────────
@@ -368,10 +281,47 @@ pub(crate) fn set_recv_ecn(socket: &UdpSocket) {
     }
 }
 
-/// Parse cmsg control data for `IP_TOS` (v4) / `IPV6_TCLASS` (v6).
-/// Returns the TOS byte if a recognised cmsg is present.
+// ── Unified cmsg / sockaddr helpers ────────────────────────────────
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn parse_tos_cmsg(control: &[u8]) -> Option<u8> {
+fn cmsg_align(len: usize) -> usize {
+    let align = std::mem::size_of::<usize>();
+    (len + align - 1) & !(align - 1)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cmsg_data_offset() -> usize {
+    cmsg_align(std::mem::size_of::<libc::cmsghdr>())
+}
+
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn cmsg_data_offset_for_test() -> usize {
+    cmsg_data_offset()
+}
+
+/// Everything the recv path extracts from a single cmsg control buffer.
+///
+/// `parse_recv_cmsgs` walks the buffer once and emits all three fields,
+/// avoiding the 2–3× duplicate scans that separate per-cmsg-type parsers
+/// produced on the hot path (one inbound datagram = one walk).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ParsedRecvCmsgs {
+    /// Per-datagram destination IP. From `IP_PKTINFO` / `IP_RECVDSTADDR` /
+    /// `IPV6_PKTINFO` cmsgs (audit #20).
+    pub local_ip: Option<std::net::IpAddr>,
+    /// Inbound TOS byte. The low 2 bits hold the ECN code point
+    /// (audit #18).
+    pub tos: Option<u8>,
+    /// UDP GRO segment size — Linux only; always `None` on macOS.
+    pub segment_size: Option<u16>,
+}
+
+/// Walk the recvmsg control buffer once and extract pktinfo + TOS + GRO
+/// segment-size fields together. See `ParsedRecvCmsgs`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
+    let mut out = ParsedRecvCmsgs::default();
     let mut offset = 0;
     while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
         // SAFETY: bounds checked above; read_unaligned handles alignment.
@@ -383,11 +333,15 @@ pub(crate) fn parse_tos_cmsg(control: &[u8]) -> Option<u8> {
         }
         let data_off = offset + cmsg_data_offset();
 
-        if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_TOS {
-            // IP_TOS payload is a single byte on Linux and macOS,
-            // padded to int alignment.
-            if data_off < control.len() {
-                return Some(control[data_off]);
+        // IPv6 destination address — same cmsg type on Linux and macOS.
+        if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
+            if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
+                #[allow(unsafe_code)]
+                let info: libc::in6_pktinfo = unsafe {
+                    std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
+                };
+                let ip = std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr);
+                out.local_ip = Some(std::net::IpAddr::V6(ip));
             }
         } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_TCLASS {
             // IPV6_TCLASS payload is an int (4 bytes); only the low byte
@@ -397,24 +351,87 @@ pub(crate) fn parse_tos_cmsg(control: &[u8]) -> Option<u8> {
                 let tclass: libc::c_int = unsafe {
                     std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
                 };
-                return Some((tclass & 0xff) as u8);
+                out.tos = Some((tclass & 0xff) as u8);
+            }
+        } else if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_TOS {
+            // IP_TOS payload is a single byte, padded to int alignment.
+            if data_off < control.len() {
+                out.tos = Some(control[data_off]);
+            }
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_PKTINFO {
+                    if data_off + std::mem::size_of::<libc::in_pktinfo>() <= control.len() {
+                        #[allow(unsafe_code)]
+                        let info: libc::in_pktinfo = unsafe {
+                            std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
+                        };
+                        let ip = std::net::Ipv4Addr::from(u32::from_be(info.ipi_spec_dst.s_addr));
+                        out.local_ip = Some(std::net::IpAddr::V4(ip));
+                    }
+                } else if hdr.cmsg_level == SOL_UDP && hdr.cmsg_type == UDP_GRO {
+                    if data_off + std::mem::size_of::<u16>() <= control.len() {
+                        #[allow(unsafe_code)]
+                        let seg: u16 = unsafe {
+                            std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
+                        };
+                        out.segment_size = Some(seg);
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if hdr.cmsg_level == libc::IPPROTO_IP
+                    && hdr.cmsg_type == libc::IP_RECVDSTADDR
+                    && data_off + std::mem::size_of::<libc::in_addr>() <= control.len()
+                {
+                    // IP_RECVDSTADDR delivers a bare `struct in_addr` (4 bytes).
+                    #[allow(unsafe_code)]
+                    let addr: libc::in_addr = unsafe {
+                        std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
+                    };
+                    let ip = std::net::Ipv4Addr::from(u32::from_be(addr.s_addr));
+                    out.local_ip = Some(std::net::IpAddr::V4(ip));
+                }
             }
         }
 
         offset += cmsg_align(hdr.cmsg_len as usize);
     }
-    None
+    out
 }
 
-#[cfg(target_os = "macos")]
-fn cmsg_align(len: usize) -> usize {
-    let align = std::mem::size_of::<usize>();
-    (len + align - 1) & !(align - 1)
-}
-
-#[cfg(target_os = "macos")]
-fn cmsg_data_offset() -> usize {
-    cmsg_align(std::mem::size_of::<libc::cmsghdr>())
+/// Convert a `sockaddr_storage` (filled by `recvmsg` / `recvmmsg`) into a
+/// `SocketAddr`. Returns `None` for unrecognised address families.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn sockaddr_to_socketaddr(
+    addr: &libc::sockaddr_storage,
+    len: libc::socklen_t,
+) -> Option<std::net::SocketAddr> {
+    if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
+        && i32::from(addr.ss_family) == libc::AF_INET
+    {
+        // SAFETY: ss_family is AF_INET and len covers sockaddr_in.
+        #[allow(unsafe_code)]
+        let sin: &libc::sockaddr_in =
+            unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in>() };
+        let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+        let port = u16::from_be(sin.sin_port);
+        Some(std::net::SocketAddr::from((ip, port)))
+    } else if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
+        && i32::from(addr.ss_family) == libc::AF_INET6
+    {
+        // SAFETY: ss_family is AF_INET6 and len covers sockaddr_in6.
+        #[allow(unsafe_code)]
+        let sin6: &libc::sockaddr_in6 =
+            unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in6>() };
+        let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+        let port = u16::from_be(sin6.sin6_port);
+        Some(std::net::SocketAddr::from((ip, port)))
+    } else {
+        None
+    }
 }
 
 // ── UDP GSO (Generic Segmentation Offload) ──────────────────────────
@@ -499,32 +516,6 @@ pub(crate) fn enable_gro(socket: &UdpSocket) {
             std::mem::size_of_val(&enable) as libc::socklen_t,
         );
     }
-}
-
-/// Parse cmsg control data for `UDP_GRO` segment size.
-/// Returns the segment size if a GRO cmsg is present.
-#[cfg(target_os = "linux")]
-pub(crate) fn parse_gro_cmsg(control: &[u8]) -> Option<u16> {
-    let mut offset = 0;
-    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
-        let hdr: libc::cmsghdr =
-            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
-        if hdr.cmsg_len == 0 {
-            break;
-        }
-        let data_off = offset + cmsg_data_offset();
-
-        if hdr.cmsg_level == SOL_UDP && hdr.cmsg_type == UDP_GRO {
-            if data_off + std::mem::size_of::<u16>() <= control.len() {
-                let seg: u16 =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                return Some(seg);
-            }
-        }
-
-        offset += cmsg_align(hdr.cmsg_len as usize);
-    }
-    None
 }
 
 #[cfg(unix)]
