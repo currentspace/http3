@@ -31,7 +31,10 @@ pub struct H3Connection {
     pub session_ticket: Option<Vec<u8>>,
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
-    pub last_peer_stream_id: u64,
+    /// Largest peer-initiated request stream ID we have accepted (i.e.
+    /// produced a Headers event for). Used as the value carried in the
+    /// server's outgoing GoAway frame per RFC 9114 §5.2. Audit finding #1.
+    pub largest_accepted_request_id: u64,
     /// Pool for recv_body output — buffers become event data directly.
     pub data_pool: AdaptiveBufferPool,
     /// Thread-safe handle cloned into each data event so V8 GC can return
@@ -100,7 +103,7 @@ impl H3Connection {
             session_ticket: None,
             qpack_max_table_capacity: init.qpack_max_table_capacity,
             qpack_blocked_streams: init.qpack_blocked_streams,
-            last_peer_stream_id: 0,
+            largest_accepted_request_id: 0,
             data_pool,
             data_recycler,
             data_recycle_rx,
@@ -149,7 +152,12 @@ impl H3Connection {
             loop {
                 match h3_conn.poll(&mut self.quiche_conn) {
                     Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                        self.last_peer_stream_id = stream_id;
+                        // Track the largest accepted request ID for our own
+                        // outgoing GoAway. monotonic since quiche delivers
+                        // events in order, but max() is defensive.
+                        if stream_id > self.largest_accepted_request_id {
+                            self.largest_accepted_request_id = stream_id;
+                        }
                         let headers: Vec<JsHeader> = list
                             .into_iter()
                             .map(|h| JsHeader {
@@ -165,7 +173,6 @@ impl H3Connection {
                         ));
                     }
                     Ok((stream_id, quiche::h3::Event::Data)) => {
-                        self.last_peer_stream_id = stream_id;
                         loop {
                             let (mut buf, _) = self.data_pool.checkout(16384);
                             match h3_conn.recv_body(
@@ -201,18 +208,18 @@ impl H3Connection {
                         }
                     }
                     Ok((stream_id, quiche::h3::Event::Finished)) => {
-                        self.last_peer_stream_id = stream_id;
                         events.push(JsH3Event::finished(conn_handle, stream_id));
                     }
                     Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
-                        self.last_peer_stream_id = stream_id;
                         events.push(JsH3Event::reset(conn_handle, stream_id, error_code));
                     }
                     Ok((_, quiche::h3::Event::PriorityUpdate)) => {
                         // Ignore priority updates for now
                     }
                     Ok((stream_id, quiche::h3::Event::GoAway)) => {
-                        self.last_peer_stream_id = stream_id;
+                        // Peer's GoAway carries *their* watermark; do NOT
+                        // overwrite our own largest_accepted_request_id with
+                        // it (audit finding #1).
                         events.push(JsH3Event::goaway(conn_handle, stream_id));
                     }
                     Err(quiche::h3::Error::Done) => break,
@@ -462,12 +469,12 @@ impl H3Connection {
             None,
             None,
             Some(format!(
-                "last_peer_stream_id={} blocked_streams={}",
-                self.last_peer_stream_id,
+                "largest_accepted_request_id={} blocked_streams={}",
+                self.largest_accepted_request_id,
                 self.blocked_set.len()
             )),
         );
-        h3.send_goaway(&mut self.quiche_conn, self.last_peer_stream_id)
+        h3.send_goaway(&mut self.quiche_conn, self.largest_accepted_request_id)
             .map_err(Http3NativeError::H3)
     }
 
