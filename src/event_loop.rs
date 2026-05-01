@@ -372,6 +372,18 @@ fn flush_runtime_error<D: Driver, H: ProtocolHandler>(
     batcher.flush()
 }
 
+fn record_sink_close_exit<D: Driver>(driver: &D) {
+    reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "exit-sink-close",
+        Some(driver.driver_kind()),
+        None,
+        Some(driver.pending_tx_count()),
+        None,
+    );
+}
+
 impl EventBatcher {
     #[cfg(feature = "node-api")]
     pub fn new_tsfn(tsfn: EventTsfn) -> Self {
@@ -398,6 +410,31 @@ impl EventBatcher {
 
     pub fn stats_handle(&self) -> EventBatcherStatsHandle {
         self.stats.clone()
+    }
+
+    /// Append a logically atomic event group. If the group would cross the
+    /// normal batch cap, flush the existing batch first so the group is not
+    /// split across TSFN deliveries.
+    pub fn append_atomic(&mut self, mut events: Vec<JsH3Event>) -> bool {
+        if events.is_empty() {
+            return true;
+        }
+        if !self.batch.is_empty() && self.batch.len() + events.len() > MAX_BATCH_SIZE {
+            if !self.flush() {
+                return false;
+            }
+        }
+        self.batch.append(&mut events);
+        true
+    }
+
+    pub fn collect_atomic<F>(&mut self, collect: F) -> bool
+    where
+        F: FnOnce(&mut Vec<JsH3Event>),
+    {
+        let mut events = Vec::new();
+        collect(&mut events);
+        self.append_atomic(events)
     }
 
     /// Flush events to the configured sink. Returns `false` when the sink asks
@@ -490,7 +527,14 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 
         // 3. Drain command channel (unconditional — waker just makes poll return early)
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if handler.dispatch_command(cmd, &mut batcher.batch) {
+            let mut shutdown_requested = false;
+            if !batcher.collect_atomic(|batch| {
+                shutdown_requested = handler.dispatch_command(cmd, batch);
+            }) {
+                record_sink_close_exit(driver);
+                return;
+            }
+            if shutdown_requested {
                 // Shutdown requested: flush remaining sends before exiting
                 handler.flush_sends(&mut outbound);
                 if !outbound.is_empty() {
@@ -605,24 +649,34 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 for chunk in pkt.data.chunks(seg) {
                     let (mut buf, reused) = gro_segment_pool.copy_from_slice(chunk);
                     reactor_metrics::record_gro_segment_buffer_checkout(reused, chunk.len());
-                    handler.process_packet(
-                        &mut buf,
-                        pkt.peer,
-                        pkt_local,
-                        &mut pending_outbound,
-                        &mut batcher.batch,
-                    );
+                    if !batcher.collect_atomic(|batch| {
+                        handler.process_packet(
+                            &mut buf,
+                            pkt.peer,
+                            pkt_local,
+                            &mut pending_outbound,
+                            batch,
+                        )
+                    }) {
+                        record_sink_close_exit(driver);
+                        return;
+                    }
                     let retained = gro_segment_pool.checkin(buf);
                     reactor_metrics::record_gro_segment_buffer_checkin(retained);
                 }
             } else {
-                handler.process_packet(
-                    &mut pkt.data,
-                    pkt.peer,
-                    pkt_local,
-                    &mut pending_outbound,
-                    &mut batcher.batch,
-                );
+                if !batcher.collect_atomic(|batch| {
+                    handler.process_packet(
+                        &mut pkt.data,
+                        pkt.peer,
+                        pkt_local,
+                        &mut pending_outbound,
+                        batch,
+                    )
+                }) {
+                    record_sink_close_exit(driver);
+                    return;
+                }
             }
             rx_recycled.push(pkt.data);
             // Submit retry / version-negotiation packets immediately
@@ -658,15 +712,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             }
             // Mid-batch flush if needed
             if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
-                reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
-                reactor_metrics::record_lifecycle_trace(
-                    "event-loop",
-                    "exit-sink-close",
-                    Some(driver.driver_kind()),
-                    None,
-                    Some(driver.pending_tx_count()),
-                    None,
-                );
+                record_sink_close_exit(driver);
                 return;
             }
         }
@@ -675,23 +721,24 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         }
 
         // 5. Process protocol timers (always — cheap when nothing is expired)
-        handler.process_timers(Instant::now(), &mut batcher.batch);
+        if !batcher.collect_atomic(|batch| handler.process_timers(Instant::now(), batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
 
         // 6. Poll drain events + flush pending writes
-        handler.poll_drain_events(&mut batcher.batch);
-        handler.flush_pending_writes(&mut batcher.batch);
+        if !batcher.collect_atomic(|batch| handler.poll_drain_events(batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
+        if !batcher.collect_atomic(|batch| handler.flush_pending_writes(batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
 
         // Mid-batch flush if timer/drain processing pushed us over the cap
         if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
-            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
-            reactor_metrics::record_lifecycle_trace(
-                "event-loop",
-                "exit-sink-close",
-                Some(driver.driver_kind()),
-                None,
-                Some(driver.pending_tx_count()),
-                None,
-            );
+            record_sink_close_exit(driver);
             return;
         }
 
@@ -718,22 +765,17 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         }
 
         // 8. Cleanup closed connections
-        handler.cleanup_closed(&mut batcher.batch);
+        if !batcher.collect_atomic(|batch| handler.cleanup_closed(batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
 
         // 8b. Drain returned data buffers from V8 GC back into connection pools.
         handler.drain_recycled_buffers();
 
         // 9. Flush events to JS
         if !batcher.flush() {
-            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
-            reactor_metrics::record_lifecycle_trace(
-                "event-loop",
-                "exit-sink-close",
-                Some(driver.driver_kind()),
-                None,
-                Some(driver.pending_tx_count()),
-                None,
-            );
+            record_sink_close_exit(driver);
             push_shutdown_complete(&mut batcher);
             let _ = batcher.flush();
             return;
@@ -764,6 +806,7 @@ mod tests {
 
     /// Tracks the sizes of each batch delivered via `emit()`.
     type DeliveryLog = Arc<Mutex<Vec<usize>>>;
+    type EventDeliveryLog = Arc<Mutex<Vec<Vec<(u8, u32, i64)>>>>;
 
     /// A test-only sink that captures every batch delivered via `emit()`.
     struct CaptureSink {
@@ -805,8 +848,63 @@ mod tests {
         }
     }
 
+    struct CaptureEventsSink {
+        delivered: EventDeliveryLog,
+    }
+
+    impl CaptureEventsSink {
+        fn new() -> (Self, EventDeliveryLog) {
+            let log: EventDeliveryLog = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    delivered: Arc::clone(&log),
+                },
+                log,
+            )
+        }
+    }
+
+    impl EventSink for CaptureEventsSink {
+        fn kind(&self) -> &'static str {
+            "capture-events"
+        }
+
+        fn emit(&mut self, events: Vec<JsH3Event>, _stats: &EventBatcherStatsHandle) -> bool {
+            self.delivered.lock().unwrap().push(
+                events
+                    .into_iter()
+                    .map(|event| (event.event_type, event.conn_handle, event.stream_id))
+                    .collect(),
+            );
+            true
+        }
+    }
+
     fn dummy_event() -> JsH3Event {
         JsH3Event::data(0, 0, vec![1, 2, 3], false, crate::h3_event::NO_RECYCLER)
+    }
+
+    fn typed_event(event_type: u8, conn_handle: u32, stream_id: u64) -> JsH3Event {
+        match event_type {
+            crate::h3_event::EVENT_HEADERS => {
+                JsH3Event::headers(conn_handle, stream_id, vec![], false)
+            }
+            crate::h3_event::EVENT_DATA => JsH3Event::data(
+                conn_handle,
+                stream_id,
+                vec![1],
+                false,
+                crate::h3_event::NO_RECYCLER,
+            ),
+            crate::h3_event::EVENT_FINISHED => JsH3Event::finished(conn_handle, stream_id),
+            _ => JsH3Event::data(
+                conn_handle,
+                stream_id,
+                vec![1],
+                false,
+                crate::h3_event::NO_RECYCLER,
+            ),
+        }
     }
 
     #[test]
@@ -961,7 +1059,7 @@ mod tests {
     #[test]
     fn test_batcher_stats_drop_recording() {
         let (sink, _log) = CaptureSink::new();
-        let mut batcher = EventBatcher::with_sink(sink);
+        let batcher = EventBatcher::with_sink(sink);
         let handle = batcher.stats_handle();
 
         handle.record_drop(3);
@@ -974,7 +1072,7 @@ mod tests {
     #[test]
     fn test_batcher_stats_sink_error_recording() {
         let (sink, _log) = CaptureSink::new();
-        let mut batcher = EventBatcher::with_sink(sink);
+        let batcher = EventBatcher::with_sink(sink);
         let handle = batcher.stats_handle();
 
         handle.record_sink_error();
@@ -1011,6 +1109,51 @@ mod tests {
         let delivered = log.lock().unwrap();
         assert_eq!(delivered.len(), 1, "batcher does not split internally");
         assert_eq!(delivered[0], 2049);
+    }
+
+    #[test]
+    fn test_batcher_atomic_group_flushes_before_crossing_cap() {
+        let (sink, log) = CaptureEventsSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+
+        for _ in 0..MAX_BATCH_SIZE - 1 {
+            batcher.batch.push(dummy_event());
+        }
+
+        let ok = batcher.append_atomic(vec![
+            typed_event(crate::h3_event::EVENT_HEADERS, 7, 11),
+            typed_event(crate::h3_event::EVENT_DATA, 7, 11),
+            typed_event(crate::h3_event::EVENT_FINISHED, 7, 11),
+        ]);
+        assert!(ok);
+        assert!(batcher.flush());
+
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0].len(), MAX_BATCH_SIZE - 1);
+        assert_eq!(
+            delivered[1],
+            vec![
+                (crate::h3_event::EVENT_HEADERS, 7, 11),
+                (crate::h3_event::EVENT_DATA, 7, 11),
+                (crate::h3_event::EVENT_FINISHED, 7, 11),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_batcher_atomic_group_may_exceed_cap_when_group_is_large() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+
+        let group = (0..MAX_BATCH_SIZE + 1)
+            .map(|_| dummy_event())
+            .collect::<Vec<_>>();
+        assert!(batcher.append_atomic(group));
+        assert!(batcher.flush());
+
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.as_slice(), &[MAX_BATCH_SIZE + 1]);
     }
 
     #[test]

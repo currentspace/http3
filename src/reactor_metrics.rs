@@ -439,7 +439,7 @@ pub(crate) fn record_event_batch_drop(count: usize) {
     EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
     EVENT_BATCH_DROPPED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
     // Drops never reach JS, so they shouldn't sit in the outstanding gauge.
-    EVENT_BATCH_OUTSTANDING.fetch_sub(count as u64, Ordering::Relaxed);
+    release_event_batch_outstanding(count as u64);
 }
 
 pub(crate) fn record_event_batch_sink_error() {
@@ -453,11 +453,13 @@ pub(crate) fn record_event_batch_ack(count: usize) {
     EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
     let count = count as u64;
     EVENT_BATCH_ACKED_EVENTS_TOTAL.fetch_add(count, Ordering::Relaxed);
-    let prev = EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed);
-    // Saturating sub: a stray ack with count > outstanding (e.g. drop
-    // race) shouldn't underflow the gauge to a huge value.
-    let new = prev.saturating_sub(count);
-    EVENT_BATCH_OUTSTANDING.store(new, Ordering::Relaxed);
+    release_event_batch_outstanding(count);
+}
+
+fn release_event_batch_outstanding(count: u64) {
+    let _ = EVENT_BATCH_OUTSTANDING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+        Some(prev.saturating_sub(count))
+    });
 }
 
 pub(crate) fn self_heal_event_batch_if_stuck(high_water: u64, stuck_after_ms: u64) -> u64 {
@@ -1174,6 +1176,15 @@ mod tests {
         // Dropped events never reach JS, so they shouldn't sit in the gauge.
         assert_eq!(snap.eventBatchOutstanding, 0);
         assert_eq!(snap.eventBatchDroppedEventsTotal, 50);
+    }
+
+    #[test]
+    fn test_record_event_batch_drop_saturates() {
+        let _guard = setup();
+        record_event_batch_drop(10);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchDroppedEventsTotal, 10);
     }
 
     #[test]
