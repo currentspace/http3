@@ -39,6 +39,9 @@ pub struct JsReactorTelemetrySnapshot {
     pub eventBatchDroppedEventsTotal: i64,
     pub eventBatchSinkErrorsTotal: i64,
     pub eventBatchMaxSizeHighWatermark: i64,
+    pub eventBatchAckedEventsTotal: i64,
+    pub eventBatchOutstanding: i64,
+    pub eventBatchOutstandingHighWatermark: i64,
     pub rawQuicServerWorkerSpawns: i64,
     pub rawQuicClientDedicatedWorkerSpawns: i64,
     pub rawQuicClientSharedWorkersCreated: i64,
@@ -196,6 +199,12 @@ static EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_DROPPED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_SINK_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+/// Audit finding #14: gauge of events handed to TSFN minus events JS has
+/// acked. A persistently rising value flags an unbounded libuv queue —
+/// the early-warning signal that motivates the recv-pause in step 5.2.
+static EVENT_BATCH_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_ACKED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Buffers handed to a `BufferRecycler` whose receiver was already
 /// dropped (or whose channel was full at the moment). Audit finding #31.
@@ -376,14 +385,48 @@ pub(crate) fn record_event_batch_flush(count: usize) {
     bump(&EVENT_BATCH_FLUSHES_TOTAL);
     EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
     observe_max(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK, count);
+    let outstanding = EVENT_BATCH_OUTSTANDING.fetch_add(count as u64, Ordering::Relaxed)
+        + count as u64;
+    let mut hwm = EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK.load(Ordering::Relaxed);
+    while outstanding > hwm {
+        match EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK.compare_exchange_weak(
+            hwm,
+            outstanding,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => hwm = actual,
+        }
+    }
 }
 
 pub(crate) fn record_event_batch_drop(count: usize) {
     EVENT_BATCH_DROPPED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+    // Drops never reach JS, so they shouldn't sit in the outstanding gauge.
+    EVENT_BATCH_OUTSTANDING.fetch_sub(count as u64, Ordering::Relaxed);
 }
 
 pub(crate) fn record_event_batch_sink_error() {
     bump(&EVENT_BATCH_SINK_ERRORS_TOTAL);
+}
+
+/// Audit finding #14: JS has finished dispatching `count` events from a
+/// TSFN batch. Releases credit on the outstanding gauge so the worker
+/// can quantify how far JS is behind real-time.
+pub(crate) fn record_event_batch_ack(count: usize) {
+    let count = count as u64;
+    EVENT_BATCH_ACKED_EVENTS_TOTAL.fetch_add(count, Ordering::Relaxed);
+    let prev = EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed);
+    // Saturating sub: a stray ack with count > outstanding (e.g. drop
+    // race) shouldn't underflow the gauge to a huge value.
+    let new = prev.saturating_sub(count);
+    EVENT_BATCH_OUTSTANDING.store(new, Ordering::Relaxed);
+}
+
+/// Current best-effort snapshot of the outstanding-events gauge.
+pub fn event_batch_outstanding() -> u64 {
+    EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed)
 }
 
 pub(crate) fn record_recycler_drop() {
@@ -734,6 +777,9 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         eventBatchDroppedEventsTotal: event_batch_dropped_events_total,
         eventBatchSinkErrorsTotal: load(&EVENT_BATCH_SINK_ERRORS_TOTAL),
         eventBatchMaxSizeHighWatermark: load(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK),
+        eventBatchAckedEventsTotal: load(&EVENT_BATCH_ACKED_EVENTS_TOTAL),
+        eventBatchOutstanding: load(&EVENT_BATCH_OUTSTANDING),
+        eventBatchOutstandingHighWatermark: load(&EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK),
         rawQuicServerWorkerSpawns: load(&RAW_QUIC_SERVER_WORKER_SPAWNS),
         rawQuicClientDedicatedWorkerSpawns: load(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         rawQuicClientSharedWorkersCreated: load(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
@@ -833,6 +879,9 @@ pub fn reset() {
         &EVENT_BATCH_DROPPED_EVENTS_TOTAL,
         &EVENT_BATCH_SINK_ERRORS_TOTAL,
         &EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK,
+        &EVENT_BATCH_OUTSTANDING,
+        &EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK,
+        &EVENT_BATCH_ACKED_EVENTS_TOTAL,
         &RAW_QUIC_SERVER_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED,
@@ -936,6 +985,9 @@ mod tests {
         assert_eq!(snap.eventBatchDroppedEventsTotal, 0);
         assert_eq!(snap.eventBatchSinkErrorsTotal, 0);
         assert_eq!(snap.eventBatchMaxSizeHighWatermark, 0);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 0);
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchOutstandingHighWatermark, 0);
         assert_eq!(snap.rawQuicServerWorkerSpawns, 0);
         assert_eq!(snap.h3ServerWorkerSpawns, 0);
         assert_eq!(snap.txBuffersRecycled, 0);
@@ -977,6 +1029,43 @@ mod tests {
         assert_eq!(snap.eventBatchFlushesTotal, 2);
         assert_eq!(snap.eventBatchAttemptedEventsTotal, 30);
         assert_eq!(snap.eventBatchMaxSizeHighWatermark, 20);
+        // Audit #14: outstanding gauge climbs with each flush.
+        assert_eq!(snap.eventBatchOutstanding, 30);
+        assert_eq!(snap.eventBatchOutstandingHighWatermark, 30);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 0);
+    }
+
+    #[test]
+    fn test_record_event_batch_ack() {
+        setup();
+        record_event_batch_flush(50);
+        record_event_batch_ack(20);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 30);
+        assert_eq!(snap.eventBatchOutstandingHighWatermark, 50);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 20);
+    }
+
+    #[test]
+    fn test_record_event_batch_ack_saturates() {
+        setup();
+        record_event_batch_flush(5);
+        // Stray ack with count > outstanding shouldn't underflow.
+        record_event_batch_ack(100);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 100);
+    }
+
+    #[test]
+    fn test_record_event_batch_drop_releases_outstanding() {
+        setup();
+        record_event_batch_flush(50);
+        record_event_batch_drop(50);
+        let snap = snapshot();
+        // Dropped events never reach JS, so they shouldn't sit in the gauge.
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchDroppedEventsTotal, 50);
     }
 
     #[test]

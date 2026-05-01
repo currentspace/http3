@@ -183,6 +183,12 @@ impl NativeQuicClient {
         }
     }
 
+    /// Audit finding #14: see Http3SecureServer::ack_event_batch.
+    #[napi]
+    pub fn ack_event_batch(&self, count: u32) {
+        crate::reactor_metrics::record_event_batch_ack(count as usize);
+    }
+
     /// Join the worker thread. Safe to call after `request_shutdown()`.
     /// Also releases the TSFN reference held by this struct.
     #[napi]

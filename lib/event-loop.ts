@@ -89,6 +89,8 @@ export interface NativeWorkerServerBinding {
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;
@@ -118,6 +120,8 @@ export interface NativeWorkerClientBinding {
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;
@@ -190,6 +194,8 @@ export interface NativeQuicServerBinding {
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;
@@ -213,6 +219,8 @@ export interface NativeQuicClientBinding {
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;

@@ -236,6 +236,10 @@ export class Http3SecureServer extends EventEmitter {
             this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
             eventLoop._onShutdownSentinel();
           }
+          // Audit finding #14: release credit on the native outstanding-events
+          // gauge so the worker can quantify how far behind real-time JS is.
+          // Step 5.2 will use this signal to pause RX when JS falls behind.
+          workerServer.ackEventBatch(events.length);
         });
 
         const eventLoop = new WorkerEventLoop(workerServer);

@@ -344,6 +344,16 @@ impl NativeWorkerServer {
         }
     }
 
+    /// Audit finding #14: JS calls this after dispatching a TSFN batch
+    /// so the worker can quantify how far behind real-time JS is.
+    /// Releases credit on the global outstanding-events gauge; the
+    /// recv-pause threshold (step 5.2) reads that gauge to decide
+    /// whether to skip RX processing for one poll iteration.
+    #[napi]
+    pub fn ack_event_batch(&self, count: u32) {
+        crate::reactor_metrics::record_event_batch_ack(count as usize);
+    }
+
     /// Join all worker threads. Safe to call after `request_shutdown()`.
     #[napi]
     pub fn join_worker(&mut self) {

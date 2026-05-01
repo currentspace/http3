@@ -630,6 +630,8 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
               session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
               eventLoop._onShutdownSentinel();
             }
+            // Audit #14: release credit on the outstanding-events gauge.
+            nativeClient.ackEventBatch(events.length);
           },
         );
 

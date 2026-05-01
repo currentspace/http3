@@ -372,6 +372,8 @@ export class QuicServer extends EventEmitter {
             this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
             eventLoop._onShutdownSentinel();
           }
+          // Audit #14: release credit on the outstanding-events gauge.
+          native.ackEventBatch(events.length);
         },
       );
 

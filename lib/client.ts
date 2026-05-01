@@ -474,6 +474,8 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
             session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
             eventLoop._onShutdownSentinel();
           }
+          // Audit #14: release credit on the outstanding-events gauge.
+          nativeClient.ackEventBatch(events.length);
         });
 
         const eventLoop = new ClientEventLoop(nativeClient);

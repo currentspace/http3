@@ -19,6 +19,8 @@ export declare class NativeQuicClient {
   getQlogPath(): string | null
   /** Send the Shutdown command without joining the worker thread. */
   requestShutdown(): boolean
+  /** Audit finding #14: see Http3SecureServer::ack_event_batch. */
+  ackEventBatch(count: number): void
   /**
    * Join the worker thread. Safe to call after `request_shutdown()`.
    * Also releases the TSFN reference held by this struct.
@@ -40,6 +42,8 @@ export declare class NativeQuicServer {
   getQlogPath(connHandle: number): string | null
   /** Send the Shutdown command without joining the worker threads. */
   requestShutdown(): boolean
+  /** Audit finding #14: see Http3SecureServer::ack_event_batch. */
+  ackEventBatch(count: number): void
   /**
    * Join all worker threads. Safe to call after `request_shutdown()`.
    * Also releases the TSFN reference held by this struct.
@@ -64,6 +68,8 @@ export declare class NativeWorkerClient {
   getQlogPath(): string | null
   /** Send the Shutdown command without joining the worker thread. */
   requestShutdown(): boolean
+  /** Audit finding #14: see Http3SecureServer::ack_event_batch. */
+  ackEventBatch(count: number): void
   /** Join the worker thread. Safe to call after `request_shutdown()`. */
   joinWorker(): void
   shutdown(): void
@@ -95,6 +101,14 @@ export declare class NativeWorkerServer {
   getQlogPath(connHandle: number): string | null
   /** Send the Shutdown command without joining the worker threads. */
   requestShutdown(): boolean
+  /**
+   * Audit finding #14: JS calls this after dispatching a TSFN batch
+   * so the worker can quantify how far behind real-time JS is.
+   * Releases credit on the global outstanding-events gauge; the
+   * recv-pause threshold (step 5.2) reads that gauge to decide
+   * whether to skip RX processing for one poll iteration.
+   */
+  ackEventBatch(count: number): void
   /** Join all worker threads. Safe to call after `request_shutdown()`. */
   joinWorker(): void
   shutdown(): void
@@ -264,6 +278,9 @@ export interface JsReactorTelemetrySnapshot {
   eventBatchDroppedEventsTotal: number
   eventBatchSinkErrorsTotal: number
   eventBatchMaxSizeHighWatermark: number
+  eventBatchAckedEventsTotal: number
+  eventBatchOutstanding: number
+  eventBatchOutstandingHighWatermark: number
   rawQuicServerWorkerSpawns: number
   rawQuicClientDedicatedWorkerSpawns: number
   rawQuicClientSharedWorkersCreated: number
