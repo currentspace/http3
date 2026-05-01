@@ -2385,6 +2385,22 @@ impl ProtocolHandler for QuicServerHandler {
         for handle in &closed {
             self.timer_heap.remove_connection(*handle);
             self.conn_send_buffers.remove(handle);
+            // Audit finding #12: emit a reset for every abandoned stream
+            // before dropping its PendingWrite, so JS-side write callbacks
+            // fire (via stream.destroy in _onReset) instead of hanging.
+            let abandoned: Vec<u64> = self
+                .pending_writes
+                .keys()
+                .filter(|&&(ch, _)| ch as usize == *handle)
+                .map(|&(_, sid)| sid)
+                .collect();
+            for stream_id in abandoned {
+                batch.push(JsH3Event::reset(
+                    offset | (*handle as u32),
+                    stream_id,
+                    0, // raw QUIC: app error 0 — connection-level close
+                ));
+            }
             self.pending_writes
                 .retain(|&(ch, _), _| ch as usize != *handle);
             if !self.last_expired.contains(handle) {

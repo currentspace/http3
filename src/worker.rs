@@ -2481,6 +2481,23 @@ impl ProtocolHandler for H3ServerHandler {
             self.timer_heap.remove_connection(*handle);
             self.conn_send_buffers.remove(handle);
             self.pending_session_closes.remove(&(*handle as u32));
+            // Audit finding #12: emit a reset for every abandoned stream
+            // before dropping its PendingWrite, so the JS-side write
+            // callback fires (via stream.destroy in _onReset) instead of
+            // hanging waiting for a drain that will never come.
+            let abandoned: Vec<u64> = self
+                .pending_writes
+                .keys()
+                .filter(|&&(ch, _)| ch as usize == *handle)
+                .map(|&(_, sid)| sid)
+                .collect();
+            for stream_id in abandoned {
+                batch.push(JsH3Event::reset(
+                    offset | (*handle as u32),
+                    stream_id,
+                    0, // H3_NO_ERROR — connection-level close, not stream-level reset
+                ));
+            }
             self.pending_writes
                 .retain(|&(ch, _), _| ch as usize != *handle);
             if !self.last_expired.contains(handle) {
