@@ -21,10 +21,17 @@
 
 import type { Duplex } from 'node:stream';
 
+/**
+ * Drain callback. Invoked with no argument on a real drain (resume the
+ * pending write) or with an Error on stream close (reject the pending
+ * write callback so callers don't hang). See {@link rejectDrainCallbacks}.
+ */
+export type DrainCallback = (err?: Error) => void;
+
 export interface BackpressureState {
   pendingReads: Array<Buffer | null>;
   readBackpressure: boolean;
-  drainCallbacks: Array<() => void>;
+  drainCallbacks: Array<DrainCallback>;
 }
 
 export function createBackpressureState(): BackpressureState | null {
@@ -120,4 +127,17 @@ export function flushDrainCallbacks(state: BackpressureState | null): void {
 export function cancelDrainCallbacks(state: BackpressureState | null): void {
   if (state === null) return;
   state.drainCallbacks.length = 0;
+}
+
+/**
+ * Invoke every queued drain callback with an error so the caller's pending
+ * `write(chunk, cb)` callback fires (with that error) instead of hanging.
+ * Used by `stream.close()`. Audit finding #13.
+ */
+export function rejectDrainCallbacks(state: BackpressureState | null, err: Error): void {
+  if (state === null) return;
+  const cbs = state.drainCallbacks.splice(0);
+  for (const cb of cbs) {
+    cb(err);
+  }
 }

@@ -1,12 +1,12 @@
 import { Duplex } from 'node:stream';
 import {
   type BackpressureState,
-  cancelDrainCallbacks,
   createBackpressureState,
   ensureBackpressureState,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
+  rejectDrainCallbacks,
 } from './stream-backpressure.js';
 
 /**
@@ -63,7 +63,7 @@ export class QuicStream extends Duplex {
     } else if (this._clientLoop) {
       this._clientLoop.streamClose(this._streamId, errorCode);
     }
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this.destroy();
   }
 
@@ -125,7 +125,8 @@ export class QuicStream extends Duplex {
     } else {
       const remaining = chunk.subarray(written);
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._writeChunk(remaining, callback);
       });
     }
@@ -138,7 +139,8 @@ export class QuicStream extends Duplex {
         callback();
       } else {
         this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+        this._bp.drainCallbacks.push((err) => {
+          if (err) { callback(err); return; }
           this._writeFinalChunk(chunk, callback);
         });
       }
@@ -148,7 +150,8 @@ export class QuicStream extends Duplex {
       callback();
     } else {
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._writeFinalChunk(chunk.subarray(written), callback);
       });
     }
@@ -171,7 +174,7 @@ export class QuicStream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     callback(error);
   }
 }

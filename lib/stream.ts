@@ -4,12 +4,12 @@ import type { IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
 import {
   type BackpressureState,
-  cancelDrainCallbacks,
   createBackpressureState,
   ensureBackpressureState,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
+  rejectDrainCallbacks,
 } from './stream-backpressure.js';
 
 /** HTTP header map where each value is a string or string array. */
@@ -170,7 +170,7 @@ export class ServerHttp3Stream extends Duplex {
    */
   close(code?: number): void {
     this._eventLoop?.streamClose(this._connHandle, this._streamId, code ?? 0);
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this._clearTimeout();
     this.destroy();
   }
@@ -229,10 +229,13 @@ export class ServerHttp3Stream extends Duplex {
     if (written >= chunk.length) {
       callback();
     } else {
-      // Partial write or fully blocked — retry remainder on drain
+      // Partial write or fully blocked — retry remainder on drain. If the
+      // stream closes before drain, the closure is invoked with an Error
+      // so the user's callback fires instead of hanging.
       const remaining = chunk.subarray(written);
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._writeChunk(remaining, callback);
       });
     }
@@ -253,7 +256,8 @@ export class ServerHttp3Stream extends Duplex {
     );
     if (written === 0) {
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._eventLoop?.streamSend(
           this._connHandle,
           this._streamId,
@@ -288,7 +292,7 @@ export class ServerHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     this._clearTimeout();
     callback(error);
   }
@@ -333,7 +337,7 @@ export class ClientHttp3Stream extends Duplex {
   close(code?: number): void {
     const closeCode = code ?? 0;
     this._eventLoop?.streamClose(this._streamId, closeCode);
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this._clearTimeout();
     this.destroy();
   }
@@ -388,7 +392,8 @@ export class ClientHttp3Stream extends Duplex {
     } else {
       const remaining = chunk.subarray(written);
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._writeChunk(remaining, callback);
       });
     }
@@ -403,7 +408,8 @@ export class ClientHttp3Stream extends Duplex {
     const written = this._eventLoop.streamSend(this._streamId, Buffer.alloc(0), true);
     if (written === 0) {
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._eventLoop?.streamSend(this._streamId, Buffer.alloc(0), true);
         callback();
       });
@@ -433,7 +439,7 @@ export class ClientHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     this._clearTimeout();
     callback(error);
   }
@@ -515,7 +521,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
     } catch {
       // Ignore close errors while cleaning up.
     }
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this.destroy();
   }
 
