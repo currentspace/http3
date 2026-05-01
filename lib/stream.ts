@@ -2,6 +2,7 @@ import { Duplex } from 'node:stream';
 import { constants as http2Constants } from 'node:http2';
 import type { IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from 'node:http2';
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
+import { Http3Error, ERR_HTTP3_STREAM_ERROR } from './errors.js';
 import {
   type BackpressureState,
   createBackpressureState,
@@ -11,6 +12,15 @@ import {
   fireDrainCallbacks,
   rejectDrainCallbacks,
 } from './stream-backpressure.js';
+
+/**
+ * Maximum time `_final` will wait for the worker to accept the FIN before
+ * destroying the stream with a timeout error. Audit finding #9: prevents
+ * `end()` from hanging forever if the worker is wedged. Today's
+ * `streamSend` contract makes the wait branch unreachable, but the
+ * watchdog protects future paths (see deferred Phase 3 redesign).
+ */
+const STREAM_FINISH_TIMEOUT_MS = 30_000;
 
 /** HTTP header map where each value is a string or string array. */
 export type IncomingHeaders = Record<string, string | string[]>;
@@ -265,16 +275,30 @@ export class ServerHttp3Stream extends Duplex {
       true,
     );
     if (written === 0) {
+      // Audit finding #9: bound the wait so a wedged worker can't hang
+      // end() forever. Settled flag prevents double-firing if the timer
+      // and drain race.
+      let settled = false;
+      const settle = (err?: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        callback(err);
+      };
+      const timer = setTimeout(() => {
+        settle(new Http3Error('stream finish timed out', ERR_HTTP3_STREAM_ERROR));
+      }, STREAM_FINISH_TIMEOUT_MS);
+      timer.unref();
       this._bp = ensureBackpressureState(this._bp);
       this._bp.drainCallbacks.push((err) => {
-        if (err) { callback(err); return; }
+        clearTimeout(timer);
+        if (err) { settle(err); return; }
         this._eventLoop?.streamSend(
           this._connHandle,
           this._streamId,
           Buffer.alloc(0),
           true,
         );
-        callback();
+        settle();
       });
     } else {
       callback();
@@ -417,11 +441,23 @@ export class ClientHttp3Stream extends Duplex {
     }
     const written = this._eventLoop.streamSend(this._streamId, Buffer.alloc(0), true);
     if (written === 0) {
+      // Audit finding #9: bound the wait, mirror server-side _final.
+      let settled = false;
+      const settle = (err?: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        callback(err);
+      };
+      const timer = setTimeout(() => {
+        settle(new Http3Error('stream finish timed out', ERR_HTTP3_STREAM_ERROR));
+      }, STREAM_FINISH_TIMEOUT_MS);
+      timer.unref();
       this._bp = ensureBackpressureState(this._bp);
       this._bp.drainCallbacks.push((err) => {
-        if (err) { callback(err); return; }
+        clearTimeout(timer);
+        if (err) { settle(err); return; }
         this._eventLoop?.streamSend(this._streamId, Buffer.alloc(0), true);
-        callback();
+        settle();
       });
     } else {
       callback();

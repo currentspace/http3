@@ -1,4 +1,5 @@
 import { Duplex } from 'node:stream';
+import { Http3Error, ERR_HTTP3_STREAM_ERROR } from './errors.js';
 import {
   type BackpressureState,
   createBackpressureState,
@@ -8,6 +9,9 @@ import {
   fireDrainCallbacks,
   rejectDrainCallbacks,
 } from './stream-backpressure.js';
+
+/** Audit finding #9: bound on `_final` wait time. */
+const STREAM_FINISH_TIMEOUT_MS = 30_000;
 
 /**
  * Event loop interface for QUIC server-side stream commands.
@@ -160,7 +164,24 @@ export class QuicStream extends Duplex {
   _final(callback: (error?: Error | null) => void): void {
     const finalChunk = this._finalChunk ?? Buffer.alloc(0);
     this._finalChunk = null;
-    this._writeFinalChunk(finalChunk, callback);
+
+    // Audit finding #9: wrap the entire _writeFinalChunk path with a
+    // timeout so a wedged worker / stuck drain can't hang end() forever.
+    let settled = false;
+    const settle = (err?: Error | null): void => {
+      if (settled) return;
+      settled = true;
+      callback(err);
+    };
+    const timer = setTimeout(() => {
+      settle(new Http3Error('stream finish timed out', ERR_HTTP3_STREAM_ERROR));
+    }, STREAM_FINISH_TIMEOUT_MS);
+    timer.unref();
+
+    this._writeFinalChunk(finalChunk, (err) => {
+      clearTimeout(timer);
+      settle(err);
+    });
   }
 
   private _doSend(data: Buffer, fin: boolean): number {
