@@ -123,6 +123,37 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// Probe whether `io_uring_setup(2)` is permitted in this environment.
+    /// Returns `false` inside Docker without `--privileged` or a permissive
+    /// seccomp profile, on kernels without io_uring, or in CI sandboxes that
+    /// disable `IORING_*` syscalls. The probe is cached once per process.
+    /// Tests that hit `IoUringDriver::new` early-return with a skip message
+    /// instead of panicking when this returns `false`.
+    fn io_uring_available() -> bool {
+        use crate::transport::Driver;
+        use crate::transport::io_uring::IoUringDriver;
+        static AVAILABLE: OnceLock<bool> = OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            let Ok(sock) = UdpSocket::bind("127.0.0.1:0") else {
+                return false;
+            };
+            let _ = sock.set_nonblocking(true);
+            IoUringDriver::new(sock).is_ok()
+        })
+    }
+
+    macro_rules! skip_unless_io_uring {
+        () => {{
+            if !io_uring_available() {
+                eprintln!(
+                    "skipping {}: io_uring_setup not permitted in this environment",
+                    std::any::type_name_of_val(&|| ())
+                );
+                return;
+            }
+        }};
+    }
+
     // ── Test: probe_gso via setsockopt leaves socket dirty ──────────
 
     #[test]
@@ -275,6 +306,7 @@ mod tests {
             let pkt = TxDatagram {
                 data: vec![0xAB; 100],
                 to: b_addr,
+                max_segment_size: None,
             };
             driver_a.submit_sends(vec![pkt]).unwrap();
             // Poll to flush (poll driver's sendmmsg happens inside send_batch).
@@ -770,6 +802,7 @@ mod tests {
             .map(|i| TxDatagram {
                 data: vec![i as u8; 200],
                 to: recv_addr,
+                max_segment_size: None,
             })
             .collect();
         let batches = group_for_gso(packets);
@@ -888,6 +921,7 @@ mod tests {
             .map(|i| TxDatagram {
                 data: vec![i as u8; 200],
                 to: recv_addr,
+                max_segment_size: None,
             })
             .collect();
         sender.submit_sends(packets).unwrap();
@@ -918,6 +952,7 @@ mod tests {
     #[test]
     fn iouring_driver_gso_roundtrip() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -939,6 +974,7 @@ mod tests {
             .map(|i| TxDatagram {
                 data: vec![i as u8; 200],
                 to: recv_addr,
+                max_segment_size: None,
             })
             .collect();
         sender.submit_sends(packets).unwrap();
@@ -980,6 +1016,7 @@ mod tests {
     #[test]
     fn iouring_driver_gro_cmsg_with_quic_sized_packets() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1002,6 +1039,7 @@ mod tests {
             .map(|i| TxDatagram {
                 data: vec![i as u8; 1200],
                 to: recv_addr,
+                max_segment_size: None,
             })
             .collect();
         sender.submit_sends(packets).unwrap();
@@ -1049,6 +1087,7 @@ mod tests {
     #[test]
     fn iouring_driver_gso_multi_round() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1070,6 +1109,7 @@ mod tests {
                 .map(|i| TxDatagram {
                     data: vec![(round * 16 + i) as u8; 200],
                     to: recv_addr,
+                    max_segment_size: None,
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1102,6 +1142,7 @@ mod tests {
     #[test]
     fn iouring_driver_rapid_submit_sends_no_poll() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1131,6 +1172,7 @@ mod tests {
                 .map(|i| TxDatagram {
                     data: vec![(call * pkts_per_call + i) as u8; pkt_size],
                     to: recv_addr,
+                    max_segment_size: None,
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1164,6 +1206,7 @@ mod tests {
     #[test]
     fn iouring_driver_bidirectional_echo() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1197,6 +1240,7 @@ mod tests {
                 .map(|i| TxDatagram {
                     data: vec![(round * pkts_per_round + i) as u8; pkt_size],
                     to: addr_b,
+                    max_segment_size: None,
                 })
                 .collect();
             a.submit_sends(packets).unwrap();
@@ -1207,6 +1251,7 @@ mod tests {
                 .map(|i| TxDatagram {
                     data: vec![(round * pkts_per_round + i) as u8; pkt_size],
                     to: addr_a,
+                    max_segment_size: None,
                 })
                 .collect();
             b.submit_sends(packets).unwrap();
@@ -1289,6 +1334,7 @@ mod tests {
     #[test]
     fn iouring_driver_echo_at_scale() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1354,6 +1400,7 @@ mod tests {
                     .map(|i| TxDatagram {
                         data: vec![(i % 256) as u8; pkt_size],
                         to: server_addr,
+                        max_segment_size: None,
                     })
                     .collect();
                 client.submit_sends(packets).unwrap();
@@ -1375,12 +1422,14 @@ mod tests {
                             echo_packets.push(TxDatagram {
                                 data: chunk.to_vec(),
                                 to: client_addr,
+                                max_segment_size: None,
                             });
                         }
                     } else {
                         echo_packets.push(TxDatagram {
                             data: pkt.data.clone(),
                             to: client_addr,
+                            max_segment_size: None,
                         });
                     }
                 }
@@ -1440,6 +1489,7 @@ mod tests {
     #[test]
     fn iouring_driver_cross_thread_echo() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1507,6 +1557,7 @@ mod tests {
                     echo.push(TxDatagram {
                         data: pkt.data.clone(),
                         to: client_addr,
+                        max_segment_size: None,
                     });
                 }
                 if !echo.is_empty() {
@@ -1540,6 +1591,7 @@ mod tests {
                     .map(|i| TxDatagram {
                         data: vec![(i % 256) as u8; pkt_size],
                         to: server_addr,
+                        max_segment_size: None,
                     })
                     .collect();
                 client.submit_sends(packets).unwrap();
@@ -1576,6 +1628,7 @@ mod tests {
     #[test]
     fn iouring_driver_bounded_tier2_progress_under_saturation() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1623,6 +1676,7 @@ mod tests {
             .map(|i| TxDatagram {
                 data: vec![(i % 251) as u8; packet_size],
                 to: recv_addr,
+                max_segment_size: None,
             })
             .collect();
 
@@ -1668,6 +1722,7 @@ mod tests {
     #[test]
     fn iouring_driver_no_latency_spikes() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1693,6 +1748,7 @@ mod tests {
                 .map(|i| TxDatagram {
                     data: vec![(round * 32 + i) as u8; 200],
                     to: recv_addr,
+                    max_segment_size: None,
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1746,6 +1802,7 @@ mod tests {
     #[test]
     fn iouring_driver_stress_multi_round() {
         let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
 
@@ -1773,6 +1830,7 @@ mod tests {
                 .map(|i| TxDatagram {
                     data: vec![((round * pkts_per_round + i) % 256) as u8; pkt_size],
                     to: recv_addr,
+                    max_segment_size: None,
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1841,6 +1899,7 @@ mod tests {
                 .map(|i| TxDatagram {
                     data: vec![i as u8; 200],
                     to: recv_addr,
+                    max_segment_size: None,
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();

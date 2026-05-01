@@ -414,6 +414,7 @@ mod inner {
                     self.unsent.push_back(TxDatagram {
                         data,
                         to: pkt_addrs[i],
+                        max_segment_size: None,
                     });
                 }
             }
@@ -508,12 +509,14 @@ mod inner {
                             self.unsent.push_back(TxDatagram {
                                 data: chunk.to_vec(),
                                 to: batch_addrs[i],
+                                max_segment_size: None,
                             });
                         }
                     } else {
                         self.unsent.push_back(TxDatagram {
                             data,
                             to: batch_addrs[i],
+                            max_segment_size: None,
                         });
                     }
                 }

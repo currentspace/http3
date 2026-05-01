@@ -344,6 +344,7 @@ mod inner {
                 unsent.push(TxDatagram {
                     data,
                     to: self.connected_peer,
+                    max_segment_size: None,
                 });
             }
 
@@ -449,6 +450,7 @@ mod inner {
             TxDatagram {
                 data: std::mem::take(&mut self.data),
                 to: self.peer,
+                max_segment_size: None,
             }
         }
 
@@ -751,14 +753,14 @@ mod inner {
                                     let peer = parse_sockaddr(name_data);
                                     if let Some(peer) = peer {
                                         let control = parsed.control_data();
-                                        let parsed = parse_recv_cmsgs(control);
-                                        let local = parsed
+                                        let cmsgs = parse_recv_cmsgs(control);
+                                        let local = cmsgs
                                             .local_ip
                                             .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                                             .unwrap_or(self.local_addr);
-                                        let segment_size = parsed.segment_size;
+                                        let segment_size = cmsgs.segment_size;
                                         // Audit #18: ECN observability.
-                                        if let Some(tos) = parsed.tos {
+                                        if let Some(tos) = cmsgs.tos {
                                             reactor_metrics::record_ecn_recv(
                                                 crate::transport::socket::EcnCodePoint::from_tos(tos),
                                             );
@@ -850,6 +852,7 @@ mod inner {
                                         self.pending_tx.push_back(TxDatagram {
                                             data: chunk.to_vec(),
                                             to: peer,
+                                            max_segment_size: None,
                                         });
                                     }
                                 } else {
@@ -1002,6 +1005,7 @@ mod inner {
                                 self.pending_tx.push_back(TxDatagram {
                                     data: chunk.to_vec(),
                                     to: batch.to,
+                                    max_segment_size: None,
                                 });
                             }
                             continue;
@@ -1014,6 +1018,7 @@ mod inner {
                                 self.pending_tx.push_back(TxDatagram {
                                     data: chunk.to_vec(),
                                     to: batch.to,
+                                    max_segment_size: None,
                                 });
                             }
                             continue;
@@ -1035,6 +1040,7 @@ mod inner {
                                 self.pending_tx.push_back(TxDatagram {
                                     data: chunk.to_vec(),
                                     to: peer,
+                                    max_segment_size: None,
                                 });
                             }
                         } else {
@@ -1047,6 +1053,7 @@ mod inner {
                         self.pending_tx.push_back(TxDatagram {
                             data: batch.data,
                             to: batch.to,
+                            max_segment_size: None,
                         });
                     }
                 }
@@ -1346,6 +1353,7 @@ mod inner {
                         self.pending_tx.push_back(TxDatagram {
                             data: chunk.to_vec(),
                             to: batch.to,
+                            max_segment_size: None,
                         });
                     }
                     reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
@@ -1361,6 +1369,7 @@ mod inner {
                     self.tx_slots[idx].prepare(TxDatagram {
                         data: batch.data,
                         to: batch.to,
+                        max_segment_size: None,
                     });
                 }
                 let slot = &mut self.tx_slots[idx];
@@ -1382,6 +1391,7 @@ mod inner {
                         self.pending_tx.push_back(TxDatagram {
                             data: chunk.to_vec(),
                             to: peer,
+                            max_segment_size: None,
                         });
                     }
                     reactor_metrics::record_io_uring_sq_full_event();
@@ -1517,14 +1527,14 @@ mod inner {
                                     let peer = parse_sockaddr(name_data);
                                     if let Some(peer) = peer {
                                         let control = parsed.control_data();
-                                        let parsed = parse_recv_cmsgs(control);
-                                        let local = parsed
+                                        let cmsgs = parse_recv_cmsgs(control);
+                                        let local = cmsgs
                                             .local_ip
                                             .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                                             .unwrap_or(self.local_addr);
-                                        let segment_size = parsed.segment_size;
+                                        let segment_size = cmsgs.segment_size;
                                         // Audit #18: ECN observability.
-                                        if let Some(tos) = parsed.tos {
+                                        if let Some(tos) = cmsgs.tos {
                                             reactor_metrics::record_ecn_recv(
                                                 crate::transport::socket::EcnCodePoint::from_tos(tos),
                                             );
@@ -1580,6 +1590,7 @@ mod inner {
                                         self.pending_tx.push_back(TxDatagram {
                                             data: chunk.to_vec(),
                                             to: peer,
+                                            max_segment_size: None,
                                         });
                                     }
                                 } else {
