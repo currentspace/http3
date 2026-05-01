@@ -296,6 +296,14 @@ export interface ReactorTelemetrySnapshot {
   eventBatchDroppedEventsTotal: number;
   eventBatchSinkErrorsTotal: number;
   eventBatchMaxSizeHighWatermark: number;
+  eventBatchAckedEventsTotal: number;
+  eventBatchOutstanding: number;
+  eventBatchOutstandingHighWatermark: number;
+  eventBatchRxPausesTotal: number;
+  ecnRecvNotEctTotal: number;
+  ecnRecvEct0Total: number;
+  ecnRecvEct1Total: number;
+  ecnRecvCeTotal: number;
   rawQuicServerWorkerSpawns: number;
   rawQuicClientDedicatedWorkerSpawns: number;
   rawQuicClientSharedWorkersCreated: number;

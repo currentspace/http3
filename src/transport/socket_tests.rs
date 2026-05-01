@@ -1636,14 +1636,27 @@ mod tests {
         let receiver_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender_sock.set_nonblocking(true).unwrap();
         receiver_sock.set_nonblocking(true).unwrap();
-        // Increase rcvbuf to handle the full burst without packet loss.
-        // Default rmem_default (212992) is too small for 384 × 1480 = 568320 bytes.
-        setsockopt_int(
+        // The full burst is 384 × 1480 = 568320 bytes. Default rmem_max
+        // (~256 KiB) clamps SO_RCVBUF below that, so the kernel drops the
+        // tail of the burst before our io_uring multishot recvmsg gets a
+        // chance to drain it. Try SO_RCVBUFFORCE first (bypasses rmem_max
+        // when we have CAP_NET_ADMIN — available under
+        // `--security-opt seccomp=unconfined`) and fall back to SO_RCVBUF.
+        let want_rcvbuf: libc::c_int = 4 << 20; // 4 MiB
+        let force_rc = setsockopt_int(
             receiver_sock.as_raw_fd(),
             libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            1 << 20,
+            libc::SO_RCVBUFFORCE,
+            want_rcvbuf,
         );
+        if force_rc != 0 {
+            setsockopt_int(
+                receiver_sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                want_rcvbuf,
+            );
+        }
         let recv_addr = receiver_sock.local_addr().unwrap();
 
         let (mut sender, _sw) = IoUringDriver::new(sender_sock).unwrap();
@@ -1659,10 +1672,13 @@ mod tests {
                 .unwrap();
             ready_tx.send(()).unwrap();
             let mut received = 0usize;
-            let deadline = Instant::now() + Duration::from_secs(10);
+            // Drain at line rate: 1 ms timeout per poll so the loop spins
+            // hot while packets are streaming and exits quickly when idle.
+            // 30 s overall deadline matches the sender drain cap below.
+            let deadline = Instant::now() + Duration::from_secs(30);
             while received < expected_bytes && Instant::now() < deadline {
                 let outcome = receiver
-                    .poll(Some(Instant::now() + Duration::from_millis(20)))
+                    .poll(Some(Instant::now() + Duration::from_millis(1)))
                     .unwrap();
                 for pkt in &outcome.rx {
                     received += pkt.data.len();
@@ -1697,7 +1713,9 @@ mod tests {
             "test should saturate more than one TX window (outstanding_after_submit={pending_after_submit})",
         );
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // The sender drain cap is generous so even Docker virtio loopback
+        // (with its smaller default rmem_max) gets the full burst out.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while sender.pending_tx_count() > 0 && Instant::now() < deadline {
             let _ = sender.poll(Some(Instant::now() + Duration::from_millis(5)));
         }
@@ -1705,7 +1723,8 @@ mod tests {
 
         assert_eq!(
             received, expected_bytes,
-            "all saturated sends should arrive without stalling (got {received}/{expected_bytes})",
+            "all saturated sends should arrive without stalling \
+             (got {received}/{expected_bytes})",
         );
         assert_eq!(
             sender.pending_tx_count(),

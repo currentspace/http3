@@ -279,6 +279,13 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       headers[h.name] = h.value;
     }
 
+    if (stream._responseSeen) {
+      // Subsequent HEADERS frames after the response are trailing headers
+      // (H3 spec §4.1). Emit them as 'trailers' to match node:http2.
+      stream.emit('trailers', headers);
+      return;
+    }
+    stream._responseSeen = true;
     const flags = { endStream: event.fin ?? false };
     stream.emit('response', headers, flags);
   }

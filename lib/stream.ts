@@ -392,6 +392,12 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
   /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
+  /**
+   * @internal — set after the response HEADERS arrive. Subsequent
+   * HEADERS frames are treated as trailing headers and emitted as
+   * `'trailers'` instead of `'response'`, matching node:http2 semantics.
+   */
+  _responseSeen = false;
 
   /** The HTTP/3 stream ID. */
   get id(): number { return this._streamId; }

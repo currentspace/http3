@@ -3,6 +3,14 @@
 # build + dist artifacts so we can `docker run` an HTTP/3 echo server in
 # under 1s. The test in test/interop/cross-platform.test.ts uses this to
 # stand up a Debian H3 server and connect a macOS host client.
+#
+# io_uring inside Docker:
+#   Docker's default seccomp profile (since ~2022) blocks the io_uring_*
+#   syscalls due to historical CVEs. To exercise the io_uring driver
+#   inside the container, run with `--security-opt seccomp=unconfined`
+#   (the canonical pnpm scripts do this when HTTP3_INTEROP_DOCKER_IO_URING=1
+#   is set). Without the flag the runtime auto-falls-back to poll, which
+#   is also a valid Linux driver — just not the production-fast path.
 FROM http3-verify AS build
 
 WORKDIR /workspace

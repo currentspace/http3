@@ -285,7 +285,16 @@ pub(crate) fn set_recv_ecn(socket: &UdpSocket) {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cmsg_align(len: usize) -> usize {
+    // Linux's `CMSG_ALIGN` uses sizeof(size_t) = 8 on 64-bit; Darwin's
+    // `__DARWIN_ALIGN32` uses sizeof(uint32_t) = 4. Mismatching the
+    // alignment makes `cmsg_data_offset()` skip past the actual payload
+    // and silently bounds-fail every read. (Pre-existing bug — audit #20
+    // shipped because the IPv4 destination addr it extracts was never
+    // observably consumed.)
+    #[cfg(target_os = "linux")]
     let align = std::mem::size_of::<usize>();
+    #[cfg(target_os = "macos")]
+    let align = std::mem::size_of::<u32>();
     (len + align - 1) & !(align - 1)
 }
 
@@ -353,8 +362,14 @@ pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
                 };
                 out.tos = Some((tclass & 0xff) as u8);
             }
-        } else if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_TOS {
-            // IP_TOS payload is a single byte, padded to int alignment.
+        } else if hdr.cmsg_level == libc::IPPROTO_IP
+            && (hdr.cmsg_type == libc::IP_TOS
+                // Darwin delivers the TOS byte under cmsg_type = IP_RECVTOS
+                // (the same option used to enable the cmsg) rather than
+                // IP_TOS the way Linux does. Match either to stay portable.
+                || cfg!(target_os = "macos") && hdr.cmsg_type == libc::IP_RECVTOS)
+        {
+            // Payload is a single byte, padded to int alignment.
             if data_off < control.len() {
                 out.tos = Some(control[data_off]);
             }

@@ -426,6 +426,11 @@ impl H3Connection {
     }
 
     /// Send trailing headers.
+    ///
+    /// Uses quiche's `send_additional_headers` with `is_trailer_section=true`
+    /// — calling `send_response` a second time would re-emit the initial
+    /// response frame (invalid per H3 §4.1) and quiche silently drops it,
+    /// which is what made trailers never reach the peer before this fix.
     pub fn send_trailers(
         &mut self,
         stream_id: u64,
@@ -435,9 +440,14 @@ impl H3Connection {
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
-        // Send headers with fin=true to indicate end of stream
-        h3.send_response(&mut self.quiche_conn, stream_id, headers, true)
-            .map_err(Http3NativeError::H3)
+        h3.send_additional_headers(
+            &mut self.quiche_conn,
+            stream_id,
+            headers,
+            /* is_trailer_section */ true,
+            /* fin */ true,
+        )
+        .map_err(Http3NativeError::H3)
     }
 
     /// Pull returned buffers from the recycler channel back into the data pool.
