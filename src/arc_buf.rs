@@ -91,9 +91,17 @@ pub struct ArcBufFactory;
 
 impl BufFactory for ArcBufFactory {
     type Buf = ArcBuf;
+    /// quiche 0.28 introduced a separate datagram-buffer associated type;
+    /// `Vec<u8>` already satisfies the `AsRef<[u8]> + From<Vec<u8>>`
+    /// bound and matches the dgram path's existing single-shot semantics.
+    type DgramBuf = Vec<u8>;
 
     fn buf_from_slice(buf: &[u8]) -> Self::Buf {
         ArcBuf::from_vec(buf.to_vec())
+    }
+
+    fn dgram_buf_from_slice(buf: &[u8]) -> Self::DgramBuf {
+        buf.to_vec()
     }
 }
 
