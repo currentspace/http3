@@ -8,7 +8,8 @@ mod inner {
     use std::collections::VecDeque;
     use std::io;
     use std::net::SocketAddr;
-    use std::os::unix::io::{AsFd, AsRawFd, RawFd};
+    use std::os::unix::io::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
@@ -42,19 +43,15 @@ mod inner {
         recycled_tx: Vec<Vec<u8>>,
     }
 
+    /// Waker for the kqueue driver. Holds an `Arc<OwnedFd>` (a `dup`'d copy
+    /// of the kqueue fd) so the fd outlives the driver if a Waker clone is
+    /// still held — fixes audit finding #5 (UAF on driver drop). The kernel
+    /// serializes concurrent `kevent()` calls; we only trigger EVFILT_USER,
+    /// which is an atomic wakeup with no shared mutable state.
     #[derive(Clone)]
     pub struct KqueueWaker {
-        /// Raw fd of the kqueue for cross-thread kevent() calls.
-        kq_fd: RawFd,
+        kq_fd: Arc<OwnedFd>,
     }
-
-    // SAFETY: kqueue fds are safe to use from any thread via kevent(). The kernel
-    // serializes concurrent kevent() calls. KqueueWaker only triggers EVFILT_USER,
-    // which is an atomic wakeup — no shared mutable state between threads.
-    #[allow(unsafe_code)]
-    unsafe impl Send for KqueueWaker {}
-    #[allow(unsafe_code)]
-    unsafe impl Sync for KqueueWaker {}
 
     impl Driver for KqueueDriver {
         type Waker = KqueueWaker;
@@ -86,8 +83,17 @@ mod inner {
             kq.kevent(&[read_ev, waker_ev], empty, None)
                 .map_err(nix_to_io)?;
 
-            let kq_fd = kq.as_fd().as_raw_fd();
-            let waker = KqueueWaker { kq_fd };
+            // dup the kqueue fd into an OwnedFd shared with the waker, so a
+            // Waker clone outliving the driver doesn't dangle.
+            #[allow(unsafe_code)]
+            let waker_fd = unsafe { libc::dup(kq.as_fd().as_raw_fd()) };
+            if waker_fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: waker_fd is a valid fd from a successful dup().
+            #[allow(unsafe_code)]
+            let waker_owned = unsafe { OwnedFd::from_raw_fd(waker_fd) };
+            let waker = KqueueWaker { kq_fd: Arc::new(waker_owned) };
             Ok((
                 Self {
                     kq,
@@ -278,9 +284,8 @@ mod inner {
 
     impl DriverWaker for KqueueWaker {
         fn wake(&self) -> io::Result<()> {
-            // Trigger EVFILT_USER on the kqueue fd.
-            // We must use raw libc kevent() here because Kqueue is !Sync and
-            // we only have the raw fd on the waker thread.
+            // Trigger EVFILT_USER on the kqueue fd. The Arc<OwnedFd> keeps
+            // the fd valid even if the driver has been dropped concurrently.
             let ev = KEvent::new(
                 WAKER_IDENT,
                 EventFilter::EVFILT_USER,
@@ -294,13 +299,13 @@ mod inner {
                 tv_sec: 0,
                 tv_nsec: 0,
             };
-            // SAFETY: kq_fd is a valid kqueue fd. changelist is stack-allocated and
-            // lives for the duration of the kevent() call. We pass 0 for nevents
-            // (no output), so the eventlist pointer is irrelevant.
+            // SAFETY: self.kq_fd points to a valid, owned kqueue fd.
+            // changelist is stack-allocated and lives for the kevent() call.
+            // We pass 0 for nevents, so the eventlist pointer is irrelevant.
             #[allow(unsafe_code)]
             let rc = unsafe {
                 libc::kevent(
-                    self.kq_fd,
+                    self.kq_fd.as_raw_fd(),
                     changelist.as_ptr().cast(),
                     1,
                     std::ptr::null_mut(),
@@ -323,3 +328,29 @@ mod inner {
 
 #[cfg(target_os = "macos")]
 pub(crate) use inner::{KqueueDriver, KqueueWaker};
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::inner::KqueueDriver;
+    use crate::transport::{Driver, DriverWaker};
+
+    /// Audit finding #5: a Waker clone must remain usable after the
+    /// driver has been dropped. Before the fix the waker held a bare
+    /// RawFd — calling wake() after driver drop hit kevent() on a closed
+    /// (and possibly recycled) fd. With Arc<OwnedFd>, the dup'd fd stays
+    /// alive as long as a clone is held.
+    #[test]
+    fn waker_outlives_driver() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        socket.set_nonblocking(true).expect("nonblocking");
+        let (driver, waker) = KqueueDriver::new(socket).expect("kqueue new");
+
+        let cloned = waker.clone();
+        drop(waker);
+        drop(driver);
+
+        // Must not panic, must not return EBADF — the dup'd fd is owned
+        // by the Arc inside the cloned waker.
+        cloned.wake().expect("wake after driver drop");
+    }
+}
