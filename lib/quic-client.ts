@@ -23,6 +23,8 @@ const EVENT_DATAGRAM = 14;
 
 /** Options for connecting to a raw QUIC server. */
 export interface QuicConnectOptions {
+  /** Abort the connect attempt (DNS lookup + handshake). Audit finding #15. */
+  signal?: AbortSignal;
   /** Runtime selection mode. Default: `'auto'`. */
   runtimeMode?: RuntimeOptions['runtimeMode'];
   /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
@@ -577,6 +579,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
       const resolved = await resolveConnectionEndpoint(authority, {
         defaultScheme: 'quic',
         defaultPort: 4433,
+        signal: options?.signal,
       });
       if (shouldAbortConnect()) {
         return;

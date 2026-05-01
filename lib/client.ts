@@ -32,6 +32,8 @@ function normalizeCaOption(ca?: string | Buffer | Array<string | Buffer>): Buffe
 
 /** Options for connecting to an HTTP/3 server. */
 export interface ConnectOptions {
+  /** Abort the connect attempt (DNS lookup + handshake). Audit finding #15. */
+  signal?: AbortSignal;
   /** Runtime selection mode. Default: `'auto'`. */
   runtimeMode?: RuntimeOptions['runtimeMode'];
   /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
@@ -426,6 +428,7 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
       const resolved = await resolveConnectionEndpoint(authority, {
         defaultScheme: 'https',
         defaultPort: 443,
+        signal: options?.signal,
       });
       if (shouldAbortConnect()) {
         return;
