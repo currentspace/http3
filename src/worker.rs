@@ -1919,7 +1919,24 @@ impl ProtocolHandler for H3ServerHandler {
     #[allow(clippy::too_many_lines)]
     fn dispatch_command(&mut self, cmd: WorkerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
-            WorkerCommand::Shutdown => return true,
+            WorkerCommand::Shutdown => {
+                // Audit finding #11: close every live connection with an
+                // application-level CONNECTION_CLOSE so peers see a graceful
+                // shutdown instead of waiting on idle timeout. The event
+                // loop's exit-flush will push the CLOSE frames.
+                let mut handles = Vec::new();
+                self.conn_map.fill_handles(&mut handles);
+                for handle in handles {
+                    if let Some(conn) = self.conn_map.get_mut(handle) {
+                        if !conn.quiche_conn.is_closed()
+                            && !conn.quiche_conn.is_draining()
+                        {
+                            let _ = conn.quiche_conn.close(true, 0, b"server shutdown");
+                        }
+                    }
+                }
+                return true;
+            }
             WorkerCommand::SendResponseHeaders {
                 conn_handle,
                 stream_id,

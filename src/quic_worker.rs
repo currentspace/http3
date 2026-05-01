@@ -1933,7 +1933,23 @@ impl ProtocolHandler for QuicServerHandler {
 
     fn dispatch_command(&mut self, cmd: QuicServerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
-            QuicServerCommand::Shutdown => return true,
+            QuicServerCommand::Shutdown => {
+                // Audit finding #11: close every live connection with an
+                // application-level CONNECTION_CLOSE so peers see a graceful
+                // shutdown instead of waiting on idle timeout.
+                let mut handles = Vec::new();
+                self.conn_map.fill_handles(&mut handles);
+                for handle in handles {
+                    if let Some(conn) = self.conn_map.get_mut(handle) {
+                        if !conn.quiche_conn.is_closed()
+                            && !conn.quiche_conn.is_draining()
+                        {
+                            let _ = conn.quiche_conn.close(true, 0, b"server shutdown");
+                        }
+                    }
+                }
+                return true;
+            }
             QuicServerCommand::StreamSend {
                 conn_handle,
                 stream_id,
