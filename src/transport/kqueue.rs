@@ -67,6 +67,11 @@ mod inner {
             // datagram arrived on (matters for connection-ID DCID multiplexing
             // on multi-homed hosts).
             crate::transport::socket::set_pktinfo(&socket);
+            // Audit finding #18: enable IP_RECVTOS / IPV6_RECVTCLASS so
+            // recvmsg's cmsg carries the per-datagram ECN code point.
+            // quiche 0.28 doesn't expose ECN, so this is observability only;
+            // see reactor_metrics::record_ecn_recv.
+            crate::transport::socket::set_recv_ecn(&socket);
 
             // Register EVFILT_READ permanently (EV_ADD | EV_CLEAR = edge-triggered, auto-rearm)
             let read_ev = KEvent::new(
@@ -331,9 +336,14 @@ mod inner {
                 io::Error::new(io::ErrorKind::InvalidData, "unrecognised peer address")
             })?;
             let parsed_local = if msg.msg_controllen > 0 {
-                crate::transport::socket::parse_pktinfo_cmsg(
-                    &control[..msg.msg_controllen as usize],
-                )
+                let ctrl = &control[..msg.msg_controllen as usize];
+                // Audit #18: read the ECN code point if present.
+                if let Some(tos) = crate::transport::socket::parse_tos_cmsg(ctrl) {
+                    reactor_metrics::record_ecn_recv(
+                        crate::transport::socket::EcnCodePoint::from_tos(tos),
+                    );
+                }
+                crate::transport::socket::parse_pktinfo_cmsg(ctrl)
             } else {
                 None
             };

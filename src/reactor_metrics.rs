@@ -47,6 +47,12 @@ pub struct JsReactorTelemetrySnapshot {
     /// over the high-water mark. Coarse backpressure signal — if this
     /// climbs without bound, JS dispatch is the bottleneck.
     pub eventBatchRxPausesTotal: i64,
+    /// Audit #18: ECN observability — counts of inbound datagrams by
+    /// code point. Telemetry only (quiche 0.28 doesn't expose ECN).
+    pub ecnRecvNotEctTotal: i64,
+    pub ecnRecvEct0Total: i64,
+    pub ecnRecvEct1Total: i64,
+    pub ecnRecvCeTotal: i64,
     pub rawQuicServerWorkerSpawns: i64,
     pub rawQuicClientDedicatedWorkerSpawns: i64,
     pub rawQuicClientSharedWorkersCreated: i64,
@@ -211,6 +217,17 @@ static EVENT_BATCH_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_ACKED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_RX_PAUSES_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Audit finding #18: ECN code point counts on inbound datagrams,
+/// observed via IP_RECVTOS / IPV6_RECVTCLASS cmsg. quiche 0.28 doesn't
+/// expose ECN through RecvInfo, so we can't drive congestion control
+/// from these — they are observability only. CE rising indicates path
+/// congestion; ECT(0)/ECT(1) climbing means the peer is marking us
+/// ECN-capable.
+static ECN_RECV_NOT_ECT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ECN_RECV_ECT0_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ECN_RECV_ECT1_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ECN_RECV_CE_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Buffers handed to a `BufferRecycler` whose receiver was already
 /// dropped (or whose channel was full at the moment). Audit finding #31.
@@ -438,6 +455,21 @@ pub fn event_batch_outstanding() -> u64 {
 /// Audit #14, step 5.2: increment the count of RX pause iterations.
 pub(crate) fn record_event_batch_rx_pause() {
     bump(&EVENT_BATCH_RX_PAUSES_TOTAL);
+}
+
+/// Audit #18: bump the ECN counter that matches the observed code point
+/// on an inbound datagram. Telemetry-only — quiche 0.28 doesn't expose
+/// these through its API.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn record_ecn_recv(point: crate::transport::socket::EcnCodePoint) {
+    use crate::transport::socket::EcnCodePoint;
+    let counter = match point {
+        EcnCodePoint::NotEct => &ECN_RECV_NOT_ECT_TOTAL,
+        EcnCodePoint::Ect0 => &ECN_RECV_ECT0_TOTAL,
+        EcnCodePoint::Ect1 => &ECN_RECV_ECT1_TOTAL,
+        EcnCodePoint::Ce => &ECN_RECV_CE_TOTAL,
+    };
+    bump(counter);
 }
 
 pub(crate) fn record_recycler_drop() {
@@ -792,6 +824,10 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         eventBatchOutstanding: load(&EVENT_BATCH_OUTSTANDING),
         eventBatchOutstandingHighWatermark: load(&EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK),
         eventBatchRxPausesTotal: load(&EVENT_BATCH_RX_PAUSES_TOTAL),
+        ecnRecvNotEctTotal: load(&ECN_RECV_NOT_ECT_TOTAL),
+        ecnRecvEct0Total: load(&ECN_RECV_ECT0_TOTAL),
+        ecnRecvEct1Total: load(&ECN_RECV_ECT1_TOTAL),
+        ecnRecvCeTotal: load(&ECN_RECV_CE_TOTAL),
         rawQuicServerWorkerSpawns: load(&RAW_QUIC_SERVER_WORKER_SPAWNS),
         rawQuicClientDedicatedWorkerSpawns: load(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         rawQuicClientSharedWorkersCreated: load(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
@@ -895,6 +931,10 @@ pub fn reset() {
         &EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK,
         &EVENT_BATCH_ACKED_EVENTS_TOTAL,
         &EVENT_BATCH_RX_PAUSES_TOTAL,
+        &ECN_RECV_NOT_ECT_TOTAL,
+        &ECN_RECV_ECT0_TOTAL,
+        &ECN_RECV_ECT1_TOTAL,
+        &ECN_RECV_CE_TOTAL,
         &RAW_QUIC_SERVER_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED,
@@ -1002,6 +1042,10 @@ mod tests {
         assert_eq!(snap.eventBatchOutstanding, 0);
         assert_eq!(snap.eventBatchOutstandingHighWatermark, 0);
         assert_eq!(snap.eventBatchRxPausesTotal, 0);
+        assert_eq!(snap.ecnRecvNotEctTotal, 0);
+        assert_eq!(snap.ecnRecvEct0Total, 0);
+        assert_eq!(snap.ecnRecvEct1Total, 0);
+        assert_eq!(snap.ecnRecvCeTotal, 0);
         assert_eq!(snap.rawQuicServerWorkerSpawns, 0);
         assert_eq!(snap.h3ServerWorkerSpawns, 0);
         assert_eq!(snap.txBuffersRecycled, 0);
@@ -1089,6 +1133,24 @@ mod tests {
         record_event_batch_rx_pause();
         let snap = snapshot();
         assert_eq!(snap.eventBatchRxPausesTotal, 2);
+    }
+
+    #[test]
+    fn test_record_ecn_recv_classification() {
+        use crate::transport::socket::EcnCodePoint;
+        setup();
+        record_ecn_recv(EcnCodePoint::NotEct);
+        record_ecn_recv(EcnCodePoint::Ect0);
+        record_ecn_recv(EcnCodePoint::Ect0);
+        record_ecn_recv(EcnCodePoint::Ect1);
+        record_ecn_recv(EcnCodePoint::Ce);
+        record_ecn_recv(EcnCodePoint::Ce);
+        record_ecn_recv(EcnCodePoint::Ce);
+        let snap = snapshot();
+        assert_eq!(snap.ecnRecvNotEctTotal, 1);
+        assert_eq!(snap.ecnRecvEct0Total, 2);
+        assert_eq!(snap.ecnRecvEct1Total, 1);
+        assert_eq!(snap.ecnRecvCeTotal, 3);
     }
 
     #[test]

@@ -546,6 +546,10 @@ mod inner {
             let local_addr = socket.local_addr()?;
             let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
+            // Audit finding #18: enable IP_RECVTOS / IPV6_RECVTCLASS so the
+            // multishot recvmsg cmsg buffer carries the per-datagram ECN
+            // code point. Telemetry only — quiche 0.28 doesn't expose ECN.
+            crate::transport::socket::set_recv_ecn(&socket);
             enable_gro(&socket);
             log::info!(
                 "IoUringDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} defer_taskrun={defer_taskrun} tid={:?}",
@@ -752,6 +756,12 @@ mod inner {
                                             .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                                             .unwrap_or(self.local_addr);
                                         let segment_size = parse_gro_cmsg(control);
+                                        // Audit #18: ECN observability.
+                                        if let Some(tos) = crate::transport::socket::parse_tos_cmsg(control) {
+                                            reactor_metrics::record_ecn_recv(
+                                                crate::transport::socket::EcnCodePoint::from_tos(tos),
+                                            );
+                                        }
                                         let payload = parsed.payload_data();
                                         let (data, reused) = self.rx_pool.copy_from_slice(payload);
                                         reactor_metrics::record_rx_buffer_checkout(
@@ -1511,6 +1521,12 @@ mod inner {
                                             .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                                             .unwrap_or(self.local_addr);
                                         let segment_size = parse_gro_cmsg(control);
+                                        // Audit #18: ECN observability.
+                                        if let Some(tos) = crate::transport::socket::parse_tos_cmsg(control) {
+                                            reactor_metrics::record_ecn_recv(
+                                                crate::transport::socket::EcnCodePoint::from_tos(tos),
+                                            );
+                                        }
                                         let payload = parsed.payload_data();
                                         let (data, reused) = self.rx_pool.copy_from_slice(payload);
                                         reactor_metrics::record_rx_buffer_checkout(

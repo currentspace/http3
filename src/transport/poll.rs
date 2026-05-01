@@ -125,6 +125,10 @@ mod inner {
             let local_addr = socket.local_addr()?;
             let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
+            // Audit finding #18: enable IP_RECVTOS / IPV6_RECVTCLASS so the
+            // recvmmsg cmsg carries the per-datagram ECN code point.
+            // Telemetry only — quiche 0.28 doesn't expose ECN.
+            crate::transport::socket::set_recv_ecn(&socket);
             enable_gro(&socket);
             log::info!(
                 "PollDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} tid={:?}",
@@ -301,6 +305,12 @@ mod inner {
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
                     let segment_size = parse_gro_cmsg(cmsg_data);
+                    // Audit #18: ECN observability.
+                    if let Some(tos) = crate::transport::socket::parse_tos_cmsg(cmsg_data) {
+                        reactor_metrics::record_ecn_recv(
+                            crate::transport::socket::EcnCodePoint::from_tos(tos),
+                        );
+                    }
                     let (data, reused) = self
                         .rx_pool
                         .copy_from_slice(&self.rx_batch.slots[i].buf[..len]);

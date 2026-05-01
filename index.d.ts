@@ -288,6 +288,14 @@ export interface JsReactorTelemetrySnapshot {
    * climbs without bound, JS dispatch is the bottleneck.
    */
   eventBatchRxPausesTotal: number
+  /**
+   * Audit #18: ECN observability — counts of inbound datagrams by
+   * code point. Telemetry only (quiche 0.28 doesn't expose ECN).
+   */
+  ecnRecvNotEctTotal: number
+  ecnRecvEct0Total: number
+  ecnRecvEct1Total: number
+  ecnRecvCeTotal: number
   rawQuicServerWorkerSpawns: number
   rawQuicClientDedicatedWorkerSpawns: number
   rawQuicClientSharedWorkersCreated: number

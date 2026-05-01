@@ -309,6 +309,103 @@ pub(crate) fn parse_pktinfo_cmsg(control: &[u8]) -> Option<std::net::IpAddr> {
     None
 }
 
+// ── ECN (audit #18) ─────────────────────────────────────────────────
+//
+// quiche 0.28 has no `ecn` field on RecvInfo and explicitly states
+// "sending ECN is not supported at this time" (lib.rs:4501), so we
+// can't feed observed ECN into the QUIC congestion controller. But
+// ECN bits live in the IP header, not the QUIC payload — the socket
+// layer can still observe them. Surface CE / ECT(0) / ECT(1) /
+// Not-ECT counts as telemetry so operators can see whether their
+// path is congested without waiting on a quiche bump.
+
+/// ECN code points (RFC 3168, lower 2 bits of the IP TOS byte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EcnCodePoint {
+    NotEct = 0b00,
+    Ect1 = 0b01,
+    Ect0 = 0b10,
+    Ce = 0b11,
+}
+
+impl EcnCodePoint {
+    pub(crate) fn from_tos(tos: u8) -> Self {
+        match tos & 0b11 {
+            0b00 => Self::NotEct,
+            0b01 => Self::Ect1,
+            0b10 => Self::Ect0,
+            _ => Self::Ce,
+        }
+    }
+}
+
+/// Enable `IP_RECVTOS` (v4) and `IPV6_RECVTCLASS` (v6) on the socket so
+/// `recvmsg` returns the per-packet TOS byte (which holds the ECN bits)
+/// as a cmsg. Best-effort: silently no-ops if the kernel rejects the
+/// option — ECN telemetry just stays at zero in that case.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn set_recv_ecn(socket: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let enable: libc::c_int = 1;
+    // SAFETY: fd is a valid socket; enable points to a valid int.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_RECVTOS,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVTCLASS,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+    }
+}
+
+/// Parse cmsg control data for `IP_TOS` (v4) / `IPV6_TCLASS` (v6).
+/// Returns the TOS byte if a recognised cmsg is present.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn parse_tos_cmsg(control: &[u8]) -> Option<u8> {
+    let mut offset = 0;
+    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
+        // SAFETY: bounds checked above; read_unaligned handles alignment.
+        #[allow(unsafe_code)]
+        let hdr: libc::cmsghdr =
+            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
+        if hdr.cmsg_len == 0 {
+            break;
+        }
+        let data_off = offset + cmsg_data_offset();
+
+        if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_TOS {
+            // IP_TOS payload is a single byte on Linux and macOS,
+            // padded to int alignment.
+            if data_off < control.len() {
+                return Some(control[data_off]);
+            }
+        } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_TCLASS {
+            // IPV6_TCLASS payload is an int (4 bytes); only the low byte
+            // holds the traffic class.
+            if data_off + std::mem::size_of::<libc::c_int>() <= control.len() {
+                #[allow(unsafe_code)]
+                let tclass: libc::c_int = unsafe {
+                    std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
+                };
+                return Some((tclass & 0xff) as u8);
+            }
+        }
+
+        offset += cmsg_align(hdr.cmsg_len as usize);
+    }
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn cmsg_align(len: usize) -> usize {
     let align = std::mem::size_of::<usize>();
@@ -452,5 +549,23 @@ fn set_unix_reuse_port(socket: &socket2::Socket) -> Result<(), std::io::Error> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ecn_code_point_decodes_lower_two_tos_bits() {
+        // RFC 3168 §5: ECN bits live in the low 2 bits of TOS / Traffic
+        // Class. Upper 6 bits are DSCP and must be ignored.
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0000), EcnCodePoint::NotEct);
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0001), EcnCodePoint::Ect1);
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0010), EcnCodePoint::Ect0);
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0011), EcnCodePoint::Ce);
+        // DSCP bits (high 6) must not affect classification.
+        assert_eq!(EcnCodePoint::from_tos(0b1110_1011), EcnCodePoint::Ce);
+        assert_eq!(EcnCodePoint::from_tos(0b1110_1010), EcnCodePoint::Ect0);
     }
 }
