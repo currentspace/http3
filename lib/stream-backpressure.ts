@@ -78,12 +78,14 @@ export function drainPendingReads(stream: Duplex, state: BackpressureState | nul
   if (state === null) return;
   state.readBackpressure = false;
   while (state.pendingReads.length > 0) {
-    const chunk = state.pendingReads.shift()!;
+    // shift() within the length check always yields an element; cast to the
+    // declared element type rather than a non-null assertion.
+    const chunk = state.pendingReads.shift() as Buffer | null;
     if (!stream.push(chunk)) {
+      // push(null) returns false too, so the EOF case naturally exits here.
       state.readBackpressure = true;
       break;
     }
-    if (chunk === null) break; // EOF
   }
 }
 

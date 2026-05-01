@@ -581,7 +581,7 @@ export class Http3SecureServer extends EventEmitter {
     // process if Node keeps the TLS server referenced longer than expected.
     try { closeAllConnections?.call(h2Server); } catch { /* ignore */ }
     try { closeIdleConnections?.call(h2Server); } catch { /* ignore */ }
-    try { unref?.call(h2Server); } catch { /* ignore */ }
+    try { unref.call(h2Server); } catch { /* ignore */ }
     await new Promise<void>((resolve, reject) => {
       try {
         h2Server.close((err?: Error) => {

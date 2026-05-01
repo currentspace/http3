@@ -131,11 +131,12 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
           throw new Error(`echo mismatch: expected ${size}, got ${echoed.length}`);
         }
       } catch (err: unknown) {
-        // Add diagnostic info
+        // Add diagnostic info; preserve the original via `cause`.
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(
           `${msg} (streamId=${stream.id} destroyed=${stream.destroyed} ` +
           `readableEnded=${stream.readableEnded} writableFinished=${stream.writableFinished})`,
+          { cause: err },
         );
       }
     }

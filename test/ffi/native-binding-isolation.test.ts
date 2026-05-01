@@ -10,7 +10,6 @@ import assert from 'node:assert/strict';
 import { generateTestCerts } from '../support/generate-certs.js';
 
 // Load the native binding directly (bypassing TS wrappers).
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
 const binding = require('../../../index.js');
 
 // Event type constants (mirrored from h3_event.rs).

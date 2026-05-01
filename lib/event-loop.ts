@@ -518,6 +518,10 @@ export class WorkerEventLoop implements ServerEventLoopLike {
     if (this.closed) return;
     this.closed = true;
     this.worker.requestShutdown();
+    // TODO Step 4.1 (#33): await the shutdown sentinel here so late TSFN
+    // events can't land after close resolves. For now, yield once so the
+    // method has at least one suspension point.
+    await Promise.resolve();
     this.worker.joinWorker();
   }
 }
@@ -599,6 +603,8 @@ export class ClientEventLoop {
     this.closed = true;
     this.worker.close(0, 'client close');
     this.worker.requestShutdown();
+    // TODO Step 4.1 (#33): await the shutdown sentinel.
+    await Promise.resolve();
     this.worker.joinWorker();
   }
 }

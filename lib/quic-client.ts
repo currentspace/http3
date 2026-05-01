@@ -126,6 +126,8 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
     this.closed = true;
     this.worker.close(0, 'client close');
     this.worker.requestShutdown();
+    // TODO Step 4.1 (#33): await the shutdown sentinel.
+    await Promise.resolve();
     this.worker.joinWorker();
   }
 }

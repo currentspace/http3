@@ -85,18 +85,24 @@ export class QuicStream extends Duplex {
     this._writeChunk(chunk, callback);
   }
 
-  override end(chunk?: any, encoding?: any, callback?: any): this {
-    let finalChunk = chunk;
-    let finalEncoding = encoding;
-    let finalCallback = callback;
+  override end(
+    chunk?: Buffer | Uint8Array | string | (() => void),
+    encoding?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    let finalChunk: Buffer | Uint8Array | string | undefined;
+    let finalEncoding: BufferEncoding | undefined;
+    let finalCallback: (() => void) | undefined;
 
-    if (typeof finalChunk === 'function') {
-      finalCallback = finalChunk;
-      finalChunk = undefined;
-      finalEncoding = undefined;
-    } else if (typeof finalEncoding === 'function') {
-      finalCallback = finalEncoding;
-      finalEncoding = undefined;
+    if (typeof chunk === 'function') {
+      finalCallback = chunk;
+    } else if (typeof encoding === 'function') {
+      finalChunk = chunk;
+      finalCallback = encoding;
+    } else {
+      finalChunk = chunk;
+      finalEncoding = encoding;
+      finalCallback = callback;
     }
 
     if (finalChunk != null) {
@@ -105,12 +111,11 @@ export class QuicStream extends Duplex {
       } else if (finalChunk instanceof Uint8Array) {
         this._finalChunk = Buffer.from(finalChunk);
       } else {
-        this._finalChunk = Buffer.from(String(finalChunk), finalEncoding);
+        this._finalChunk = Buffer.from(finalChunk, finalEncoding);
       }
-      return (super.end as any)(undefined, undefined, finalCallback);
     }
 
-    return (super.end as any)(undefined, undefined, finalCallback);
+    return super.end(finalCallback);
   }
 
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {

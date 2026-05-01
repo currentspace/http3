@@ -134,6 +134,8 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
     if (this.closed) return;
     this.closed = true;
     this.worker.requestShutdown();
+    // TODO Step 4.1 (#33): await the shutdown sentinel.
+    await Promise.resolve();
     this.worker.joinWorker();
   }
 }

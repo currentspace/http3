@@ -52,7 +52,6 @@ export function loadBinding(): any {
     searched.push(candidate);
     if (existsSync(candidate) && existsSync(join(dir, 'package.json'))) {
       const require_ = createRequire(join(dir, 'package.json'));
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
       return require_(candidate);
     }
     dir = resolve(dir, '..');
