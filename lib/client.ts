@@ -281,7 +281,17 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const stream = this._streams.get(event.streamId);
     if (stream) {
       stream._pushData(null);
-      this._streams.delete(event.streamId);
+      // If the readable side was never consumed, resume so the Duplex can
+      // fully destroy via 'close'. Mirrors the server pattern in server.ts.
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
+      // Don't delete from _streams here: the writable side may still have
+      // pending drain callbacks that need EVENT_DRAIN to route through.
+      // Map cleanup happens on 'close' instead. (Audit finding #2.)
+      stream.once('close', () => {
+        this._streams.delete(event.streamId);
+      });
     }
   }
 
