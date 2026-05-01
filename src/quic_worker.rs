@@ -1959,7 +1959,7 @@ impl QuicServerHandler {
 impl ProtocolHandler for QuicServerHandler {
     type Command = QuicServerCommand;
 
-    fn dispatch_command(&mut self, cmd: QuicServerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
+    fn dispatch_command(&mut self, cmd: QuicServerCommand, batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             QuicServerCommand::Shutdown => {
                 // Audit finding #11: close every live connection with an
@@ -1995,6 +1995,7 @@ impl ProtocolHandler for QuicServerHandler {
                             if written < chunk.remaining_len() {
                                 chunk.advance(written);
                                 self.pending_writes.insert(key, PendingWrite { chunk, fin });
+                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             } else if fin && written == 0 && chunk.remaining_len() == 0 {
                                 self.pending_writes.insert(
                                     key,
@@ -2003,11 +2004,12 @@ impl ProtocolHandler for QuicServerHandler {
                                         fin: true,
                                     },
                                 );
+                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             }
                             // else: full write — chunk drops → recycles to pool
                         }
                         Err(e) => {
-                            _batch.push(JsH3Event::error(
+                            batch.push(JsH3Event::error(
                                 conn_handle,
                                 stream_id as i64,
                                 0,
@@ -2609,12 +2611,14 @@ impl QuicClientHandler {
                     chunk.advance(written);
                     self.pending_writes.insert(stream_id, PendingWrite { chunk, fin });
                     reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
+                    batch.push(JsH3Event::stream_blocked(0, stream_id));
                 } else if fin && written == 0 && chunk.remaining_len() == 0 {
                     self.pending_writes.insert(
                         stream_id,
                         PendingWrite { chunk: Chunk::unpooled(Vec::new()), fin: true },
                     );
                     reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
+                    batch.push(JsH3Event::stream_blocked(0, stream_id));
                 }
                 // else: full write — chunk drops → recycles to pool
             }
@@ -2802,7 +2806,7 @@ impl QuicClientHandler {
 impl ProtocolHandler for QuicClientHandler {
     type Command = QuicClientCommand;
 
-    fn dispatch_command(&mut self, cmd: QuicClientCommand, _batch: &mut Vec<JsH3Event>) -> bool {
+    fn dispatch_command(&mut self, cmd: QuicClientCommand, batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             QuicClientCommand::Shutdown => {
                 if !self.session_closed_emitted {
@@ -2835,7 +2839,7 @@ impl ProtocolHandler for QuicClientHandler {
                 chunk,
                 fin,
             } => {
-                self.queue_stream_send(stream_id, chunk, fin, _batch);
+                self.queue_stream_send(stream_id, chunk, fin, batch);
             }
             QuicClientCommand::StreamClose {
                 stream_id,

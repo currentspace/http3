@@ -231,6 +231,7 @@ pub const EVENT_SESSION_TICKET: u8 = 12;
 pub const EVENT_METRICS: u8 = 13;
 pub const EVENT_DATAGRAM: u8 = 14;
 pub const EVENT_SHUTDOWN_COMPLETE: u8 = 15;
+pub const EVENT_STREAM_BLOCKED: u8 = 16;
 
 #[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
@@ -482,6 +483,24 @@ impl JsH3Event {
         }
     }
 
+    /// Audit findings #8/#16/#29: signal that the stream's send queue went
+    /// from empty → backed up at the native layer. JS uses this to gate
+    /// `streamSend` (return 0 → fall through to `_writeChunk`'s drain
+    /// branch) so `Duplex.write()` reports real backpressure instead of
+    /// the optimistic `data.length` placeholder.
+    pub fn stream_blocked(conn_handle: u32, stream_id: u64) -> Self {
+        Self {
+            event_type: EVENT_STREAM_BLOCKED,
+            conn_handle,
+            stream_id: stream_id as i64,
+            headers: Some(vec![]),
+            data: None,
+            fin: Some(false),
+            meta: Some(JsEventMeta::empty()),
+            metrics: Some(JsSessionMetrics::zeroed()),
+        }
+    }
+
     pub fn goaway(conn_handle: u32, stream_id: u64) -> Self {
         Self {
             event_type: EVENT_GOAWAY,
@@ -723,6 +742,16 @@ mod tests {
     fn test_drain_fields() {
         let ev = JsH3Event::drain(2, 32);
         assert_eq!(ev.event_type, EVENT_DRAIN);
+        assert_eq!(ev.conn_handle, 2);
+        assert_eq!(ev.stream_id, 32_i64);
+        assert!(ev.data.is_none());
+        assert!(ev.meta.is_some());
+    }
+
+    #[test]
+    fn test_stream_blocked_fields() {
+        let ev = JsH3Event::stream_blocked(2, 32);
+        assert_eq!(ev.event_type, EVENT_STREAM_BLOCKED);
         assert_eq!(ev.conn_handle, 2);
         assert_eq!(ev.stream_id, 32_i64);
         assert!(ev.data.is_none());

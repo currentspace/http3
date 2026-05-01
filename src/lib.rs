@@ -54,7 +54,7 @@ pub mod bench_exports {
         EVENT_DATA, EVENT_DATAGRAM, EVENT_DRAIN, EVENT_ERROR, EVENT_FINISHED, EVENT_GOAWAY,
         EVENT_HANDSHAKE_COMPLETE, EVENT_HEADERS, EVENT_METRICS, EVENT_NEW_SESSION,
         EVENT_NEW_STREAM, EVENT_RESET, EVENT_SESSION_CLOSE, EVENT_SESSION_TICKET,
-        EVENT_SHUTDOWN_COMPLETE,
+        EVENT_SHUTDOWN_COMPLETE, EVENT_STREAM_BLOCKED,
     };
     pub use crate::profile::event_sink::{
         TaggedEventBatch, channel_batcher, counting_batcher, noop_batcher,

@@ -1949,7 +1949,7 @@ impl ProtocolHandler for H3ServerHandler {
     type Command = WorkerCommand;
 
     #[allow(clippy::too_many_lines)]
-    fn dispatch_command(&mut self, cmd: WorkerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
+    fn dispatch_command(&mut self, cmd: WorkerCommand, batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             WorkerCommand::Shutdown => {
                 // Audit finding #11: close every live connection with an
@@ -1986,7 +1986,7 @@ impl ProtocolHandler for H3ServerHandler {
                     // and subsequent body writes fail with FrameUnexpected
                     // because quiche's H3 framer requires headers first.
                     if let Err(e) = conn.send_response(stream_id, &h3_headers, fin) {
-                        _batch.push(JsH3Event::error(
+                        batch.push(JsH3Event::error(
                             conn_handle,
                             stream_id as i64,
                             0,
@@ -2013,7 +2013,7 @@ impl ProtocolHandler for H3ServerHandler {
                     // no HEADERS, an H3 protocol violation. Surface the
                     // failure to JS so the caller can retry the request.
                     if let Err(e) = conn.send_response(stream_id, &h3_headers, false) {
-                        _batch.push(JsH3Event::error(
+                        batch.push(JsH3Event::error(
                             conn_handle,
                             stream_id as i64,
                             0,
@@ -2028,6 +2028,7 @@ impl ProtocolHandler for H3ServerHandler {
                             if written < body.remaining_len() {
                                 body.advance(written);
                                 self.pending_writes.insert(key, PendingWrite { chunk: body, fin });
+                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             } else if fin && written == 0 && body.remaining_len() == 0 {
                                 self.pending_writes.insert(
                                     key,
@@ -2036,10 +2037,11 @@ impl ProtocolHandler for H3ServerHandler {
                                         fin: true,
                                     },
                                 );
+                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             }
                         }
                         Err(e) => {
-                            _batch.push(JsH3Event::error(
+                            batch.push(JsH3Event::error(
                                 conn_handle,
                                 stream_id as i64,
                                 0,
@@ -2066,6 +2068,7 @@ impl ProtocolHandler for H3ServerHandler {
                             if written < chunk.remaining_len() {
                                 chunk.advance(written);
                                 self.pending_writes.insert(key, PendingWrite { chunk, fin });
+                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             } else if fin && written == 0 && chunk.remaining_len() == 0 {
                                 self.pending_writes.insert(
                                     key,
@@ -2074,10 +2077,11 @@ impl ProtocolHandler for H3ServerHandler {
                                         fin: true,
                                     },
                                 );
+                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             }
                         }
                         Err(e) => {
-                            _batch.push(JsH3Event::error(
+                            batch.push(JsH3Event::error(
                                 conn_handle,
                                 stream_id as i64,
                                 0,
@@ -2762,11 +2766,13 @@ impl H3ClientHandler {
                 if written < chunk.remaining_len() {
                     chunk.advance(written);
                     self.pending_writes.insert(stream_id, PendingWrite { chunk, fin });
+                    batch.push(JsH3Event::stream_blocked(0, stream_id));
                 } else if fin && written == 0 && chunk.remaining_len() == 0 {
                     self.pending_writes.insert(
                         stream_id,
                         PendingWrite { chunk: Chunk::unpooled(Vec::new()), fin: true },
                     );
+                    batch.push(JsH3Event::stream_blocked(0, stream_id));
                 }
                 // else: full write — chunk drops → recycles to pool
             }
@@ -2953,7 +2959,7 @@ impl H3ClientHandler {
 impl ProtocolHandler for H3ClientHandler {
     type Command = ClientWorkerCommand;
 
-    fn dispatch_command(&mut self, cmd: ClientWorkerCommand, _batch: &mut Vec<JsH3Event>) -> bool {
+    fn dispatch_command(&mut self, cmd: ClientWorkerCommand, batch: &mut Vec<JsH3Event>) -> bool {
         match cmd {
             ClientWorkerCommand::Shutdown => {
                 if !self.session_closed_emitted {
@@ -2989,7 +2995,7 @@ impl ProtocolHandler for H3ClientHandler {
                 chunk,
                 fin,
             } => {
-                self.queue_stream_send(stream_id, chunk, fin, _batch);
+                self.queue_stream_send(stream_id, chunk, fin, batch);
             }
             ClientWorkerCommand::StreamClose {
                 stream_id,
