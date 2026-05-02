@@ -472,14 +472,32 @@ function startServer(config) {
                   child.kill('SIGTERM');
                 }
 
-                await Promise.race([
-                  exitPromise,
-                  new Promise((_, rejectPromise) => {
-                    setTimeout(() => {
-                      rejectPromise(new Error('QUIC benchmark server shutdown timed out'));
-                    }, 10_000);
-                  }),
-                ]);
+                let shutdownTimer;
+                let timedOut = false;
+                try {
+                  timedOut = await Promise.race([
+                    exitPromise.then(() => false),
+                    new Promise((resolveTimeout) => {
+                      shutdownTimer = setTimeout(() => {
+                        resolveTimeout(true);
+                      }, 10_000);
+                    }),
+                  ]);
+                } finally {
+                  if (shutdownTimer) clearTimeout(shutdownTimer);
+                }
+                if (timedOut) {
+                  if (child.exitCode === null && child.signalCode === null) {
+                    child.kill('SIGKILL');
+                  }
+                  try {
+                    await exitPromise;
+                  } catch {
+                    // Preserve the shutdown timeout error; the forced exit only
+                    // confirms that the child was reaped.
+                  }
+                  throw new Error('QUIC benchmark server shutdown timed out');
+                }
               },
             });
           }

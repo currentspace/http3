@@ -16,6 +16,27 @@ export const EVENT_SHUTDOWN_COMPLETE = 15;
  */
 export const SHUTDOWN_TIMEOUT_MS = 5000;
 
+/**
+ * Await worker shutdown without leaving the fallback timer referenced after
+ * the sentinel wins. A referenced timer here keeps `node --test` alive even
+ * though every stream/session has closed correctly.
+ * @internal
+ */
+export async function waitForShutdownOrTimeout(sentinel: Promise<void>): Promise<void> {
+  let timeout: NodeJS.Timeout | null = null;
+  const timer = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
+  });
+
+  try {
+    await Promise.race([sentinel, timer]);
+  } finally {
+    if (timeout !== null) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 // ----- Native binding type definitions -----
 
 /**
@@ -591,10 +612,7 @@ export class WorkerEventLoop implements ServerEventLoopLike {
 
     this.worker.requestShutdown();
 
-    const timer = new Promise<void>((resolve) => {
-      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
-    });
-    await Promise.race([sentinel, timer]);
+    await waitForShutdownOrTimeout(sentinel);
     this._shutdownResolve = null;
 
     this.worker.joinWorker();
@@ -686,10 +704,7 @@ export class ClientEventLoop {
     this.worker.close(errorCode, reason);
     this.worker.requestShutdown();
 
-    const timer = new Promise<void>((resolve) => {
-      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
-    });
-    await Promise.race([sentinel, timer]);
+    await waitForShutdownOrTimeout(sentinel);
     this._shutdownResolve = null;
 
     this.worker.joinWorker();

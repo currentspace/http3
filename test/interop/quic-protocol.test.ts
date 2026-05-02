@@ -17,6 +17,11 @@ import {
   endLifecycleCapture,
   withLifecycleTimeout,
 } from '../support/failure-artifacts.js';
+import {
+  anyEventWithTimeout,
+  onceEventWithTimeout,
+  withTimeoutValue,
+} from '../support/async-race.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -52,10 +57,7 @@ describe('QUIC protocol verification', () => {
         rejectUnauthorized: false,
       });
 
-      const ticketPromise = new Promise<Buffer>((resolve) => {
-        client.on('sessionTicket', resolve);
-      });
-
+      const ticketPromise = onceEventWithTimeout<Buffer | null>(client, 'sessionTicket', 3000, null);
       await client.ready();
 
       // Do an echo to ensure the connection is fully established
@@ -64,10 +66,7 @@ describe('QUIC protocol verification', () => {
       await collect(stream);
 
       // Wait for session ticket event
-      const ticket = await Promise.race([
-        ticketPromise,
-        new Promise<null>((resolve) => { setTimeout(() => resolve(null), 3000); }),
-      ]);
+      const ticket = await ticketPromise;
 
       assert.ok(ticket !== null, 'sessionTicket event should fire');
       assert.ok(Buffer.isBuffer(ticket), 'ticket should be a Buffer');
@@ -88,19 +87,14 @@ describe('QUIC protocol verification', () => {
       const client1 = connectQuic(`127.0.0.1:${addr.port}`, {
         rejectUnauthorized: false,
       });
-      const ticketPromise = new Promise<Buffer>((resolve) => {
-        client1.on('sessionTicket', resolve);
-      });
+      const ticketPromise = onceEventWithTimeout<Buffer | null>(client1, 'sessionTicket', 3000, null);
       await client1.ready();
 
       const s1 = client1.openStream();
       s1.end(Buffer.from('first'));
       await collect(s1);
 
-      const ticket = await Promise.race([
-        ticketPromise,
-        new Promise<null>((resolve) => { setTimeout(() => resolve(null), 3000); }),
-      ]);
+      const ticket = await ticketPromise;
       assert.ok(ticket !== null, 'must receive session ticket from first connection');
       await client1.close();
 
@@ -353,10 +347,7 @@ describe('QUIC protocol verification', () => {
       stream.close(99);
 
       // Server should see the reset
-      const err = await Promise.race([
-        serverStreamError,
-        new Promise<null>((resolve) => { setTimeout(() => resolve(null), 3000); }),
-      ]);
+      const err = await withTimeoutValue(serverStreamError, 3000, null);
 
       assert.ok(err !== null, 'server should receive stream error from reset');
       assert.ok(stream.destroyed, 'client stream should be destroyed after close()');
@@ -392,20 +383,35 @@ describe('QUIC protocol verification', () => {
 
       // 6th stream — should error or block (quiche enforces limit)
       const stream6 = client.openStream();
-      const sixthResult = await Promise.race([
-        new Promise<string>((resolve) => {
-          stream6.on('error', (err: Error) => resolve(`error:${err.message}`));
-        }),
-        (async () => {
-          try {
-            stream6.end(Buffer.from('should-fail'));
-            const data = await collect(stream6, 3000);
-            return `ok:${data.toString()}`;
-          } catch (err: unknown) {
-            return `error:${(err as Error).message}`;
+      const sixthResult = await new Promise<string>((resolve) => {
+        let settled = false;
+        let onStream6Error: ((err: Error) => void) | null = null;
+        const settle = (result: string): void => {
+          if (settled) return;
+          settled = true;
+          if (onStream6Error !== null) {
+            stream6.off('error', onStream6Error);
           }
-        })(),
-      ]);
+          resolve(result);
+        };
+
+        onStream6Error = (err: Error): void => {
+          settle(`error:${err.message}`);
+        };
+        stream6.once('error', onStream6Error);
+
+        try {
+          stream6.end(Buffer.from('should-fail'));
+        } catch (err: unknown) {
+          settle(`error:${(err as Error).message}`);
+          return;
+        }
+
+        void collect(stream6, 3000).then(
+          (data) => settle(`ok:${data.toString()}`),
+          (err: unknown) => settle(`error:${(err as Error).message}`),
+        );
+      });
 
       // Stream may error, block, or succeed after previous streams close and credits refresh.
       // The important thing is no crash.
@@ -578,10 +584,7 @@ describe('QUIC protocol verification', () => {
 
       client.sendDatagram(Buffer.from('ping'));
 
-      const echoed = await Promise.race([
-        received,
-        new Promise<null>((resolve) => { setTimeout(() => resolve(null), 3000); }),
-      ]);
+      const echoed = await withTimeoutValue(received, 3000, null);
 
       await streamDone;
 
@@ -612,11 +615,13 @@ describe('QUIC protocol verification', () => {
       });
 
       const receivedSet = new Set<string>();
+      let onDatagram: ((data: Buffer) => void) | null = null;
       const allReceived = new Promise<void>((resolve) => {
-        client.on('datagram', (data: Buffer) => {
+        onDatagram = (data: Buffer): void => {
           receivedSet.add(data.toString());
           if (receivedSet.size >= 18) resolve();
-        });
+        };
+        client.on('datagram', onDatagram);
       });
 
       // Ensure connection is active
@@ -629,10 +634,13 @@ describe('QUIC protocol verification', () => {
         client.sendDatagram(Buffer.from(`dg-${i}`));
       }
 
-      await Promise.race([
-        allReceived,
-        new Promise<void>((resolve) => { setTimeout(resolve, 5000); }),
-      ]);
+      try {
+        await withTimeoutValue(allReceived, 5000, undefined);
+      } finally {
+        if (onDatagram !== null) {
+          client.off('datagram', onDatagram);
+        }
+      }
 
       await streamDone;
 
@@ -677,10 +685,11 @@ describe('QUIC protocol verification', () => {
         maxIdleTimeoutMs: 2000,
       });
 
-      const fourthResult = await Promise.race([
+      const fourthResult = await withTimeoutValue(
         c4.ready().then(() => 'connected' as const, () => 'rejected' as const),
-        new Promise<'timeout'>((resolve) => { setTimeout(() => resolve('timeout'), 3000); }),
-      ]);
+        3000,
+        'timeout' as const,
+      );
 
       // Always clean up the 4th client
       try { await c4.close(); } catch { /* may already be closed */ }
@@ -714,12 +723,7 @@ describe('QUIC protocol verification', () => {
       await collect(stream);
 
       // Now sit idle and wait for close event
-      const closeReceived = await Promise.race([
-        new Promise<boolean>((resolve) => {
-          client.on('close', () => resolve(true));
-        }),
-        new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 3000); }),
-      ]);
+      const closeReceived = await onceEventWithTimeout<boolean>(client, 'close', 3000, false);
 
       assert.ok(closeReceived, 'client should receive close event within ~2.5s of idle timeout');
 
@@ -738,14 +742,14 @@ describe('QUIC protocol verification', () => {
       });
       const serverSession = await serverSessionPromise;
 
-      const closeInfoPromise = new Promise<{ errorCode: number; reason: string }>((resolve) => {
-        client.on('close', resolve);
-      });
+      const closeInfoPromise = onceEventWithTimeout<{ errorCode: number; reason: string } | null>(
+        client,
+        'close',
+        5000,
+        null,
+      );
       serverSession.close(77, 'raw drain');
-      const closeInfo = await Promise.race([
-        closeInfoPromise,
-        new Promise<null>((resolve) => { setTimeout(() => resolve(null), 5000); }),
-      ]);
+      const closeInfo = await closeInfoPromise;
 
       assert.deepStrictEqual(closeInfo, { errorCode: 77, reason: 'raw drain' });
       try { await client.close(); } catch { /* may already be closed */ }
@@ -796,13 +800,12 @@ describe('QUIC protocol verification', () => {
         // All clients should receive close events, no crash, no hang
         const closeResults = await Promise.all(
           clients.map((client) =>
-            Promise.race([
-              new Promise<boolean>((resolve) => {
-                client.on('close', () => resolve(true));
-                client.on('error', () => resolve(true)); // error before close is also acceptable
-              }),
-              new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 3000); }),
-            ]),
+            anyEventWithTimeout(
+              client,
+              [{ name: 'close', value: true }, { name: 'error', value: true }],
+              3000,
+              false,
+            ),
           ),
         );
 

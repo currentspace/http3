@@ -176,11 +176,11 @@ export function installGracefulShutdown(
     options?.onSignal?.(signal);
     options?.health?.beginShutdown(signal);
 
+    let timer: NodeJS.Timeout | null = null;
     const timeout = new Promise<never>((_, reject) => {
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         reject(new Error(`graceful shutdown timed out after ${timeoutMs}ms`));
       }, timeoutMs);
-      timer.unref();
     });
 
     try {
@@ -188,6 +188,10 @@ export function installGracefulShutdown(
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
       options?.onError?.(error);
+    } finally {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
     }
   };
 

@@ -509,10 +509,23 @@ async function startServer(label, spec) {
     async stop() {
       if (child.exitCode !== null || child.signalCode !== null) return;
       child.kill('SIGTERM');
-      await Promise.race([
-        new Promise((resolve) => child.once('exit', resolve)),
-        new Promise((resolve) => setTimeout(resolve, 10000)),
-      ]);
+      let exitCleanup = () => {};
+      let shutdownTimer;
+      try {
+        await Promise.race([
+          new Promise((resolve) => {
+            const onExit = () => resolve();
+            exitCleanup = () => child.off('exit', onExit);
+            child.once('exit', onExit);
+          }),
+          new Promise((resolve) => {
+            shutdownTimer = setTimeout(resolve, 10000);
+          }),
+        ]);
+      } finally {
+        exitCleanup();
+        if (shutdownTimer) clearTimeout(shutdownTimer);
+      }
       if (child.exitCode === null && child.signalCode === null) {
         child.kill('SIGKILL');
       }

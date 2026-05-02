@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { X509Certificate } from 'node:crypto';
-import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding, streamSendOutcomeBytes } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, binding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
 import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
@@ -144,10 +144,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
 
     this.worker.requestShutdown();
 
-    const timer = new Promise<void>((resolve) => {
-      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS).unref();
-    });
-    await Promise.race([sentinel, timer]);
+    await waitForShutdownOrTimeout(sentinel);
     this._shutdownResolve = null;
 
     this.worker.joinWorker();

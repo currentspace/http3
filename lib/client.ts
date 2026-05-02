@@ -399,6 +399,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
           this._stopKeylogEmitter();
           this._rejectPendingPings(closeErr);
           this._emitClose(closeInfo);
+          this._cleanupEventLoopAfterNativeClose();
           break;
         }
         case EVENT_DRAIN:
@@ -443,6 +444,21 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       }
     }
     this._streams.clear();
+  }
+
+  private _cleanupEventLoopAfterNativeClose(): void {
+    this._closeRequested = true;
+    this._clearConnectTimer();
+    const loop_ = this._eventLoop;
+    this._eventLoop = null;
+    if (!loop_) return;
+    void (async (): Promise<void> => {
+      try {
+        await loop_.close();
+      } catch {
+        /* native close cleanup is best-effort after SESSION_CLOSE */
+      }
+    })();
   }
 
   private _onHeaders(event: NativeEvent): void {

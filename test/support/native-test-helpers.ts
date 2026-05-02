@@ -70,6 +70,8 @@ export interface EventCollector {
   allEvents: any[];
   /** Wait until an event with the given `eventType` appears. */
   waitForEvent(eventType: number, timeoutMs?: number): Promise<any>;
+  /** Wait until any one of the given event types appears. */
+  waitForAnyEvent(eventTypes: number[], timeoutMs?: number): Promise<any>;
   /** Wait until N events of the given `eventType` have been collected. */
   waitForNEvents(eventType: number, count: number, timeoutMs?: number): Promise<any[]>;
   /** Wait until a SHUTDOWN_COMPLETE (15) event is observed. */
@@ -90,8 +92,9 @@ export function createEventCollector(): EventCollector {
     for (const evt of events) {
       allEvents.push(evt);
       for (let i = waiters.length - 1; i >= 0; i--) {
-        if (waiters[i].eventType === evt.eventType) {
-          const waiter = waiters[i];
+        const waiter = waiters[i];
+        if (!waiter) continue;
+        if (waiter.eventType === evt.eventType) {
           waiters.splice(i, 1);
           waiter.resolve(evt);
         }
@@ -118,6 +121,38 @@ export function createEventCollector(): EventCollector {
           resolve(evt);
         },
       });
+    });
+  }
+
+  function waitForAnyEvent(eventTypes: number[], timeoutMs = 5000): Promise<any> {
+    const wanted = new Set(eventTypes);
+    const existing = allEvents.find((e) => wanted.has(e.eventType));
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise<any>((resolve, reject) => {
+      let settled = false;
+      const group = Symbol('waitForAnyEvent');
+      const timer = setTimeout(() => {
+        settled = true;
+        for (let i = waiters.length - 1; i >= 0; i--) {
+          if ((waiters[i] as any).__anyEventGroup === group) waiters.splice(i, 1);
+        }
+        reject(new Error(`Timed out waiting for eventTypes=${eventTypes.join(',')} after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const complete = (evt: any): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        for (let i = waiters.length - 1; i >= 0; i--) {
+          if ((waiters[i] as any).__anyEventGroup === group) waiters.splice(i, 1);
+        }
+        resolve(evt);
+      };
+
+      for (const eventType of eventTypes) {
+        waiters.push({ eventType, resolve: complete, __anyEventGroup: group } as any);
+      }
     });
   }
 
@@ -176,7 +211,7 @@ export function createEventCollector(): EventCollector {
     });
   }
 
-  return { callback, allEvents, waitForEvent, waitForNEvents, waitForShutdown, reset };
+  return { callback, allEvents, waitForEvent, waitForAnyEvent, waitForNEvents, waitForShutdown, reset };
 }
 
 // ---- QUIC pair ----

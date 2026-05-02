@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding, streamSendOutcomeBytes } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, binding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
@@ -144,10 +144,7 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
     this.worker.close(errorCode, reason);
     this.worker.requestShutdown();
 
-    const timer = new Promise<void>((resolve) => {
-      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
-    });
-    await Promise.race([sentinel, timer]);
+    await waitForShutdownOrTimeout(sentinel);
     this._shutdownResolve = null;
 
     this.worker.joinWorker();
@@ -346,11 +343,13 @@ export class QuicClientSession extends EventEmitter {
           break;
         case EVENT_SESSION_CLOSE: {
           const closeErr = toSessionError(event, 'session closed');
+          const closeInfo = sessionCloseInfoFromEvent(event);
           if (!this._handshakeComplete) {
             this._markReadyError(new Error('session closed before handshake'));
           }
           this._cleanupStreams(closeErr);
-          this._emitClose(sessionCloseInfoFromEvent(event));
+          this._emitClose(closeInfo);
+          this._cleanupEventLoopAfterNativeClose(closeInfo);
           break;
         }
         case EVENT_DRAIN:
@@ -495,6 +494,21 @@ export class QuicClientSession extends EventEmitter {
     if (this._closeEmitted) return;
     this._closeEmitted = true;
     this.emit('close', info);
+  }
+
+  private _cleanupEventLoopAfterNativeClose(info: SessionCloseInfo): void {
+    this._closeRequested = true;
+    this._clearConnectTimer();
+    const loop_ = this._eventLoop;
+    this._eventLoop = null;
+    if (!loop_) return;
+    void (async (): Promise<void> => {
+      try {
+        await loop_.close(info.errorCode, info.reason);
+      } catch {
+        /* native close cleanup is best-effort after SESSION_CLOSE */
+      }
+    })();
   }
 
   private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
