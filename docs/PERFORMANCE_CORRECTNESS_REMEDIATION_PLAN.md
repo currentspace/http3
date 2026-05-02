@@ -68,6 +68,9 @@
 21. **64 KiB ingress-pool validation completed.**
     Short macOS/kqueue H3 and raw QUIC steady-state runs with 5 connections, 2 in-flight streams per connection, and 64 KiB payloads completed with zero errors. H3 recorded ingress reuse/allocation of client `215/15` and server `225/5`; raw QUIC recorded client `110/10` and server `116/4`, confirming the new top size class is used on the benchmark path.
 
+22. **FIN-only writes skip outbound ingress-pool checkout.**
+    Empty stream-final writes now use a shared JS empty buffer and a zero-capacity, unpooled native `Chunk::empty()`, so sending FIN without payload no longer checks out a 1 KiB ingress-pool buffer just to copy zero bytes. H3 and raw QUIC route empty FIN through quiche's borrowed `&[]` send APIs instead of the zero-copy body path because there is no payload buffer lifetime to preserve.
+
 ## P0: Finish write backpressure semantics
 
 **Problem:** The new JS window restores Node stream pressure at the public API boundary, but native command channels still report "queued" rather than "accepted by worker/quiche".

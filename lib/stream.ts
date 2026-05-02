@@ -23,6 +23,7 @@ import {
  * opens for the FIN.
  */
 const STREAM_FINISH_TIMEOUT_MS = 30_000;
+const EMPTY_BUFFER = Buffer.alloc(0);
 
 /** HTTP header map where each value is a string or string array. */
 export type IncomingHeaders = Record<string, string | string[]>;
@@ -339,7 +340,7 @@ export class ServerHttp3Stream extends Duplex {
       : this._eventLoop.streamSend(
           this._connHandle,
           this._streamId,
-          Buffer.alloc(0),
+          EMPTY_BUFFER,
           true,
         );
     if (written === 0) {
@@ -363,7 +364,7 @@ export class ServerHttp3Stream extends Duplex {
         this._eventLoop?.streamSend(
           this._connHandle,
           this._streamId,
-          Buffer.alloc(0),
+          EMPTY_BUFFER,
           true,
         );
         settle();
@@ -532,7 +533,7 @@ export class ClientHttp3Stream extends Duplex {
     }
     const written = this._blocked
       ? 0
-      : this._eventLoop.streamSend(this._streamId, Buffer.alloc(0), true);
+      : this._eventLoop.streamSend(this._streamId, EMPTY_BUFFER, true);
     if (written === 0) {
       // Audit finding #9: bound the wait, mirror server-side _final.
       let settled = false;
@@ -549,7 +550,7 @@ export class ClientHttp3Stream extends Duplex {
       this._bp.drainCallbacks.push((err) => {
         clearTimeout(timer);
         if (err) { settle(err); return; }
-        this._eventLoop?.streamSend(this._streamId, Buffer.alloc(0), true);
+        this._eventLoop?.streamSend(this._streamId, EMPTY_BUFFER, true);
         settle();
       });
     } else {

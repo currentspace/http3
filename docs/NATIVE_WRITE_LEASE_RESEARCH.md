@@ -30,6 +30,10 @@ changes.
    completion. Proving that the same chunk stays authoritative through
    retransmission requires deeper transport integration than the public stream
    send APIs expose.
+7. FIN-only writes carry no payload lifetime, so the idiomatic quiche path is
+   the borrowed empty-slice send API (`&[]` with `fin=true`) rather than the
+   zero-copy body API. This avoids treating an empty payload buffer as a real
+   lease.
 
 ## Current Outbound Code Map
 

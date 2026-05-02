@@ -407,6 +407,41 @@ impl QuicConnection {
         fin: bool,
     ) -> Result<StreamSendOutcome, Http3NativeError> {
         let data_len = buf.remaining_len();
+        if data_len == 0 {
+            if !fin {
+                return Ok(StreamSendOutcome {
+                    written: 0,
+                    fin_accepted: false,
+                    remainder: None,
+                });
+            }
+
+            return match self.quiche_conn.stream_send(stream_id, &[], true) {
+                Ok(written) => {
+                    if self.is_local_stream(stream_id) {
+                        self.known_streams.insert(stream_id);
+                    }
+                    Ok(StreamSendOutcome {
+                        written: if written == 0 { 1 } else { written },
+                        fin_accepted: true,
+                        remainder: None,
+                    })
+                }
+                Err(quiche::Error::Done) => {
+                    if self.blocked_set.insert(stream_id) {
+                        self.blocked_queue.push_back(stream_id);
+                        reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
+                    }
+                    Ok(StreamSendOutcome {
+                        written: 0,
+                        fin_accepted: false,
+                        remainder: Some(buf),
+                    })
+                }
+                Err(e) => Err(Http3NativeError::Quiche(e)),
+            };
+        }
+
         let original = buf.clone();
         match self.quiche_conn.stream_send_zc(stream_id, buf, None, fin) {
             Ok((written, remaining)) => {

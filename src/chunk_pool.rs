@@ -92,6 +92,10 @@ impl ChunkPool {
     /// Check out a buffer with capacity >= `len`.
     /// Returns `(buffer, reused)`.
     pub fn checkout(&mut self, len: usize) -> (Vec<u8>, bool) {
+        if len == 0 {
+            return (Vec::new(), false);
+        }
+
         if let Some(bin_idx) = Self::bin_for(len) {
             // Search this bin and larger bins for a reusable buffer.
             for idx in bin_idx..NUM_BINS {
@@ -183,6 +187,10 @@ impl ChunkPoolIngress {
     }
 
     pub fn copy_napi_buffer(&self, buf: &napi::bindgen_prelude::Buffer) -> Chunk {
+        if buf.is_empty() {
+            return Chunk::empty();
+        }
+
         let mut pool = self.pool.lock().unwrap_or_else(|err| err.into_inner());
         pool.drain_returned(&self.rx);
         let (data, reused) = pool.checkout_copy(buf.as_ref());
@@ -202,6 +210,18 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    /// Create an empty chunk without touching a pool.
+    ///
+    /// FIN-only stream writes carry no payload bytes, so allocating a pooled
+    /// 1 KiB backing Vec for them just adds pressure at the N-API boundary.
+    pub fn empty() -> Self {
+        Self {
+            data: Vec::new(),
+            offset: 0,
+            pool_return: None,
+        }
+    }
+
     /// Create a chunk by copying from a NAPI Buffer (JS→Rust boundary).
     /// The resulting Vec will be recycled to the pool when dropped.
     #[cfg(feature = "node-api")]
@@ -371,6 +391,17 @@ mod tests {
     }
 
     #[test]
+    fn zero_length_checkout_does_not_consume_a_size_class() {
+        let mut pool = ChunkPool::new(4);
+        let (buf, reused) = pool.checkout(0);
+
+        assert!(!reused);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0);
+        assert_eq!(pool.total_pooled(), 0);
+    }
+
+    #[test]
     fn size_class_bucketing() {
         let mut pool = ChunkPool::new(4);
 
@@ -454,6 +485,16 @@ mod tests {
         drop(chunk);
         pool.drain_returned(&rx);
         assert_eq!(pool.total_pooled(), 1);
+    }
+
+    #[test]
+    fn empty_chunk_is_unpooled() {
+        let chunk = Chunk::empty();
+
+        assert!(chunk.remaining().is_empty());
+        assert_eq!(chunk.remaining_len(), 0);
+        assert_eq!(chunk.data.capacity(), 0);
+        assert!(chunk.pool_return().is_none());
     }
 
     #[test]

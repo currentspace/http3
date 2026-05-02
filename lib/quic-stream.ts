@@ -15,6 +15,7 @@ import {
 
 /** Audit finding #9: bound on `_final` wait time. */
 const STREAM_FINISH_TIMEOUT_MS = 30_000;
+const EMPTY_BUFFER = Buffer.alloc(0);
 
 /**
  * Event loop interface for QUIC server-side stream commands.
@@ -183,7 +184,7 @@ export class QuicStream extends Duplex {
   }
 
   _final(callback: (error?: Error | null) => void): void {
-    const finalChunk = this._finalChunk ?? Buffer.alloc(0);
+    const finalChunk = this._finalChunk ?? EMPTY_BUFFER;
     this._finalChunk = null;
 
     // Audit finding #9: wrap the entire _writeFinalChunk path with a

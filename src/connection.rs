@@ -442,6 +442,35 @@ impl H3Connection {
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
         let data_len = buf.remaining_len();
+        if data_len == 0 {
+            if !fin {
+                return Ok(SendBodyOutcome {
+                    written: 0,
+                    fin_accepted: false,
+                    remainder: None,
+                });
+            }
+
+            return match h3.send_body(&mut self.quiche_conn, stream_id, &[], true) {
+                Ok(written) => Ok(SendBodyOutcome {
+                    written,
+                    fin_accepted: true,
+                    remainder: None,
+                }),
+                Err(quiche::h3::Error::Done) => {
+                    if self.blocked_set.insert(stream_id) {
+                        self.blocked_queue.push_back(stream_id);
+                    }
+                    Ok(SendBodyOutcome {
+                        written: 0,
+                        fin_accepted: false,
+                        remainder: Some(buf),
+                    })
+                }
+                Err(e) => Err(Http3NativeError::H3(e)),
+            };
+        }
+
         match h3.send_body_zc(&mut self.quiche_conn, stream_id, &mut buf, fin) {
             Ok(written) => {
                 if written < data_len && self.blocked_set.insert(stream_id) {
