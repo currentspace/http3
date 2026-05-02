@@ -43,6 +43,7 @@ mod inner {
     const USER_RX_BUF_SIZE: usize = 65535;
     const RX_BUF_SIZE: usize = 65535 + RX_BUF_OVERHEAD;
     const TX_SLOTS: usize = 256;
+    const SQ_RING_ENTRIES: u32 = TX_SLOTS as u32;
     const TIER2_TASKRUN_PREFETCH_LIMIT: u32 = 2;
     const TIER2_BLOCKING_WAIT_LIMIT: u32 = 4;
 
@@ -638,18 +639,18 @@ mod inner {
                 .setup_defer_taskrun()
                 .setup_r_disabled()
                 .setup_cqsize(4096)
-                .build(128)
+                .build(SQ_RING_ENTRIES)
                 .map(|r| (r, true))
                 .or_else(|_| {
                     // Fallback: without DEFER_TASKRUN (kernel < 6.1).
                     io_uring::IoUring::builder()
                         .setup_cqsize(4096)
-                        .build(128)
+                        .build(SQ_RING_ENTRIES)
                         .map(|r| (r, false))
                 })
                 .or_else(|_| {
                     // Minimal fallback.
-                    io_uring::IoUring::new(128).map(|r| (r, false))
+                    io_uring::IoUring::new(SQ_RING_ENTRIES).map(|r| (r, false))
                 })?;
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
