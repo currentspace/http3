@@ -19,6 +19,12 @@ use crate::h3_event::{EventRecycler, JsH3Event, JsHeader};
 use crate::ping_state::PingState;
 use crate::reactor_metrics;
 
+// quiche::h3::send_body() needs room for the DATA frame type varint, the
+// largest DATA length varint, and at least one payload byte before reporting
+// H3 body streams writable again. Using the same scale here prevents
+// premature JS drain callbacks for blocked empty-FIN retries.
+const H3_WRITE_READY_MIN_CAPACITY: usize = 9;
+
 pub struct H3Connection {
     pub quiche_conn: quiche::Connection<ArcBufFactory>,
     pub h3_conn: Option<quiche::h3::Connection>,
@@ -268,7 +274,10 @@ impl H3Connection {
             let Some(stream_id) = self.blocked_queue.pop_front() else {
                 break;
             };
-            match self.quiche_conn.stream_writable(stream_id, 1) {
+            match self
+                .quiche_conn
+                .stream_writable(stream_id, H3_WRITE_READY_MIN_CAPACITY)
+            {
                 Ok(true) => {
                     self.blocked_set.remove(&stream_id);
                     events.push(JsH3Event::drain(conn_handle, stream_id));

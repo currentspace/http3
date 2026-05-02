@@ -22,6 +22,48 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function waitForDrain(stream: ServerHttp3Stream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      stream.off('drain', onDrain);
+      stream.off('error', onError);
+      stream.off('close', onClose);
+    };
+    const onDrain = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error('stream closed before drain'));
+    };
+    stream.once('drain', onDrain);
+    stream.once('error', onError);
+    stream.once('close', onClose);
+  });
+}
+
+async function writeChunkedResponse(stream: ServerHttp3Stream, chunks: Buffer[]): Promise<void> {
+  stream.respond({ ':status': '200' });
+
+  if (chunks.length === 0) {
+    stream.end();
+    return;
+  }
+
+  for (let index = 0; index < chunks.length - 1; index += 1) {
+    if (!stream.write(chunks[index])) {
+      await waitForDrain(stream);
+    }
+  }
+
+  stream.end(chunks[chunks.length - 1]);
+}
+
 function loadConfig(): BenchServerConfig {
   const configStr = process.argv[2];
   if (!configStr) {
@@ -62,15 +104,16 @@ async function main(): Promise<void> {
       stream.end();
       return;
     }
+
     const chunks: Buffer[] = [];
     stream.on('data', (c: Buffer) => {
       bytesEchoed += c.length;
       chunks.push(c);
     });
     stream.on('end', () => {
-      const body = Buffer.concat(chunks);
-      stream.respond({ ':status': '200' });
-      stream.end(body);
+      void writeChunkedResponse(stream, chunks).catch((error) => {
+        stream.destroy(error);
+      });
     });
   });
 

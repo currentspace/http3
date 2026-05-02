@@ -25,6 +25,46 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function waitForDrain(stream: QuicStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      stream.off('drain', onDrain);
+      stream.off('error', onError);
+      stream.off('close', onClose);
+    };
+    const onDrain = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error('stream closed before drain'));
+    };
+    stream.once('drain', onDrain);
+    stream.once('error', onError);
+    stream.once('close', onClose);
+  });
+}
+
+async function writeChunkedResponse(stream: QuicStream, chunks: Buffer[]): Promise<void> {
+  if (chunks.length === 0) {
+    stream.end();
+    return;
+  }
+
+  for (let index = 0; index < chunks.length - 1; index += 1) {
+    if (!stream.write(chunks[index])) {
+      await waitForDrain(stream);
+    }
+  }
+
+  stream.end(chunks[chunks.length - 1]);
+}
+
 function loadConfig(): BenchServerConfig {
   const configStr = process.argv[2];
   if (!configStr) {
@@ -70,27 +110,15 @@ async function main(): Promise<void> {
     });
     session.on('stream', (stream: QuicStream) => {
       streamCount++;
-      let singleChunk: Buffer | null = null;
-      let chunks: Buffer[] | null = null;
-      let totalLength = 0;
+      const chunks: Buffer[] = [];
       stream.on('data', (chunk: Buffer) => {
         bytesEchoed += chunk.length;
-        totalLength += chunk.length;
-        if (singleChunk === null && chunks === null) {
-          singleChunk = chunk;
-        } else {
-          if (chunks === null) {
-            chunks = [singleChunk!];
-            singleChunk = null;
-          }
-          chunks.push(chunk);
-        }
+        chunks.push(chunk);
       });
       stream.on('end', () => {
-        const body = chunks
-          ? Buffer.concat(chunks, totalLength)
-          : (singleChunk ?? Buffer.alloc(0));
-        stream.end(body);
+        void writeChunkedResponse(stream, chunks).catch((error) => {
+          stream.destroy(error);
+        });
       });
     });
   });

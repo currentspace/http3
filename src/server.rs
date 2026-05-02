@@ -286,12 +286,18 @@ impl NativeWorkerServer {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle
-            .send_datagram(
-                conn_handle,
-                self.stream_ingress_pool.copy_napi_buffer(&data),
-            )
-            .unwrap_or(false)
+        let body_len = data.as_ref().len();
+        if !handle.try_admit_outbound(body_len, false) {
+            return false;
+        }
+        let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
+        match handle.send_datagram(conn_handle, chunk) {
+            Ok(accepted) => accepted,
+            Err(_) => {
+                handle.release_outbound_admission(body_len, false);
+                false
+            }
+        }
     }
 
     #[napi]

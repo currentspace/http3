@@ -14,12 +14,14 @@ interface BenchConfig {
   streamsPerConnection: number;
   messageSize: number;
   timeoutMs: number;
+  connectTimeoutMs?: number;
   warmupMs?: number;
   durationMs?: number;
   maxInflightPerConnection?: number;
   runtimeMode?: 'auto' | 'fast' | 'portable';
   fallbackPolicy?: 'error' | 'warn-and-fallback';
   clientId?: number;
+  connectionBarrier?: boolean;
 }
 
 type MeasurementPhase = 'warmup' | 'measured' | 'cooldown';
@@ -135,7 +137,7 @@ async function doRequest(
   payload: Buffer,
   timeoutMs: number,
   diag?: BenchDiag,
-): Promise<Buffer> {
+): Promise<number> {
   if (diag) diag.requestsStarted++;
   const stream = await session.requestAsync({
     ':method': 'POST',
@@ -147,20 +149,89 @@ async function doRequest(
   stream.end(payload);
 
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
+    let responseBytes = 0;
     const timer = setTimeout(() => reject(new Error('h3 request timed out')), timeoutMs);
     stream.on('response', () => { /* headers received */ });
-    stream.on('data', (chunk: Buffer) => { chunks.push(chunk); });
+    stream.on('data', (chunk: Buffer) => { responseBytes += chunk.length; });
     stream.on('end', () => {
       clearTimeout(timer);
       if (diag) diag.responsesCompleted++;
-      resolve(Buffer.concat(chunks));
+      resolve(responseBytes);
     });
     stream.on('error', (err: Error) => {
       clearTimeout(timer);
       if (diag) diag.requestErrors++;
       reject(err);
     });
+  });
+}
+
+function writeJson(message: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function classifyError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message || error.name;
+  }
+  return String(error);
+}
+
+function incrementCount(counts: Record<string, number>, key: string): void {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+
+function waitForStartSignal(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let input = '';
+    let settled = false;
+
+    const cleanup = (): void => {
+      process.stdin.off('data', onData);
+      process.stdin.off('end', onEnd);
+      process.stdin.off('error', onError);
+    };
+
+    const settle = (fn: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    const onData = (data: Buffer | string): void => {
+      input += data.toString();
+      const lines = input.split('\n');
+      input = lines.pop() ?? '';
+      for (const line of lines) {
+        const command = line.trim();
+        if (!command) {
+          continue;
+        }
+        if (command === 'start') {
+          settle(resolve);
+          return;
+        }
+        settle(() => reject(new Error(`unexpected benchmark control command: ${command}`)));
+        return;
+      }
+    };
+
+    const onEnd = (): void => {
+      settle(() => reject(new Error('benchmark control stream closed before start')));
+    };
+
+    const onError = (error: Error): void => {
+      settle(() => reject(error));
+    };
+
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', onData);
+    process.stdin.once('end', onEnd);
+    process.stdin.once('error', onError);
+    process.stdin.resume();
   });
 }
 
@@ -213,9 +284,11 @@ async function main(): Promise<void> {
   let cooldownStreams = 0;
   let cooldownBytes = 0;
   let errors = 0;
+  const errorCounts: Record<string, number> = {};
 
   const payload = Buffer.alloc(config.messageSize, 0xcc);
   const host = config.host ?? '127.0.0.1';
+  const connectTimeoutMs = config.connectTimeoutMs ?? config.timeoutMs;
 
   // Phase 1: Open connections
   const clients: Http3ClientSession[] = [];
@@ -226,7 +299,7 @@ async function main(): Promise<void> {
       const client = await connectAsync(`${host}:${config.port}`, {
         rejectUnauthorized: false,
         initialMaxStreamsBidi: 50_000,
-        connectTimeoutMs: Math.min(config.timeoutMs, 5_000),
+        connectTimeoutMs,
         runtimeMode: config.runtimeMode,
         fallbackPolicy: config.fallbackPolicy,
       });
@@ -238,8 +311,21 @@ async function main(): Promise<void> {
       runtimeSelections.set(runtimeKey, (runtimeSelections.get(runtimeKey) ?? 0) + 1);
     } catch (err) {
       errors++;
+      incrementCount(errorCounts, classifyError(err));
       process.stderr.write(`H3 connection ${c} failed: ${err}\n`);
     }
+  }
+
+  if (config.connectionBarrier) {
+    writeJson({
+      type: 'ready',
+      clientId: config.clientId ?? null,
+      expectedConnections: config.connections,
+      connectionsOpened: clients.length,
+      errors,
+      errorCounts,
+    });
+    await waitForStartSignal();
   }
 
   // Phase 2: Run streams
@@ -278,14 +364,16 @@ async function main(): Promise<void> {
         const phase = classifyMeasurementPhase(loadElapsedAtStartMs, warmupMs, durationMs);
 
         try {
-          const echoed = await doRequest(client, payload, config.timeoutMs, diag);
+          const echoedBytes = await doRequest(client, payload, config.timeoutMs, diag);
           const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
-          if (echoed.length === payload.length) {
-            recordCompletion(phase, echoed.length * 2, streamMs);
+          if (echoedBytes === payload.length) {
+            recordCompletion(phase, echoedBytes * 2, streamMs);
           } else {
+            incrementCount(errorCounts, 'response length mismatch');
             errors++;
           }
-        } catch {
+        } catch (err) {
+          incrementCount(errorCounts, classifyError(err));
           errors++;
         }
       }
@@ -301,31 +389,48 @@ async function main(): Promise<void> {
     );
     loadElapsedMs = Number(process.hrtime.bigint() - loadStart) / 1e6;
   } else {
-    const allStreams: Promise<void>[] = [];
-    for (const client of clients) {
-      for (let s = 0; s < config.streamsPerConnection; s++) {
-        allStreams.push(
-          (async () => {
-            const streamStart = process.hrtime.bigint();
-            try {
-              const echoed = await doRequest(client, payload, config.timeoutMs, diag);
-              const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
-              if (echoed.length === payload.length) {
-                totalStreams++;
-                totalBytes += echoed.length * 2;
-                streamLatency.add(streamMs);
-              } else {
-                errors++;
-              }
-            } catch {
-              errors++;
-            }
-          })(),
-        );
+    const fixedMaxInflightPerConnection = Math.max(
+      1,
+      Math.min(config.streamsPerConnection, config.maxInflightPerConnection ?? config.streamsPerConnection),
+    );
+
+    async function runFixedRequest(client: Http3ClientSession): Promise<void> {
+      const streamStart = process.hrtime.bigint();
+      try {
+        const echoedBytes = await doRequest(client, payload, config.timeoutMs, diag);
+        const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
+        if (echoedBytes === payload.length) {
+          totalStreams++;
+          totalBytes += echoedBytes * 2;
+          streamLatency.add(streamMs);
+        } else {
+          incrementCount(errorCounts, 'response length mismatch');
+          errors++;
+        }
+      } catch (err) {
+        incrementCount(errorCounts, classifyError(err));
+        errors++;
       }
     }
 
-    await Promise.all(allStreams);
+    async function runFixedConnection(client: Http3ClientSession): Promise<void> {
+      let nextStream = 0;
+      async function worker(): Promise<void> {
+        for (;;) {
+          const streamIndex = nextStream;
+          nextStream++;
+          if (streamIndex >= config.streamsPerConnection) {
+            return;
+          }
+          await runFixedRequest(client);
+        }
+      }
+      await Promise.all(
+        Array.from({ length: fixedMaxInflightPerConnection }, () => worker()),
+      );
+    }
+
+    await Promise.all(clients.map((client) => runFixedConnection(client)));
     loadElapsedMs = Number(process.hrtime.bigint() - loadStart) / 1e6;
   }
 
@@ -358,6 +463,7 @@ async function main(): Promise<void> {
     totalStreams,
     totalBytes,
     errors,
+    errorCounts,
     elapsedMs: Math.round(elapsedMs),
     throughputMbps: Number((measuredElapsedMs > 0 ? ((totalBytes * 8) / (measuredElapsedMs / 1000) / 1e6) : 0).toFixed(1)),
     streamsPerSecond: Number((measuredElapsedMs > 0 ? (totalStreams / (measuredElapsedMs / 1000)) : 0).toFixed(0)),
@@ -397,7 +503,9 @@ async function main(): Promise<void> {
       targetDurationMs: steadyState ? durationMs : null,
       measuredMs: Math.round(measuredElapsedMs),
       loadElapsedMs: Math.round(steadyState ? loadElapsedMs : elapsedMs),
-      maxInflightPerConnection,
+      maxInflightPerConnection: steadyState
+        ? maxInflightPerConnection
+        : (config.maxInflightPerConnection ?? null),
       warmupStreams,
       warmupBytes,
       cooldownStreams,
@@ -408,7 +516,7 @@ async function main(): Promise<void> {
     reactorTelemetry: binding.runtimeTelemetry(),
   };
 
-  process.stdout.write(JSON.stringify(result) + '\n');
+  writeJson(result);
   process.exit(0);
 }
 

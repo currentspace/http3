@@ -297,6 +297,7 @@ Options:
   --stats-interval-ms N                       Server stats emission interval
   --results-dir DIR                           Write a timestamped JSON artifact under DIR
   --label TEXT                                Optional artifact label suffix
+  --no-connection-barrier                     Start load as each client finishes connecting
   --allow-errors                              Exit 0 even if the benchmark sees request errors
   --json                                      Print machine-readable JSON summary
   --help                                      Show this help text
@@ -333,9 +334,6 @@ function resolveSettings(argv) {
   if (durationMs === null && warmupMs > 0) {
     throw new Error('--warmup-ms requires --duration-ms');
   }
-  if (durationMs === null && maxInflightPerConnection !== null) {
-    throw new Error('--max-inflight-per-connection requires --duration-ms');
-  }
   if (durationMs !== null && rounds !== 1) {
     throw new Error('--duration-ms steady-state mode requires --rounds 1');
   }
@@ -360,6 +358,7 @@ function resolveSettings(argv) {
     clientFallbackPolicy,
     resultsDir: options.get('--results-dir'),
     label: options.get('--label') ?? null,
+    connectionBarrier: !flags.has('--no-connection-barrier'),
     allowErrors: flags.has('--allow-errors'),
     json: flags.has('--json'),
   };
@@ -507,68 +506,193 @@ function startServer(config) {
   });
 }
 
-function runClient(config) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [BENCH_CLIENT_PATH, JSON.stringify(config)], {
-      cwd: ROOT_DIR,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+function spawnClient(config) {
+  let resolveReady;
+  let rejectReady;
+  let resolveResult;
+  let rejectResult;
+  let started = false;
+  let ready = config.connectionBarrier ? null : {
+    type: 'ready',
+    clientId: config.clientId ?? null,
+    expectedConnections: config.connections,
+    connectionsOpened: 0,
+    errors: 0,
+  };
+  let result = null;
+  let settled = false;
 
-    let stdoutBuffer = '';
-    let stderrBuffer = '';
-    let result = null;
-
-    const timeoutBudgetMs = config.timeoutMs + 10_000 + (config.warmupMs ?? 0) + (config.durationMs ?? 0);
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`));
-    }, timeoutBudgetMs);
-
-    child.stdout.on('data', (data) => {
-      stdoutBuffer += data.toString();
-      const lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const message = JSON.parse(line);
-          if (message.type === 'result') {
-            result = message;
-          }
-        } catch {
-          // Ignore non-JSON output from the benchmark client.
-        }
-      }
-    });
-
-    child.stderr.on('data', (data) => {
-      const text = data.toString();
-      stderrBuffer += text;
-      process.stderr.write(text);
-    });
-
-    child.on('error', (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-
-    child.on('exit', (code, signal) => {
-      clearTimeout(timeout);
-      if (signal) {
-        reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} exited via signal ${signal}`));
-        return;
-      }
-      if (code !== 0) {
-        reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} exited with code ${code}\n${stderrBuffer}`.trim()));
-        return;
-      }
-      if (!result) {
-        reject(new Error(`H3 benchmark client ${config.clientId ?? '?'} exited without a result`));
-        return;
-      }
-      resolve(result);
-    });
+  const readyPromise = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
   });
+  const resultPromise = new Promise((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+
+  const child = spawn(process.execPath, [BENCH_CLIENT_PATH, JSON.stringify(config)], {
+    cwd: ROOT_DIR,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  if (ready) {
+    resolveReady(ready);
+  }
+
+  let stdoutBuffer = '';
+  let stderrBuffer = '';
+
+  const timeoutBudgetMs =
+    config.timeoutMs +
+    (config.connectionBarrier ? config.timeoutMs + 10_000 : 0) +
+    10_000 +
+    (config.warmupMs ?? 0) +
+    (config.durationMs ?? 0);
+  const timeout = setTimeout(() => {
+    child.kill('SIGKILL');
+    const error = new Error(`H3 benchmark client ${config.clientId ?? '?'} timed out`);
+    rejectReady(error);
+    rejectResult(error);
+  }, timeoutBudgetMs);
+
+  const rejectBoth = (error) => {
+    rejectReady(error);
+    rejectResult(error);
+  };
+
+  child.stdout.on('data', (data) => {
+    stdoutBuffer += data.toString();
+    const lines = stdoutBuffer.split('\n');
+    stdoutBuffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const message = JSON.parse(line);
+        if (message.type === 'ready') {
+          ready = message;
+          resolveReady(message);
+          continue;
+        }
+        if (message.type === 'result') {
+          result = message;
+        }
+      } catch {
+        // Ignore non-JSON output from the benchmark client.
+      }
+    }
+  });
+
+  child.stderr.on('data', (data) => {
+    const text = data.toString();
+    stderrBuffer += text;
+    process.stderr.write(text);
+  });
+
+  child.on('error', (error) => {
+    clearTimeout(timeout);
+    rejectBoth(error);
+  });
+
+  child.on('exit', (code, signal) => {
+    clearTimeout(timeout);
+    if (settled) {
+      return;
+    }
+    settled = true;
+    if (signal) {
+      rejectBoth(new Error(`H3 benchmark client ${config.clientId ?? '?'} exited via signal ${signal}`));
+      return;
+    }
+    if (code !== 0) {
+      rejectBoth(new Error(`H3 benchmark client ${config.clientId ?? '?'} exited with code ${code}\n${stderrBuffer}`.trim()));
+      return;
+    }
+    if (config.connectionBarrier && !ready) {
+      rejectBoth(new Error(`H3 benchmark client ${config.clientId ?? '?'} exited before connection readiness`));
+      return;
+    }
+    if (!result) {
+      rejectResult(new Error(`H3 benchmark client ${config.clientId ?? '?'} exited without a result`));
+      return;
+    }
+    resolveResult(result);
+  });
+
+  return {
+    ready: readyPromise,
+    result: resultPromise,
+    start() {
+      if (started) {
+        return;
+      }
+      started = true;
+      child.stdin.write('start\n');
+      child.stdin.end();
+    },
+    kill() {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGTERM');
+      }
+    },
+  };
+}
+
+async function runClient(config) {
+  const client = spawnClient(config);
+  const ready = await client.ready;
+  if (config.connectionBarrier) {
+    const expected = ready.expectedConnections ?? config.connections;
+    const opened = ready.connectionsOpened ?? 0;
+    const errors = ready.errors ?? 0;
+    if (errors > 0 || opened !== expected) {
+      client.kill();
+      throw new Error(
+        `H3 benchmark client ${config.clientId ?? '?'} connection phase failed: ` +
+        `${opened}/${expected} opened, ${errors} errors`,
+      );
+    }
+  }
+  client.start();
+  return client.result;
+}
+
+async function runClientGroup(configs, connectionBarrier) {
+  if (!connectionBarrier) {
+    return Promise.all(configs.map((config) => runClient(config)));
+  }
+
+  const clients = configs.map((config) => spawnClient(config));
+  try {
+    const readyMessages = await Promise.all(clients.map((client) => client.ready));
+    const failures = readyMessages.filter((message, index) => {
+      const expected = message.expectedConnections ?? configs[index].connections;
+      const opened = message.connectionsOpened ?? 0;
+      const errors = message.errors ?? 0;
+      return errors > 0 || opened !== expected;
+    });
+    if (failures.length > 0) {
+      const detail = failures
+        .map((message) => {
+          const expected = message.expectedConnections ?? '?';
+          const opened = message.connectionsOpened ?? 0;
+          const errors = message.errors ?? 0;
+          return `client ${message.clientId ?? '?'} ${opened}/${expected} opened, ${errors} errors`;
+        })
+        .join('; ');
+      throw new Error(`H3 benchmark connection barrier failed: ${detail}`);
+    }
+    for (const client of clients) {
+      client.start();
+    }
+    return await Promise.all(clients.map((client) => client.result));
+  } catch (error) {
+    for (const client of clients) {
+      client.result.catch(() => undefined);
+      client.kill();
+    }
+    throw error;
+  }
 }
 
 function aggregateProcessResults(results, wallElapsedMs) {
@@ -578,6 +702,7 @@ function aggregateProcessResults(results, wallElapsedMs) {
   const streamP99s = results.map((result) => result.streamLatency.p99Ms);
   const runtimeSelections = {};
   const reactorTelemetry = {};
+  const errorCounts = {};
   const steadyState = results.some((result) => result.measurement?.mode === 'steady-state');
   const measuredWallElapsedMs = steadyState
     ? maxDefinedNumber(results.map((result) => result.measurement?.measuredMs ?? null), 0)
@@ -591,9 +716,10 @@ function aggregateProcessResults(results, wallElapsedMs) {
   const targetDurationMs = steadyState
     ? maxDefinedNumber(results.map((result) => result.measurement?.targetDurationMs ?? null), 0)
     : null;
-  const maxInflightPerConnection = steadyState
-    ? maxDefinedNumber(results.map((result) => result.measurement?.maxInflightPerConnection ?? null), null)
-    : null;
+  const maxInflightPerConnection = maxDefinedNumber(
+    results.map((result) => result.measurement?.maxInflightPerConnection ?? null),
+    null,
+  );
 
   const totalStreams = sumBy(results, (result) => result.totalStreams);
   const totalBytes = sumBy(results, (result) => result.totalBytes);
@@ -608,12 +734,14 @@ function aggregateProcessResults(results, wallElapsedMs) {
   for (const result of results) {
     mergeCountObjects(runtimeSelections, result.runtimeSelections);
     mergeNumericTelemetry(reactorTelemetry, result.reactorTelemetry);
+    mergeCountObjects(errorCounts, result.errorCounts);
   }
 
   return {
     totalStreams,
     totalBytes,
     errors,
+    errorCounts,
     wallElapsedMs: measuredWallElapsedMs,
     processWallElapsedMs: wallElapsedMs,
     throughputMbps: measuredWallElapsedMs > 0 ? (totalBytes * 8) / (measuredWallElapsedMs / 1000) / 1_000_000 : 0,
@@ -660,9 +788,13 @@ function printSummary(summary) {
       ` for ${measurement.measuredWallElapsedMs}ms after ${measurement.warmupMs}ms warmup`,
     );
   } else {
+    const fixedWindow = settings.maxInflightPerConnection
+      ? ` with ${settings.maxInflightPerConnection} inflight per connection`
+      : '';
     console.log(
       `  Load: ${settings.clientProcesses} client processes x ${settings.connections} connections` +
-      ` x ${settings.streamsPerConnection} requests x ${formatBytes(settings.messageSize)} x ${settings.rounds} rounds`,
+      ` x ${settings.streamsPerConnection} requests${fixedWindow}` +
+      ` x ${formatBytes(settings.messageSize)} x ${settings.rounds} rounds`,
     );
   }
   console.log(
@@ -672,6 +804,9 @@ function printSummary(summary) {
   console.log(`  Requested requests: ${requestedStreams ?? 'steady-state window'}`);
   console.log(`  Completed requests: ${totalStreams}`);
   console.log(`  Errors: ${errors}`);
+  if (errors > 0) {
+    console.log(`  Error classes: ${formatCountSummary(clientStats.errorCounts)}`);
+  }
   if (measurement.mode === 'steady-state') {
     console.log(`  Process wall time: ${wallElapsedMs}ms`);
     console.log(`  Measured window: ${measurement.measuredWallElapsedMs}ms (load phase ${measurement.loadElapsedMs}ms)`);
@@ -764,6 +899,7 @@ async function main() {
     maxInflightPerConnection: settings.maxInflightPerConnection,
     runtimeMode: settings.clientRuntimeMode,
     fallbackPolicy: settings.clientFallbackPolicy,
+    connectionBarrier: settings.connectionBarrier,
   };
 
   const server = await startServer(serverConfig);
@@ -777,13 +913,12 @@ async function main() {
   try {
     for (let round = 0; round < settings.rounds; round += 1) {
       const roundStart = Date.now();
-      const results = await Promise.all(
-        Array.from({ length: settings.clientProcesses }, (_, index) => runClient({
+      const clientConfigs = Array.from({ length: settings.clientProcesses }, (_, index) => ({
           ...clientConfig,
           port: server.port,
           clientId: round * settings.clientProcesses + index + 1,
-        })),
-      );
+        }));
+      const results = await runClientGroup(clientConfigs, settings.connectionBarrier);
       const roundElapsedMs = Date.now() - roundStart;
       const aggregate = aggregateProcessResults(results, roundElapsedMs);
       allResults.push(...results);
