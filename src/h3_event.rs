@@ -281,7 +281,7 @@ impl JsH3Event {
             event_type: EVENT_NEW_SESSION,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -290,7 +290,7 @@ impl JsH3Event {
                 server_name: Some(server_name),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -299,11 +299,11 @@ impl JsH3Event {
             event_type: EVENT_NEW_STREAM,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -319,15 +319,15 @@ impl JsH3Event {
             event_type: EVENT_NEW_STREAM,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: if data.is_empty() {
                 None
             } else {
                 Some(make_data_buf(data, recycler))
             },
             fin: Some(fin),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -339,8 +339,8 @@ impl JsH3Event {
             headers: Some(headers),
             data: None,
             fin: Some(fin),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -355,11 +355,11 @@ impl JsH3Event {
             event_type: EVENT_DATA,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: Some(make_data_buf(data, recycler)),
             fin: Some(fin),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -368,11 +368,11 @@ impl JsH3Event {
             event_type: EVENT_FINISHED,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -381,14 +381,14 @@ impl JsH3Event {
             event_type: EVENT_RESET,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
                 error_code: Some(error_code as u32),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -397,11 +397,11 @@ impl JsH3Event {
             event_type: EVENT_SESSION_CLOSE,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -410,7 +410,7 @@ impl JsH3Event {
             event_type: EVENT_SESSION_CLOSE,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -418,7 +418,7 @@ impl JsH3Event {
                 error_reason: Some(reason),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -427,11 +427,11 @@ impl JsH3Event {
             event_type: EVENT_DRAIN,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -445,11 +445,11 @@ impl JsH3Event {
             event_type: EVENT_STREAM_BLOCKED,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -458,11 +458,11 @@ impl JsH3Event {
             event_type: EVENT_WRITE_READY,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -471,11 +471,11 @@ impl JsH3Event {
             event_type: EVENT_GOAWAY,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -484,7 +484,7 @@ impl JsH3Event {
             event_type: EVENT_ERROR,
             conn_handle,
             stream_id,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -492,7 +492,7 @@ impl JsH3Event {
                 error_reason: Some(reason),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -507,7 +507,7 @@ impl JsH3Event {
             event_type: EVENT_ERROR,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -519,7 +519,7 @@ impl JsH3Event {
                 syscall: Some(syscall.into()),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -528,11 +528,11 @@ impl JsH3Event {
             event_type: EVENT_HANDSHAKE_COMPLETE,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -545,7 +545,7 @@ impl JsH3Event {
             event_type: EVENT_HANDSHAKE_COMPLETE,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -554,7 +554,7 @@ impl JsH3Event {
                     .map(|chain| chain.into_iter().map(Into::into).collect()),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -563,11 +563,11 @@ impl JsH3Event {
             event_type: EVENT_SESSION_TICKET,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: Some(ticket.into()),
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -576,10 +576,10 @@ impl JsH3Event {
             event_type: EVENT_METRICS,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
+            meta: None,
             metrics: Some(metrics.clone()),
         }
     }
@@ -589,11 +589,11 @@ impl JsH3Event {
             event_type: EVENT_DATAGRAM,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: Some(make_data_buf(data, recycler)),
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -602,14 +602,14 @@ impl JsH3Event {
             event_type: EVENT_PING_ACK,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
                 duration_ms: Some(duration_ms),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -620,11 +620,11 @@ impl JsH3Event {
             event_type: EVENT_SHUTDOWN_COMPLETE,
             conn_handle: 0,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 }
@@ -639,10 +639,10 @@ mod tests {
         assert_eq!(ev.event_type, EVENT_NEW_SESSION);
         assert_eq!(ev.conn_handle, 42);
         assert_eq!(ev.stream_id, -1);
-        assert_eq!(ev.headers.as_ref().unwrap().len(), 0);
+        assert!(ev.headers.is_none());
         assert!(ev.data.is_none());
         assert_eq!(ev.fin, Some(false));
-        assert!(ev.metrics.is_some());
+        assert!(ev.metrics.is_none());
         let meta = ev.meta.expect("meta must be Some");
         assert_eq!(meta.remote_addr.as_deref(), Some("127.0.0.1"));
         assert_eq!(meta.remote_port, Some(4433));
@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(ev.stream_id, 12_i64);
         assert!(ev.data.is_none());
         assert_eq!(ev.fin, Some(false));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(ev.stream_id, 16_i64);
         assert!(ev.data.is_none());
         assert_eq!(ev.fin, Some(false));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(ev.event_type, EVENT_SESSION_CLOSE);
         assert_eq!(ev.conn_handle, 11);
         assert_eq!(ev.stream_id, -1);
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -737,7 +737,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 2);
         assert_eq!(ev.stream_id, 32_i64);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -747,7 +747,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 2);
         assert_eq!(ev.stream_id, 32_i64);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -757,7 +757,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 2);
         assert_eq!(ev.stream_id, -1);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 6);
         assert_eq!(ev.stream_id, 64_i64);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -780,7 +780,7 @@ mod tests {
         assert_eq!(meta.error_code, Some(0x0101));
         assert_eq!(meta.error_reason.as_deref(), Some("flow control"));
         assert!(meta.error_category.is_none());
-        assert!(ev.metrics.is_some());
+        assert!(ev.metrics.is_none());
     }
 
     #[test]
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(ev.event_type, EVENT_HANDSHAKE_COMPLETE);
         assert_eq!(ev.conn_handle, 15);
         assert_eq!(ev.stream_id, -1);
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -836,7 +836,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 25);
         assert_eq!(ev.stream_id, -1);
         assert_eq!(ev.data.as_deref(), Some(ticket.as_slice()));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 30);
         assert_eq!(ev.stream_id, -1);
         assert_eq!(ev.data.as_deref(), Some(payload.as_slice()));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -857,8 +857,8 @@ mod tests {
         assert_eq!(ev.conn_handle, 0);
         assert_eq!(ev.stream_id, -1);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
-        assert!(ev.metrics.is_some());
+        assert!(ev.meta.is_none());
+        assert!(ev.metrics.is_none());
     }
 
     #[cfg(feature = "node-api")]

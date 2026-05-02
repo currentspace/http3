@@ -118,10 +118,33 @@ impl ChunkPool {
         }
     }
 
+    /// Check out an empty buffer with capacity >= `len`.
+    ///
+    /// This is for copy-immediately call sites. Keeping the length at zero
+    /// avoids the zero-fill that `resize(len, 0)` would do before the caller
+    /// overwrites every byte with `extend_from_slice`.
+    fn checkout_for_copy(&mut self, len: usize) -> (Vec<u8>, bool) {
+        if len == 0 {
+            return (Vec::new(), false);
+        }
+
+        if let Some(bin_idx) = Self::bin_for(len) {
+            for idx in bin_idx..NUM_BINS {
+                if let Some(mut buf) = self.bins[idx].pop() {
+                    buf.clear();
+                    return (buf, true);
+                }
+            }
+            (Vec::with_capacity(CHUNK_CLASSES[bin_idx]), false)
+        } else {
+            (Vec::with_capacity(len), false)
+        }
+    }
+
     /// Check out a buffer and copy `data` into it.
     pub fn checkout_copy(&mut self, data: &[u8]) -> (Vec<u8>, bool) {
-        let (mut buf, reused) = self.checkout(data.len());
-        buf[..data.len()].copy_from_slice(data);
+        let (mut buf, reused) = self.checkout_for_copy(data.len());
+        buf.extend_from_slice(data);
         (buf, reused)
     }
 
@@ -565,5 +588,20 @@ mod tests {
         let data = [42u8; 100];
         let (buf, _) = pool.checkout_copy(&data);
         assert_eq!(&buf[..100], &data[..]);
+    }
+
+    #[test]
+    fn checkout_copy_reuses_without_stale_tail() {
+        let mut pool = ChunkPool::new(4);
+        let (mut buf, _) = pool.checkout(1024);
+        buf.fill(0xAA);
+        pool.checkin(buf);
+
+        let (copied, reused) = pool.checkout_copy(&[1, 2, 3]);
+
+        assert!(reused);
+        assert_eq!(copied, vec![1, 2, 3]);
+        assert_eq!(copied.len(), 3);
+        assert!(copied.capacity() >= 1024);
     }
 }
