@@ -1,7 +1,11 @@
 //! Reusable buffer pool to reduce allocation pressure in the hot
 //! packet-receive and send loops.
 
+#![deny(unsafe_code)]
+
 use std::sync::Arc;
+
+use crate::unsafe_boundary::InitializedPacketBuf;
 
 const DEFAULT_BUF_SIZE: usize = 65535;
 const DEFAULT_POOL_SIZE: usize = 256;
@@ -21,16 +25,11 @@ impl BufferPool {
     }
 
     /// Take a buffer from the pool (or allocate a new one).
-    /// The returned buffer has length == buf_size but content is uninitialized.
-    /// Callers must write before reading.
-    #[allow(unsafe_code)]
+    /// The returned buffer has length == buf_size and is initialized.
     pub fn checkout(&mut self) -> Vec<u8> {
-        self.buffers.pop().unwrap_or_else(|| {
-            let mut buf = Vec::with_capacity(self.buf_size);
-            // SAFETY: callers always write before reading (documented contract).
-            unsafe { buf.set_len(self.buf_size); }
-            buf
-        })
+        self.buffers
+            .pop()
+            .unwrap_or_else(|| InitializedPacketBuf::zeroed(self.buf_size).into_vec())
     }
 
     /// Return a buffer to the pool. Only keeps it if capacity is sufficient.
@@ -106,7 +105,11 @@ impl AdaptiveBufferPool {
     pub fn with_recycler(
         max_buffers: usize,
         min_capacity: usize,
-    ) -> (Self, Arc<BufferRecycler>, crossbeam_channel::Receiver<Vec<u8>>) {
+    ) -> (
+        Self,
+        Arc<BufferRecycler>,
+        crossbeam_channel::Receiver<Vec<u8>>,
+    ) {
         let (tx, rx) = crossbeam_channel::bounded(max_buffers * 2);
         let pool = Self {
             buffers: Vec::with_capacity(max_buffers),

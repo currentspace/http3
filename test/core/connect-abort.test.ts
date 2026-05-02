@@ -8,6 +8,21 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { resolveConnectionEndpoint } from '../../lib/endpoint.js';
+import { connect, connectQuic } from '../../lib/index.js';
+
+function nextImmediate(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+function isAbortErrorWith(message: RegExp): (err: unknown) => boolean {
+  return (err: unknown): boolean => (
+    err instanceof Error
+    && err.name === 'AbortError'
+    && message.test(err.message)
+  );
+}
 
 describe('resolveConnectionEndpoint AbortSignal', () => {
   it('throws synchronously if signal is already aborted', async () => {
@@ -50,5 +65,41 @@ describe('resolveConnectionEndpoint AbortSignal', () => {
       }),
       /would-cancel/,
     );
+  });
+
+  it('rejects raw QUIC ready() and closes native resources when aborted during handshake', async () => {
+    const ac = new AbortController();
+    const session = connectQuic('127.0.0.1:19999', {
+      rejectUnauthorized: false,
+      signal: ac.signal,
+      maxIdleTimeoutMs: 10_000,
+    });
+
+    await nextImmediate();
+    ac.abort(new Error('cancel raw handshake'));
+
+    await assert.rejects(
+      session.ready(),
+      isAbortErrorWith(/cancel raw handshake/),
+    );
+    await session.close();
+  });
+
+  it('rejects HTTP/3 ready() and closes native resources when aborted during handshake', async () => {
+    const ac = new AbortController();
+    const session = connect('https://127.0.0.1:19998', {
+      rejectUnauthorized: false,
+      signal: ac.signal,
+      maxIdleTimeoutMs: 10_000,
+    });
+
+    await nextImmediate();
+    ac.abort(new Error('cancel h3 handshake'));
+
+    await assert.rejects(
+      session.ready(),
+      isAbortErrorWith(/cancel h3 handshake/),
+    );
+    await session.close();
   });
 });

@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_lines)]
+#![deny(unsafe_code)]
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use serde::Serialize;
 
+use crate::chunk_pool::Chunk;
 use crate::cid::CidEncoding;
 use crate::config::{
     ClientAuthMode, JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode,
@@ -22,7 +24,6 @@ use crate::h3_event::{
 };
 #[cfg(feature = "node-api")]
 use crate::profile::event_sink::channel_and_tsfn_batcher;
-use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_and_counting_batcher, channel_batcher};
 use crate::profile::mock_trace::MockReplayTrace;
 use crate::quic_worker::{

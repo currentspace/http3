@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use std::io;
 use std::time::Instant;
 

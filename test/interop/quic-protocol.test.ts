@@ -415,6 +415,27 @@ describe('QUIC protocol verification', () => {
       await server.close();
     });
 
+    it('openStream is rejected before JS mints an over-limit stream id', async () => {
+      const server = createQuicServer({
+        key: certs.key, cert: certs.cert, disableRetry: true,
+        initialMaxStreamsBidi: 1,
+      });
+      const addr = await server.listen(0, '127.0.0.1');
+      const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+
+      const first = client.openStream();
+      assert.equal(first.id, 0);
+      assert.throws(
+        () => client.openStream(),
+        /streamlimit|stream limit|QUIC error/i,
+      );
+
+      await client.close();
+      await server.close();
+    });
+
     it('bidirectional half-close', async () => {
       const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
 
@@ -702,6 +723,31 @@ describe('QUIC protocol verification', () => {
 
       assert.ok(closeReceived, 'client should receive close event within ~2.5s of idle timeout');
 
+      try { await client.close(); } catch { /* may already be closed */ }
+      await server.close();
+    });
+
+    it('close event includes raw QUIC application close payload', async () => {
+      const server = createQuicServer({ key: certs.key, cert: certs.cert, disableRetry: true });
+      const serverSessionPromise = new Promise<QuicServerSession>((resolve) => {
+        server.on('session', resolve);
+      });
+      const addr = await server.listen(0, '127.0.0.1');
+      const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      const serverSession = await serverSessionPromise;
+
+      const closeInfoPromise = new Promise<{ errorCode: number; reason: string }>((resolve) => {
+        client.on('close', resolve);
+      });
+      serverSession.close(77, 'raw drain');
+      const closeInfo = await Promise.race([
+        closeInfoPromise,
+        new Promise<null>((resolve) => { setTimeout(() => resolve(null), 5000); }),
+      ]);
+
+      assert.deepStrictEqual(closeInfo, { errorCode: 77, reason: 'raw drain' });
       try { await client.close(); } catch { /* may already be closed */ }
       await server.close();
     });

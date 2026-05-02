@@ -10,8 +10,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -303,11 +303,9 @@ fn test_h3_idle_timeout_reset_by_request() {
     // At 1.5s from handshake (~1.1s from last activity), verify no
     // SESSION_CLOSE has arrived — well within the 2s idle timeout.
     std::thread::sleep(Duration::from_millis(1100));
-    let premature_close = recv_event_matching(
-        &pair.client_rx,
-        Duration::from_millis(200),
-        |e| e.event_type == EVENT_SESSION_CLOSE,
-    );
+    let premature_close = recv_event_matching(&pair.client_rx, Duration::from_millis(200), |e| {
+        e.event_type == EVENT_SESSION_CLOSE
+    });
     assert!(
         premature_close.is_none(),
         "H3 connection should NOT have timed out — request kept it alive"
@@ -406,8 +404,7 @@ fn test_h3_request_after_long_idle() {
     );
     assert!(got_fin, "client should receive fin on response stream");
     assert_eq!(
-        client_data,
-        b"survived-idle",
+        client_data, b"survived-idle",
         "response body should match after idle period"
     );
 }

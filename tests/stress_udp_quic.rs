@@ -211,7 +211,12 @@ fn setup_udp_quic_pair(
         .unwrap();
 
     // Complete handshake
-    exchange_udp(&client_sock, &server_sock, &mut client_conn, &mut server_conn);
+    exchange_udp(
+        &client_sock,
+        &server_sock,
+        &mut client_conn,
+        &mut server_conn,
+    );
 
     assert!(client_conn.is_established(), "client handshake failed");
     assert!(server_conn.is_established(), "server handshake failed");
@@ -354,7 +359,10 @@ fn echo_stream(pair: &mut UdpQuicPair, stream_id: u64, payload: &[u8]) {
             break;
         }
     }
-    assert!(server_fin, "server did not receive fin on stream {stream_id}");
+    assert!(
+        server_fin,
+        "server did not receive fin on stream {stream_id}"
+    );
 
     // Server echoes
     pair.server_conn
@@ -435,7 +443,8 @@ fn test_udp_5_connections_parallel() {
         .collect();
 
     for (i, h) in handles.into_iter().enumerate() {
-        h.join().unwrap_or_else(|e| panic!("connection {i} panicked: {e:?}"));
+        h.join()
+            .unwrap_or_else(|e| panic!("connection {i} panicked: {e:?}"));
     }
 
     let _ = std::fs::remove_file(&cert_path);

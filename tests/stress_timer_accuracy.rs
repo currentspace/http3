@@ -69,9 +69,7 @@ fn test_timer_heap_under_load() {
         );
     }
 
-    eprintln!(
-        "timer heap: all {handle_count} handles expired correctly with no duplicates"
-    );
+    eprintln!("timer heap: all {handle_count} handles expired correctly with no duplicates");
 }
 
 #[test]

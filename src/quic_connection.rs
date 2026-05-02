@@ -1,6 +1,8 @@
 //! Per-connection raw QUIC state (no HTTP/3 framing), managing bidirectional
 //! streams, send buffering, and event generation for the worker loop.
 
+#![deny(unsafe_code)]
+
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -9,9 +11,11 @@ use std::time::Instant;
 
 use crate::arc_buf::{ArcBuf, ArcBufFactory};
 use crate::buffer_pool::{AdaptiveBufferPool, BufferRecycler};
+use crate::chunk_pool::Chunk;
 use crate::connection::ConnectionMetrics;
 use crate::error::Http3NativeError;
 use crate::h3_event::{EventRecycler, JsH3Event};
+use crate::ping_state::PingState;
 use crate::reactor_metrics;
 
 const MAX_OUTBOUND_DATAGRAM_QUEUE: usize = 64;
@@ -52,13 +56,21 @@ pub struct QuicConnection {
     readable_scratch: Vec<u64>,
     /// Bounded retry queue for outbound QUIC DATAGRAM frames that quiche
     /// temporarily refuses with `Done`.
-    outbound_datagrams: VecDeque<Vec<u8>>,
+    outbound_datagrams: VecDeque<ArcBuf>,
+    ping_state: PingState,
 }
 
 pub struct QuicConnectionInit<'a> {
     pub role: &'a str,
     pub qlog_dir: Option<&'a str>,
     pub qlog_level: Option<&'a str>,
+}
+
+/// Result of a zero-copy raw QUIC stream send.
+pub struct StreamSendOutcome {
+    pub written: usize,
+    pub fin_accepted: bool,
+    pub remainder: Option<ArcBuf>,
 }
 
 impl QuicConnection {
@@ -101,6 +113,7 @@ impl QuicConnection {
             data_recycle_rx,
             readable_scratch: Vec::new(),
             outbound_datagrams: VecDeque::new(),
+            ping_state: PingState::default(),
         }
     }
 
@@ -128,6 +141,23 @@ impl QuicConnection {
             Err(quiche::Error::Done) => Err(Http3NativeError::Quiche(quiche::Error::Done)),
             Err(e) => Err(Http3NativeError::Quiche(e)),
         }
+    }
+
+    pub fn queue_ping(&mut self) -> Result<(), Http3NativeError> {
+        if self.quiche_conn.is_closed() || self.quiche_conn.is_draining() {
+            return Err(Http3NativeError::InvalidState(
+                "connection is closing".into(),
+            ));
+        }
+        self.quiche_conn
+            .send_ack_eliciting()
+            .map_err(Http3NativeError::Quiche)?;
+        self.ping_state.queue(&self.quiche_conn.stats());
+        Ok(())
+    }
+
+    pub fn poll_ping_acks(&mut self) -> Vec<f64> {
+        self.ping_state.complete_acked(&self.quiche_conn.stats())
     }
 
     pub fn timeout(&self) -> Option<std::time::Duration> {
@@ -356,8 +386,27 @@ impl QuicConnection {
         data: Vec<u8>,
         fin: bool,
     ) -> Result<(usize, Option<Vec<u8>>), Http3NativeError> {
-        let data_len = data.len();
-        let buf = ArcBuf::from_vec(data);
+        let outcome = self.stream_send_arcbuf(stream_id, ArcBuf::from_vec(data), fin)?;
+        let remainder = outcome.remainder.map(|r| r.as_ref().to_vec());
+        Ok((outcome.written, remainder))
+    }
+
+    pub fn stream_send_chunk(
+        &mut self,
+        stream_id: u64,
+        chunk: Chunk,
+        fin: bool,
+    ) -> Result<StreamSendOutcome, Http3NativeError> {
+        self.stream_send_arcbuf(stream_id, ArcBuf::from_chunk(chunk), fin)
+    }
+
+    pub fn stream_send_arcbuf(
+        &mut self,
+        stream_id: u64,
+        buf: ArcBuf,
+        fin: bool,
+    ) -> Result<StreamSendOutcome, Http3NativeError> {
+        let data_len = buf.remaining_len();
         let original = buf.clone();
         match self.quiche_conn.stream_send_zc(stream_id, buf, None, fin) {
             Ok((written, remaining)) => {
@@ -368,22 +417,42 @@ impl QuicConnection {
                 if self.is_local_stream(stream_id) {
                     self.known_streams.insert(stream_id);
                 }
-                // Convert remaining ArcBuf back to Vec for pending-write storage.
-                let remainder = remaining.map(|r| r.as_ref().to_vec());
-                // Sentinel for FIN-only sends.
-                if data_len == 0 && fin && written == 0 {
-                    Ok((1, None))
-                } else {
-                    Ok((written, remainder))
-                }
+                Ok(StreamSendOutcome {
+                    written,
+                    fin_accepted: fin && remaining.is_none(),
+                    remainder: remaining,
+                })
             }
             Err(quiche::Error::Done) => {
                 if self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
                     reactor_metrics::record_raw_quic_blocked_streams(self.blocked_queue.len());
                 }
-                Ok((0, Some(original.as_ref().to_vec())))
+                Ok(StreamSendOutcome {
+                    written: 0,
+                    fin_accepted: false,
+                    remainder: Some(original),
+                })
             }
+            Err(e) => Err(Http3NativeError::Quiche(e)),
+        }
+    }
+
+    pub fn reserve_local_bidi_stream(&mut self, stream_id: u64) -> Result<(), Http3NativeError> {
+        if !self.is_local_stream(stream_id) || (stream_id & 0x2) != 0 {
+            return Err(Http3NativeError::InvalidState(format!(
+                "stream {stream_id} is not a local bidirectional stream"
+            )));
+        }
+
+        match self.quiche_conn.stream_send(stream_id, &[], false) {
+            Ok(0) => {
+                self.known_streams.insert(stream_id);
+                Ok(())
+            }
+            Ok(written) => Err(Http3NativeError::InvalidState(format!(
+                "empty stream reservation wrote {written} bytes"
+            ))),
             Err(e) => Err(Http3NativeError::Quiche(e)),
         }
     }
@@ -481,6 +550,26 @@ impl QuicConnection {
         self.quiche_conn.is_closed()
     }
 
+    pub fn session_close_event(&self, conn_handle: u32) -> JsH3Event {
+        if let Some(error) = self
+            .quiche_conn
+            .peer_error()
+            .or_else(|| self.quiche_conn.local_error())
+        {
+            return JsH3Event::session_close_with_error(
+                conn_handle,
+                error.error_code,
+                String::from_utf8_lossy(&error.reason).into_owned(),
+            );
+        }
+
+        if self.quiche_conn.is_timed_out() {
+            return JsH3Event::session_close_with_error(conn_handle, 0, "idle timeout".into());
+        }
+
+        JsH3Event::session_close(conn_handle)
+    }
+
     pub fn send_datagram(&mut self, data: &[u8]) -> Result<(), Http3NativeError> {
         self.quiche_conn
             .dgram_send(data)
@@ -488,32 +577,40 @@ impl QuicConnection {
             .map_err(Http3NativeError::Quiche)
     }
 
-    pub fn queue_datagram(&mut self, data: Vec<u8>) -> Result<bool, Http3NativeError> {
-        match self.quiche_conn.dgram_send(&data) {
-            Ok(_) => Ok(true),
-            Err(quiche::Error::Done) => {
-                if self.outbound_datagrams.len() >= MAX_OUTBOUND_DATAGRAM_QUEUE {
-                    return Ok(false);
-                }
-                self.outbound_datagrams.push_back(data);
-                Ok(true)
+    pub fn queue_datagram(&mut self, data: Chunk) -> Result<bool, Http3NativeError> {
+        let data = ArcBuf::from_chunk(data);
+
+        if self.quiche_conn.is_dgram_send_queue_full() {
+            if self.outbound_datagrams.len() >= MAX_OUTBOUND_DATAGRAM_QUEUE {
+                return Ok(false);
             }
-            Err(e) => Err(Http3NativeError::Quiche(e)),
+            self.outbound_datagrams.push_back(data);
+            return Ok(true);
         }
+
+        self.quiche_conn
+            .dgram_send_buf(data)
+            .map(|_| true)
+            .map_err(Http3NativeError::Quiche)
+    }
+
+    pub fn queue_datagram_vec(&mut self, data: Vec<u8>) -> Result<bool, Http3NativeError> {
+        self.queue_datagram(Chunk::unpooled(data))
     }
 
     pub fn drain_outbound_datagrams(&mut self) {
-        while let Some(data) = self.outbound_datagrams.pop_front() {
-            match self.quiche_conn.dgram_send(&data) {
-                Ok(_) => {}
-                Err(quiche::Error::Done) => {
-                    self.outbound_datagrams.push_front(data);
-                    break;
-                }
-                Err(e) => {
-                    log::debug!("dropping queued QUIC datagram after send failure: {e}");
-                    break;
-                }
+        loop {
+            if self.quiche_conn.is_dgram_send_queue_full() {
+                break;
+            }
+
+            let Some(data) = self.outbound_datagrams.pop_front() else {
+                break;
+            };
+
+            if let Err(e) = self.quiche_conn.dgram_send_buf(data) {
+                log::debug!("dropping queued QUIC datagram after send failure: {e}");
+                break;
             }
         }
     }
@@ -524,19 +621,16 @@ impl QuicConnection {
 
     pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
         loop {
-            // Datagrams are at most one MTU (~1500 bytes).
-            let (mut buf, _) = self.data_pool.checkout(1500);
-            match self.quiche_conn.dgram_recv(&mut buf) {
-                Ok(len) => {
-                    buf.truncate(len);
-                    events.push(JsH3Event::datagram(conn_handle, buf, self.event_recycler()));
-                }
+            match self.quiche_conn.dgram_recv_buf() {
+                Ok(buf) => events.push(JsH3Event::datagram(
+                    conn_handle,
+                    buf.into_vec(),
+                    self.event_recycler(),
+                )),
                 Err(quiche::Error::Done) => {
-                    self.data_pool.checkin(buf);
                     break;
                 }
                 Err(_) => {
-                    self.data_pool.checkin(buf);
                     break;
                 }
             }

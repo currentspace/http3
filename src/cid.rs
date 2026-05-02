@@ -1,6 +1,8 @@
 //! Connection ID generation: random CIDs for standard use and optional
 //! QUIC-LB-compatible CIDs with embedded server IDs.
 
+#![deny(unsafe_code)]
+
 use ring::rand::SecureRandom;
 
 use crate::error::Http3NativeError;

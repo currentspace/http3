@@ -87,6 +87,7 @@ pub struct NativeWorkerServer {
     /// Retained for creating additional quiche configs for sharded workers.
     /// All napi Buffers are copied to Vec<u8> so they can be used across threads.
     server_options_snapshot: Option<StoredServerOptions>,
+    stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress,
 }
 
 #[napi]
@@ -109,6 +110,7 @@ impl NativeWorkerServer {
             http3_config: Some(http3_config),
             tsfn: Some(tsfn),
             server_options_snapshot: Some(stored),
+            stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress::new(64),
         })
     }
 
@@ -195,14 +197,19 @@ impl NativeWorkerServer {
         let Some(handle) = &self.handle else {
             return false;
         };
+        let body_len = data.as_ref().len();
         let h: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
-        handle.send_command(crate::worker::WorkerCommand::SendResponse {
+        let accepted = handle.send_command(crate::worker::WorkerCommand::SendResponse {
             conn_handle,
             stream_id: stream_id as u64,
             headers: h,
-            body: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
+            body: self.stream_ingress_pool.copy_napi_buffer(&data),
             fin,
-        })
+        });
+        if accepted {
+            crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+        }
+        accepted
     }
 
     #[napi]
@@ -210,12 +217,17 @@ impl NativeWorkerServer {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle.send_command(crate::worker::WorkerCommand::StreamSend {
+        let body_len = data.as_ref().len();
+        let accepted = handle.send_command(crate::worker::WorkerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            chunk: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
+            chunk: self.stream_ingress_pool.copy_napi_buffer(&data),
             fin,
-        })
+        });
+        if accepted {
+            crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+        }
+        accepted
     }
 
     #[napi]
@@ -261,7 +273,10 @@ impl NativeWorkerServer {
             return false;
         };
         handle
-            .send_datagram(conn_handle, data.to_vec())
+            .send_datagram(
+                conn_handle,
+                self.stream_ingress_pool.copy_napi_buffer(&data),
+            )
             .unwrap_or(false)
     }
 

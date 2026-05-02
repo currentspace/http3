@@ -24,8 +24,10 @@ mod inner {
         CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso, set_pktinfo,
     };
     use crate::transport::{
-        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
+        Driver, DriverWaker, GsoBatch, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+        group_for_gso,
     };
+    use crate::unsafe_boundary::ProvidedBufferId;
 
     /// Number of provided buffers in the RX buffer ring.
     /// 512 gives enough headroom for burst receives between poll() calls —
@@ -60,6 +62,62 @@ mod inner {
 
     const FIXED_SOCKET: io_uring::types::Fixed = io_uring::types::Fixed(0);
     const FIXED_EVENTFD: io_uring::types::Fixed = io_uring::types::Fixed(1);
+
+    fn send_bundle_prefix_len(packets: &[TxDatagram]) -> usize {
+        let mut count = 0usize;
+        for packet in packets.iter().take(TX_RING_ENTRIES as usize) {
+            if packet.data.len() > TX_BUF_ENTRY_SIZE {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
+
+    trait CompletionView {
+        fn completion_user_data(&self) -> u64;
+    }
+
+    impl CompletionView for io_uring::cqueue::Entry {
+        fn completion_user_data(&self) -> u64 {
+            self.user_data()
+        }
+    }
+
+    fn split_bundle_completions<C>(cqes: impl IntoIterator<Item = C>) -> (Vec<C>, Vec<C>)
+    where
+        C: CompletionView,
+    {
+        let mut bundle = Vec::new();
+        let mut non_bundle = Vec::new();
+        for cqe in cqes {
+            if cqe.completion_user_data() & OP_MASK == OP_BUNDLE {
+                bundle.push(cqe);
+            } else {
+                non_bundle.push(cqe);
+            }
+        }
+        (bundle, non_bundle)
+    }
+
+    #[derive(Debug, Default)]
+    struct WakerReadState {
+        armed: bool,
+    }
+
+    impl WakerReadState {
+        fn should_submit(&self) -> bool {
+            !self.armed
+        }
+
+        fn mark_submitted(&mut self) {
+            self.armed = true;
+        }
+
+        fn mark_completed(&mut self) {
+            self.armed = false;
+        }
+    }
 
     /// Compile-time-optional trace logging for diagnosing driver-level issues.
     /// Zero cost when `driver-tracing` feature is disabled (default).
@@ -154,7 +212,8 @@ mod inner {
         }
 
         /// Stage a consumed buffer for return (no fence yet).
-        fn stage_buffer_return(&mut self, bid: u16) {
+        fn stage_buffer_return(&mut self, bid: ProvidedBufferId) {
+            let bid = bid.get();
             let entries = self.ring_ptr.cast::<io_uring::types::BufRingEntry>();
             let slot = (self.tail % RX_RING_SIZE) as usize;
             let entry = unsafe { &mut *entries.add(slot) };
@@ -179,13 +238,10 @@ mod inner {
         }
 
         /// Get a reference to the buffer data for a given buffer ID.
-        fn buffer_data(&self, bid: u16) -> &[u8] {
-            assert!(
-                bid < RX_RING_SIZE as u16,
-                "kernel returned out-of-range bid: {bid}"
-            );
+        fn buffer_data(&self, bid: ProvidedBufferId) -> &[u8] {
+            let bid = bid.get();
             let offset = (bid as usize) * RX_BUF_SIZE;
-            // SAFETY: the bid invariant is enforced by the assert above; buffer region is valid.
+            // SAFETY: ProvidedBufferId proves bid < RX_RING_SIZE; buffer region is valid.
             unsafe { std::slice::from_raw_parts(self.buf_base.add(offset), RX_BUF_SIZE) }
         }
     }
@@ -281,13 +337,20 @@ mod inner {
         /// Fill ring entries with packet data and publish the tail.
         /// Returns how many packets were enqueued.
         fn fill_and_publish(&mut self, packets: &[TxDatagram]) -> usize {
-            let n = packets.len().min(TX_RING_ENTRIES as usize);
+            let n = send_bundle_prefix_len(packets);
+            if n == 0 {
+                self.in_flight = false;
+                self.in_flight_count = 0;
+                self.in_flight_lengths.clear();
+                return 0;
+            }
+
             let entries = self.ring_ptr.cast::<io_uring::types::BufRingEntry>();
 
             self.in_flight_lengths.clear();
             for i in 0..n {
                 let slot = (self.tail % TX_RING_ENTRIES) as usize;
-                let len = packets[i].data.len().min(TX_BUF_ENTRY_SIZE);
+                let len = packets[i].data.len();
                 let buf_offset = slot * TX_BUF_ENTRY_SIZE;
 
                 // SAFETY: slot is in [0, TX_RING_ENTRIES), buf_offset is valid.
@@ -464,6 +527,46 @@ mod inner {
         }
     }
 
+    fn enqueue_retry_data(
+        pending_tx: &mut VecDeque<TxDatagram>,
+        data: Vec<u8>,
+        peer: SocketAddr,
+        gso_segment_size: u16,
+    ) {
+        if gso_segment_size == 0 {
+            pending_tx.push_back(TxDatagram {
+                data,
+                to: peer,
+                max_segment_size: None,
+            });
+            return;
+        }
+
+        let seg = gso_segment_size as usize;
+        for chunk in data.chunks(seg) {
+            pending_tx.push_back(TxDatagram {
+                data: chunk.to_vec(),
+                to: peer,
+                max_segment_size: None,
+            });
+        }
+    }
+
+    fn enqueue_gso_batch_for_retry(pending_tx: &mut VecDeque<TxDatagram>, batch: GsoBatch) {
+        enqueue_retry_data(pending_tx, batch.data, batch.to, batch.segment_size);
+    }
+
+    fn requeue_tx_slot_for_retry(pending_tx: &mut VecDeque<TxDatagram>, slot: &mut TxSlot) {
+        let seg = slot.gso_segment_size;
+        let peer = slot.peer;
+        if seg == 0 {
+            pending_tx.push_back(slot.take_packet());
+        } else {
+            let data = slot.recycle_buffer();
+            enqueue_retry_data(pending_tx, data, peer, seg);
+        }
+    }
+
     pub struct IoUringDriver {
         ring: io_uring::IoUring,
         socket_fd: RawFd,
@@ -483,6 +586,7 @@ mod inner {
         tx_buf_ring: Option<TxBufRing>,
         tx_slots: Vec<TxSlot>,
         waker_buf: Box<[u8; 8]>,
+        waker_read_state: WakerReadState,
         tx_in_flight: usize,
         /// Total payload bytes across all in-flight TX SQEs.
         tx_bytes_in_flight: usize,
@@ -635,6 +739,7 @@ mod inner {
                 tx_buf_ring,
                 tx_slots,
                 waker_buf: Box::new([0u8; 8]),
+                waker_read_state: WakerReadState::default(),
                 tx_in_flight: 0,
                 tx_bytes_in_flight: 0,
                 tx_bytes_cap,
@@ -679,6 +784,7 @@ mod inner {
 
             // Queue any pending TX SQEs — submit_with_args will flush them.
             self.submit_pending_tx()?;
+            self.submit_waker_read()?;
 
             let wait_dur = deadline.map_or(Duration::from_millis(100), |d| {
                 d.saturating_duration_since(Instant::now())
@@ -742,12 +848,13 @@ mod inner {
                         }
 
                         if result > 0 {
-                            if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
-                                if bid >= RX_RING_SIZE as u16 {
+                            if let Some(raw_bid) = io_uring::cqueue::buffer_select(flags) {
+                                let Some(bid) = ProvidedBufferId::new(raw_bid, RX_RING_SIZE) else {
                                     log::error!(
-                                        "io_uring recv CQE returned out-of-range bid={bid} flags={flags:#x}"
+                                        "io_uring recv CQE returned out-of-range bid={raw_bid} flags={flags:#x}"
                                     );
-                                }
+                                    continue;
+                                };
                                 let buf = self.rx_ring.buffer_data(bid);
                                 let buf_len = result as usize;
 
@@ -854,20 +961,7 @@ mod inner {
                             {
                                 reactor_metrics::record_io_uring_retryable_send_completion();
                                 // GSO batch or retryable: split back into individual packets.
-                                let seg = slot.gso_segment_size;
-                                if seg > 0 {
-                                    let peer = slot.peer;
-                                    let data = slot.recycle_buffer();
-                                    for chunk in data.chunks(seg as usize) {
-                                        self.pending_tx.push_back(TxDatagram {
-                                            data: chunk.to_vec(),
-                                            to: peer,
-                                            max_segment_size: None,
-                                        });
-                                    }
-                                } else {
-                                    self.pending_tx.push_back(slot.take_packet());
-                                }
+                                requeue_tx_slot_for_retry(&mut self.pending_tx, slot);
                                 reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
                             } else {
                                 self.recycled_tx.push(slot.recycle_buffer());
@@ -875,6 +969,7 @@ mod inner {
                         }
                     }
                     OP_WAKER => {
+                        self.waker_read_state.mark_completed();
                         outcome.woken = true;
                         reactor_metrics::record_io_uring_wake_completion();
                         // Drain eventfd counter.
@@ -887,7 +982,7 @@ mod inner {
                             );
                         }
                         // Resubmit waker read — flushed by next submit_with_args.
-                        let _ = self.submit_waker_read();
+                        self.submit_waker_read()?;
                     }
                     OP_BUNDLE => {
                         if let Some(ref mut tx_ring) = self.tx_buf_ring {
@@ -993,7 +1088,7 @@ mod inner {
             if let Some(ref mut tx_ring) = self.tx_buf_ring {
                 if !tx_ring.in_flight && !packets.is_empty() {
                     // Process any pending CQEs to reclaim the ring.
-                    self.drain_bundle_cqes();
+                    self.drain_bundle_cqes()?;
                     return self.submit_send_bundle(packets);
                 }
             }
@@ -1010,27 +1105,13 @@ mod inner {
                         if self.tx_bytes_in_flight + batch.data.len() > self.tx_bytes_cap
                             && self.tx_in_flight > 0
                         {
-                            let seg = batch.segment_size as usize;
-                            for chunk in batch.data.chunks(seg) {
-                                self.pending_tx.push_back(TxDatagram {
-                                    data: chunk.to_vec(),
-                                    to: batch.to,
-                                    max_segment_size: None,
-                                });
-                            }
+                            enqueue_gso_batch_for_retry(&mut self.pending_tx, batch);
                             continue;
                         }
                         // Find a free slot directly (can't go through pending_tx).
                         let Some(idx) = self.tx_slots.iter().position(|s| !s.in_flight) else {
                             // No slot: split back to individual packets.
-                            let seg = batch.segment_size as usize;
-                            for chunk in batch.data.chunks(seg) {
-                                self.pending_tx.push_back(TxDatagram {
-                                    data: chunk.to_vec(),
-                                    to: batch.to,
-                                    max_segment_size: None,
-                                });
-                            }
+                            enqueue_gso_batch_for_retry(&mut self.pending_tx, batch);
                             continue;
                         };
                         self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
@@ -1043,16 +1124,11 @@ mod inner {
                         .user_data(OP_SEND | idx as u64);
                         let push_result = unsafe { self.ring.submission().push(&entry) };
                         if push_result.is_err() {
-                            let seg = self.tx_slots[idx].gso_segment_size as usize;
-                            let peer = self.tx_slots[idx].peer;
-                            let data = self.tx_slots[idx].recycle_buffer();
-                            for chunk in data.chunks(seg) {
-                                self.pending_tx.push_back(TxDatagram {
-                                    data: chunk.to_vec(),
-                                    to: peer,
-                                    max_segment_size: None,
-                                });
-                            }
+                            requeue_tx_slot_for_retry(
+                                &mut self.pending_tx,
+                                &mut self.tx_slots[idx],
+                            );
+                            reactor_metrics::record_io_uring_sq_full_event();
                         } else {
                             self.tx_bytes_in_flight += self.tx_slots[idx].data.len();
                             self.tx_in_flight += 1;
@@ -1237,6 +1313,10 @@ mod inner {
         }
 
         fn submit_waker_read(&mut self) -> io::Result<()> {
+            if !self.waker_read_state.should_submit() {
+                return Ok(());
+            }
+
             let entry = io_uring::opcode::Read::new(FIXED_EVENTFD, self.waker_buf.as_mut_ptr(), 8)
                 .build()
                 .user_data(OP_WAKER);
@@ -1248,6 +1328,7 @@ mod inner {
                     io::Error::new(io::ErrorKind::Other, "SQ full")
                 })?;
             }
+            self.waker_read_state.mark_submitted();
             reactor_metrics::record_io_uring_submitted_sqes(1);
             Ok(())
         }
@@ -1307,35 +1388,43 @@ mod inner {
         }
 
         /// Process pending CQEs to reclaim the TX buffer ring.
-        fn drain_bundle_cqes(&mut self) {
+        fn drain_bundle_cqes(&mut self) -> io::Result<()> {
             let mut needs_reset = false;
-            // Check for completed bundle CQEs without blocking.
-            for cqe in self.ring.completion() {
-                let user_data = cqe.user_data();
-                let op = user_data & OP_MASK;
-                if op == OP_BUNDLE {
-                    let result = cqe.result();
-                    if let Some(ref mut tx_ring) = self.tx_buf_ring {
-                        let (consumed, unsent) = if result > 0 {
-                            tx_ring.complete(result as usize)
-                        } else {
-                            tx_ring.complete(0)
-                        };
-                        reactor_metrics::record_io_uring_tx_datagrams_completed(consumed);
-                        if !unsent.is_empty() {
-                            for pkt in unsent {
-                                self.pending_tx.push_back(pkt);
-                            }
-                            needs_reset = true;
+            let (bundle_cqes, non_bundle_cqes) = split_bundle_completions(self.ring.completion());
+            let bundle_count = bundle_cqes.len();
+
+            for cqe in bundle_cqes {
+                let result = cqe.result();
+                if let Some(ref mut tx_ring) = self.tx_buf_ring {
+                    let (consumed, unsent) = if result > 0 {
+                        tx_ring.complete(result as usize)
+                    } else {
+                        tx_ring.complete(0)
+                    };
+                    reactor_metrics::record_io_uring_tx_datagrams_completed(consumed);
+                    if !unsent.is_empty() {
+                        for pkt in unsent {
+                            self.pending_tx.push_back(pkt);
                         }
+                        needs_reset = true;
                     }
                 }
             }
+            if bundle_count > 0 {
+                reactor_metrics::record_io_uring_completions(bundle_count);
+            }
+
             if needs_reset {
                 if let Some(ref mut tx_ring) = self.tx_buf_ring {
                     let _ = tx_ring.reset(&self.ring.submitter());
                 }
             }
+
+            self.cqe_buf = non_bundle_cqes;
+            if !self.cqe_buf.is_empty() {
+                let _ = self.process_cqes_inline()?;
+            }
+            Ok(())
         }
 
         /// Group packets into GSO batches and submit as SQEs directly.
@@ -1355,17 +1444,11 @@ mod inner {
                 std::thread::current().id(),
             );
             let mut sqes_pushed = 0usize;
-            for batch in batches {
+            let mut batches = batches.into_iter();
+            while let Some(batch) = batches.next() {
                 let Some(idx) = self.tx_slots.iter().position(|s| !s.in_flight) else {
                     // No free slot — split batch back into individual packets.
-                    let seg = batch.segment_size as usize;
-                    for chunk in batch.data.chunks(seg) {
-                        self.pending_tx.push_back(TxDatagram {
-                            data: chunk.to_vec(),
-                            to: batch.to,
-                            max_segment_size: None,
-                        });
-                    }
+                    enqueue_gso_batch_for_retry(&mut self.pending_tx, batch);
                     reactor_metrics::record_io_uring_pending_tx(self.pending_tx.len());
                     continue;
                 };
@@ -1394,15 +1477,9 @@ mod inner {
                 let push_result = unsafe { self.ring.submission().push(&entry) };
                 if push_result.is_err() {
                     // SQ full — split back to pending.
-                    let seg = self.tx_slots[idx].gso_segment_size as usize;
-                    let peer = self.tx_slots[idx].peer;
-                    let data = self.tx_slots[idx].recycle_buffer();
-                    for chunk in data.chunks(seg) {
-                        self.pending_tx.push_back(TxDatagram {
-                            data: chunk.to_vec(),
-                            to: peer,
-                            max_segment_size: None,
-                        });
+                    requeue_tx_slot_for_retry(&mut self.pending_tx, &mut self.tx_slots[idx]);
+                    for batch in batches {
+                        enqueue_gso_batch_for_retry(&mut self.pending_tx, batch);
                     }
                     reactor_metrics::record_io_uring_sq_full_event();
                     break;
@@ -1526,12 +1603,13 @@ mod inner {
                             }
                         }
                         if result > 0 {
-                            if let Some(bid) = io_uring::cqueue::buffer_select(flags) {
-                                if bid >= RX_RING_SIZE as u16 {
+                            if let Some(raw_bid) = io_uring::cqueue::buffer_select(flags) {
+                                let Some(bid) = ProvidedBufferId::new(raw_bid, RX_RING_SIZE) else {
                                     log::error!(
-                                        "io_uring recv CQE returned out-of-range bid={bid} flags={flags:#x}"
+                                        "io_uring recv CQE returned out-of-range bid={raw_bid} flags={flags:#x}"
                                     );
-                                }
+                                    continue;
+                                };
                                 let buf = self.rx_ring.buffer_data(bid);
                                 let buf_len = result as usize;
                                 if let Ok(parsed) = io_uring::types::RecvMsgOut::parse(
@@ -1599,26 +1677,14 @@ mod inner {
                                 || (errno == libc::EMSGSIZE && slot.gso_segment_size > 0)
                             {
                                 reactor_metrics::record_io_uring_retryable_send_completion();
-                                let seg = slot.gso_segment_size;
-                                if seg > 0 {
-                                    let peer = slot.peer;
-                                    let data = slot.recycle_buffer();
-                                    for chunk in data.chunks(seg as usize) {
-                                        self.pending_tx.push_back(TxDatagram {
-                                            data: chunk.to_vec(),
-                                            to: peer,
-                                            max_segment_size: None,
-                                        });
-                                    }
-                                } else {
-                                    self.pending_tx.push_back(slot.take_packet());
-                                }
+                                requeue_tx_slot_for_retry(&mut self.pending_tx, slot);
                             } else {
                                 self.recycled_tx.push(slot.recycle_buffer());
                             }
                         }
                     }
                     OP_WAKER => {
+                        self.waker_read_state.mark_completed();
                         self.deferred_woken = true;
                         reactor_metrics::record_io_uring_wake_completion();
                         unsafe {
@@ -1628,7 +1694,7 @@ mod inner {
                                 8,
                             );
                         }
-                        let _ = self.submit_waker_read();
+                        self.submit_waker_read()?;
                     }
                     OP_BUNDLE => {
                         if let Some(ref mut tx_ring) = self.tx_buf_ring {
@@ -1788,6 +1854,153 @@ mod inner {
                 }
                 std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct TestCqe {
+            user_data: u64,
+            label: &'static str,
+        }
+
+        impl CompletionView for TestCqe {
+            fn completion_user_data(&self) -> u64 {
+                self.user_data
+            }
+        }
+
+        fn test_tx_datagram(len: usize) -> TxDatagram {
+            TxDatagram {
+                data: vec![7; len],
+                to: "127.0.0.1:4433".parse().unwrap(),
+                max_segment_size: None,
+            }
+        }
+
+        #[test]
+        fn split_bundle_completions_preserves_interleaved_non_bundle_cqes() {
+            let (bundle, non_bundle) = split_bundle_completions([
+                TestCqe {
+                    user_data: OP_RECV,
+                    label: "rx",
+                },
+                TestCqe {
+                    user_data: OP_BUNDLE | 1,
+                    label: "bundle-1",
+                },
+                TestCqe {
+                    user_data: OP_SEND | 7,
+                    label: "send",
+                },
+                TestCqe {
+                    user_data: OP_WAKER,
+                    label: "waker",
+                },
+                TestCqe {
+                    user_data: OP_BUNDLE | 2,
+                    label: "bundle-2",
+                },
+            ]);
+
+            assert_eq!(
+                bundle.iter().map(|cqe| cqe.label).collect::<Vec<_>>(),
+                ["bundle-1", "bundle-2"]
+            );
+            assert_eq!(
+                non_bundle.iter().map(|cqe| cqe.label).collect::<Vec<_>>(),
+                ["rx", "send", "waker"]
+            );
+        }
+
+        #[test]
+        fn requeue_tx_slot_for_retry_preserves_non_gso_datagram() {
+            let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let mut pending = VecDeque::new();
+            let mut slot = TxSlot::new();
+            slot.prepare(TxDatagram {
+                data: vec![1, 2, 3],
+                to: peer,
+                max_segment_size: None,
+            });
+
+            requeue_tx_slot_for_retry(&mut pending, &mut slot);
+
+            assert!(!slot.in_flight);
+            assert_eq!(slot.gso_segment_size, 0);
+            assert_eq!(pending.len(), 1);
+            let packet = pending.pop_front().unwrap();
+            assert_eq!(packet.data, vec![1, 2, 3]);
+            assert_eq!(packet.to, peer);
+            assert_eq!(packet.max_segment_size, None);
+        }
+
+        #[test]
+        fn requeue_tx_slot_for_retry_splits_gso_datagram() {
+            let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let mut pending = VecDeque::new();
+            let mut slot = TxSlot::new();
+            slot.prepare_gso(vec![1, 2, 3, 4, 5], peer, 2);
+
+            requeue_tx_slot_for_retry(&mut pending, &mut slot);
+
+            assert!(!slot.in_flight);
+            assert_eq!(slot.gso_segment_size, 0);
+            assert_eq!(pending.len(), 3);
+            assert_eq!(pending.pop_front().unwrap().data, vec![1, 2]);
+            assert_eq!(pending.pop_front().unwrap().data, vec![3, 4]);
+            assert_eq!(pending.pop_front().unwrap().data, vec![5]);
+        }
+
+        #[test]
+        fn enqueue_retry_data_accepts_zero_segment_size() {
+            let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let mut pending = VecDeque::new();
+
+            enqueue_retry_data(&mut pending, Vec::new(), peer, 0);
+
+            assert_eq!(pending.len(), 1);
+            let packet = pending.pop_front().unwrap();
+            assert!(packet.data.is_empty());
+            assert_eq!(packet.to, peer);
+        }
+
+        #[test]
+        fn send_bundle_prefix_len_stops_before_oversized_datagram() {
+            let packets = vec![
+                test_tx_datagram(TX_BUF_ENTRY_SIZE),
+                test_tx_datagram(TX_BUF_ENTRY_SIZE + 1),
+                test_tx_datagram(1),
+            ];
+
+            assert_eq!(send_bundle_prefix_len(&packets), 1);
+            assert_eq!(
+                send_bundle_prefix_len(&[test_tx_datagram(TX_BUF_ENTRY_SIZE + 1)]),
+                0
+            );
+        }
+
+        #[test]
+        fn send_bundle_prefix_len_caps_at_ring_entries() {
+            let packets = (0..(TX_RING_ENTRIES as usize + 1))
+                .map(|_| test_tx_datagram(1))
+                .collect::<Vec<_>>();
+
+            assert_eq!(send_bundle_prefix_len(&packets), TX_RING_ENTRIES as usize);
+        }
+
+        #[test]
+        fn waker_read_state_tracks_single_in_flight_read() {
+            let mut state = WakerReadState::default();
+
+            assert!(state.should_submit());
+            state.mark_submitted();
+            assert!(!state.should_submit());
+            state.mark_completed();
+            assert!(state.should_submit());
         }
     }
 }

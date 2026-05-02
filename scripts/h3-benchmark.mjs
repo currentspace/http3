@@ -212,6 +212,8 @@ function formatBufferReuseSummary(telemetry) {
     telemetry.pendingWriteBufferAllocations ?? 0,
     telemetry.pendingWriteTailAllocations ?? 0,
     telemetry.pendingWriteGrowthReallocations ?? 0,
+    telemetry.outboundIngressBufferReuses ?? 0,
+    telemetry.outboundIngressBufferAllocations ?? 0,
   ].some((value) => value > 0);
   if (!hasSignals) {
     return null;
@@ -228,6 +230,9 @@ function formatBufferReuseSummary(telemetry) {
       `/bytes:${telemetry.pendingWriteCopiedBytes ?? 0}` +
       `/tail:${telemetry.pendingWriteTailAllocations ?? 0}` +
       `/grow:${telemetry.pendingWriteGrowthReallocations ?? 0}`,
+    `ingress=reuse:${telemetry.outboundIngressBufferReuses ?? 0}` +
+      `/alloc:${telemetry.outboundIngressBufferAllocations ?? 0}` +
+      `/bytes:${telemetry.outboundIngressCopiedBytes ?? 0}`,
   ].join(', ');
 }
 

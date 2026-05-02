@@ -13,13 +13,15 @@
 - Unified listener: both protocols on the same host/port
 - QUIC-LB plaintext CID mode: supported via `quicLb + serverId`
 - Raw QUIC: bidirectional streams, datagrams, session resumption, custom ALPN
+- Feature-level support, experimental status, and deferred protocol work are
+  tracked in [PROTOCOL_FEATURE_STATUS.md](./PROTOCOL_FEATURE_STATUS.md).
 
 ## Transport Layer
 
 - macOS: kqueue (`fast` and `portable`)
 - Linux `fast`: io_uring
 - Linux `portable`: readiness-based `poll(2)` + `eventfd`
-- QUIC engine: quiche 0.26.1
+- QUIC engine: quiche 0.28
 
 ## Platform Targets (N-API prebuild intent)
 

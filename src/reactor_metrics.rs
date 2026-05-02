@@ -123,6 +123,15 @@ pub struct JsReactorTelemetrySnapshot {
     pub pendingWriteCopiedBytes: i64,
     pub pendingWriteTailAllocations: i64,
     pub pendingWriteGrowthReallocations: i64,
+    pub outboundIngressBufferReuses: i64,
+    pub outboundIngressBufferAllocations: i64,
+    pub outboundIngressCopiedBytes: i64,
+    pub outboundStreamJsAdmittedBytesTotal: i64,
+    pub outboundStreamJsAdmittedWritesTotal: i64,
+    pub outboundCommandQueuedBytes: i64,
+    pub outboundCommandQueuedBytesHighWatermark: i64,
+    pub outboundPendingWriteBytes: i64,
+    pub outboundPendingWriteBytesHighWatermark: i64,
     pub txBuffersRecycled: i64,
 }
 
@@ -312,6 +321,17 @@ static PENDING_WRITE_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
 static PENDING_WRITE_TAIL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static PENDING_WRITE_GROWTH_REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
+static OUTBOUND_INGRESS_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_INGRESS_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_INGRESS_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+static OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_COMMAND_QUEUED_BYTES: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_PENDING_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+
 static TX_BUFFERS_RECYCLED: AtomicU64 = AtomicU64::new(0);
 
 const LIFECYCLE_TRACE_CAPACITY: usize = 512;
@@ -334,6 +354,24 @@ fn bump(counter: &AtomicU64) {
 
 fn observe_max(counter: &AtomicU64, value: usize) {
     counter.fetch_max(value as u64, Ordering::Relaxed);
+}
+
+fn add_to_gauge(gauge: &AtomicU64, high_watermark: &AtomicU64, amount: usize) {
+    if amount == 0 {
+        return;
+    }
+    let current = gauge.fetch_add(amount as u64, Ordering::Relaxed) + amount as u64;
+    high_watermark.fetch_max(current, Ordering::Relaxed);
+}
+
+fn release_gauge(gauge: &AtomicU64, amount: usize) {
+    if amount == 0 {
+        return;
+    }
+    let amount = amount as u64;
+    let _ = gauge.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+        Some(prev.saturating_sub(amount))
+    });
 }
 
 fn lifecycle_trace_events() -> &'static Mutex<VecDeque<JsLifecycleTraceEvent>> {
@@ -827,6 +865,55 @@ pub(crate) fn record_pending_write_growth_reallocation() {
     bump(&PENDING_WRITE_GROWTH_REALLOCATIONS);
 }
 
+pub(crate) fn record_outbound_ingress_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&OUTBOUND_INGRESS_BUFFER_REUSES);
+    } else {
+        bump(&OUTBOUND_INGRESS_BUFFER_ALLOCATIONS);
+    }
+    OUTBOUND_INGRESS_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_outbound_stream_js_admitted(bytes: usize) {
+    if bytes == 0 {
+        return;
+    }
+    OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
+    bump(&OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL);
+}
+
+pub(crate) fn record_outbound_command_queued(bytes: usize) {
+    add_to_gauge(
+        &OUTBOUND_COMMAND_QUEUED_BYTES,
+        &OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK,
+        bytes,
+    );
+}
+
+pub(crate) fn record_outbound_command_dequeued(bytes: usize) {
+    release_gauge(&OUTBOUND_COMMAND_QUEUED_BYTES, bytes);
+}
+
+pub(crate) fn record_outbound_pending_write_added(bytes: usize) {
+    add_to_gauge(
+        &OUTBOUND_PENDING_WRITE_BYTES,
+        &OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK,
+        bytes,
+    );
+}
+
+pub(crate) fn record_outbound_pending_write_removed(bytes: usize) {
+    release_gauge(&OUTBOUND_PENDING_WRITE_BYTES, bytes);
+}
+
+pub(crate) fn record_outbound_pending_write_change(before: usize, after: usize) {
+    if after > before {
+        record_outbound_pending_write_added(after - before);
+    } else {
+        record_outbound_pending_write_removed(before - after);
+    }
+}
+
 pub(crate) fn record_tx_buffers_recycled(count: usize) {
     TX_BUFFERS_RECYCLED.fetch_add(count as u64, Ordering::Relaxed);
 }
@@ -939,6 +1026,17 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         pendingWriteCopiedBytes: load(&PENDING_WRITE_COPIED_BYTES),
         pendingWriteTailAllocations: load(&PENDING_WRITE_TAIL_ALLOCATIONS),
         pendingWriteGrowthReallocations: load(&PENDING_WRITE_GROWTH_REALLOCATIONS),
+        outboundIngressBufferReuses: load(&OUTBOUND_INGRESS_BUFFER_REUSES),
+        outboundIngressBufferAllocations: load(&OUTBOUND_INGRESS_BUFFER_ALLOCATIONS),
+        outboundIngressCopiedBytes: load(&OUTBOUND_INGRESS_COPIED_BYTES),
+        outboundStreamJsAdmittedBytesTotal: load(&OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL),
+        outboundStreamJsAdmittedWritesTotal: load(&OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL),
+        outboundCommandQueuedBytes: load(&OUTBOUND_COMMAND_QUEUED_BYTES),
+        outboundCommandQueuedBytesHighWatermark: load(
+            &OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK,
+        ),
+        outboundPendingWriteBytes: load(&OUTBOUND_PENDING_WRITE_BYTES),
+        outboundPendingWriteBytesHighWatermark: load(&OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK),
         txBuffersRecycled: load(&TX_BUFFERS_RECYCLED),
     }
 }
@@ -1048,6 +1146,15 @@ pub fn reset() {
         &PENDING_WRITE_COPIED_BYTES,
         &PENDING_WRITE_TAIL_ALLOCATIONS,
         &PENDING_WRITE_GROWTH_REALLOCATIONS,
+        &OUTBOUND_INGRESS_BUFFER_REUSES,
+        &OUTBOUND_INGRESS_BUFFER_ALLOCATIONS,
+        &OUTBOUND_INGRESS_COPIED_BYTES,
+        &OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL,
+        &OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL,
+        &OUTBOUND_COMMAND_QUEUED_BYTES,
+        &OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK,
+        &OUTBOUND_PENDING_WRITE_BYTES,
+        &OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK,
         &TX_BUFFERS_RECYCLED,
     ] {
         reset_counter(counter);
@@ -1055,19 +1162,24 @@ pub fn reset() {
 }
 
 #[cfg(test)]
+pub(crate) fn test_metrics_guard() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     /// Reset all global counters and lifecycle trace state before each test
     /// to isolate from other tests (global atomics are shared across the
     /// process, but `cargo test` runs tests on separate threads).
     fn setup() -> MutexGuard<'static, ()> {
-        static TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-        let guard = TEST_LOCK
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap();
+        let guard = test_metrics_guard();
         reset();
         set_lifecycle_trace_enabled(false);
         reset_lifecycle_trace();
@@ -1100,6 +1212,12 @@ mod tests {
         assert_eq!(snap.ecnRecvCeTotal, 0);
         assert_eq!(snap.rawQuicServerWorkerSpawns, 0);
         assert_eq!(snap.h3ServerWorkerSpawns, 0);
+        assert_eq!(snap.outboundIngressBufferReuses, 0);
+        assert_eq!(snap.outboundIngressBufferAllocations, 0);
+        assert_eq!(snap.outboundIngressCopiedBytes, 0);
+        assert_eq!(snap.outboundStreamJsAdmittedBytesTotal, 0);
+        assert_eq!(snap.outboundCommandQueuedBytes, 0);
+        assert_eq!(snap.outboundPendingWriteBytes, 0);
         assert_eq!(snap.txBuffersRecycled, 0);
     }
 
@@ -1194,6 +1312,39 @@ mod tests {
         record_event_batch_rx_pause();
         let snap = snapshot();
         assert_eq!(snap.eventBatchRxPausesTotal, 2);
+    }
+
+    #[test]
+    fn test_record_outbound_write_pressure() {
+        let _guard = setup();
+
+        record_outbound_ingress_buffer_checkout(false, 1024);
+        record_outbound_ingress_buffer_checkout(true, 2048);
+
+        record_outbound_stream_js_admitted(1024);
+        record_outbound_stream_js_admitted(0);
+        record_outbound_stream_js_admitted(2048);
+
+        record_outbound_command_queued(4096);
+        record_outbound_command_queued(1024);
+        record_outbound_command_dequeued(2048);
+        record_outbound_command_dequeued(10_000);
+
+        record_outbound_pending_write_added(8192);
+        record_outbound_pending_write_added(1024);
+        record_outbound_pending_write_change(4096, 1024);
+        record_outbound_pending_write_removed(10_000);
+
+        let snap = snapshot();
+        assert_eq!(snap.outboundIngressBufferAllocations, 1);
+        assert_eq!(snap.outboundIngressBufferReuses, 1);
+        assert_eq!(snap.outboundIngressCopiedBytes, 3072);
+        assert_eq!(snap.outboundStreamJsAdmittedBytesTotal, 3072);
+        assert_eq!(snap.outboundStreamJsAdmittedWritesTotal, 2);
+        assert_eq!(snap.outboundCommandQueuedBytes, 0);
+        assert_eq!(snap.outboundCommandQueuedBytesHighWatermark, 5120);
+        assert_eq!(snap.outboundPendingWriteBytes, 0);
+        assert_eq!(snap.outboundPendingWriteBytesHighWatermark, 9216);
     }
 
     #[test]

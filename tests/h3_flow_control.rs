@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -124,14 +124,15 @@ struct H3Pair {
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn setup_h3_pair_with_flow_control(
-    initial_max_stream_data: u64,
-    initial_max_data: u64,
-) -> H3Pair {
+fn setup_h3_pair_with_flow_control(initial_max_stream_data: u64, initial_max_data: u64) -> H3Pair {
     let (cert_pem, key_pem) = generate_test_certs();
     let (client_addr, server_addr) = next_pair_addrs();
-    let (server_quiche, client_quiche) =
-        build_h3_quiche_configs_with_flow_control(&cert_pem, &key_pem, initial_max_stream_data, initial_max_data);
+    let (server_quiche, client_quiche) = build_h3_quiche_configs_with_flow_control(
+        &cert_pem,
+        &key_pem,
+        initial_max_stream_data,
+        initial_max_data,
+    );
 
     let http3_config = Http3Config {
         qlog_dir: None,
@@ -370,7 +371,10 @@ fn test_h3_large_post_with_small_window() {
     // Client sends the 32KB POST body
     let body_len = 32 * 1024;
     let post_body = vec![0xEF_u8; body_len];
-    assert!(pair.client.stream_send(stream_id, Chunk::unpooled(post_body.clone()), true));
+    assert!(
+        pair.client
+            .stream_send(stream_id, Chunk::unpooled(post_body.clone()), true)
+    );
 
     // Collect all server events for this stream: HEADERS, DATA, FINISHED
     let mut got_headers = false;

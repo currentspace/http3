@@ -9,8 +9,8 @@
 )]
 
 use std::net::UdpSocket;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
@@ -212,7 +212,12 @@ fn setup_udp_quic_pair(
         .unwrap();
 
     // Complete handshake
-    exchange_udp(&client_sock, &server_sock, &mut client_conn, &mut server_conn);
+    exchange_udp(
+        &client_sock,
+        &server_sock,
+        &mut client_conn,
+        &mut server_conn,
+    );
 
     assert!(client_conn.is_established(), "client handshake failed");
     assert!(server_conn.is_established(), "server handshake failed");
@@ -462,8 +467,9 @@ fn test_parallel_connection_churn_5_minutes() {
 
                 while start.elapsed() < TEST_DURATION {
                     // Unique scid_byte per thread + attempt
-                    let scid_byte =
-                        thread_idx.wrapping_mul(64).wrapping_add((local_attempt % 64) as u8);
+                    let scid_byte = thread_idx
+                        .wrapping_mul(64)
+                        .wrapping_add((local_attempt % 64) as u8);
                     if churn_one_connection(&cert, &key, scid_byte) {
                         local_success += 1;
                     }
@@ -472,9 +478,7 @@ fn test_parallel_connection_churn_5_minutes() {
 
                 success.fetch_add(local_success, Ordering::Relaxed);
                 attempts.fetch_add(local_attempt, Ordering::Relaxed);
-                eprintln!(
-                    "  thread {thread_idx}: {local_success}/{local_attempt} successful"
-                );
+                eprintln!("  thread {thread_idx}: {local_success}/{local_attempt} successful");
             })
         })
         .collect();

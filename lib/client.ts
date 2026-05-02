@@ -1,11 +1,17 @@
-import { Http3ClientSessionBase } from './session.js';
+import {
+  Http3ClientSessionBase,
+  type GoawayInfo,
+  type SessionCloseInfo,
+  sessionCloseInfoFromEvent,
+} from './session.js';
 import { ClientHttp3Stream } from './stream.js';
+import { incomingHeadersToNativeHeaders, nativeHeadersToIncomingHeaders } from './stream.js';
 import type { IncomingHeaders } from './stream.js';
 import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
-import { resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
-import { Http3Error, ERR_HTTP3_INVALID_STATE, ERR_HTTP3_STREAM_ERROR } from './errors.js';
+import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
+import { Http3Error, ERR_HTTP3_GOAWAY, ERR_HTTP3_INVALID_STATE, ERR_HTTP3_STREAM_ERROR } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
@@ -24,6 +30,7 @@ const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_SESSION_TICKET = 12;
 const EVENT_DATAGRAM = 14;
+const EVENT_PING_ACK = 17;
 
 function normalizeCaOption(ca?: string | Buffer | Array<string | Buffer>): Buffer | undefined {
   if (!ca) return undefined;
@@ -88,12 +95,12 @@ export interface RequestOptions {
  */
 export interface Http3ClientSession {
   on(event: 'connect', listener: () => void): this;
-  on(event: 'goaway', listener: () => void): this;
+  on(event: 'goaway', listener: (info: GoawayInfo) => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: 'sessionTicket', listener: (ticket: Buffer) => void): this;
   on(event: 'datagram', listener: (data: Buffer) => void): this;
-  on(event: 'close', listener: () => void): this;
+  on(event: 'close', listener: (info: SessionCloseInfo) => void): this;
   on(event: 'keylog', listener: (line: Buffer) => void): this;
   on(event: 'metrics', listener: (metrics: import('./session.js').SessionMetrics) => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
@@ -113,9 +120,12 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   /** @internal */
   _closeRequested = false;
   private _readySettled = false;
+  private _goawayReceived = false;
+  private _goawayLastStreamId: number | null = null;
   private readonly _readyPromise: Promise<void>;
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
+  private _connectAbortCleanup: (() => void) | null = null;
 
   constructor(authority: string, options?: Pick<ConnectOptions, 'allow0RTT' | 'allowUnsafe0RTTMethods' | 'onEarlyData'>) {
     super();
@@ -149,12 +159,12 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     return this._readyPromise;
   }
 
-  override async close(code?: number): Promise<void> {
+  override async close(code?: number, reason?: string): Promise<void> {
     this._closeRequested = true;
     if (!this._handshakeComplete) {
       this._markReadyError(new Http3Error('session closed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
-    await super.close(code);
+    await super.close(code, reason);
   }
 
   override async destroy(err?: Error): Promise<void> {
@@ -163,6 +173,33 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._markReadyError(err ?? new Http3Error('session destroyed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
     await super.destroy(err);
+  }
+
+  /** @internal */
+  _setConnectAbortCleanup(cleanup: (() => void) | null): void {
+    this._connectAbortCleanup?.();
+    this._connectAbortCleanup = cleanup;
+  }
+
+  /** @internal */
+  _abortConnect(err: Error): void {
+    this._closeRequested = true;
+    this._markReadyError(err);
+    this._cleanupStreams();
+    this._stopMetricsEmitter();
+    this._stopKeylogEmitter();
+    const loop_ = this._eventLoop;
+    this._eventLoop = null;
+    if (loop_) {
+      void (async (): Promise<void> => {
+        try {
+          await loop_.close();
+        } catch {
+          /* best-effort abort cleanup */
+        }
+      })();
+    }
+    this._emitSessionError(err);
   }
 
   /**
@@ -189,11 +226,12 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     if (!this._eventLoop) {
       throw new Http3Error('not connected', ERR_HTTP3_INVALID_STATE);
     }
+    if (this._goawayReceived) {
+      const suffix = this._goawayLastStreamId === null ? '' : ` (last stream ID ${this._goawayLastStreamId})`;
+      throw new Http3Error(`session received GOAWAY${suffix}`, ERR_HTTP3_GOAWAY);
+    }
 
-    const h = Object.entries(headers).map(([name, value]) => ({
-      name,
-      value: Array.isArray(value) ? value[0] : value,
-    }));
+    const h = incomingHeadersToNativeHeaders(headers);
 
     const streamId = this._eventLoop.sendRequest(h, options?.endStream ?? false);
     const stream = new ClientHttp3Stream();
@@ -231,7 +269,8 @@ export class Http3ClientSession extends Http3ClientSessionBase {
           this._cleanupStreams();
           this._stopMetricsEmitter();
           this._stopKeylogEmitter();
-          this.emit('close');
+          this._rejectPendingPings(new Error('session closed'));
+          this._emitClose(sessionCloseInfoFromEvent(event));
           break;
         case EVENT_DRAIN:
           this._onDrain(event);
@@ -240,7 +279,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
           this._onStreamBlocked(event);
           break;
         case EVENT_GOAWAY:
-          this.emit('goaway');
+          this._goawayReceived = true;
+          this._goawayLastStreamId = event.streamId;
+          this.emit('goaway', { lastStreamId: event.streamId });
           break;
         case EVENT_ERROR:
           this._onError(event);
@@ -250,6 +291,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
           break;
         case EVENT_DATAGRAM:
           this._onDatagram(event);
+          break;
+        case EVENT_PING_ACK:
+          this._onPingAck(event.meta?.durationMs ?? 0);
           break;
         default:
           break;
@@ -274,10 +318,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const stream = this._streams.get(event.streamId);
     if (!stream) return;
 
-    const headers: IncomingHeaders = {};
-    for (const h of event.headers) {
-      headers[h.name] = h.value;
-    }
+    const headers = nativeHeadersToIncomingHeaders(event.headers);
 
     if (stream._responseSeen) {
       // Subsequent HEADERS frames after the response are trailing headers
@@ -382,6 +423,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   /** @internal */
   _markReady(): void {
     if (this._readySettled) return;
+    this._setConnectAbortCleanup(null);
     this._readySettled = true;
     this._resolveReady?.();
     this._resolveReady = null;
@@ -391,11 +433,33 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   /** @internal */
   _markReadyError(err: Error): void {
     if (this._readySettled) return;
+    this._setConnectAbortCleanup(null);
     this._readySettled = true;
     this._rejectReady?.(err);
     this._resolveReady = null;
     this._rejectReady = null;
   }
+}
+
+function installHttp3ConnectAbortHandler(
+  session: Http3ClientSession,
+  signal: AbortSignal | undefined,
+): void {
+  if (!signal) return;
+
+  const onAbort = (): void => {
+    session._abortConnect(abortSignalError(signal));
+  };
+
+  if (signal.aborted) {
+    onAbort();
+    return;
+  }
+
+  signal.addEventListener('abort', onAbort, { once: true });
+  session._setConnectAbortCleanup(() => {
+    signal.removeEventListener('abort', onAbort);
+  });
 }
 
 /**
@@ -440,6 +504,7 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
     });
   }
   const shouldAbortConnect = (): boolean => session._closeRequested;
+  installHttp3ConnectAbortHandler(session, options?.signal);
 
   void (async (): Promise<void> => {
     try {

@@ -23,6 +23,20 @@ mod inner {
     const WAKER_IDENT: usize = 0xCAFE;
     const RX_BUF_SIZE: usize = 65535;
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum KqueueSendErrorClass {
+        RetryableWouldBlock,
+        Permanent,
+    }
+
+    fn classify_kqueue_send_error(error: &io::Error) -> KqueueSendErrorClass {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            KqueueSendErrorClass::RetryableWouldBlock
+        } else {
+            KqueueSendErrorClass::Permanent
+        }
+    }
+
     /// Max datagrams to recv per poll iteration.  Prevents the recv loop from
     /// starving the send path under fan-out: after this many packets the loop
     /// yields so flush_sends() can push ACKs out, then the next poll() returns
@@ -105,7 +119,9 @@ mod inner {
             // SAFETY: waker_fd is a valid fd from a successful dup().
             #[allow(unsafe_code)]
             let waker_owned = unsafe { OwnedFd::from_raw_fd(waker_fd) };
-            let waker = KqueueWaker { kq_fd: Arc::new(waker_owned) };
+            let waker = KqueueWaker {
+                kq_fd: Arc::new(waker_owned),
+            };
             Ok((
                 Self {
                     kq,
@@ -221,8 +237,7 @@ mod inner {
             for _ in 0..MAX_RX_PER_POLL {
                 match self.recvmsg_once() {
                     Ok((len, peer, parsed_local)) => {
-                        let (data, reused) =
-                            self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
+                        let (data, reused) = self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
                         reactor_metrics::record_rx_buffer_checkout(reused, len);
                         // When bound to a concrete IP, use it directly — the
                         // bind addr is authoritative and avoids picking up an
@@ -255,14 +270,22 @@ mod inner {
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
             for pkt in packets {
                 match self.socket.send_to(&pkt.data, pkt.to) {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        reactor_metrics::record_kqueue_would_block_send();
-                        self.unsent.push_back(pkt);
-                        reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
-                    }
-                    _ => {
+                    Ok(_) => {
                         self.recycled_tx.push(pkt.data);
                     }
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryableWouldBlock => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.unsent.push_back(pkt);
+                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            log::warn!(
+                                "kqueue driver: send_to failed with permanent error {error}; dropping datagram"
+                            );
+                            self.recycled_tx.push(pkt.data);
+                        }
+                    },
                 }
             }
             Ok(())
@@ -301,9 +324,7 @@ mod inner {
         /// can recover the actual destination IP each datagram arrived on
         /// (audit finding #20). The recv buffer is `self.recv_buf`; the
         /// caller copies out before the next call.
-        fn recvmsg_once(
-            &mut self,
-        ) -> io::Result<(usize, SocketAddr, Option<std::net::IpAddr>)> {
+        fn recvmsg_once(&mut self) -> io::Result<(usize, SocketAddr, Option<std::net::IpAddr>)> {
             // SAFETY: zeroed sockaddr_storage is a valid initial state.
             #[allow(unsafe_code)]
             let mut name: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -316,8 +337,7 @@ mod inner {
             #[allow(unsafe_code)]
             let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
             msg.msg_name = (&raw mut name).cast();
-            msg.msg_namelen =
-                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
             msg.msg_iov = &raw mut iov;
             msg.msg_iovlen = 1;
             msg.msg_control = control.as_mut_ptr().cast();
@@ -355,16 +375,26 @@ mod inner {
         fn drain_unsent(&mut self) {
             while let Some(front) = self.unsent.front() {
                 match self.socket.send_to(&front.data, front.to) {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        reactor_metrics::record_kqueue_would_block_send();
-                        reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
-                        return;
-                    }
-                    Ok(_) | Err(_) => {
+                    Ok(_) => {
                         if let Some(pkt) = self.unsent.pop_front() {
                             self.recycled_tx.push(pkt.data);
                         }
                     }
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryableWouldBlock => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+                            return;
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            log::warn!(
+                                "kqueue driver: drain_unsent send_to failed with permanent error {error}; dropping datagram"
+                            );
+                            if let Some(pkt) = self.unsent.pop_front() {
+                                self.recycled_tx.push(pkt.data);
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -411,6 +441,23 @@ mod inner {
 
     fn nix_to_io(e: nix::errno::Errno) -> io::Error {
         io::Error::from_raw_os_error(e as i32)
+    }
+
+    #[cfg(test)]
+    mod send_error_tests {
+        use super::*;
+
+        #[test]
+        fn kqueue_send_error_classifier_only_retries_would_block() {
+            assert_eq!(
+                classify_kqueue_send_error(&io::Error::from(io::ErrorKind::WouldBlock)),
+                KqueueSendErrorClass::RetryableWouldBlock
+            );
+            assert_eq!(
+                classify_kqueue_send_error(&io::Error::from_raw_os_error(libc::EINVAL)),
+                KqueueSendErrorClass::Permanent
+            );
+        }
     }
 }
 

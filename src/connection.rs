@@ -1,6 +1,8 @@
 //! Per-connection HTTP/3 state machine wrapping a `quiche::h3::Connection`,
 //! managing stream tracking, header/data dispatch, and send buffering.
 
+#![deny(unsafe_code)]
+
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -11,8 +13,10 @@ use quiche::h3::NameValue;
 
 use crate::arc_buf::{ArcBuf, ArcBufFactory};
 use crate::buffer_pool::{AdaptiveBufferPool, BufferRecycler};
+use crate::chunk_pool::Chunk;
 use crate::error::Http3NativeError;
 use crate::h3_event::{EventRecycler, JsH3Event, JsHeader};
+use crate::ping_state::PingState;
 use crate::reactor_metrics;
 
 pub struct H3Connection {
@@ -43,6 +47,7 @@ pub struct H3Connection {
     /// Receiving end of the recycler channel — drained periodically on the
     /// worker thread to pull returned buffers back into `data_pool`.
     pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    ping_state: PingState,
 }
 
 pub struct H3ConnectionInit<'a> {
@@ -59,6 +64,16 @@ pub struct ConnectionMetrics {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub handshake_complete_at: Option<Instant>,
+}
+
+/// Result of a zero-copy H3 body send.
+pub struct SendBodyOutcome {
+    pub written: usize,
+    /// True when a requested FIN was accepted by quiche. Empty-FIN sends
+    /// legitimately return `written == 0`, so callers must not infer this
+    /// from byte progress.
+    pub fin_accepted: bool,
+    pub remainder: Option<ArcBuf>,
 }
 
 impl ConnectionMetrics {
@@ -111,6 +126,7 @@ impl H3Connection {
             data_pool,
             data_recycler,
             data_recycle_rx,
+            ping_state: PingState::default(),
         }
     }
 
@@ -272,6 +288,23 @@ impl H3Connection {
         }
     }
 
+    pub fn queue_ping(&mut self) -> Result<(), Http3NativeError> {
+        if self.quiche_conn.is_closed() || self.quiche_conn.is_draining() {
+            return Err(Http3NativeError::InvalidState(
+                "connection is closing".into(),
+            ));
+        }
+        self.quiche_conn
+            .send_ack_eliciting()
+            .map_err(Http3NativeError::Quiche)?;
+        self.ping_state.queue(&self.quiche_conn.stats());
+        Ok(())
+    }
+
+    pub fn poll_ping_acks(&mut self) -> Vec<f64> {
+        self.ping_state.complete_acked(&self.quiche_conn.stats())
+    }
+
     /// Get timeout duration for this connection.
     pub fn timeout(&self) -> Option<std::time::Duration> {
         self.quiche_conn.timeout()
@@ -360,32 +393,55 @@ impl H3Connection {
         data: Vec<u8>,
         fin: bool,
     ) -> Result<(usize, Option<Vec<u8>>), Http3NativeError> {
+        let outcome = self.send_body_arcbuf(stream_id, ArcBuf::from_vec(data), fin)?;
+        let remainder = outcome.remainder.map(|r| r.as_ref().to_vec());
+        Ok((outcome.written, remainder))
+    }
+
+    /// Send body data from a pooled outbound chunk without copying.
+    pub fn send_body_chunk(
+        &mut self,
+        stream_id: u64,
+        chunk: Chunk,
+        fin: bool,
+    ) -> Result<SendBodyOutcome, Http3NativeError> {
+        self.send_body_arcbuf(stream_id, ArcBuf::from_chunk(chunk), fin)
+    }
+
+    /// Send body data from an `ArcBuf`, returning the remaining `ArcBuf` on
+    /// flow-control block so the caller can retry without flattening/copying.
+    pub fn send_body_arcbuf(
+        &mut self,
+        stream_id: u64,
+        mut buf: ArcBuf,
+        fin: bool,
+    ) -> Result<SendBodyOutcome, Http3NativeError> {
         let h3 = self
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
-        let data_len = data.len();
-        let mut buf = ArcBuf::from_vec(data);
+        let data_len = buf.remaining_len();
         match h3.send_body_zc(&mut self.quiche_conn, stream_id, &mut buf, fin) {
             Ok(written) => {
                 if written < data_len && self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
                 }
-                // After send_body_zc, quiche replaces buf with the unwritten
-                // remainder (if any). buf.as_ref() IS the remainder.
-                let remainder = if written < data_len {
-                    Some(buf.as_ref().to_vec())
-                } else {
-                    None
-                };
-                Ok((written, remainder))
+                let remainder = if written < data_len { Some(buf) } else { None };
+                Ok(SendBodyOutcome {
+                    written,
+                    fin_accepted: fin && remainder.is_none(),
+                    remainder,
+                })
             }
             Err(quiche::h3::Error::Done) => {
                 if self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);
                 }
-                // Full block — buf is unmodified, return all data.
-                Ok((0, Some(buf.as_ref().to_vec())))
+                Ok(SendBodyOutcome {
+                    written: 0,
+                    fin_accepted: false,
+                    remainder: Some(buf),
+                })
             }
             Err(e) => Err(Http3NativeError::H3(e)),
         }
@@ -470,6 +526,26 @@ impl H3Connection {
         self.quiche_conn.is_closed()
     }
 
+    pub fn session_close_event(&self, conn_handle: u32) -> JsH3Event {
+        if let Some(error) = self
+            .quiche_conn
+            .peer_error()
+            .or_else(|| self.quiche_conn.local_error())
+        {
+            return JsH3Event::session_close_with_error(
+                conn_handle,
+                error.error_code,
+                String::from_utf8_lossy(&error.reason).into_owned(),
+            );
+        }
+
+        if self.quiche_conn.is_timed_out() {
+            return JsH3Event::session_close_with_error(conn_handle, 0, "idle timeout".into());
+        }
+
+        JsH3Event::session_close(conn_handle)
+    }
+
     pub fn send_goaway(&mut self) -> Result<(), Http3NativeError> {
         let h3 = self
             .h3_conn
@@ -498,24 +574,29 @@ impl H3Connection {
             .map_err(Http3NativeError::Quiche)
     }
 
+    pub fn send_datagram_chunk(&mut self, data: Chunk) -> Result<(), Http3NativeError> {
+        if self.quiche_conn.is_dgram_send_queue_full() {
+            return Err(Http3NativeError::Quiche(quiche::Error::Done));
+        }
+
+        self.quiche_conn
+            .dgram_send_buf(ArcBuf::from_chunk(data))
+            .map(|_| ())
+            .map_err(Http3NativeError::Quiche)
+    }
+
     pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        // Audit finding #24: take a buffer from the pool instead of using
-        // a 64 KB stack array per call (which under fan-out becomes
-        // significant per-connection per-iteration stack pressure).
-        // Mirrors quic_connection::poll_datagram_events.
         loop {
-            let (mut buf, _) = self.data_pool.checkout(1500);
-            match self.quiche_conn.dgram_recv(&mut buf) {
-                Ok(len) => {
-                    buf.truncate(len);
-                    events.push(JsH3Event::datagram(conn_handle, buf, self.event_recycler()));
-                }
+            match self.quiche_conn.dgram_recv_buf() {
+                Ok(buf) => events.push(JsH3Event::datagram(
+                    conn_handle,
+                    buf.into_vec(),
+                    self.event_recycler(),
+                )),
                 Err(quiche::Error::Done) => {
-                    self.data_pool.checkin(buf);
                     break;
                 }
                 Err(_) => {
-                    self.data_pool.checkin(buf);
                     break;
                 }
             }

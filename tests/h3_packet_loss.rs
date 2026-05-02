@@ -8,8 +8,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -32,7 +32,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 fn build_h3_quiche_configs(cert_pem: &str, key_pem: &str) -> (quiche::Config, quiche::Config) {
@@ -44,9 +47,15 @@ fn build_h3_quiche_configs(cert_pem: &str, key_pem: &str) -> (quiche::Config, qu
     std::fs::write(&key_path, key_pem).unwrap();
 
     let mut server_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    server_config.load_cert_chain_from_pem_file(cert_path.to_str().unwrap()).unwrap();
-    server_config.load_priv_key_from_pem_file(key_path.to_str().unwrap()).unwrap();
-    server_config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+    server_config
+        .load_cert_chain_from_pem_file(cert_path.to_str().unwrap())
+        .unwrap();
+    server_config
+        .load_priv_key_from_pem_file(key_path.to_str().unwrap())
+        .unwrap();
+    server_config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .unwrap();
     server_config.set_max_idle_timeout(30_000);
     server_config.set_max_recv_udp_payload_size(1472);
     server_config.set_max_send_udp_payload_size(1472);
@@ -59,7 +68,9 @@ fn build_h3_quiche_configs(cert_pem: &str, key_pem: &str) -> (quiche::Config, qu
     server_config.set_disable_active_migration(true);
 
     let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    client_config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+    client_config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .unwrap();
     client_config.verify_peer(false);
     client_config.set_max_idle_timeout(30_000);
     client_config.set_max_recv_udp_payload_size(1472);
@@ -89,8 +100,10 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(15);
 fn setup_h3_pair_with_loss(drop_pct: u32) -> H3PairWithLoss {
     let (cert_pem, key_pem) = generate_test_certs();
     let (client_addr, server_addr) = next_pair_addrs();
-    let (server_quiche, client_quiche) =
-        build_h3_quiche_configs(std::str::from_utf8(&cert_pem).unwrap(), std::str::from_utf8(&key_pem).unwrap());
+    let (server_quiche, client_quiche) = build_h3_quiche_configs(
+        std::str::from_utf8(&cert_pem).unwrap(),
+        std::str::from_utf8(&key_pem).unwrap(),
+    );
 
     let http3_config = Http3Config {
         qlog_dir: None,
@@ -141,8 +154,7 @@ fn setup_h3_pair_with_loss(drop_pct: u32) -> H3PairWithLoss {
         _client_cmd_tx,
         client_cmd_rx,
         client_batcher,
-    )
-    ;
+    );
 
     H3PairWithLoss {
         _server: server_worker,
@@ -218,18 +230,24 @@ fn test_h3_request_response_under_5pct_loss() {
         let _ = server.waker.wake();
     }
 
-    send_cmd(&pair._server, WorkerCommand::SendResponseHeaders {
-        conn_handle: server_new.conn_handle,
-        stream_id: headers_event.stream_id as u64,
-        headers: vec![(":status".into(), "200".into())],
-        fin: false,
-    });
-    send_cmd(&pair._server, WorkerCommand::StreamSend {
-        conn_handle: server_new.conn_handle,
-        stream_id: headers_event.stream_id as u64,
-        chunk: Chunk::unpooled(b"hello under loss".to_vec()),
-        fin: true,
-    });
+    send_cmd(
+        &pair._server,
+        WorkerCommand::SendResponseHeaders {
+            conn_handle: server_new.conn_handle,
+            stream_id: headers_event.stream_id as u64,
+            headers: vec![(":status".into(), "200".into())],
+            fin: false,
+        },
+    );
+    send_cmd(
+        &pair._server,
+        WorkerCommand::StreamSend {
+            conn_handle: server_new.conn_handle,
+            stream_id: headers_event.stream_id as u64,
+            chunk: Chunk::unpooled(b"hello under loss".to_vec()),
+            fin: true,
+        },
+    );
 
     // Client receives response
     let mut client_data = Vec::new();
@@ -263,7 +281,11 @@ fn test_h3_request_response_under_5pct_loss() {
     let (sent, dropped) = pair.loss.stats();
     eprintln!(
         "  H3 5% loss: {sent} sent, {dropped} dropped ({:.1}%)",
-        if sent > 0 { (dropped as f64 / sent as f64) * 100.0 } else { 0.0 }
+        if sent > 0 {
+            (dropped as f64 / sent as f64) * 100.0
+        } else {
+            0.0
+        }
     );
 }
 
@@ -301,18 +323,24 @@ fn test_h3_large_body_under_10pct_loss() {
         let _ = server.waker.wake();
     }
 
-    send_cmd2(&pair._server, WorkerCommand::SendResponseHeaders {
-        conn_handle: server_new.conn_handle,
-        stream_id: headers_event.stream_id as u64,
-        headers: vec![(":status".into(), "200".into())],
-        fin: false,
-    });
-    send_cmd2(&pair._server, WorkerCommand::StreamSend {
-        conn_handle: server_new.conn_handle,
-        stream_id: headers_event.stream_id as u64,
-        chunk: Chunk::unpooled(vec![0xCC_u8; 32 * 1024]),
-        fin: true,
-    });
+    send_cmd2(
+        &pair._server,
+        WorkerCommand::SendResponseHeaders {
+            conn_handle: server_new.conn_handle,
+            stream_id: headers_event.stream_id as u64,
+            headers: vec![(":status".into(), "200".into())],
+            fin: false,
+        },
+    );
+    send_cmd2(
+        &pair._server,
+        WorkerCommand::StreamSend {
+            conn_handle: server_new.conn_handle,
+            stream_id: headers_event.stream_id as u64,
+            chunk: Chunk::unpooled(vec![0xCC_u8; 32 * 1024]),
+            fin: true,
+        },
+    );
 
     let mut client_data = Vec::new();
     let mut got_fin = false;
@@ -349,6 +377,10 @@ fn test_h3_large_body_under_10pct_loss() {
     let (sent, dropped) = pair.loss.stats();
     eprintln!(
         "  H3 10% loss 32KB: {sent} sent, {dropped} dropped ({:.1}%)",
-        if sent > 0 { (dropped as f64 / sent as f64) * 100.0 } else { 0.0 }
+        if sent > 0 {
+            (dropped as f64 / sent as f64) * 100.0
+        } else {
+            0.0
+        }
     );
 }

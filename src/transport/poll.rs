@@ -14,8 +14,8 @@ mod inner {
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::socket::{
-        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso,
-        set_pktinfo, sockaddr_to_socketaddr,
+        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso, set_pktinfo,
+        sockaddr_to_socketaddr,
     };
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
@@ -23,6 +23,35 @@ mod inner {
 
     const MAX_RX_PER_POLL: usize = 256;
     const RX_BUF_SIZE: usize = 65535;
+
+    fn should_requeue_gso_send_error(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == Some(libc::EMSGSIZE)
+    }
+
+    fn requeue_gso_batch(
+        unsent: &mut VecDeque<TxDatagram>,
+        data: Vec<u8>,
+        to: SocketAddr,
+        segment_size: u16,
+    ) {
+        let seg = segment_size as usize;
+        if seg == 0 || data.len() <= seg {
+            unsent.push_back(TxDatagram {
+                data,
+                to,
+                max_segment_size: None,
+            });
+            return;
+        }
+
+        for chunk in data.chunks(seg) {
+            unsent.push_back(TxDatagram {
+                data: chunk.to_vec(),
+                to,
+                max_segment_size: None,
+            });
+        }
+    }
 
     /// Pre-allocated state for a single recvmmsg slot.
     struct RxMmsgSlot {
@@ -480,13 +509,18 @@ mod inner {
                 )
             };
 
-            // Same WouldBlock-vs-permanent distinction as the non-GSO path.
-            // For EMSGSIZE specifically the existing chunks() split below
-            // re-fragments the GSO batch into individual datagrams, which
-            // gives quiche a path forward without infinite retry.
+            // Same WouldBlock-vs-permanent distinction as the non-GSO path,
+            // except EMSGSIZE falls back by splitting each GSO batch into
+            // individual datagrams below.
             let (sent_count, requeue_remainder) = if sent < 0 {
                 let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::WouldBlock {
+                if should_requeue_gso_send_error(&err) {
+                    if err.raw_os_error() == Some(libc::EMSGSIZE) {
+                        log::debug!(
+                            "poll driver: GSO sendmmsg hit EMSGSIZE; splitting {} batches for retry",
+                            batch_data.len()
+                        );
+                    }
                     (0usize, true)
                 } else {
                     log::warn!(
@@ -503,22 +537,7 @@ mod inner {
                 if i < sent_count || !requeue_remainder {
                     self.recycled_tx.push(data);
                 } else {
-                    let seg = batch_seg_sizes[i] as usize;
-                    if data.len() > seg {
-                        for chunk in data.chunks(seg) {
-                            self.unsent.push_back(TxDatagram {
-                                data: chunk.to_vec(),
-                                to: batch_addrs[i],
-                                max_segment_size: None,
-                            });
-                        }
-                    } else {
-                        self.unsent.push_back(TxDatagram {
-                            data,
-                            to: batch_addrs[i],
-                            max_segment_size: None,
-                        });
-                    }
+                    requeue_gso_batch(&mut self.unsent, data, batch_addrs[i], batch_seg_sizes[i]);
                 }
             }
         }
@@ -627,6 +646,48 @@ mod inner {
                 }
                 std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn gso_error_classifier_requeues_emsgsize() {
+            assert!(should_requeue_gso_send_error(
+                &io::Error::from_raw_os_error(libc::EMSGSIZE)
+            ));
+            assert!(should_requeue_gso_send_error(
+                &io::Error::from_raw_os_error(libc::EAGAIN)
+            ));
+            assert!(!should_requeue_gso_send_error(
+                &io::Error::from_raw_os_error(libc::EINVAL)
+            ));
+        }
+
+        #[test]
+        fn requeue_gso_batch_splits_multisegment_data() {
+            let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let mut unsent = VecDeque::new();
+
+            requeue_gso_batch(&mut unsent, vec![1, 2, 3, 4, 5], peer, 2);
+
+            assert_eq!(unsent.len(), 3);
+            assert_eq!(unsent.pop_front().unwrap().data, vec![1, 2]);
+            assert_eq!(unsent.pop_front().unwrap().data, vec![3, 4]);
+            assert_eq!(unsent.pop_front().unwrap().data, vec![5]);
+        }
+
+        #[test]
+        fn requeue_gso_batch_accepts_zero_segment_size() {
+            let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let mut unsent = VecDeque::new();
+
+            requeue_gso_batch(&mut unsent, Vec::new(), peer, 0);
+
+            assert_eq!(unsent.len(), 1);
+            assert!(unsent.pop_front().unwrap().data.is_empty());
         }
     }
 }

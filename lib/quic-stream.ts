@@ -4,10 +4,13 @@ import {
   type BackpressureState,
   createBackpressureState,
   ensureBackpressureState,
+  createNativeWriteWindow,
+  completeNativeWrite,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
   rejectDrainCallbacks,
+  rejectNativeWriteWindow,
 } from './stream-backpressure.js';
 
 /** Audit finding #9: bound on `_final` wait time. */
@@ -27,6 +30,7 @@ export interface QuicServerEventLoopLike {
  * @internal
  */
 export interface QuicClientEventLoopLike {
+  openStream(): number;
   streamSend(streamId: number, data: Buffer, fin: boolean): number;
   streamClose(streamId: number, errorCode: number): boolean;
 }
@@ -45,10 +49,12 @@ export class QuicStream extends Duplex {
   /** @internal */ _clientLoop: QuicClientEventLoopLike | null = null;
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
   /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
+  /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   private _finalChunk: Buffer | null = null;
 
   constructor(opts?: { highWaterMark?: number }) {
     super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
+    this._nativeWriteWindow.highWaterMark = this.writableHighWaterMark;
   }
 
   /** The QUIC stream ID assigned by the protocol (0, 1, 4, 5, ...). */
@@ -140,7 +146,7 @@ export class QuicStream extends Duplex {
     }
     const written = this._doSend(chunk, false);
     if (written >= chunk.length) {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
       const remaining = chunk.subarray(written);
       this._bp = ensureBackpressureState(this._bp);
@@ -155,7 +161,7 @@ export class QuicStream extends Duplex {
     const written = this._blocked ? 0 : this._doSend(chunk, true);
     if (chunk.length === 0) {
       if (written > 0) {
-        callback();
+        completeNativeWrite(this._nativeWriteWindow, written, callback);
       } else {
         this._bp = ensureBackpressureState(this._bp);
         this._bp.drainCallbacks.push((err) => {
@@ -166,7 +172,7 @@ export class QuicStream extends Duplex {
       return;
     }
     if (written >= chunk.length) {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
       this._bp = ensureBackpressureState(this._bp);
       this._bp.drainCallbacks.push((err) => {
@@ -211,6 +217,7 @@ export class QuicStream extends Duplex {
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
+    rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     callback(error);
   }
 }

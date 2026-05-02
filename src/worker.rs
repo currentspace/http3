@@ -1,6 +1,8 @@
 //! Worker thread mode: a dedicated OS thread runs the QUIC/H3 hot loop,
 //! delivering batched events to the JS main thread via ThreadsafeFunction.
 
+#![deny(unsafe_code)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{
@@ -16,7 +18,7 @@ use slab::Slab;
 
 use crate::arc_buf::ArcBufFactory;
 use crate::buffer_pool::{AdaptiveBufferPool, BufferPool};
-use crate::chunk_pool::{Chunk, ChunkPool, ChunkPoolReturn};
+use crate::chunk_pool::{Chunk, ChunkPool};
 use crate::client_topology::{
     ClientSocketStrategy, SharedClientWorkerKey as SharedH3ClientWorkerKey,
     default_h3_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
@@ -25,8 +27,11 @@ use crate::config::{Http3Config, TransportRuntimeMode};
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::connection_map::ConnectionMap;
 use crate::error::Http3NativeError;
-use crate::event_loop::{self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, SEND_BUF_SIZE};
+use crate::event_loop::{
+    self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, RX_PAUSE_HIGH_WATER, SEND_BUF_SIZE,
+};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
+use crate::pending_write::{PendingWrite, PendingWriteSendOutcome, flush_pending_write};
 use crate::reactor_metrics::{self, SessionKind, WorkerSpawnKind};
 use crate::shared_client_reactor;
 use crate::timer_heap::TimerHeap;
@@ -76,7 +81,7 @@ pub enum WorkerCommand {
     },
     SendDatagram {
         conn_handle: u32,
-        data: Vec<u8>,
+        data: Chunk,
         resp_tx: Sender<bool>,
     },
     GetSessionMetrics {
@@ -98,10 +103,53 @@ pub enum WorkerCommand {
     Shutdown,
 }
 
-/// Buffered partial write for a stream blocked by flow control.
-struct PendingWrite {
-    data: Vec<u8>,
-    fin: bool,
+fn insert_pending_write<K>(pending: &mut HashMap<K, PendingWrite>, key: K, write: PendingWrite)
+where
+    K: Eq + std::hash::Hash,
+{
+    let queued = write.queued_bytes();
+    if let Some(previous) = pending.insert(key, write) {
+        reactor_metrics::record_outbound_pending_write_removed(previous.queued_bytes());
+    }
+    reactor_metrics::record_outbound_pending_write_added(queued);
+}
+
+fn remove_pending_write<K>(pending: &mut HashMap<K, PendingWrite>, key: &K) -> bool
+where
+    K: Eq + std::hash::Hash,
+{
+    if let Some(write) = pending.remove(key) {
+        reactor_metrics::record_outbound_pending_write_removed(write.queued_bytes());
+        true
+    } else {
+        false
+    }
+}
+
+fn worker_command_outbound_bytes(cmd: &WorkerCommand) -> usize {
+    match cmd {
+        WorkerCommand::SendResponse { body, .. } => body.remaining_len(),
+        WorkerCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        WorkerCommand::SendDatagram { data, .. } => data.remaining_len(),
+        _ => 0,
+    }
+}
+
+fn client_worker_command_outbound_bytes(cmd: &ClientWorkerCommand) -> usize {
+    match cmd {
+        ClientWorkerCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        ClientWorkerCommand::SendDatagram { data, .. } => data.remaining_len(),
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "node-api")]
+fn shared_client_worker_command_outbound_bytes(cmd: &SharedClientWorkerCommand) -> usize {
+    match cmd {
+        SharedClientWorkerCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        SharedClientWorkerCommand::SendDatagram { data, .. } => data.remaining_len(),
+        _ => 0,
+    }
 }
 
 const PENDING_WRITE_POOL_SIZE: usize = 256;
@@ -136,7 +184,9 @@ impl WorkerHandle {
         let ch = command_conn_handle(&cmd);
         let worker = &self.workers[crate::server_sharding::worker_index(ch)];
         let local = remap_command_handle(cmd);
+        let queued_bytes = worker_command_outbound_bytes(&local);
         if worker.cmd_tx.send(local).is_ok() {
+            reactor_metrics::record_outbound_command_queued(queued_bytes);
             let _ = worker.waker.wake();
             true
         } else {
@@ -168,7 +218,10 @@ impl WorkerHandle {
         })
     }
 
-    pub fn send_datagram(&self, conn_handle: u32, data: Vec<u8>) -> Result<bool, Http3NativeError> {
+    pub fn send_datagram<D>(&self, conn_handle: u32, data: D) -> Result<bool, Http3NativeError>
+    where
+        D: Into<Chunk>,
+    {
         let worker = &self.workers[crate::server_sharding::worker_index(conn_handle)];
         let local = crate::server_sharding::local_conn_handle(conn_handle);
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
@@ -176,7 +229,7 @@ impl WorkerHandle {
             .cmd_tx
             .send(WorkerCommand::SendDatagram {
                 conn_handle: local,
-                data,
+                data: data.into(),
                 resp_tx,
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
@@ -421,7 +474,7 @@ pub enum ClientWorkerCommand {
         error_code: u32,
     },
     SendDatagram {
-        data: Vec<u8>,
+        data: Chunk,
         resp_tx: Sender<bool>,
     },
     GetSessionMetrics {
@@ -464,7 +517,7 @@ enum SharedClientWorkerCommand {
     StreamSend {
         session_handle: u32,
         stream_id: u64,
-        data: Vec<u8>,
+        chunk: Chunk,
         fin: bool,
     },
     StreamClose {
@@ -474,7 +527,7 @@ enum SharedClientWorkerCommand {
     },
     SendDatagram {
         session_handle: u32,
-        data: Vec<u8>,
+        data: Chunk,
         resp_tx: Sender<bool>,
     },
     GetSessionMetrics {
@@ -599,6 +652,7 @@ impl ClientWorkerHandle {
     pub fn stream_send(&self, stream_id: u64, chunk: Chunk, fin: bool) -> bool {
         match &self.kind {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                let queued_bytes = chunk.remaining_len();
                 if cmd_tx
                     .send(ClientWorkerCommand::StreamSend {
                         stream_id,
@@ -607,6 +661,7 @@ impl ClientWorkerHandle {
                     })
                     .is_ok()
                 {
+                    reactor_metrics::record_outbound_command_queued(queued_bytes);
                     let _ = waker.wake();
                     true
                 } else {
@@ -618,16 +673,18 @@ impl ClientWorkerHandle {
                 session_handle,
                 worker,
             }) => {
+                let queued_bytes = chunk.remaining_len();
                 if worker
                     .cmd_tx
                     .send(SharedClientWorkerCommand::StreamSend {
                         session_handle: *session_handle,
                         stream_id,
-                        data: chunk.into_vec(),
+                        chunk,
                         fin,
                     })
                     .is_ok()
                 {
+                    reactor_metrics::record_outbound_command_queued(queued_bytes);
                     worker.wake();
                     true
                 } else {
@@ -678,8 +735,12 @@ impl ClientWorkerHandle {
         }
     }
 
-    pub fn send_datagram(&self, data: Vec<u8>) -> Result<bool, Http3NativeError> {
+    pub fn send_datagram<D>(&self, data: D) -> Result<bool, Http3NativeError>
+    where
+        D: Into<Chunk>,
+    {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
+        let data = data.into();
         match &self.kind {
             Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
                 cmd_tx
@@ -1279,6 +1340,9 @@ fn run_shared_client_event_loop<D: transport::Driver>(
         };
 
         while let Ok(cmd) = cmd_rx.try_recv() {
+            reactor_metrics::record_outbound_command_dequeued(
+                shared_client_worker_command_outbound_bytes(&cmd),
+            );
             match cmd {
                 SharedClientWorkerCommand::OpenSession {
                     mut quiche_config,
@@ -1336,16 +1400,21 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                 SharedClientWorkerCommand::StreamSend {
                     session_handle,
                     stream_id,
-                    data,
+                    chunk,
                     fin,
                 } => {
-                    if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.handler.queue_stream_send(
-                            stream_id,
-                            Chunk::unpooled(data),
-                            fin,
-                            &mut session.batcher.batch,
-                        );
+                    let should_release =
+                        if let Some(session) = sessions.get_mut(session_handle as usize) {
+                            !session.batcher.collect_atomic(|batch| {
+                                session
+                                    .handler
+                                    .queue_stream_send(stream_id, chunk, fin, batch);
+                            })
+                        } else {
+                            false
+                        };
+                    if should_release {
+                        pending_release.push(session_handle);
                     }
                 }
                 SharedClientWorkerCommand::StreamClose {
@@ -1364,7 +1433,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                 } => {
                     let ok = sessions
                         .get_mut(session_handle as usize)
-                        .is_some_and(|session| session.handler.send_datagram(&data));
+                        .is_some_and(|session| session.handler.send_datagram(data));
                     let _ = resp_tx.send(ok);
                 }
                 SharedClientWorkerCommand::GetSessionMetrics {
@@ -1455,57 +1524,69 @@ fn run_shared_client_event_loop<D: transport::Driver>(
         }
 
         let rx_count = outcome.rx.len();
-        for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
-            let Ok(header) =
-                quiche::Header::from_slice(pkt.data.as_mut_slice(), crate::cid::SCID_LEN)
-            else {
-                continue;
-            };
-            let Some(handle) = route_by_dcid.get(header.dcid.as_ref()).copied() else {
-                continue;
-            };
-            let mut should_remove = false;
-            if let Some(session) = sessions.get_mut(handle) {
-                if pkt.peer == session.server_addr {
-                    session.handler.process_packet_for_handle(
-                        pkt.data.as_mut_slice(),
-                        pkt.peer,
-                        local_addr,
-                        &mut session.batcher.batch,
-                        handle as u32,
-                    );
-                    refresh_shared_client_dcid(&mut route_by_dcid, handle, session);
-                    sync_shared_client_timer(&mut timer_heap, handle, session);
-                    if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
-                        should_remove = true;
+        let outstanding =
+            reactor_metrics::self_heal_event_batch_if_stuck(RX_PAUSE_HIGH_WATER, 5_000);
+        if rx_count > 0 && outstanding > RX_PAUSE_HIGH_WATER {
+            reactor_metrics::record_event_batch_rx_pause();
+            driver.recycle_rx_buffers(outcome.rx.into_iter().map(|pkt| pkt.data).collect());
+        } else {
+            for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
+                let Ok(header) =
+                    quiche::Header::from_slice(pkt.data.as_mut_slice(), crate::cid::SCID_LEN)
+                else {
+                    continue;
+                };
+                let Some(handle) = route_by_dcid.get(header.dcid.as_ref()).copied() else {
+                    continue;
+                };
+                let mut should_remove = false;
+                if let Some(session) = sessions.get_mut(handle) {
+                    if pkt.peer == session.server_addr {
+                        if !session.batcher.collect_atomic(|batch| {
+                            session.handler.process_packet_for_handle(
+                                pkt.data.as_mut_slice(),
+                                pkt.peer,
+                                local_addr,
+                                batch,
+                                handle as u32,
+                            );
+                        }) {
+                            should_remove = true;
+                        } else {
+                            refresh_shared_client_dcid(&mut route_by_dcid, handle, session);
+                            sync_shared_client_timer(&mut timer_heap, handle, session);
+                            if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                                should_remove = true;
+                            }
+                        }
                     }
                 }
-            }
-            if should_remove {
-                remove_shared_client_session(
-                    &mut sessions,
-                    &mut route_by_dcid,
-                    &mut timer_heap,
-                    handle,
-                );
-            }
-            if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
-                flush_shared_client_sends(
-                    &mut sessions,
-                    &mut handles_buf,
-                    &mut tx_pool,
-                    &mut outbound,
-                );
-                if !outbound.is_empty() {
-                    if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
-                        emit_shared_client_runtime_error(
-                            &mut sessions,
-                            driver,
-                            "submit_sends",
-                            "driver-submit-sends-failed",
-                            &err,
-                        );
-                        return;
+                if should_remove {
+                    remove_shared_client_session(
+                        &mut sessions,
+                        &mut route_by_dcid,
+                        &mut timer_heap,
+                        handle,
+                    );
+                }
+                if (rx_idx + 1) % 64 == 0 && rx_idx + 1 < rx_count {
+                    flush_shared_client_sends(
+                        &mut sessions,
+                        &mut handles_buf,
+                        &mut tx_pool,
+                        &mut outbound,
+                    );
+                    if !outbound.is_empty() {
+                        if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
+                            emit_shared_client_runtime_error(
+                                &mut sessions,
+                                driver,
+                                "submit_sends",
+                                "driver-submit-sends-failed",
+                                &err,
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -1515,15 +1596,18 @@ fn run_shared_client_event_loop<D: transport::Driver>(
         closed_sessions.clear();
         for handle in timer_heap.pop_expired(now) {
             if let Some(session) = sessions.get_mut(handle) {
-                session.handler.process_timers_for_handle(
-                    now,
-                    &mut session.batcher.batch,
-                    handle as u32,
-                );
-                refresh_shared_client_dcid(&mut route_by_dcid, handle, session);
-                sync_shared_client_timer(&mut timer_heap, handle, session);
-                if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                if !session.batcher.collect_atomic(|batch| {
+                    session
+                        .handler
+                        .process_timers_for_handle(now, batch, handle as u32);
+                }) {
                     closed_sessions.push(handle);
+                } else {
+                    refresh_shared_client_dcid(&mut route_by_dcid, handle, session);
+                    sync_shared_client_timer(&mut timer_heap, handle, session);
+                    if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                        closed_sessions.push(handle);
+                    }
                 }
             }
         }
@@ -1531,13 +1615,20 @@ fn run_shared_client_event_loop<D: transport::Driver>(
         handles_buf.extend(sessions.iter().map(|(handle, _)| handle));
         for handle in handles_buf.iter().copied() {
             if let Some(session) = sessions.get_mut(handle) {
-                session
-                    .handler
-                    .poll_drain_events_for_handle(&mut session.batcher.batch, handle as u32);
-                session
-                    .handler
-                    .flush_pending_writes_for_handle(&mut session.batcher.batch, handle as u32);
-                if session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush() {
+                let drain_ok = session.batcher.collect_atomic(|batch| {
+                    session
+                        .handler
+                        .poll_drain_events_for_handle(batch, handle as u32);
+                });
+                let flush_ok = drain_ok
+                    && session.batcher.collect_atomic(|batch| {
+                        session
+                            .handler
+                            .flush_pending_writes_for_handle(batch, handle as u32);
+                    });
+                if !flush_ok
+                    || (session.batcher.len() >= MAX_BATCH_SIZE && !session.batcher.flush())
+                {
                     closed_sessions.push(handle);
                 }
             }
@@ -1910,14 +2001,13 @@ struct H3ServerHandler {
     last_expired: Vec<usize>,
     handle_offset: u32,
     chunk_pool: ChunkPool,
-    chunk_pool_return: Arc<ChunkPoolReturn>,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
 impl H3ServerHandler {
     fn new(quiche_config: quiche::Config, http3_config: Http3Config, worker_index: u32) -> Self {
         let disable_retry = http3_config.disable_retry;
-        let (chunk_pool, chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
+        let (chunk_pool, _chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
         Self {
             conn_map: ConnectionMap::with_max_connections_and_cid(
                 http3_config.max_connections,
@@ -1940,7 +2030,6 @@ impl H3ServerHandler {
             last_expired: Vec::new(),
             handle_offset: crate::server_sharding::handle_offset(worker_index),
             chunk_pool,
-            chunk_pool_return,
             chunk_pool_rx,
         }
     }
@@ -1951,6 +2040,7 @@ impl ProtocolHandler for H3ServerHandler {
 
     #[allow(clippy::too_many_lines)]
     fn dispatch_command(&mut self, cmd: WorkerCommand, batch: &mut Vec<JsH3Event>) -> bool {
+        reactor_metrics::record_outbound_command_dequeued(worker_command_outbound_bytes(&cmd));
         match cmd {
             WorkerCommand::Shutdown => {
                 // Audit finding #11: close every live connection with an
@@ -2022,18 +2112,13 @@ impl ProtocolHandler for H3ServerHandler {
                     }
                     // Step 2: send body + FIN
                     let key = (conn_handle, stream_id);
-                    match conn.send_body_owned(stream_id, body.into_remaining_vec(), fin) {
-                        Ok((written, remainder)) => {
-                            if let Some(data) = remainder {
-                                self.pending_writes.insert(key, PendingWrite { data, fin });
-                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
-                            } else if fin && written == 0 {
-                                self.pending_writes.insert(
+                    match conn.send_body_chunk(stream_id, body, fin) {
+                        Ok(outcome) => {
+                            if let Some(remainder) = outcome.remainder {
+                                insert_pending_write(
+                                    &mut self.pending_writes,
                                     key,
-                                    PendingWrite {
-                                        data: Vec::new(),
-                                        fin: true,
-                                    },
+                                    PendingWrite::new(remainder, fin),
                                 );
                                 batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             }
@@ -2057,22 +2142,19 @@ impl ProtocolHandler for H3ServerHandler {
             } => {
                 let key = (conn_handle, stream_id);
                 if let Some(pw) = self.pending_writes.get_mut(&key) {
-                    pw.data.extend_from_slice(chunk.remaining());
-                    pw.fin = pw.fin || fin;
-                    // chunk drops here -> recycles to pool
+                    reactor_metrics::record_outbound_pending_write_added(pw.push_chunk(chunk));
+                    if fin {
+                        pw.set_fin();
+                    }
+                    // chunk backing allocation stays queued via ArcBuf.
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    match conn.send_body_owned(stream_id, chunk.into_remaining_vec(), fin) {
-                        Ok((written, remainder)) => {
-                            if let Some(data) = remainder {
-                                self.pending_writes.insert(key, PendingWrite { data, fin });
-                                batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
-                            } else if fin && written == 0 {
-                                self.pending_writes.insert(
+                    match conn.send_body_chunk(stream_id, chunk, fin) {
+                        Ok(outcome) => {
+                            if let Some(remainder) = outcome.remainder {
+                                insert_pending_write(
+                                    &mut self.pending_writes,
                                     key,
-                                    PendingWrite {
-                                        data: Vec::new(),
-                                        fin: true,
-                                    },
+                                    PendingWrite::new(remainder, fin),
                                 );
                                 batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                             }
@@ -2096,11 +2178,10 @@ impl ProtocolHandler for H3ServerHandler {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
                     match conn.stream_close(stream_id, u64::from(error_code)) {
                         Ok(()) => {
-                            if self
-                                .pending_writes
-                                .remove(&(conn_handle, stream_id))
-                                .is_some()
-                            {
+                            if remove_pending_write(
+                                &mut self.pending_writes,
+                                &(conn_handle, stream_id),
+                            ) {
                                 batch.push(JsH3Event::reset(
                                     conn_handle,
                                     stream_id,
@@ -2200,7 +2281,7 @@ impl ProtocolHandler for H3ServerHandler {
                 let ok = self
                     .conn_map
                     .get_mut(conn_handle as usize)
-                    .is_some_and(|conn| conn.send_datagram(&data).is_ok());
+                    .is_some_and(|conn| conn.send_datagram_chunk(data).is_ok());
                 let _ = resp_tx.send(ok);
             }
             WorkerCommand::GetSessionMetrics {
@@ -2238,7 +2319,7 @@ impl ProtocolHandler for H3ServerHandler {
                 resp_tx,
             } => {
                 let ok = if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
-                    conn.quiche_conn.send_ack_eliciting().is_ok()
+                    conn.queue_ping().is_ok()
                 } else {
                     false
                 };
@@ -2389,6 +2470,9 @@ impl ProtocolHandler for H3ServerHandler {
             }
 
             conn.poll_h3_events(offset | (handle as u32), batch);
+            for duration_ms in conn.poll_ping_acks() {
+                batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
+            }
 
             let mut retired_scids = Vec::new();
             while let Some(retired) = conn.quiche_conn.retired_scid_next() {
@@ -2439,9 +2523,12 @@ impl ProtocolHandler for H3ServerHandler {
                         )),
                     );
                     reactor_metrics::record_session_close(SessionKind::H3Server);
-                    batch.push(JsH3Event::session_close(offset | (handle as u32)));
+                    batch.push(conn.session_close_event(offset | (handle as u32)));
                 } else {
                     conn.poll_h3_events(offset | (handle as u32), batch);
+                    for duration_ms in conn.poll_ping_acks() {
+                        batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
+                    }
                     self.timer_heap
                         .set_deadline(handle, conn.timeout().map(|timeout| now + timeout));
                 }
@@ -2579,10 +2666,10 @@ impl ProtocolHandler for H3ServerHandler {
     fn cleanup_closed(&mut self, batch: &mut Vec<JsH3Event>) {
         let offset = self.handle_offset;
         let closed = self.conn_map.drain_closed();
-        for handle in &closed {
-            self.timer_heap.remove_connection(*handle);
-            self.conn_send_buffers.remove(handle);
-            self.pending_session_closes.remove(&(*handle as u32));
+        for (handle, conn) in closed {
+            self.timer_heap.remove_connection(handle);
+            self.conn_send_buffers.remove(&handle);
+            self.pending_session_closes.remove(&(handle as u32));
             // Audit finding #12: emit a reset for every abandoned stream
             // before dropping its PendingWrite, so the JS-side write
             // callback fires (via stream.destroy in _onReset) instead of
@@ -2590,19 +2677,26 @@ impl ProtocolHandler for H3ServerHandler {
             let abandoned: Vec<u64> = self
                 .pending_writes
                 .keys()
-                .filter(|&&(ch, _)| ch as usize == *handle)
+                .filter(|&&(ch, _)| ch as usize == handle)
                 .map(|&(_, sid)| sid)
                 .collect();
             for stream_id in abandoned {
                 batch.push(JsH3Event::reset(
-                    offset | (*handle as u32),
+                    offset | (handle as u32),
                     stream_id,
                     0, // H3_NO_ERROR — connection-level close, not stream-level reset
                 ));
             }
-            self.pending_writes
-                .retain(|&(ch, _), _| ch as usize != *handle);
-            if !self.last_expired.contains(handle) {
+            let mut removed_bytes = 0;
+            self.pending_writes.retain(|&(ch, _), write| {
+                let keep = ch as usize != handle;
+                if !keep {
+                    removed_bytes += write.queued_bytes();
+                }
+                keep
+            });
+            reactor_metrics::record_outbound_pending_write_removed(removed_bytes);
+            if !self.last_expired.contains(&handle) {
                 reactor_metrics::record_lifecycle_trace(
                     "h3-server",
                     "session-close-cleanup",
@@ -2611,12 +2705,12 @@ impl ProtocolHandler for H3ServerHandler {
                     None,
                     Some(format!(
                         "conn_handle={} pending_graceful_closes={}",
-                        offset | (*handle as u32),
+                        offset | (handle as u32),
                         self.pending_session_closes.len()
                     )),
                 );
                 reactor_metrics::record_session_close(SessionKind::H3Server);
-                batch.push(JsH3Event::session_close(offset | (*handle as u32)));
+                batch.push(conn.session_close_event(offset | (handle as u32)));
             }
         }
         self.last_expired.clear();
@@ -2659,7 +2753,6 @@ struct H3ClientHandler {
     timer_deadline: Option<Instant>,
     session_closed_emitted: bool,
     chunk_pool: ChunkPool,
-    chunk_pool_return: Arc<ChunkPoolReturn>,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
 }
 
@@ -2702,7 +2795,7 @@ impl H3ClientHandler {
         );
         let timer_deadline = conn.timeout().map(|t| Instant::now() + t);
         reactor_metrics::record_session_open(SessionKind::H3Client);
-        let (chunk_pool, chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
+        let (chunk_pool, _chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
         Some(Self {
             conn,
             pending_writes: HashMap::new(),
@@ -2715,7 +2808,6 @@ impl H3ClientHandler {
             timer_deadline,
             session_closed_emitted: false,
             chunk_pool,
-            chunk_pool_return,
             chunk_pool_rx,
         })
     }
@@ -2779,27 +2871,20 @@ impl H3ClientHandler {
         batch: &mut Vec<JsH3Event>,
     ) {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
-            pw.data.extend_from_slice(chunk.remaining());
-            pw.fin = pw.fin || fin;
+            reactor_metrics::record_outbound_pending_write_added(pw.push_chunk(chunk));
+            if fin {
+                pw.set_fin();
+            }
             return;
         }
 
-        match self
-            .conn
-            .send_body_owned(stream_id, chunk.into_remaining_vec(), fin)
-        {
-            Ok((written, remainder)) => {
-                if let Some(data) = remainder {
-                    self.pending_writes
-                        .insert(stream_id, PendingWrite { data, fin });
-                    batch.push(JsH3Event::stream_blocked(0, stream_id));
-                } else if fin && written == 0 {
-                    self.pending_writes.insert(
+        match self.conn.send_body_chunk(stream_id, chunk, fin) {
+            Ok(outcome) => {
+                if let Some(remainder) = outcome.remainder {
+                    insert_pending_write(
+                        &mut self.pending_writes,
                         stream_id,
-                        PendingWrite {
-                            data: Vec::new(),
-                            fin: true,
-                        },
+                        PendingWrite::new(remainder, fin),
                     );
                     batch.push(JsH3Event::stream_blocked(0, stream_id));
                 }
@@ -2819,7 +2904,7 @@ impl H3ClientHandler {
     fn close_stream(&mut self, stream_id: u64, error_code: u32) {
         match self.conn.stream_close(stream_id, u64::from(error_code)) {
             Ok(()) => {
-                self.pending_writes.remove(&stream_id);
+                remove_pending_write(&mut self.pending_writes, &stream_id);
             }
             Err(e) => {
                 log::debug!(
@@ -2829,8 +2914,8 @@ impl H3ClientHandler {
         }
     }
 
-    fn send_datagram(&mut self, data: &[u8]) -> bool {
-        self.conn.send_datagram(data).is_ok()
+    fn send_datagram(&mut self, data: Chunk) -> bool {
+        self.conn.send_datagram_chunk(data).is_ok()
     }
 
     fn metrics_snapshot(&self) -> JsSessionMetrics {
@@ -2842,7 +2927,7 @@ impl H3ClientHandler {
     }
 
     fn ping(&mut self) -> bool {
-        self.conn.quiche_conn.send_ack_eliciting().is_ok()
+        self.conn.queue_ping().is_ok()
     }
 
     fn qlog_path(&self) -> Option<String> {
@@ -2872,9 +2957,15 @@ impl H3ClientHandler {
         for stream_id in self.pending_writes.keys().copied().collect::<Vec<_>>() {
             batch.push(JsH3Event::reset(conn_handle, stream_id, 0));
         }
+        let removed_bytes: usize = self
+            .pending_writes
+            .values()
+            .map(PendingWrite::queued_bytes)
+            .sum();
         self.pending_writes.clear();
+        reactor_metrics::record_outbound_pending_write_removed(removed_bytes);
         reactor_metrics::record_session_close(SessionKind::H3Client);
-        batch.push(JsH3Event::session_close(conn_handle));
+        batch.push(self.conn.session_close_event(conn_handle));
         self.session_closed_emitted = true;
     }
 
@@ -2904,6 +2995,9 @@ impl H3ClientHandler {
             batch.push(JsH3Event::handshake_complete(conn_handle));
         }
         self.conn.poll_h3_events(conn_handle, batch);
+        for duration_ms in self.conn.poll_ping_acks() {
+            batch.push(JsH3Event::ping_ack(conn_handle, duration_ms));
+        }
         if let Some(ticket) = self.conn.update_session_ticket() {
             batch.push(JsH3Event::session_ticket(conn_handle, ticket));
         }
@@ -2926,6 +3020,9 @@ impl H3ClientHandler {
                 self.emit_session_close(batch, conn_handle);
             } else {
                 self.conn.poll_h3_events(conn_handle, batch);
+                for duration_ms in self.conn.poll_ping_acks() {
+                    batch.push(JsH3Event::ping_ack(conn_handle, duration_ms));
+                }
                 if let Some(ticket) = self.conn.update_session_ticket() {
                     batch.push(JsH3Event::session_ticket(conn_handle, ticket));
                 }
@@ -2998,6 +3095,9 @@ impl ProtocolHandler for H3ClientHandler {
     type Command = ClientWorkerCommand;
 
     fn dispatch_command(&mut self, cmd: ClientWorkerCommand, batch: &mut Vec<JsH3Event>) -> bool {
+        reactor_metrics::record_outbound_command_dequeued(client_worker_command_outbound_bytes(
+            &cmd,
+        ));
         match cmd {
             ClientWorkerCommand::Shutdown => {
                 if !self.session_closed_emitted {
@@ -3042,7 +3142,7 @@ impl ProtocolHandler for H3ClientHandler {
                 self.close_stream(stream_id, error_code);
             }
             ClientWorkerCommand::SendDatagram { data, resp_tx } => {
-                let _ = resp_tx.send(self.send_datagram(&data));
+                let _ = resp_tx.send(self.send_datagram(data));
             }
             ClientWorkerCommand::GetSessionMetrics { resp_tx } => {
                 let _ = resp_tx.send(Some(self.metrics_snapshot()));
@@ -3189,23 +3289,26 @@ fn flush_pending_writes(
 ) -> Vec<(u32, u64)> {
     let mut flushed = Vec::new();
     pending.retain(|&(conn_handle, stream_id), pw| {
+        let before = pw.queued_bytes();
         let Some(conn) = conn_map.get_mut(conn_handle as usize) else {
             // PendingWrite drops -> chunk recycles to pool
+            reactor_metrics::record_outbound_pending_write_removed(before);
             return false;
         };
-        let data = std::mem::take(&mut pw.data);
-        match conn.send_body_owned(stream_id, data, pw.fin) {
-            Ok((_written, None)) => {
+        match flush_one_h3_pending_write(conn, stream_id, pw) {
+            Ok(true) => {
                 flushed.push((conn_handle, stream_id));
+                reactor_metrics::record_outbound_pending_write_removed(before);
                 // PendingWrite drops -> chunk recycles to pool
                 false
             }
-            Ok((_written, Some(remainder))) => {
-                pw.data = remainder;
+            Ok(false) => {
+                reactor_metrics::record_outbound_pending_write_change(before, pw.queued_bytes());
                 true
             }
             Err(e) => {
                 log::warn!("flush pending write failed for stream {stream_id}: {e}");
+                reactor_metrics::record_outbound_pending_write_removed(before);
                 false // Remove — stream is dead
             }
         }
@@ -3221,19 +3324,21 @@ fn flush_client_pending_writes(
 ) -> Vec<u64> {
     let mut flushed = Vec::new();
     pending.retain(|&stream_id, pw| {
-        let data = std::mem::take(&mut pw.data);
-        match conn.send_body_owned(stream_id, data, pw.fin) {
-            Ok((_written, None)) => {
+        let before = pw.queued_bytes();
+        match flush_one_h3_pending_write(conn, stream_id, pw) {
+            Ok(true) => {
                 flushed.push(stream_id);
+                reactor_metrics::record_outbound_pending_write_removed(before);
                 // PendingWrite drops -> chunk recycles to pool
                 false
             }
-            Ok((_written, Some(remainder))) => {
-                pw.data = remainder;
+            Ok(false) => {
+                reactor_metrics::record_outbound_pending_write_change(before, pw.queued_bytes());
                 true
             }
             Err(e) => {
                 log::warn!("flush pending write failed for stream {stream_id}: {e}");
+                reactor_metrics::record_outbound_pending_write_removed(before);
                 false // Remove — stream is dead
             }
         }
@@ -3241,9 +3346,34 @@ fn flush_client_pending_writes(
     flushed
 }
 
+fn flush_one_h3_pending_write(
+    conn: &mut H3Connection,
+    stream_id: u64,
+    pw: &mut PendingWrite,
+) -> Result<bool, Http3NativeError> {
+    flush_pending_write(pw, |buf, send_fin| {
+        let outcome = conn.send_body_arcbuf(stream_id, buf, send_fin)?;
+        Ok(PendingWriteSendOutcome {
+            fin_accepted: outcome.fin_accepted,
+            remainder: outcome.remainder,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::arc_buf::ArcBuf;
+    use crate::reactor_metrics;
+    use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::sync::MutexGuard;
+
+    fn setup_metrics() -> MutexGuard<'static, ()> {
+        let guard = reactor_metrics::test_metrics_guard();
+        reactor_metrics::reset();
+        guard
+    }
 
     /// QUIC path validation happens inside quiche — the worker accepts
     /// packets from any peer.
@@ -3252,5 +3382,65 @@ mod tests {
         let _original: SocketAddr = "127.0.0.1:443".parse().expect("valid addr");
         let _migrated: SocketAddr = "127.0.0.1:444".parse().expect("valid addr");
         // Acceptance is unconditional; this test verifies compile-time only.
+    }
+
+    #[test]
+    fn h3_pending_write_byte_accounting_tracks_queue_lifecycle() {
+        let _guard = setup_metrics();
+        let mut pending = HashMap::new();
+
+        insert_pending_write(
+            &mut pending,
+            7_u64,
+            PendingWrite::new(ArcBuf::from_vec(vec![0; 4]), false),
+        );
+        assert_eq!(reactor_metrics::snapshot().outboundPendingWriteBytes, 4);
+
+        let write = pending.get_mut(&7).expect("pending write exists");
+        reactor_metrics::record_outbound_pending_write_added(
+            write.push_chunk(Chunk::unpooled(vec![0; 6])),
+        );
+        let snap = reactor_metrics::snapshot();
+        assert_eq!(snap.outboundPendingWriteBytes, 10);
+        assert_eq!(snap.outboundPendingWriteBytesHighWatermark, 10);
+
+        assert!(remove_pending_write(&mut pending, &7));
+        let snap = reactor_metrics::snapshot();
+        assert_eq!(snap.outboundPendingWriteBytes, 0);
+        assert_eq!(snap.outboundPendingWriteBytesHighWatermark, 10);
+    }
+
+    #[test]
+    fn h3_command_outbound_bytes_reads_unflattened_chunks() {
+        let server_cmd = WorkerCommand::StreamSend {
+            conn_handle: 1,
+            stream_id: 2,
+            chunk: Chunk::unpooled(vec![1; 5]),
+            fin: false,
+        };
+        let client_cmd = ClientWorkerCommand::StreamSend {
+            stream_id: 4,
+            chunk: Chunk::unpooled(vec![2; 9]),
+            fin: true,
+        };
+        let (server_resp_tx, _server_resp_rx) = crossbeam_channel::bounded(1);
+        let server_datagram_cmd = WorkerCommand::SendDatagram {
+            conn_handle: 1,
+            data: Chunk::unpooled(vec![3; 11]),
+            resp_tx: server_resp_tx,
+        };
+        let (client_resp_tx, _client_resp_rx) = crossbeam_channel::bounded(1);
+        let client_datagram_cmd = ClientWorkerCommand::SendDatagram {
+            data: Chunk::unpooled(vec![4; 13]),
+            resp_tx: client_resp_tx,
+        };
+
+        assert_eq!(worker_command_outbound_bytes(&server_cmd), 5);
+        assert_eq!(client_worker_command_outbound_bytes(&client_cmd), 9);
+        assert_eq!(worker_command_outbound_bytes(&server_datagram_cmd), 11);
+        assert_eq!(
+            client_worker_command_outbound_bytes(&client_datagram_cmd),
+            13
+        );
     }
 }

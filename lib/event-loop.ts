@@ -45,6 +45,7 @@ export interface NativeEvent {
     syscall?: string;
     peerCertificatePresented?: boolean;
     peerCertificateChain?: Buffer[];
+    durationMs?: number;
   };
   metrics?: {
     packetsIn: number;
@@ -210,6 +211,7 @@ export interface NativeQuicServerBinding {
  */
 export interface NativeQuicClientBinding {
   connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
+  openStream(): number;
   streamSend(streamId: number, data: Buffer, fin: boolean): boolean;
   streamClose(streamId: number, errorCode: number): boolean;
   sendDatagram(data: Buffer): boolean;
@@ -356,6 +358,15 @@ export interface ReactorTelemetrySnapshot {
   kqueueUnsentHighWatermark: number;
   kqueueWouldBlockSends: number;
   kqueueWriteWakeups: number;
+  outboundIngressBufferReuses: number;
+  outboundIngressBufferAllocations: number;
+  outboundIngressCopiedBytes: number;
+  outboundStreamJsAdmittedBytesTotal: number;
+  outboundStreamJsAdmittedWritesTotal: number;
+  outboundCommandQueuedBytes: number;
+  outboundCommandQueuedBytesHighWatermark: number;
+  outboundPendingWriteBytes: number;
+  outboundPendingWriteBytesHighWatermark: number;
   txBuffersRecycled: number;
 }
 
@@ -642,7 +653,7 @@ export class ClientEventLoop {
     return this.worker.getQlogPath();
   }
 
-  async close(): Promise<void> {
+  async close(errorCode = 0, reason = 'client close'): Promise<void> {
     if (this.closed) return;
     this.closed = true;
 
@@ -652,7 +663,7 @@ export class ClientEventLoop {
           this._shutdownResolve = resolve;
         });
 
-    this.worker.close(0, 'client close');
+    this.worker.close(errorCode, reason);
     this.worker.requestShutdown();
 
     const timer = new Promise<void>((resolve) => {

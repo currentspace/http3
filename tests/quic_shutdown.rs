@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -46,7 +46,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 // ---------------------------------------------------------------------------

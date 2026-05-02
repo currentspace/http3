@@ -70,9 +70,7 @@ pub(crate) fn group_for_gso(packets: Vec<TxDatagram>) -> Vec<GsoBatch> {
         let seg_size = pkt.data.len() as u16;
         // Per-packet cap from quiche's negotiated PMTU when supplied;
         // falls back to the Ethernet default for callers that don't set it.
-        let seg_cap = pkt
-            .max_segment_size
-            .map_or(GSO_MAX_SEGMENT, |s| s as usize);
+        let seg_cap = pkt.max_segment_size.map_or(GSO_MAX_SEGMENT, |s| s as usize);
         if let Some(last) = batches.last_mut() {
             if last.to == pkt.to
                 && last.segment_size == seg_size
@@ -278,9 +276,7 @@ pub(crate) fn create_platform_driver(
                         | Some(libc::ENOMEM) => {
                             // Auto-fallback to poll driver
                             if let Some(sock) = fallback_socket {
-                                log::warn!(
-                                    "io_uring setup failed ({error}), falling back to poll"
-                                );
+                                log::warn!("io_uring setup failed ({error}), falling back to poll");
                                 reactor_metrics::record_driver_setup_attempt(
                                     RuntimeDriverKind::Poll,
                                 );
@@ -508,8 +504,7 @@ mod tests {
         let max_in_batch = GSO_MAX_PAYLOAD / seg; // 59
         assert_eq!(max_in_batch, 59);
 
-        let mut packets: Vec<TxDatagram> =
-            (0..max_in_batch).map(|_| pkt(seg, 4433)).collect();
+        let mut packets: Vec<TxDatagram> = (0..max_in_batch).map(|_| pkt(seg, 4433)).collect();
         // One more packet should start a new batch.
         packets.push(pkt(seg, 4433));
 
@@ -541,7 +536,11 @@ mod tests {
             pkt_with_cap(jumbo, 4433, 4000),
         ];
         let batches = group_for_gso(packets);
-        assert_eq!(batches.len(), 1, "jumbo packets must coalesce when PMTU permits");
+        assert_eq!(
+            batches.len(),
+            1,
+            "jumbo packets must coalesce when PMTU permits"
+        );
         assert_eq!(batches[0].data.len(), jumbo * 2);
         assert_eq!(batches[0].segment_size as usize, jumbo);
     }

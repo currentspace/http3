@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -47,7 +47,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -147,9 +150,7 @@ fn build_quic_quiche_configs(
     server_config
         .load_priv_key_from_pem_file(key_path.to_str().unwrap())
         .unwrap();
-    server_config
-        .set_application_protos(&[b"quic"])
-        .unwrap();
+    server_config.set_application_protos(&[b"quic"]).unwrap();
     server_config.set_max_idle_timeout(30_000);
     server_config.set_max_recv_udp_payload_size(1472);
     server_config.set_max_send_udp_payload_size(1472);
@@ -168,9 +169,7 @@ fn build_quic_quiche_configs(
 
     // Client quiche config
     let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    client_config
-        .set_application_protos(&[b"quic"])
-        .unwrap();
+    client_config.set_application_protos(&[b"quic"]).unwrap();
     client_config.verify_peer(false);
     client_config.set_max_idle_timeout(30_000);
     client_config.set_max_recv_udp_payload_size(1472);
@@ -193,14 +192,15 @@ fn build_quic_quiche_configs(
     (server_config, client_config)
 }
 
-fn setup_quic_pair_direct(
-    initial_max_stream_data: u64,
-    initial_max_data: u64,
-) -> QuicPair {
+fn setup_quic_pair_direct(initial_max_stream_data: u64, initial_max_data: u64) -> QuicPair {
     let (cert_pem, key_pem) = generate_test_certs();
     let (client_addr, server_addr) = next_pair_addrs();
-    let (server_quiche, client_quiche) =
-        build_quic_quiche_configs(&cert_pem, &key_pem, initial_max_stream_data, initial_max_data);
+    let (server_quiche, client_quiche) = build_quic_quiche_configs(
+        &cert_pem,
+        &key_pem,
+        initial_max_stream_data,
+        initial_max_data,
+    );
 
     build_quic_pair_from_configs(server_quiche, client_quiche, client_addr, server_addr)
 }
@@ -405,8 +405,7 @@ fn test_quic_multiple_streams_with_small_windows() {
     }
 
     // Collect server data for all 5 streams with extended timeout
-    let mut stream_data: std::collections::HashMap<i64, Vec<u8>> =
-        std::collections::HashMap::new();
+    let mut stream_data: std::collections::HashMap<i64, Vec<u8>> = std::collections::HashMap::new();
     let mut streams_finished = std::collections::HashSet::new();
     let extended_timeout = Duration::from_secs(10);
     let deadline = std::time::Instant::now() + extended_timeout;
@@ -481,8 +480,7 @@ fn test_quic_connection_level_flow_control_limits() {
     }
 
     // Collect server data for all streams with generous timeout
-    let mut stream_data: std::collections::HashMap<i64, Vec<u8>> =
-        std::collections::HashMap::new();
+    let mut stream_data: std::collections::HashMap<i64, Vec<u8>> = std::collections::HashMap::new();
     let mut streams_finished = std::collections::HashSet::new();
     let extended_timeout = Duration::from_secs(15);
     let deadline = std::time::Instant::now() + extended_timeout;

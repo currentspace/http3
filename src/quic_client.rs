@@ -21,6 +21,7 @@ pub struct NativeQuicClient {
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress,
 }
 
 #[napi]
@@ -43,6 +44,7 @@ impl NativeQuicClient {
             qlog_level: options.qlog_level,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
+            stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress::new(64),
         })
     }
 
@@ -91,11 +93,30 @@ impl NativeQuicClient {
     }
 
     #[napi]
+    pub fn open_stream(&self) -> napi::Result<i64> {
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("quic client not running"))?;
+        let stream_id = handle.open_stream().map_err(napi::Error::from)?;
+        i64::try_from(stream_id).map_err(|_| napi::Error::from_reason("stream id overflow"))
+    }
+
+    #[napi]
     pub fn stream_send(&self, stream_id: i64, data: Buffer, fin: bool) -> bool {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle.stream_send(stream_id as u64, data.to_vec(), fin)
+        let body_len = data.as_ref().len();
+        let accepted = handle.stream_send_chunk(
+            stream_id as u64,
+            self.stream_ingress_pool.copy_napi_buffer(&data),
+            fin,
+        );
+        if accepted {
+            crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+        }
+        accepted
     }
 
     #[napi]
@@ -119,7 +140,9 @@ impl NativeQuicClient {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle.send_datagram(data.to_vec()).unwrap_or(false)
+        handle
+            .send_datagram(self.stream_ingress_pool.copy_napi_buffer(&data))
+            .unwrap_or(false)
     }
 
     #[napi]

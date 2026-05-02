@@ -1,6 +1,8 @@
 //! Connection routing by CID, retry-token validation, and session lifecycle
 //! management for both HTTP/3 and raw QUIC servers.
 
+#![deny(unsafe_code)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -272,8 +274,8 @@ impl ConnectionMap {
         buf.extend(self.connections.iter().map(|(handle, _)| handle));
     }
 
-    /// Remove all closed connections, returning their handles.
-    pub fn drain_closed(&mut self) -> Vec<usize> {
+    /// Remove all closed connections, returning their handles and final state.
+    pub fn drain_closed(&mut self) -> Vec<(usize, H3Connection)> {
         let closed: Vec<usize> = self
             .connections
             .iter()
@@ -281,10 +283,10 @@ impl ConnectionMap {
             .map(|(handle, _)| handle)
             .collect();
 
-        for &handle in &closed {
-            self.remove(handle);
-        }
         closed
+            .into_iter()
+            .filter_map(|handle| self.remove(handle).map(|conn| (handle, conn)))
+            .collect()
     }
 }
 
@@ -424,7 +426,12 @@ mod tests {
 
     /// Hand-craft a retry-token payload with a chosen timestamp so we can
     /// exercise the clock-skew window without mocking SystemTime.
-    fn craft_token_with_ts(map: &ConnectionMap, peer: &SocketAddr, odcid: &[u8], ts: u64) -> Vec<u8> {
+    fn craft_token_with_ts(
+        map: &ConnectionMap,
+        peer: &SocketAddr,
+        odcid: &[u8],
+        ts: u64,
+    ) -> Vec<u8> {
         let mut payload = Vec::new();
         match peer {
             SocketAddr::V4(v4) => {

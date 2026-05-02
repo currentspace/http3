@@ -45,9 +45,7 @@ const MIN_SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
 /// sockets ended up at 2 MB while clients got 8 MB.
 fn set_socket_buffer_sizes(socket: &socket2::Socket) {
     for &size in BUFFER_SIZES {
-        if socket.set_send_buffer_size(size).is_ok()
-            && socket.set_recv_buffer_size(size).is_ok()
-        {
+        if socket.set_send_buffer_size(size).is_ok() && socket.set_recv_buffer_size(size).is_ok() {
             break;
         }
     }
@@ -346,9 +344,8 @@ pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
         if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
             if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
                 #[allow(unsafe_code)]
-                let info: libc::in6_pktinfo = unsafe {
-                    std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
-                };
+                let info: libc::in6_pktinfo =
+                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
                 let ip = std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr);
                 out.local_ip = Some(std::net::IpAddr::V6(ip));
             }
@@ -357,9 +354,8 @@ pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
             // holds the traffic class.
             if data_off + std::mem::size_of::<libc::c_int>() <= control.len() {
                 #[allow(unsafe_code)]
-                let tclass: libc::c_int = unsafe {
-                    std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
-                };
+                let tclass: libc::c_int =
+                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
                 out.tos = Some((tclass & 0xff) as u8);
             }
         } else if hdr.cmsg_level == libc::IPPROTO_IP
@@ -403,9 +399,8 @@ pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
                 {
                     // IP_RECVDSTADDR delivers a bare `struct in_addr` (4 bytes).
                     #[allow(unsafe_code)]
-                    let addr: libc::in_addr = unsafe {
-                        std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
-                    };
+                    let addr: libc::in_addr =
+                        unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
                     let ip = std::net::Ipv4Addr::from(u32::from_be(addr.s_addr));
                     out.local_ip = Some(std::net::IpAddr::V4(ip));
                 }

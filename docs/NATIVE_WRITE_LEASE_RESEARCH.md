@@ -7,18 +7,29 @@ write lease system for:
 
 - raw QUIC stream writes
 - HTTP/3 request and response body DATA writes
+- raw QUIC and HTTP/3 DATAGRAM payloads
 
 It is intentionally focused on research and architecture mapping, not on code
 changes.
 
 ## Main Findings
 
-1. The current hot outbound path is `JS Buffer -> napi Buffer -> Rust Vec<u8> -> PendingWrite -> quiche`.
-2. The binding layer always copies outbound payload bytes with `data.to_vec()`.
-3. JS stream wrappers do not receive true native partial-write results today; `lib/event-loop.ts` synthesizes full logical success with `Math.max(data.length, fin ? 1 : 0)`.
-4. `EVENT_DRAIN` currently means "the stream is writable again at the quiche/flow-control layer" and is already the best existing signal to align with chunk-pool exhaustion.
-5. The existing `src/buffer_pool.rs` is only for encrypted UDP packet buffers, not for stream payload ownership.
-6. At the current quiche API boundary, the earliest reclaim point visible in this repo is "quiche accepted the bytes", not UDP send completion. If the same chunk must remain authoritative through retransmission, that likely requires a deeper integration layer than the current `&[u8]` send APIs expose.
+1. Stream and DATAGRAM payloads now use the pooled native-copy stepping stone:
+   `JS Buffer -> napi Buffer -> ChunkPoolIngress -> Chunk -> ArcBuf -> quiche`.
+2. The remaining unavoidable N-API boundary copy lands in a recyclable native
+   allocation instead of a fresh `data.to_vec()` on every stream or DATAGRAM send.
+3. Pending stream writes retain `ArcBuf` remainders instead of flattening tails
+   back into new `Vec<u8>` values.
+4. JS stream wrappers enforce local Node-style write pressure through
+   `writableHighWaterMark`; native telemetry decides whether a second worker
+   admission window is needed.
+5. `EVENT_DRAIN` means local stream backlog has dropped below the writable
+   window; it is not tied to peer ACK.
+6. At the current quiche API boundary, the earliest stream-body reclaim point
+   visible in this repo is still "quiche accepted the bytes", not UDP send
+   completion. Proving that the same chunk stays authoritative through
+   retransmission requires deeper transport integration than the public stream
+   send APIs expose.
 
 ## Current Outbound Code Map
 
@@ -63,12 +74,16 @@ changes.
 
 - `src/client.rs`
   - `NativeWorkerClient::stream_send()`
+  - `NativeWorkerClient::send_datagram()`
 - `src/server.rs`
   - `NativeWorkerServer::stream_send()`
+  - `NativeWorkerServer::send_datagram()`
 - `src/quic_client.rs`
   - `NativeQuicClient::stream_send()`
+  - `NativeQuicClient::send_datagram()`
 - `src/quic_server.rs`
   - `NativeQuicServer::stream_send()`
+  - `NativeQuicServer::send_datagram()`
 - `index.d.ts`
   - declares native `streamSend(...): boolean`
 - `src/event_loop.rs`
@@ -111,16 +126,20 @@ changes.
 flowchart LR
   jsBuffer[JsBuffer]
   napiBuffer[NapiBuffer]
-  rustVec[RustVec]
+  chunkPool[ChunkPoolIngress]
+  chunk[Chunk]
+  arcBuf[ArcBuf]
   pendingWrite[PendingWrite]
   quicheState[QuicheState]
   txPacket[TxDatagram]
   driver[UdpDriver]
 
   jsBuffer --> napiBuffer
-  napiBuffer --> rustVec
-  rustVec --> pendingWrite
-  rustVec --> quicheState
+  napiBuffer --> chunkPool
+  chunkPool --> chunk
+  chunk --> arcBuf
+  arcBuf --> pendingWrite
+  arcBuf --> quicheState
   pendingWrite --> quicheState
   quicheState --> txPacket
   txPacket --> driver
@@ -129,10 +148,14 @@ flowchart LR
 Observed ownership transitions:
 
 - JS creates or passes a `Buffer`.
-- napi-rs receives a `Buffer` and immediately copies to `Vec<u8>` with `to_vec()`.
+- napi-rs receives a `Buffer` and copies once into a pooled native `Chunk`.
 - The worker either:
-  - sends `&data` straight into quiche, or
-  - stores the unsent tail in `PendingWrite.data`.
+  - transfers the chunk into `ArcBuf` and sends it to quiche, or
+  - stores an `ArcBuf` remainder in `PendingWrite`.
+- DATAGRAM sends transfer the chunk into `ArcBuf` and call
+  `quiche::Connection::dgram_send_buf()`.
+- DATAGRAM receives use `dgram_recv_buf()` and convert the uniquely owned
+  `ArcBuf` into event data without an extra queue-to-event copy.
 - After quiche produces packet bytes, those bytes go into a pooled `TxDatagram` buffer and later recycle through `drain_recycled_tx()`.
 
 The stream payload and the packet buffer are separate lifetime domains.
@@ -157,13 +180,13 @@ The stream payload and the packet buffer are separate lifetime domains.
 ### Native copies and retention
 
 - binding edge
-  - `data.to_vec()` in `src/client.rs`, `src/server.rs`, `src/quic_client.rs`, `src/quic_server.rs`
+  - one copy from V8-owned `Buffer` into `ChunkPoolIngress` for stream bodies and DATAGRAM payloads
 - first blocked tail
-  - `data[written..].to_vec()` in `src/worker.rs` and `src/quic_worker.rs`
+  - retained as an `ArcBuf` window
 - blocked append path
-  - `PendingWrite.data.extend_from_slice(&data)`
+  - appends preserve chunk structure through `PendingWrite`
 - retry path
-  - `pw.data.drain(..written)` as chunks are progressively accepted
+  - advances chunk/`ArcBuf` windows as bytes are progressively accepted
 
 ## Calling Pattern Analysis
 
@@ -225,6 +248,8 @@ Interpretation:
 - `1-4 KiB` is the strongest existing evidence for the dominant critical-path class.
 - `16 KiB` matters for throughput lanes.
 - `64 KiB+` appears mostly in backpressure, stress, and correctness tests rather than as the primary everyday hot-path target.
+- The implemented `ChunkPool` now covers `1 KiB` through `64 KiB`; large
+  classes retain fewer buffers per bin to keep the memory tradeoff bounded.
 
 ### Header/body assembly behavior
 
@@ -243,9 +268,12 @@ header path can stay separate while the DATA path migrates.
 DATAGRAM paths are relevant to allocation hygiene but are not the main lease
 target:
 
-- they still materialize `Buffer.from(data)`
+- user-facing helpers can still materialize `Buffer.from(data)` before the
+  binding call, but the native boundary now copies that payload into
+  `ChunkPoolIngress`
 - they do not share the stream-body drain model
-- they do not currently justify being in the first lease rollout
+- native DATAGRAM sends now share the stream-body `Chunk`/`ArcBuf` ownership
+  model and call quiche's `dgram_send_buf()`
 
 ## Drain and Backpressure Semantics
 
@@ -427,16 +455,21 @@ Additional note:
 
 ## Proposed Architecture Delta
 
-### Recommended chunk classes to prototype
+### Current chunk classes
 
-Start with:
+Implemented classes:
 
 - `1 KiB`
 - `2 KiB`
 - `4 KiB`
+- `8 KiB`
+- `16 KiB`
+- `32 KiB`
+- `64 KiB`
 
-Investigate `8 KiB` only after measuring whether repeated `4 KiB` or `16 KiB`
-workloads benefit enough to justify another class.
+Large classes are intentionally capped below the small-class retention count.
+This keeps ordinary `8-64 KiB` writes reusable without turning each active
+native client/session object into an unbounded large-buffer cache.
 
 ### Recommended state model
 
@@ -588,6 +621,12 @@ Mitigation:
 
 ### Existing telemetry most relevant today
 
+- `outboundIngressBufferReuses`
+- `outboundIngressBufferAllocations`
+- `outboundIngressCopiedBytes`
+- `outboundStreamJsAdmittedBytesTotal`
+- `outboundCommandQueuedBytesHighWatermark`
+- `outboundPendingWriteBytesHighWatermark`
 - `rawQuicDrainEventEmits`
 - `rawQuicBlockedStreamHighWatermark`
 - `rawQuicClientPendingWriteHighWatermark`
@@ -596,9 +635,11 @@ Mitigation:
 
 Observation:
 
+- the JS `Buffer` to native `ChunkPoolIngress` boundary is now directly
+  measurable
 - raw QUIC already has useful blocked/drain counters
-- H3 does not currently expose symmetric blocked-stream or pending-write
-  high-water metrics
+- H3 and raw QUIC now both report command-queue and pending-write byte
+  high-water marks
 
 ### Metrics to add in a future implementation
 
@@ -613,7 +654,6 @@ Observation:
 - `nativeWriteChunkPoolHighWatermark`
 - `nativeWriteChunksCheckedOut`
 - `nativeWriteChunksRecycled`
-- H3 equivalents for blocked-stream and pending-write high watermarks
 - separate drain reasons for:
   - transport credit restored
   - pool capacity restored
@@ -622,8 +662,8 @@ Observation:
 
 Compare four paths:
 
-1. current `Buffer -> native -> PendingWrite -> quiche`
-2. pooled native-copy stepping stone
+1. current pooled native-copy stepping stone
+2. direct N-API external-buffer pinning
 3. direct-fill lease path
 4. direct-fill plus coalescing
 
@@ -654,3 +694,19 @@ The strongest architectural constraint is the current quiche send boundary:
 
 That constraint should be treated as the key design fork before implementation
 choices are locked.
+
+## Current Decision
+
+Native outbound buffer pinning remains deferred. The current owned-send and
+chunk-pool work removes the most obvious extra ownership churn without adding
+cross-thread JS `Buffer` pinning. Revisit NAPI `Reference<Buffer>` leases only
+after the benchmark matrix above shows a repeatable bottleneck that cannot be
+addressed inside the native-owned payload path. Short `64 KiB` H3/raw QUIC
+validation runs now show ingress-buffer reuse after warmup, so external-buffer
+pinning has no current correctness or performance justification from the local
+macOS/kqueue profiles.
+
+DATAGRAM zero-copy is no longer deferred: stream-body stabilization made it
+safe to reuse the same `ChunkPool`/`ArcBuf` model for DATAGRAM sends, and
+quiche 0.28's `dgram_recv_buf()` lets the receive path avoid the extra
+DATAGRAM queue-to-event copy when the owned buffer is unique.

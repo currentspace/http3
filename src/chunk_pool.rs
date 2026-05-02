@@ -5,10 +5,19 @@
 //! This eliminates glibc malloc fragmentation from repeated alloc/free
 //! cycles on the write path.
 
+#![deny(unsafe_code)]
+
 use std::sync::Arc;
 
+#[cfg(feature = "node-api")]
+use std::sync::Mutex;
+
 /// Size classes for pooled chunks.
-const CHUNK_CLASSES: [usize; 3] = [1024, 2048, 4096];
+///
+/// The top class matches Node's default binary stream high-water mark
+/// (64 KiB), so ordinary writes avoid malloc churn while still copying into
+/// Rust-owned memory before crossing worker-thread boundaries.
+const CHUNK_CLASSES: [usize; 7] = [1024, 2048, 4096, 8192, 16_384, 32_768, 65_536];
 
 /// Number of size-class bins.
 const NUM_BINS: usize = CHUNK_CLASSES.len();
@@ -26,7 +35,7 @@ pub struct ChunkPool {
 impl ChunkPool {
     pub fn new(max_per_bin: usize) -> Self {
         Self {
-            bins: [Vec::new(), Vec::new(), Vec::new()],
+            bins: std::array::from_fn(|_| Vec::new()),
             max_per_bin,
         }
     }
@@ -69,6 +78,17 @@ impl ChunkPool {
         CHUNK_CLASSES.iter().rposition(|&class| class <= cap)
     }
 
+    fn max_entries_for_bin(&self, bin_idx: usize) -> usize {
+        if CHUNK_CLASSES[bin_idx] <= 4096 {
+            return self.max_per_bin;
+        }
+
+        // Large buffers are retained for reuse, but at a lower per-bin count
+        // to keep per-session memory bounded when callers write 16-64 KiB
+        // chunks repeatedly.
+        (self.max_per_bin / 8).max(1)
+    }
+
     /// Check out a buffer with capacity >= `len`.
     /// Returns `(buffer, reused)`.
     pub fn checkout(&mut self, len: usize) -> (Vec<u8>, bool) {
@@ -106,7 +126,7 @@ impl ChunkPool {
     pub fn checkin(&mut self, buf: Vec<u8>) -> bool {
         let cap = buf.capacity();
         if let Some(bin_idx) = Self::bin_for_cap(cap) {
-            if self.bins[bin_idx].len() < self.max_per_bin {
+            if self.bins[bin_idx].len() < self.max_entries_for_bin(bin_idx) {
                 self.bins[bin_idx].push(buf);
                 return true;
             }
@@ -138,6 +158,39 @@ impl ChunkPoolReturn {
     }
 }
 
+/// N-API ingress-side chunk pool.
+///
+/// The only unavoidable copy on outbound stream writes is from the V8-owned
+/// `Buffer` into Rust-owned memory. This type makes that copy land in a
+/// reusable `ChunkPool` allocation; the worker/quiche path then keeps the
+/// same allocation alive until it can be recycled back here.
+#[cfg(feature = "node-api")]
+pub struct ChunkPoolIngress {
+    pool: Mutex<ChunkPool>,
+    pool_return: Arc<ChunkPoolReturn>,
+    rx: crossbeam_channel::Receiver<Vec<u8>>,
+}
+
+#[cfg(feature = "node-api")]
+impl ChunkPoolIngress {
+    pub fn new(max_per_bin: usize) -> Self {
+        let (pool, pool_return, rx) = ChunkPool::with_return_channel(max_per_bin);
+        Self {
+            pool: Mutex::new(pool),
+            pool_return,
+            rx,
+        }
+    }
+
+    pub fn copy_napi_buffer(&self, buf: &napi::bindgen_prelude::Buffer) -> Chunk {
+        let mut pool = self.pool.lock().unwrap_or_else(|err| err.into_inner());
+        pool.drain_returned(&self.rx);
+        let (data, reused) = pool.checkout_copy(buf.as_ref());
+        crate::reactor_metrics::record_outbound_ingress_buffer_checkout(reused, data.len());
+        Chunk::from_vec(data, Some(Arc::clone(&self.pool_return)))
+    }
+}
+
 /// An outbound payload chunk that auto-recycles its backing buffer to the
 /// pool when dropped.
 ///
@@ -154,10 +207,12 @@ impl Chunk {
     #[cfg(feature = "node-api")]
     pub fn from_napi_buffer(
         buf: &napi::bindgen_prelude::Buffer,
+        pool: &mut ChunkPool,
         pool_return: &Arc<ChunkPoolReturn>,
     ) -> Self {
+        let (data, _reused) = pool.checkout_copy(buf.as_ref());
         Self {
-            data: buf.to_vec(),
+            data,
             offset: 0,
             pool_return: Some(Arc::clone(pool_return)),
         }
@@ -233,6 +288,15 @@ impl Chunk {
         self.data.split_off(self.offset)
     }
 
+    /// Decompose this chunk without copying so another owner can manage
+    /// recycling. The returned offset points at the first unwritten byte.
+    pub fn into_raw_parts(mut self) -> (Vec<u8>, usize, Option<Arc<ChunkPoolReturn>>) {
+        let data = std::mem::take(&mut self.data);
+        let offset = self.offset;
+        let pool_return = self.pool_return.take();
+        (data, offset, pool_return)
+    }
+
     /// Append additional data to this chunk's unwritten region.
     /// Used when a stream is already blocked and more data arrives.
     pub fn append(&mut self, data: &[u8]) {
@@ -250,6 +314,12 @@ impl Chunk {
     /// Get the pool return handle (for cloning into sub-chunks).
     pub fn pool_return(&self) -> &Option<Arc<ChunkPoolReturn>> {
         &self.pool_return
+    }
+}
+
+impl From<Vec<u8>> for Chunk {
+    fn from(value: Vec<u8>) -> Self {
+        Self::unpooled(value)
     }
 }
 
@@ -319,15 +389,30 @@ mod tests {
         assert!(buf4k.capacity() >= 4096);
         pool.checkin(buf4k);
 
-        assert_eq!(pool.total_pooled(), 3); // One in each bin.
+        // 64KB class, matching Node's default binary high-water mark.
+        let (buf64k, _) = pool.checkout(65_536);
+        assert!(buf64k.capacity() >= 65_536);
+        pool.checkin(buf64k);
+
+        assert_eq!(pool.total_pooled(), 4); // One in selected bins.
     }
 
     #[test]
     fn oversized_not_pooled() {
         let mut pool = ChunkPool::new(4);
-        let (buf, _) = pool.checkout(8000);
-        assert_eq!(buf.len(), 8000);
+        let (buf, _) = pool.checkout(128 * 1024);
+        assert_eq!(buf.len(), 128 * 1024);
         assert!(!pool.checkin(buf)); // Rejected — too large.
+    }
+
+    #[test]
+    fn large_bins_use_lower_retention_cap() {
+        let mut pool = ChunkPool::new(16);
+        assert!(pool.checkin(Vec::with_capacity(65_536)));
+        assert!(pool.checkin(Vec::with_capacity(65_536)));
+        assert!(!pool.checkin(Vec::with_capacity(65_536)));
+
+        assert_eq!(pool.bins[6].len(), 2);
     }
 
     /// Audit finding #28: a Vec smaller than its target class but >= the

@@ -21,3 +21,17 @@ path = "fuzz_targets/parse_recv_cmsgs.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "unsafe_wrappers"
+path = "fuzz_targets/unsafe_wrappers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pending_write_state"
+path = "fuzz_targets/pending_write_state.rs"
+test = false
+doc = false
+bench = false

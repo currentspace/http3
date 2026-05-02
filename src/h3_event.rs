@@ -8,11 +8,6 @@ use napi_derive::napi;
 use crate::buffer_pool::BufferRecycler;
 #[cfg(feature = "node-api")]
 use std::sync::Arc;
-#[cfg(all(feature = "node-api", test))]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[cfg(all(feature = "node-api", test))]
-static NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
@@ -111,114 +106,8 @@ impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
         env: napi::sys::napi_env,
         val: Self,
     ) -> napi::Result<napi::sys::napi_value> {
-        use std::ffi::c_void;
-
-        let mut data = val.data;
-        let len = data.len();
-
-        if len == 0 {
-            // Empty buffer — use standard NAPI path
-            let mut ret = std::ptr::null_mut();
-            let status =
-                unsafe { napi::sys::napi_create_buffer(env, 0, std::ptr::null_mut(), &mut ret) };
-            if status != napi::sys::Status::napi_ok {
-                return Err(napi::Error::from_status(status.into()));
-            }
-            return Ok(ret);
-        }
-
-        let ptr = data.as_mut_ptr();
-        let cap = data.capacity();
-        std::mem::forget(data);
-
-        if let Some(recycler) = val.recycler {
-            // Recyclable — finalize callback returns to pool. Audit
-            // finding #22: capture the raw Box pointer so we can reclaim
-            // it on the failure paths where NAPI never registered the
-            // finalize callback. Otherwise the Box (and its inner Arc)
-            // leak.
-            let hint = Box::new(RecycleHint { ptr, cap, recycler });
-            let hint_ptr = Box::into_raw(hint);
-            let mut ret = std::ptr::null_mut();
-            let status = unsafe {
-                create_external_buffer(
-                    env,
-                    len,
-                    ptr as *mut c_void,
-                    Some(finalize_recycle),
-                    hint_ptr as *mut c_void,
-                    &mut ret,
-                )
-            };
-            if status == napi::sys::Status::napi_no_external_buffers_allowed {
-                // Fallback: reconstruct and use copy path. NAPI rejected
-                // the external pointer, so reclaim the Box ourselves
-                // (drop disconnects the recycler, which is the right
-                // behavior — JS will own a copy instead).
-                drop(unsafe { Box::from_raw(hint_ptr) });
-                let data = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-                let buf = napi::bindgen_prelude::Buffer::from(data);
-                return unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) };
-            }
-            if status != napi::sys::Status::napi_ok {
-                // Unexpected status — NAPI didn't register the finalize.
-                // Reclaim the Box AND the underlying Vec so neither leaks.
-                drop(unsafe { Box::from_raw(hint_ptr) });
-                drop(unsafe { Vec::from_raw_parts(ptr, len, cap) });
-                return Err(napi::Error::from_status(status.into()));
-            }
-            Ok(ret)
-        } else {
-            // Non-recyclable — reconstruct Buffer and use its standard to_napi_value
-            let data = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-            let buf = napi::bindgen_prelude::Buffer::from(data);
-            unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) }
-        }
+        crate::unsafe_boundary::ExternalVecLease::new(val.data, val.recycler).into_napi_value(env)
     }
-}
-
-#[cfg(feature = "node-api")]
-unsafe fn create_external_buffer(
-    env: napi::sys::napi_env,
-    len: usize,
-    data: *mut std::ffi::c_void,
-    finalize_cb: napi::sys::napi_finalize,
-    finalize_hint: *mut std::ffi::c_void,
-    result: *mut napi::sys::napi_value,
-) -> napi::sys::napi_status {
-    #[cfg(test)]
-    {
-        if NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE.load(Ordering::SeqCst) {
-            return napi::sys::Status::napi_generic_failure;
-        }
-    }
-    unsafe {
-        napi::sys::napi_create_external_buffer(env, len, data, finalize_cb, finalize_hint, result)
-    }
-}
-
-#[cfg(feature = "node-api")]
-struct RecycleHint {
-    ptr: *mut u8,
-    cap: usize,
-    recycler: Arc<BufferRecycler>,
-}
-
-// SAFETY: The pointer is only accessed in the finalize callback, which runs
-// after V8 GC has confirmed no JS references remain.
-#[cfg(feature = "node-api")]
-unsafe impl Send for RecycleHint {}
-
-#[cfg(feature = "node-api")]
-unsafe extern "C" fn finalize_recycle(
-    _env: napi::sys::napi_env,
-    _data: *mut std::ffi::c_void,
-    hint: *mut std::ffi::c_void,
-) {
-    let hint = unsafe { Box::from_raw(hint as *mut RecycleHint) };
-    // Reconstruct Vec with len=0 (content was consumed by JS), preserve capacity
-    let buf = unsafe { Vec::from_raw_parts(hint.ptr, 0, hint.cap) };
-    hint.recycler.recycle(buf);
 }
 
 #[cfg(feature = "node-api")]
@@ -266,6 +155,7 @@ pub const EVENT_METRICS: u8 = 13;
 pub const EVENT_DATAGRAM: u8 = 14;
 pub const EVENT_SHUTDOWN_COMPLETE: u8 = 15;
 pub const EVENT_STREAM_BLOCKED: u8 = 16;
+pub const EVENT_PING_ACK: u8 = 17;
 
 #[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
@@ -293,6 +183,7 @@ pub struct JsEventMeta {
     pub syscall: Option<String>,
     pub peer_certificate_presented: Option<bool>,
     pub peer_certificate_chain: Option<Vec<ByteBuf>>,
+    pub duration_ms: Option<f64>,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]
@@ -356,6 +247,7 @@ impl JsEventMeta {
             syscall: None,
             peer_certificate_presented: None,
             peer_certificate_chain: None,
+            duration_ms: None,
         }
     }
 }
@@ -508,6 +400,23 @@ impl JsH3Event {
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta::empty()),
+            metrics: Some(JsSessionMetrics::zeroed()),
+        }
+    }
+
+    pub fn session_close_with_error(conn_handle: u32, error_code: u64, reason: String) -> Self {
+        Self {
+            event_type: EVENT_SESSION_CLOSE,
+            conn_handle,
+            stream_id: -1,
+            headers: Some(vec![]),
+            data: None,
+            fin: Some(false),
+            meta: Some(JsEventMeta {
+                error_code: Some(u32::try_from(error_code).unwrap_or(u32::MAX)),
+                error_reason: Some(reason),
+                ..JsEventMeta::empty()
+            }),
             metrics: Some(JsSessionMetrics::zeroed()),
         }
     }
@@ -674,6 +583,22 @@ impl JsH3Event {
         }
     }
 
+    pub fn ping_ack(conn_handle: u32, duration_ms: f64) -> Self {
+        Self {
+            event_type: EVENT_PING_ACK,
+            conn_handle,
+            stream_id: -1,
+            headers: Some(vec![]),
+            data: None,
+            fin: Some(false),
+            meta: Some(JsEventMeta {
+                duration_ms: Some(duration_ms),
+                ..JsEventMeta::empty()
+            }),
+            metrics: Some(JsSessionMetrics::zeroed()),
+        }
+    }
+
     /// Sentinel event emitted as the last event before a worker thread exits.
     /// JS awaits this to guarantee all prior events have been delivered.
     pub fn shutdown_complete() -> Self {
@@ -778,6 +703,17 @@ mod tests {
         assert_eq!(ev.conn_handle, 11);
         assert_eq!(ev.stream_id, -1);
         assert!(ev.meta.is_some());
+    }
+
+    #[test]
+    fn test_session_close_with_error_fields() {
+        let ev = JsH3Event::session_close_with_error(11, 42, "shutdown".into());
+        assert_eq!(ev.event_type, EVENT_SESSION_CLOSE);
+        assert_eq!(ev.conn_handle, 11);
+        assert_eq!(ev.stream_id, -1);
+        let meta = ev.meta.expect("meta must be Some");
+        assert_eq!(meta.error_code, Some(42));
+        assert_eq!(meta.error_reason.as_deref(), Some("shutdown"));
     }
 
     #[test]
@@ -907,14 +843,14 @@ mod tests {
         use napi::bindgen_prelude::ToNapiValue;
 
         let (_pool, recycler, rx) = crate::buffer_pool::AdaptiveBufferPool::with_recycler(8, 1);
-        NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE.store(true, Ordering::SeqCst);
+        crate::unsafe_boundary::force_external_buffer_generic_failure(true);
         let result = unsafe {
             RecyclableBuffer::to_napi_value(
                 std::ptr::null_mut(),
                 RecyclableBuffer::new(vec![1, 2, 3, 4], Some(recycler)),
             )
         };
-        NAPI_FORCE_EXTERNAL_BUFFER_GENERIC_FAILURE.store(false, Ordering::SeqCst);
+        crate::unsafe_boundary::force_external_buffer_generic_failure(false);
 
         assert!(result.is_err());
         assert!(

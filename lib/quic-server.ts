@@ -5,6 +5,7 @@ import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
 import { toSessionError } from './error-map.js';
+import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
 import { resolveServerClientAuthMode } from './tls-client-auth.js';
@@ -158,7 +159,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
  */
 export interface QuicServerSession {
   on(event: 'stream', listener: (stream: QuicStream) => void): this;
-  on(event: 'close', listener: () => void): this;
+  on(event: 'close', listener: (info: SessionCloseInfo) => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'datagram', listener: (data: Buffer) => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
@@ -175,6 +176,8 @@ export class QuicServerSession extends EventEmitter {
   private readonly _eventLoop: QuicWorkerEventLoop;
   /** @internal */ readonly _streams = new Map<number, QuicStream>();
   /** @internal */ _nextBidiStreamId = 1; // Server-initiated bidi: 1, 5, 9, ...
+  private _closeEmitted = false;
+  private _closeInfo: SessionCloseInfo | null = null;
 
   /** @internal */
   constructor(connHandle: number, remoteAddress: string, remotePort: number, eventLoop: QuicWorkerEventLoop) {
@@ -279,6 +282,14 @@ export class QuicServerSession extends EventEmitter {
       }
     }
     this._streams.clear();
+  }
+
+  /** @internal */
+  _emitClose(info: SessionCloseInfo = defaultSessionCloseInfo()): void {
+    this._closeInfo = info;
+    if (this._closeEmitted) return;
+    this._closeEmitted = true;
+    this.emit('close', info);
   }
 
   private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
@@ -526,7 +537,7 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (session) {
       session._cleanup();
-      session.emit('close');
+      session._emitClose(sessionCloseInfoFromEvent(event));
       this._sessions.delete(event.connHandle);
     }
   }

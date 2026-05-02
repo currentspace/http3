@@ -1,6 +1,8 @@
 //! Crate error types with conversions to `napi::Error` so Rust failures
 //! surface as proper JS exceptions.
 
+#![deny(unsafe_code)]
+
 #[cfg(feature = "node-api")]
 use napi::Status;
 
@@ -243,8 +245,7 @@ mod tests {
     #[test]
     fn test_runtime_io_constructor() {
         let io_err = std::io::Error::from_raw_os_error(9);
-        let err =
-            Http3NativeError::runtime_io("kqueue", "kevent", "bad-fd", io_err);
+        let err = Http3NativeError::runtime_io("kqueue", "kevent", "bad-fd", io_err);
         match err {
             Http3NativeError::RuntimeIo {
                 driver,
@@ -289,18 +290,23 @@ impl From<Http3NativeError> for napi::Error {
                 Some(errno) => format!("[h3:io|errno={errno}]"),
                 None => "[h3:io]".to_string(),
             },
-            Http3NativeError::FastPathUnavailable { driver, syscall, errno, .. } => {
-                let errno_part = errno
-                    .map(|e| format!("|errno={e}"))
-                    .unwrap_or_default();
-                format!(
-                    "[h3:fast-path|driver={driver}|syscall={syscall}{errno_part}]"
-                )
+            Http3NativeError::FastPathUnavailable {
+                driver,
+                syscall,
+                errno,
+                ..
+            } => {
+                let errno_part = errno.map(|e| format!("|errno={e}")).unwrap_or_default();
+                format!("[h3:fast-path|driver={driver}|syscall={syscall}{errno_part}]")
             }
-            Http3NativeError::RuntimeIo { driver, syscall, errno, reason_code, .. } => {
-                let errno_part = errno
-                    .map(|e| format!("|errno={e}"))
-                    .unwrap_or_default();
+            Http3NativeError::RuntimeIo {
+                driver,
+                syscall,
+                errno,
+                reason_code,
+                ..
+            } => {
+                let errno_part = errno.map(|e| format!("|errno={e}")).unwrap_or_default();
                 format!(
                     "[h3:runtime-io|driver={driver}|syscall={syscall}|reason={reason_code}{errno_part}]"
                 )

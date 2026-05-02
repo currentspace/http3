@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -47,7 +47,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -271,11 +274,9 @@ fn test_quic_idle_timeout_reset_by_data() {
 
     // At 1.5s from handshake, check that NO SESSION_CLOSE has arrived
     std::thread::sleep(Duration::from_millis(700));
-    let premature_close = recv_event_matching(
-        &pair.client_rx,
-        Duration::from_millis(200),
-        |e| e.event_type == EVENT_SESSION_CLOSE,
-    );
+    let premature_close = recv_event_matching(&pair.client_rx, Duration::from_millis(200), |e| {
+        e.event_type == EVENT_SESSION_CLOSE
+    });
     assert!(
         premature_close.is_none(),
         "connection should NOT have timed out — data kept it alive"
@@ -331,13 +332,11 @@ fn test_quic_connection_close_and_cleanup() {
     assert!(received, "server should receive data on stream 0");
 
     // Server issues CloseSession
-    assert!(
-        pair.server.send_command(QuicServerCommand::CloseSession {
-            conn_handle: server_conn,
-            error_code: 0,
-            reason: "test cleanup".to_string(),
-        })
-    );
+    assert!(pair.server.send_command(QuicServerCommand::CloseSession {
+        conn_handle: server_conn,
+        error_code: 0,
+        reason: "test cleanup".to_string(),
+    }));
 
     // Client should see SESSION_CLOSE
     let close_event = recv_event_matching(&pair.client_rx, RECV_TIMEOUT, |e| {

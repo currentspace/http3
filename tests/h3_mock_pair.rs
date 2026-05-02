@@ -10,8 +10,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -387,8 +387,7 @@ fn test_h3_request_response() {
                     if event.stream_id == stream_id as i64 {
                         if event.event_type == EVENT_HEADERS {
                             let resp_hdrs = event.headers.as_ref().unwrap();
-                            let status =
-                                resp_hdrs.iter().find(|h| h.name == ":status").unwrap();
+                            let status = resp_hdrs.iter().find(|h| h.name == ":status").unwrap();
                             assert_eq!(status.value, "200");
                             got_response_headers = true;
                         }
@@ -410,7 +409,10 @@ fn test_h3_request_response() {
         }
     }
 
-    assert!(got_response_headers, "client should receive response HEADERS");
+    assert!(
+        got_response_headers,
+        "client should receive response HEADERS"
+    );
     assert!(got_fin, "client should receive fin on response stream");
     assert_eq!(client_data, b"Hello, HTTP/3!");
 }
@@ -436,7 +438,10 @@ fn test_h3_post_with_body() {
 
     // Client sends the POST body
     let post_body = b"request-body-payload".to_vec();
-    assert!(pair.client.stream_send(stream_id, Chunk::unpooled(post_body.clone()), true));
+    assert!(
+        pair.client
+            .stream_send(stream_id, Chunk::unpooled(post_body.clone()), true)
+    );
 
     // Collect all server events for this stream: HEADERS, DATA, FINISHED.
     // In H3, the body may arrive as DATA events and a FINISHED event,
@@ -529,12 +534,10 @@ fn test_h3_multiple_concurrent_streams() {
     }
 
     // Wait for server to see HEADERS on all streams
-    let server_header_events = recv_events_matching(
-        &pair.server_rx,
-        RECV_TIMEOUT,
-        stream_count,
-        |e| e.event_type == EVENT_HEADERS,
-    );
+    let server_header_events =
+        recv_events_matching(&pair.server_rx, RECV_TIMEOUT, stream_count, |e| {
+            e.event_type == EVENT_HEADERS
+        });
     assert_eq!(
         server_header_events.len(),
         stream_count,

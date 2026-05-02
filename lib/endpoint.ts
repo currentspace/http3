@@ -131,13 +131,26 @@ export function parseConnectionEndpoint(
   }
 }
 
+export function abortSignalError(signal: AbortSignal | undefined): Error {
+  const reason: unknown = signal?.reason;
+  if (reason instanceof Error && reason.name === 'AbortError') {
+    return reason;
+  }
+
+  const error = new Error(reason instanceof Error
+    ? reason.message
+    : typeof reason === 'string' ? reason : 'The operation was aborted');
+  error.name = 'AbortError';
+  if (reason instanceof Error) {
+    (error as Error & { cause?: unknown }).cause = reason;
+  }
+  return error;
+}
+
 /** Throws synchronously if the signal is already aborted. */
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    const reason: unknown = signal.reason;
-    throw reason instanceof Error
-      ? reason
-      : new Error(typeof reason === 'string' ? reason : 'aborted');
+    throw abortSignalError(signal);
   }
 }
 
@@ -148,10 +161,7 @@ async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined
   throwIfAborted(signal);
   const aborted = new Promise<never>((_, reject) => {
     const handler = (): void => {
-      const reason: unknown = signal.reason;
-      reject(reason instanceof Error
-        ? reason
-        : new Error(typeof reason === 'string' ? reason : 'aborted'));
+      reject(abortSignalError(signal));
     };
     signal.addEventListener('abort', handler, { once: true });
   });

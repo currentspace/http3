@@ -9,6 +9,7 @@ export declare class NativeMockQuicProfiler {
 export declare class NativeQuicClient {
   constructor(options: JsQuicClientOptions, callback: (err: Error | null, events: Array<JsH3Event>) => void)
   connect(serverAddr: string, serverName: string): JsAddressInfo
+  openStream(): number
   streamSend(streamId: number, data: Buffer, fin: boolean): boolean
   streamClose(streamId: number, errorCode: number): boolean
   close(errorCode: number, reason: string): boolean
@@ -157,6 +158,7 @@ export interface JsEventMeta {
   syscall?: string
   peerCertificatePresented?: boolean
   peerCertificateChain?: Array<ByteBuf>
+  durationMs?: number
 }
 
 export interface JsH3Event {
@@ -366,6 +368,15 @@ export interface JsReactorTelemetrySnapshot {
   pendingWriteCopiedBytes: number
   pendingWriteTailAllocations: number
   pendingWriteGrowthReallocations: number
+  outboundIngressBufferReuses: number
+  outboundIngressBufferAllocations: number
+  outboundIngressCopiedBytes: number
+  outboundStreamJsAdmittedBytesTotal: number
+  outboundStreamJsAdmittedWritesTotal: number
+  outboundCommandQueuedBytes: number
+  outboundCommandQueuedBytesHighWatermark: number
+  outboundPendingWriteBytes: number
+  outboundPendingWriteBytesHighWatermark: number
   txBuffersRecycled: number
 }
 

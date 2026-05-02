@@ -7,10 +7,13 @@ import {
   type BackpressureState,
   createBackpressureState,
   ensureBackpressureState,
+  createNativeWriteWindow,
+  completeNativeWrite,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
   rejectDrainCallbacks,
+  rejectNativeWriteWindow,
 } from './stream-backpressure.js';
 
 /**
@@ -40,6 +43,48 @@ function firstHeaderValue(value: string | string[]): string {
   return Array.isArray(value) ? value[0] : value;
 }
 
+/** @internal Append a header value while preserving duplicate field lines. */
+export function appendIncomingHeader(headers: IncomingHeaders, name: string, value: string): void {
+  if (!Object.prototype.hasOwnProperty.call(headers, name)) {
+    headers[name] = value;
+    return;
+  }
+  const current = headers[name];
+  if (Array.isArray(current)) {
+    current.push(value);
+    return;
+  }
+  headers[name] = [current, value];
+}
+
+/** @internal Convert native header pairs to an `IncomingHeaders` map. */
+export function nativeHeadersToIncomingHeaders(
+  headers: Array<{ name: string; value: string }>,
+): IncomingHeaders {
+  const out: IncomingHeaders = {};
+  for (const header of headers) {
+    appendIncomingHeader(out, header.name, header.value);
+  }
+  return out;
+}
+
+/** @internal Convert `IncomingHeaders` into native header pairs, preserving arrays. */
+export function incomingHeadersToNativeHeaders(
+  headers: IncomingHeaders,
+): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  for (const [name, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        out.push({ name, value: item });
+      }
+      continue;
+    }
+    out.push({ name, value });
+  }
+  return out;
+}
+
 /** @internal Convert node:http2 incoming headers to the flat `IncomingHeaders` map. */
 export function normalizeIncomingHeaders(headers: IncomingHttpHeaders): IncomingHeaders {
   const normalized: IncomingHeaders = {};
@@ -64,7 +109,7 @@ export function toHttp2OutgoingHeaders(headers: IncomingHeaders): OutgoingHttpHe
       out[name] = Number.isFinite(status) ? status : 200;
       continue;
     }
-    out[name] = singleValue;
+    out[name] = value;
   }
   return out;
 }
@@ -113,6 +158,7 @@ export class ServerHttp3Stream extends Duplex {
    */
   _blocked = false;
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
+  /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
 
@@ -131,10 +177,7 @@ export class ServerHttp3Stream extends Duplex {
     if (this._headersSent) return;
     this._headersSent = true;
 
-    const h = Object.entries(headers).map(([name, value]) => ({
-      name,
-      value: Array.isArray(value) ? value[0] : value,
-    }));
+    const h = incomingHeadersToNativeHeaders(headers);
     // Audit finding #17: auto-inject :status: 200 when the caller didn't
     // supply one. Brings H3 to parity with the H2 adapter (which already
     // defaults to 200 in toHttp2OutgoingHeaders) and avoids a quiche-
@@ -162,10 +205,7 @@ export class ServerHttp3Stream extends Duplex {
     this._headersSent = true;
     this._finSent = true;
 
-    const h = Object.entries(headers).map(([name, value]) => ({
-      name,
-      value: Array.isArray(value) ? value[0] : value,
-    }));
+    const h = incomingHeadersToNativeHeaders(headers);
     if (!h.some((entry) => entry.name === ':status')) {
       h.unshift({ name: ':status', value: '200' });
     }
@@ -186,10 +226,7 @@ export class ServerHttp3Stream extends Duplex {
 
   /** Send trailing headers after the response body is complete. */
   sendTrailers(trailers: IncomingHeaders): void {
-    const h = Object.entries(trailers).map(([name, value]) => ({
-      name,
-      value: Array.isArray(value) ? value[0] : value,
-    }));
+    const h = incomingHeadersToNativeHeaders(trailers);
     this._eventLoop?.sendTrailers(this._connHandle, this._streamId, h);
   }
 
@@ -276,7 +313,7 @@ export class ServerHttp3Stream extends Duplex {
     ) ?? 0;
 
     if (written >= chunk.length) {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
       // Partial write or fully blocked — retry remainder on drain. If the
       // stream closes before drain, the closure is invoked with an Error
@@ -332,7 +369,7 @@ export class ServerHttp3Stream extends Duplex {
         settle();
       });
     } else {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     }
   }
 
@@ -358,6 +395,7 @@ export class ServerHttp3Stream extends Duplex {
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
+    rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     this._clearTimeout();
     callback(error);
   }
@@ -389,6 +427,7 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _eventLoop: ClientEventLoop | null = null;
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
+  /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
   /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
@@ -474,7 +513,7 @@ export class ClientHttp3Stream extends Duplex {
     }
     const written = this._eventLoop?.streamSend(this._streamId, chunk, false) ?? 0;
     if (written >= chunk.length) {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
       const remaining = chunk.subarray(written);
       this._bp = ensureBackpressureState(this._bp);
@@ -514,7 +553,7 @@ export class ClientHttp3Stream extends Duplex {
         settle();
       });
     } else {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     }
   }
 
@@ -540,6 +579,7 @@ export class ClientHttp3Stream extends Duplex {
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
+    rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     this._clearTimeout();
     callback(error);
   }

@@ -18,6 +18,7 @@ pub struct NativeQuicServer {
     /// Kept alive so the TSFN reference count stays > 0 while the worker
     /// thread is shutting down, ensuring pending callbacks are delivered.
     tsfn: Option<Arc<crate::worker::EventTsfn>>,
+    stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress,
 }
 
 #[napi]
@@ -50,6 +51,7 @@ impl NativeQuicServer {
             quiche_config: Some(quiche_config),
             server_config: Some(server_config),
             tsfn: Some(Arc::new(callback)),
+            stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress::new(64),
         })
     }
 
@@ -77,14 +79,13 @@ impl NativeQuicServer {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
 
-        let worker_handle =
-            crate::quic_worker::spawn_quic_server(
-                quiche_config,
-                server_config,
-                addr,
-                Arc::clone(tsfn),
-            )
-            .map_err(napi::Error::from)?;
+        let worker_handle = crate::quic_worker::spawn_quic_server(
+            quiche_config,
+            server_config,
+            addr,
+            Arc::clone(tsfn),
+        )
+        .map_err(napi::Error::from)?;
 
         let local = worker_handle.local_addr();
         self.handle = Some(worker_handle);
@@ -105,12 +106,17 @@ impl NativeQuicServer {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle.send_command(crate::quic_worker::QuicServerCommand::StreamSend {
+        let body_len = data.as_ref().len();
+        let accepted = handle.send_command(crate::quic_worker::QuicServerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            chunk: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
+            chunk: self.stream_ingress_pool.copy_napi_buffer(&data),
             fin,
-        })
+        });
+        if accepted {
+            crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+        }
+        accepted
     }
 
     #[napi]
@@ -143,7 +149,10 @@ impl NativeQuicServer {
             return false;
         };
         handle
-            .send_datagram(conn_handle, data.to_vec())
+            .send_datagram(
+                conn_handle,
+                self.stream_ingress_pool.copy_napi_buffer(&data),
+            )
             .unwrap_or(false)
     }
 

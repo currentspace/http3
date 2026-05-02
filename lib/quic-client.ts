@@ -2,11 +2,12 @@ import { EventEmitter } from 'node:events';
 import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
-import { resolveConnectionEndpoint } from './endpoint.js';
+import { abortSignalError, resolveConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
 import { ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
+import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
 
@@ -99,9 +100,12 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
     await Promise.resolve();
   }
 
+  openStream(): number {
+    return this.worker.openStream();
+  }
+
   streamSend(streamId: number, data: Buffer, fin: boolean): number {
-    this.worker.streamSend(streamId, data, fin);
-    return Math.max(data.length, fin ? 1 : 0);
+    return this.worker.streamSend(streamId, data, fin) ? Math.max(data.length, fin ? 1 : 0) : 0;
   }
 
   streamClose(streamId: number, errorCode: number): boolean {
@@ -124,7 +128,7 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
     return this.worker.ping();
   }
 
-  async close(): Promise<void> {
+  async close(errorCode = 0, reason = 'client close'): Promise<void> {
     if (this.closed) return;
     this.closed = true;
 
@@ -134,7 +138,7 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
           this._shutdownResolve = resolve;
         });
 
-    this.worker.close(0, 'client close');
+    this.worker.close(errorCode, reason);
     this.worker.requestShutdown();
 
     const timer = new Promise<void>((resolve) => {
@@ -153,7 +157,7 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
 export interface QuicClientSession {
   on(event: 'connect', listener: () => void): this;
   on(event: 'stream', listener: (stream: QuicStream) => void): this;
-  on(event: 'close', listener: () => void): this;
+  on(event: 'close', listener: (info: SessionCloseInfo) => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: 'sessionTicket', listener: (ticket: Buffer) => void): this;
@@ -179,7 +183,9 @@ export class QuicClientSession extends EventEmitter {
   private readonly _readyPromise: Promise<void>;
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
-  private _nextBidiStreamId = 0; // Client-initiated bidi: 0, 4, 8, ...
+  private _connectAbortCleanup: (() => void) | null = null;
+  private _closeEmitted = false;
+  private _closeInfo: SessionCloseInfo | null = null;
 
   constructor() {
     super();
@@ -220,8 +226,7 @@ export class QuicClientSession extends EventEmitter {
     if (!this._eventLoop) {
       throw new Error('QUIC session not connected');
     }
-    const streamId = this._nextBidiStreamId;
-    this._nextBidiStreamId += 4;
+    const streamId = this._eventLoop.openStream();
     const hwm = this._streams.size < 100 ? 256 * 1024 : 16 * 1024;
     const stream = new QuicStream({ highWaterMark: hwm });
     stream._streamId = streamId;
@@ -258,21 +263,47 @@ export class QuicClientSession extends EventEmitter {
   // Raw QUIC has no HTTP/3 SETTINGS frames; intentionally no getRemoteSettings().
 
   /** Close the session and destroy all streams. */
-  async close(): Promise<void> {
+  async close(errorCode = 0, reason = 'client close'): Promise<void> {
     this._closeRequested = true;
     if (!this._handshakeComplete) {
       this._markReadyError(new Error('session closed before handshake'));
     }
     this._cleanupStreams();
     if (this._eventLoop) {
-      await this._eventLoop.close();
+      await this._eventLoop.close(errorCode, reason);
       this._eventLoop = null;
     }
+    this._emitClose({ errorCode, reason });
   }
 
   /** @internal */
   _setEventLoop(loop_: QuicClientEventLoop | null): void {
     this._eventLoop = loop_;
+  }
+
+  /** @internal */
+  _setConnectAbortCleanup(cleanup: (() => void) | null): void {
+    this._connectAbortCleanup?.();
+    this._connectAbortCleanup = cleanup;
+  }
+
+  /** @internal */
+  _abortConnect(err: Error): void {
+    this._closeRequested = true;
+    this._markReadyError(err);
+    this._cleanupStreams();
+    const loop_ = this._eventLoop;
+    this._eventLoop = null;
+    if (loop_) {
+      void (async (): Promise<void> => {
+        try {
+          await loop_.close();
+        } catch {
+          /* best-effort abort cleanup */
+        }
+      })();
+    }
+    this._emitSessionError(err);
   }
 
   /** @internal */
@@ -299,7 +330,7 @@ export class QuicClientSession extends EventEmitter {
             this._markReadyError(new Error('session closed before handshake'));
           }
           this._cleanupStreams();
-          this.emit('close');
+          this._emitClose(sessionCloseInfoFromEvent(event));
           break;
         case EVENT_DRAIN:
           this._onDrain(event);
@@ -430,6 +461,13 @@ export class QuicClientSession extends EventEmitter {
     this._streams.clear();
   }
 
+  private _emitClose(info: SessionCloseInfo = defaultSessionCloseInfo()): void {
+    this._closeInfo = info;
+    if (this._closeEmitted) return;
+    this._closeEmitted = true;
+    this.emit('close', info);
+  }
+
   private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
     stream.once('close', () => {
       if (this._streams.get(streamId) === stream) {
@@ -455,6 +493,7 @@ export class QuicClientSession extends EventEmitter {
 
   private _markReady(): void {
     if (this._readySettled) return;
+    this._setConnectAbortCleanup(null);
     if (this._readyHandle) {
       clearImmediate(this._readyHandle);
       this._readyHandle = null;
@@ -468,6 +507,7 @@ export class QuicClientSession extends EventEmitter {
   /** @internal */
   _markReadyError(err: Error): void {
     if (this._readySettled) return;
+    this._setConnectAbortCleanup(null);
     if (this._readyHandle) {
       clearImmediate(this._readyHandle);
       this._readyHandle = null;
@@ -560,6 +600,27 @@ function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
   return NativeQuicClient;
 }
 
+function installQuicConnectAbortHandler(
+  session: QuicClientSession,
+  signal: AbortSignal | undefined,
+): void {
+  if (!signal) return;
+
+  const onAbort = (): void => {
+    session._abortConnect(abortSignalError(signal));
+  };
+
+  if (signal.aborted) {
+    onAbort();
+    return;
+  }
+
+  signal.addEventListener('abort', onAbort, { once: true });
+  session._setConnectAbortCleanup(() => {
+    signal.removeEventListener('abort', onAbort);
+  });
+}
+
 /**
  * Connect to a raw QUIC server and return a session immediately.
  *
@@ -586,6 +647,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
   setPendingRuntimeInfo(session, options);
   const NativeQuicClient = getNativeQuicClientConstructor();
   const shouldAbortConnect = (): boolean => session._closeRequested;
+  installQuicConnectAbortHandler(session, options?.signal);
 
   void (async (): Promise<void> => {
     try {

@@ -6,8 +6,17 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Http2ServerSessionAdapter, Http3ServerSession } from './session.js';
-import { ServerHttp2StreamAdapter, ServerHttp3Stream, normalizeIncomingHeaders } from './stream.js';
+import {
+  Http2ServerSessionAdapter,
+  Http3ServerSession,
+  sessionCloseInfoFromEvent,
+} from './session.js';
+import {
+  ServerHttp2StreamAdapter,
+  ServerHttp3Stream,
+  nativeHeadersToIncomingHeaders,
+  normalizeIncomingHeaders,
+} from './stream.js';
 import type { IncomingHeaders, StreamFlags } from './stream.js';
 import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from './event-loop.js';
@@ -35,6 +44,7 @@ const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
 const EVENT_STREAM_BLOCKED = 16;
+const EVENT_PING_ACK = 17;
 
 /** TLS credential options accepted by the server. */
 export interface TlsOptions {
@@ -357,6 +367,9 @@ export class Http3SecureServer extends EventEmitter {
         case EVENT_DATAGRAM:
           this._onDatagram(event);
           break;
+        case EVENT_PING_ACK:
+          this._onPingAck(event);
+          break;
         default:
           break;
       }
@@ -562,7 +575,7 @@ export class Http3SecureServer extends EventEmitter {
     for (const [h2Session, session] of this._h2Sessions) {
       this._destroyH2SessionStreams(h2Session);
       h2Session.destroy();
-      session.emit('close');
+      session._emitClose();
     }
     this._h2Sessions.clear();
   }
@@ -678,10 +691,7 @@ export class Http3SecureServer extends EventEmitter {
     const existing = this._streams.get(streamKey);
     if (existing) {
       // Duplicate headers on the same stream — these are trailers
-      const trailers: IncomingHeaders = {};
-      for (const h of event.headers) {
-        trailers[h.name] = h.value;
-      }
+      const trailers = nativeHeadersToIncomingHeaders(event.headers);
       existing.emit('trailers', trailers);
       return;
     }
@@ -693,10 +703,7 @@ export class Http3SecureServer extends EventEmitter {
     stream._eventLoop = this._eventLoop;
     this._streams.set(streamKey, stream);
 
-    const headers: IncomingHeaders = {};
-    for (const h of event.headers) {
-      headers[h.name] = h.value;
-    }
+    const headers = nativeHeadersToIncomingHeaders(event.headers);
 
     const flags: StreamFlags = { endStream: event.fin ?? false };
     this.emit('stream', stream, headers, flags);
@@ -748,7 +755,8 @@ export class Http3SecureServer extends EventEmitter {
     if (session) {
       session._stopMetricsEmitter();
       session._stopKeylogEmitter();
-      session.emit('close');
+      session._rejectPendingPings(new Error('session closed'));
+      session._emitClose(sessionCloseInfoFromEvent(event));
       this._sessions.delete(event.connHandle);
     }
     // Clean up any streams belonging to this session
@@ -784,7 +792,7 @@ export class Http3SecureServer extends EventEmitter {
   private _onGoaway(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
     if (session) {
-      session.emit('goaway');
+      session.emit('goaway', { lastStreamId: event.streamId });
     }
   }
 
@@ -810,6 +818,13 @@ export class Http3SecureServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (session) {
       session.emit('datagram', event.data);
+    }
+  }
+
+  private _onPingAck(event: NativeEvent): void {
+    const session = this._sessions.get(event.connHandle);
+    if (session) {
+      session._onPingAck(event.meta?.durationMs ?? 0);
     }
   }
 }

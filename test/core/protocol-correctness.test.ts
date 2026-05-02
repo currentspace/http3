@@ -75,22 +75,43 @@ describe('Protocol correctness regressions', () => {
 
       await waitFor(() => serverSession !== null, 2000);
       const events: string[] = [];
-      client.on('goaway', () => { events.push('goaway'); });
-      client.on('close', () => { events.push('close'); });
+      let goawayInfo: { lastStreamId: number } | null = null;
+      let closeInfo: { errorCode: number; reason: string } | null = null;
+      client.on('goaway', (info) => {
+        goawayInfo = info;
+        events.push('goaway');
+      });
+      client.on('close', (info) => {
+        closeInfo = info;
+        events.push('close');
+      });
 
-      const activeSession = serverSession as { close: (code?: number) => Promise<void> };
+      const activeSession = serverSession as { close: (code?: number, reason?: string) => Promise<void> };
       await withLifecycleTimeout(
-        activeSession.close(0),
+        activeSession.close(42, 'planned drain'),
         5000,
         'protocol-correctness/server-session-close',
       );
       await waitFor(() => events.includes('goaway'), 7000);
+      assert.deepStrictEqual(goawayInfo, { lastStreamId: 0 });
+      assert.throws(() => {
+        client.request({
+          ':method': 'GET',
+          ':path': '/after-goaway',
+          ':authority': 'localhost',
+          ':scheme': 'https',
+        }, { endStream: true });
+      }, (error: unknown) => {
+        return error instanceof Error
+          && 'code' in error
+          && (error as { code?: string }).code === 'ERR_HTTP3_GOAWAY';
+      });
+      await waitFor(() => events.includes('close'), 7000);
+      assert.deepStrictEqual(closeInfo, { errorCode: 42, reason: 'planned drain' });
 
       const goawayIdx = events.indexOf('goaway');
       const closeIdx = events.indexOf('close');
-      if (closeIdx >= 0) {
-        assert.ok(goawayIdx >= 0 && goawayIdx < closeIdx, 'GOAWAY should arrive before close');
-      }
+      assert.ok(goawayIdx >= 0 && goawayIdx < closeIdx, 'GOAWAY should arrive before close');
 
       await withLifecycleTimeout(client.close(), 3000, 'protocol-correctness/client-close');
       await withLifecycleTimeout(server.close(), 3000, 'protocol-correctness/server-close');

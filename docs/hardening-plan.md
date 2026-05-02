@@ -16,6 +16,36 @@
 - Every commit gates on: `pnpm run lint`, `pnpm run typecheck`, `cargo clippy --lib`, `cargo clippy --tests --features bench-internals`, plus the focused tests called out in the task
 - Mark task done only when all observables are green and success criteria met
 
+## Completion status
+
+**Last updated:** 2026-05-01. The sprint checklist is closed. Items that
+require performance evidence are explicitly deferred behind the benchmark gates
+called out below rather than implemented speculatively.
+
+| ID | Status | Evidence |
+|---|---|---|
+| P1-A | Complete | H3 worker send paths use `send_body_owned`; pending tails are retained as owned `PendingWrite` data. |
+| P1-B | Complete | `io_uring` RX buffer IDs are guarded by a release assert and out-of-range CQE diagnostics. |
+| P1-C | Complete | `RecyclableBuffer` has cfg-test forced external-buffer failure coverage for direct reclaim of NAPI-owned hints. |
+| P1-D | Complete | `session.ping(cb?)` overloads and HTTP/2 parity forwarding are covered by `test/core/session-ping.test.ts`. |
+| P1-E | Complete | H3 and raw QUIC stream-close dispatch purges pending writes and emits reset/error events for abandoned tails. |
+| P1-F | Complete | Event-batch RX pause now has stuck-gauge self-healing telemetry and tests in `src/reactor_metrics.rs`. |
+| P1-G | Complete | Shared raw QUIC and shared H3 client reactors honor `RX_PAUSE_HIGH_WATER`. |
+| P1-H | Complete | Previously silent stream close/trailer/send failures log debug diagnostics with stream and connection context. |
+| P2-A | Complete | `.github/workflows/ci.yml` contains the privileged `runtime-io-uring` CI lane. |
+| P2-B | Complete | `test/interop/stream-reset.test.ts` covers stream cancellation behavior. |
+| P2-C | Complete | `fuzz/fuzz_targets/parse_recv_cmsgs.rs` and `fuzz/Cargo.toml` provide the cmsg fuzz target. |
+| P2-D | Complete | `EventBatcher::collect_atomic` preserves per-connection atomic event groups and has regression coverage. |
+| P2-E | Complete | Longhaul suites assert bounded post-warmup RSS and heap drift through `assertMemoryDriftWithinLimit`. |
+| P2-F | Complete | Raw QUIC APIs intentionally omit `getRemoteSettings()`; the decision is documented in API and session code. |
+| P2-G | Complete | Raw QUIC send paths move chunk ownership into `QuicConnection::stream_send` without an extra borrowed-copy step. |
+| P2-H | Complete | Raw QUIC outbound DATAGRAMs use a bounded retry queue and expose `datagramQueueDepth`. |
+| P3-A | Deferred by benchmark gate | Native outbound buffer pinning remains gated by `docs/NATIVE_WRITE_LEASE_RESEARCH.md` and `docs/PERF_PROFILING.md`; no implementation without repeatable throughput/allocation evidence. |
+| P3-B | Deferred by benchmark gate | JS-side QPACK pre-encode remains gated by header-heavy benchmark evidence in `docs/PERF_PROFILING.md`. |
+| P3-C | Complete | `.github/workflows/verify.yml` adds the macOS kqueue matrix on `macos-13` and `macos-14`. |
+| P3-D | Complete | `tests/buffer_recycler_loom.rs` models the BufferRecycler return/drop ownership invariant under loom. |
+| P3-E | Complete | `docs/PROTOCOL_FEATURE_STATUS.md` records supported, experimental, and deferred protocol features. |
+
 ---
 
 ## Phase 1 — This sprint (high ROI, low risk)

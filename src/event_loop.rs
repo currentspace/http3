@@ -5,6 +5,8 @@
 //! lives in the [`ProtocolHandler`] implementations; platform I/O lives in the
 //! [`Driver`](crate::transport::Driver) implementations.
 
+#![deny(unsafe_code)]
+
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{
@@ -71,6 +73,8 @@ impl EventBatcherStatsHandle {
         self.inner
             .max_batch_size
             .fetch_max(count, Ordering::Relaxed);
+        #[cfg(test)]
+        let _metrics_guard = reactor_metrics::test_metrics_guard();
         reactor_metrics::record_event_batch_flush(count);
     }
 
@@ -78,11 +82,15 @@ impl EventBatcherStatsHandle {
         self.inner
             .dropped_events
             .fetch_add(count as u64, Ordering::Relaxed);
+        #[cfg(test)]
+        let _metrics_guard = reactor_metrics::test_metrics_guard();
         reactor_metrics::record_event_batch_drop(count);
     }
 
     pub(crate) fn record_sink_error(&self) {
         self.inner.sink_errors.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        let _metrics_guard = reactor_metrics::test_metrics_guard();
         reactor_metrics::record_event_batch_sink_error();
     }
 
@@ -1154,6 +1162,27 @@ mod tests {
 
         let delivered = log.lock().unwrap();
         assert_eq!(delivered.as_slice(), &[MAX_BATCH_SIZE + 1]);
+    }
+
+    #[test]
+    fn test_collect_atomic_returns_false_when_preflush_closes() {
+        let sink = CaptureSink::closing();
+        let mut batcher = EventBatcher::with_sink(sink);
+
+        for _ in 0..MAX_BATCH_SIZE {
+            batcher.batch.push(dummy_event());
+        }
+
+        let ok = batcher.collect_atomic(|batch| {
+            batch.push(typed_event(crate::h3_event::EVENT_HEADERS, 7, 11));
+            batch.push(typed_event(crate::h3_event::EVENT_DATA, 7, 11));
+        });
+
+        assert!(!ok, "collect_atomic should surface sink closure");
+        assert!(
+            batcher.batch.is_empty(),
+            "pre-flush failure should not append the atomic group"
+        );
     }
 
     #[test]

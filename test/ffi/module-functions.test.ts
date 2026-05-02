@@ -42,6 +42,9 @@ describe('FFI module functions', () => {
         'workerThreadSpawnsTotal',
         'shutdownCompleteEmittedTotal',
         'eventBatchFlushesTotal',
+        'outboundStreamJsAdmittedBytesTotal',
+        'outboundCommandQueuedBytes',
+        'outboundPendingWriteBytes',
       ]) {
         assert.ok(key in snap, `telemetry should contain "${key}"`);
         assert.strictEqual(typeof snap[key], 'number', `"${key}" should be a number`);
@@ -55,6 +58,9 @@ describe('FFI module functions', () => {
       assert.strictEqual(snap.workerThreadSpawnsTotal, 0);
       assert.strictEqual(snap.shutdownCompleteEmittedTotal, 0);
       assert.strictEqual(snap.eventBatchFlushesTotal, 0);
+      assert.strictEqual(snap.outboundStreamJsAdmittedBytesTotal, 0);
+      assert.strictEqual(snap.outboundCommandQueuedBytes, 0);
+      assert.strictEqual(snap.outboundPendingWriteBytes, 0);
     });
 
     it('counters increment after server creation', () => {

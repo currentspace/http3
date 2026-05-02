@@ -309,6 +309,22 @@ Do not promote new benchmark gates into CI until these conditions hold:
 - macOS comparisons are judged by topology and backlog behavior, not by trying
   to imitate `io_uring` internals.
 
+## Benchmark-gated backlog decisions
+
+The hardening backlog has two performance-only ideas that should stay deferred
+until the benchmark artifacts above justify the added complexity:
+
+- Native outbound buffer pinning: do not implement NAPI `Reference<Buffer>`
+  pinning unless the comparison matrix in
+  [`NATIVE_WRITE_LEASE_RESEARCH.md`](./NATIVE_WRITE_LEASE_RESEARCH.md) shows a
+  repeatable bottleneck after the current owned-send and chunk-pool paths.
+  Required evidence is at least three comparable samples showing meaningful
+  throughput or allocation wins without worse p95/p99 latency.
+- JS-side QPACK pre-encode: do not implement a JavaScript header pre-encoding
+  path unless header-heavy workloads show worker-thread header conversion or
+  allocation as the limiting factor. Use small-request, gRPC-style, and
+  high-cardinality-header profiles before promoting this from backlog to design.
+
 Investigate before accepting a new baseline when any like-for-like group shows:
 
 - throughput regression greater than about 10%

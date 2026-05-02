@@ -63,6 +63,14 @@ The diagnostic lanes are still important for transport debugging and publish
 readiness, but they are intentionally not wired into the default CI bundle until
 their environment sensitivity is worth the extra runtime.
 
+## Untested or deferred protocol features
+
+Feature-level support status is tracked in
+[`PROTOCOL_FEATURE_STATUS.md`](./PROTOCOL_FEATURE_STATUS.md). Use that document
+to distinguish intentional deferrals such as NAT rebinding, active connection
+migration, QUIC version negotiation, and production-grade 0-RTT data validation
+from accidental test gaps.
+
 ## CI gating policy
 
 - PR/push gates:
@@ -72,6 +80,7 @@ their environment sensitivity is worth the extra runtime.
   - `npm test`
   - browser compatibility smoke
   - Linux arm64 Docker runtime matrix
+  - macOS kqueue matrix on `macos-13` and `macos-14`
   - concurrency/load smoke
   - packed-install smoke
   - TypeScript interop workflow
@@ -93,4 +102,3 @@ is tracked in [`LIFECYCLE_VALIDATION_CHECKLIST.md`](./LIFECYCLE_VALIDATION_CHECK
 Use that checklist as the source of truth for shutdown ordering, GOAWAY/close,
 raw QUIC active-stream teardown, durable tracing, and representative
 driver/bridge validation work.
-

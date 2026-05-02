@@ -3,11 +3,30 @@
 //! `ArcBuf` wraps an `Arc<Vec<u8>>` with offset/len, allowing quiche to
 //! split and clone buffers without copying the underlying data.
 
+#![deny(unsafe_code)]
+
 use std::fmt;
 use std::sync::Arc;
 
 use quiche::BufFactory;
 use quiche::BufSplit;
+
+use crate::chunk_pool::{Chunk, ChunkPoolReturn};
+
+struct ArcBufInner {
+    data: Vec<u8>,
+    pool_return: Option<Arc<ChunkPoolReturn>>,
+}
+
+impl Drop for ArcBufInner {
+    fn drop(&mut self) {
+        if let Some(ret) = self.pool_return.take() {
+            let mut data = std::mem::take(&mut self.data);
+            data.clear();
+            ret.send(data);
+        }
+    }
+}
 
 /// A reference-counted byte buffer that supports zero-copy splitting.
 ///
@@ -15,7 +34,7 @@ use quiche::BufSplit;
 /// so `clone()` and `split_at()` share the backing allocation.
 #[derive(Clone)]
 pub struct ArcBuf {
-    data: Arc<Vec<u8>>,
+    data: Arc<ArcBufInner>,
     offset: usize,
     len: usize,
 }
@@ -25,10 +44,56 @@ impl ArcBuf {
     pub fn from_vec(v: Vec<u8>) -> Self {
         let len = v.len();
         Self {
-            data: Arc::new(v),
+            data: Arc::new(ArcBufInner {
+                data: v,
+                pool_return: None,
+            }),
             offset: 0,
             len,
         }
+    }
+
+    /// Create an `ArcBuf` from a pooled outbound chunk without copying.
+    ///
+    /// The chunk's backing allocation is returned to the chunk pool when the
+    /// last cloned/split `ArcBuf` handle is dropped.
+    pub fn from_chunk(chunk: Chunk) -> Self {
+        let (data, offset, pool_return) = chunk.into_raw_parts();
+        let len = data.len().saturating_sub(offset);
+        Self {
+            data: Arc::new(ArcBufInner { data, pool_return }),
+            offset,
+            len,
+        }
+    }
+
+    pub fn remaining_len(&self) -> usize {
+        self.len
+    }
+
+    /// Consume the buffer into an owned Vec when this handle owns the full
+    /// allocation uniquely; otherwise copy just the visible window.
+    pub fn into_vec(self) -> Vec<u8> {
+        let offset = self.offset;
+        let len = self.len;
+
+        if offset != 0 || len != self.data.data.len() {
+            return self.as_ref().to_vec();
+        }
+
+        match Arc::try_unwrap(self.data) {
+            Ok(mut inner) => {
+                inner.pool_return = None;
+                std::mem::take(&mut inner.data)
+            }
+            Err(data) => data.data[offset..offset + len].to_vec(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for ArcBuf {
+    fn from(value: Vec<u8>) -> Self {
+        Self::from_vec(value)
     }
 }
 
@@ -44,7 +109,7 @@ impl fmt::Debug for ArcBuf {
 
 impl AsRef<[u8]> for ArcBuf {
     fn as_ref(&self) -> &[u8] {
-        &self.data[self.offset..self.offset + self.len]
+        &self.data.data[self.offset..self.offset + self.len]
     }
 }
 
@@ -78,7 +143,7 @@ impl BufSplit for ArcBuf {
             return false;
         };
         let new_offset = self.offset - prefix_len;
-        vec[new_offset..self.offset].copy_from_slice(prefix);
+        vec.data[new_offset..self.offset].copy_from_slice(prefix);
         self.offset = new_offset;
         self.len += prefix_len;
         true
@@ -92,16 +157,16 @@ pub struct ArcBufFactory;
 impl BufFactory for ArcBufFactory {
     type Buf = ArcBuf;
     /// quiche 0.28 introduced a separate datagram-buffer associated type;
-    /// `Vec<u8>` already satisfies the `AsRef<[u8]> + From<Vec<u8>>`
-    /// bound and matches the dgram path's existing single-shot semantics.
-    type DgramBuf = Vec<u8>;
+    /// use `ArcBuf` here as well so DATAGRAM sends can retain pooled N-API
+    /// ingress buffers until quiche has consumed them.
+    type DgramBuf = ArcBuf;
 
     fn buf_from_slice(buf: &[u8]) -> Self::Buf {
         ArcBuf::from_vec(buf.to_vec())
     }
 
     fn dgram_buf_from_slice(buf: &[u8]) -> Self::DgramBuf {
-        buf.to_vec()
+        ArcBuf::from_vec(buf.to_vec())
     }
 }
 
@@ -114,6 +179,20 @@ mod tests {
         let data = vec![1, 2, 3, 4, 5];
         let buf = ArcBuf::from_vec(data.clone());
         assert_eq!(buf.as_ref(), &data[..]);
+    }
+
+    #[test]
+    fn into_vec_avoids_copy_for_unique_full_window() {
+        let data = vec![1, 2, 3, 4];
+        let buf = ArcBuf::from_vec(data.clone());
+        assert_eq!(buf.into_vec(), data);
+    }
+
+    #[test]
+    fn into_vec_copies_visible_window_for_split_buffer() {
+        let mut buf = ArcBuf::from_vec(vec![1, 2, 3, 4]);
+        let tail = buf.split_at(2);
+        assert_eq!(tail.into_vec(), vec![3, 4]);
     }
 
     #[test]

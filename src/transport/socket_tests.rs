@@ -220,7 +220,9 @@ mod tests {
 
     #[test]
     fn enable_gro_cross_thread_recvmmsg() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender.set_nonblocking(true).unwrap();
@@ -951,7 +953,9 @@ mod tests {
 
     #[test]
     fn iouring_driver_gso_roundtrip() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1015,7 +1019,9 @@ mod tests {
     /// parse — causing stream timeouts in the QUIC benchmark.
     #[test]
     fn iouring_driver_gro_cmsg_with_quic_sized_packets() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1086,7 +1092,9 @@ mod tests {
 
     #[test]
     fn iouring_driver_gso_multi_round() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1141,7 +1149,9 @@ mod tests {
     /// in the SQ ring, invisible to the kernel until the next poll().
     #[test]
     fn iouring_driver_rapid_submit_sends_no_poll() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1205,7 +1215,9 @@ mod tests {
     /// unflushed SQEs, stuck completions, or poll/submit ordering issues.
     #[test]
     fn iouring_driver_bidirectional_echo() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1333,7 +1345,9 @@ mod tests {
     /// Uses QUIC-sized packets (1200B) and a realistic connection count.
     #[test]
     fn iouring_driver_echo_at_scale() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1488,7 +1502,9 @@ mod tests {
     /// drains, packets drop and the echo never completes.
     #[test]
     fn iouring_driver_cross_thread_echo() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1627,7 +1643,9 @@ mod tests {
 
     #[test]
     fn iouring_driver_bounded_tier2_progress_under_saturation() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1740,7 +1758,9 @@ mod tests {
     /// is blocking (unflushed SQEs, stuck completions, etc).
     #[test]
     fn iouring_driver_no_latency_spikes() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};
@@ -1820,7 +1840,9 @@ mod tests {
     /// Verifies no packet loss or stalls under sustained load.
     #[test]
     fn iouring_driver_stress_multi_round() {
-        let _serial = io_uring_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = io_uring_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         skip_unless_io_uring!();
         use crate::transport::io_uring::IoUringDriver;
         use crate::transport::{Driver, TxDatagram};

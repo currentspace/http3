@@ -67,6 +67,7 @@ mio = { version = "1", features = ["os-poll", "net"] }
 rcgen = "0.14"
 criterion = { version = "0.8", features = ["html_reports"] }
 env_logger = "0.11"
+loom = "0.7"
 
 [[bench]]
 name = "driver_udp"
