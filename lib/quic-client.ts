@@ -2,9 +2,9 @@ import { EventEmitter } from 'node:events';
 import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
-import { abortSignalError, resolveConnectionEndpoint } from './endpoint.js';
+import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
-import { ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
+import { ERR_HTTP3_INVALID_STATE, ERR_HTTP3_SESSION_ERROR, ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
 import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
@@ -18,6 +18,7 @@ const EVENT_RESET = 6;
 const EVENT_SESSION_CLOSE = 7;
 const EVENT_DRAIN = 8;
 const EVENT_STREAM_BLOCKED = 16;
+const EVENT_WRITE_READY = 18;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_SESSION_TICKET = 12;
@@ -47,6 +48,8 @@ export interface QuicConnectOptions {
   servername?: string;
   /** Idle timeout in milliseconds. Default: 30_000. */
   maxIdleTimeoutMs?: number;
+  /** Maximum time to wait for QUIC/TLS handshake completion. Default: 30_000; 0 disables. */
+  connectTimeoutMs?: number;
   /** Maximum UDP payload size. Default: 1350. */
   maxUdpPayloadSize?: number;
   /** Connection-level flow control window. Default: 100_000_000 bytes. */
@@ -142,7 +145,7 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
     this.worker.requestShutdown();
 
     const timer = new Promise<void>((resolve) => {
-      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS).unref();
+      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
     });
     await Promise.race([sentinel, timer]);
     this._shutdownResolve = null;
@@ -184,6 +187,7 @@ export class QuicClientSession extends EventEmitter {
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
   private _connectAbortCleanup: (() => void) | null = null;
+  private _connectTimer: NodeJS.Timeout | null = null;
   private _closeEmitted = false;
   private _closeInfo: SessionCloseInfo | null = null;
 
@@ -265,6 +269,7 @@ export class QuicClientSession extends EventEmitter {
   /** Close the session and destroy all streams. */
   async close(errorCode = 0, reason = 'client close'): Promise<void> {
     this._closeRequested = true;
+    this._clearConnectTimer();
     if (!this._handshakeComplete) {
       this._markReadyError(new Error('session closed before handshake'));
     }
@@ -288,8 +293,22 @@ export class QuicClientSession extends EventEmitter {
   }
 
   /** @internal */
+  _setConnectTimer(timer: NodeJS.Timeout | null): void {
+    this._clearConnectTimer();
+    this._connectTimer = timer;
+  }
+
+  /** @internal */
+  _clearConnectTimer(): void {
+    if (!this._connectTimer) return;
+    clearTimeout(this._connectTimer);
+    this._connectTimer = null;
+  }
+
+  /** @internal */
   _abortConnect(err: Error): void {
     this._closeRequested = true;
+    this._clearConnectTimer();
     this._markReadyError(err);
     this._cleanupStreams();
     const loop_ = this._eventLoop;
@@ -337,6 +356,9 @@ export class QuicClientSession extends EventEmitter {
           break;
         case EVENT_STREAM_BLOCKED:
           this._onStreamBlocked(event);
+          break;
+        case EVENT_WRITE_READY:
+          this._onWriteReady();
           break;
         case EVENT_ERROR:
           this._onError(event);
@@ -405,6 +427,12 @@ export class QuicClientSession extends EventEmitter {
     const stream = this._streams.get(event.streamId);
     if (stream) {
       stream._onNativeBlocked();
+    }
+  }
+
+  private _onWriteReady(): void {
+    for (const stream of this._streams.values()) {
+      stream._onNativeWriteReady();
     }
   }
 
@@ -493,6 +521,7 @@ export class QuicClientSession extends EventEmitter {
 
   private _markReady(): void {
     if (this._readySettled) return;
+    this._clearConnectTimer();
     this._setConnectAbortCleanup(null);
     if (this._readyHandle) {
       clearImmediate(this._readyHandle);
@@ -507,6 +536,7 @@ export class QuicClientSession extends EventEmitter {
   /** @internal */
   _markReadyError(err: Error): void {
     if (this._readySettled) return;
+    this._clearConnectTimer();
     this._setConnectAbortCleanup(null);
     if (this._readyHandle) {
       clearImmediate(this._readyHandle);
@@ -522,6 +552,14 @@ export class QuicClientSession extends EventEmitter {
 function normalizePem(value?: string | Buffer): Buffer | undefined {
   if (!value) return undefined;
   return typeof value === 'string' ? Buffer.from(value) : value;
+}
+
+function normalizeConnectTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return 30_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Http3Error('connect timeout must be a non-negative finite number', ERR_HTTP3_INVALID_STATE);
+  }
+  return Math.floor(timeoutMs);
 }
 
 function assertPemBlock(field: 'cert' | 'key', value: Buffer): void {
@@ -648,6 +686,23 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
   const NativeQuicClient = getNativeQuicClientConstructor();
   const shouldAbortConnect = (): boolean => session._closeRequested;
   installQuicConnectAbortHandler(session, options?.signal);
+  const authorityString = typeof authority === 'string'
+    ? authority
+    : stringifyConnectionEndpoint(authority);
+  const connectTimeoutMs = normalizeConnectTimeoutMs(options?.connectTimeoutMs);
+  if (connectTimeoutMs > 0) {
+    session._setConnectTimer(setTimeout(() => {
+      if (session._closeRequested) return;
+      session._abortConnect(new Http3Error(
+        `QUIC connect timed out after ${connectTimeoutMs} ms`,
+        ERR_HTTP3_SESSION_ERROR,
+        {
+          reasonCode: 'connect-timeout',
+          endpoint: authorityString,
+        },
+      ));
+    }, connectTimeoutMs));
+  }
 
   void (async (): Promise<void> => {
     try {

@@ -505,12 +505,10 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
-    // Command is queued to worker thread via unbounded channel — always succeeds.
-    // The worker will generate drain events if flow-control blocks at the quiche level.
-    this.worker.streamSend(connHandle, streamId, data, fin);
+    const accepted = this.worker.streamSend(connHandle, streamId, data, fin);
     // When sending FIN with empty data (stream._final), return 1 so the
     // caller knows the command was accepted (0 would look like a block).
-    return Math.max(data.length, fin ? 1 : 0);
+    return accepted ? Math.max(data.length, fin ? 1 : 0) : 0;
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {
@@ -571,7 +569,7 @@ export class WorkerEventLoop implements ServerEventLoopLike {
     this.worker.requestShutdown();
 
     const timer = new Promise<void>((resolve) => {
-      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS).unref();
+      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
     });
     await Promise.race([sentinel, timer]);
     this._shutdownResolve = null;
@@ -616,8 +614,7 @@ export class ClientEventLoop {
   }
 
   streamSend(streamId: number, data: Buffer, fin: boolean): number {
-    this.worker.streamSend(streamId, data, fin);
-    return Math.max(data.length, fin ? 1 : 0);
+    return this.worker.streamSend(streamId, data, fin) ? Math.max(data.length, fin ? 1 : 0) : 0;
   }
 
   streamClose(streamId: number, errorCode: number): boolean {
@@ -667,7 +664,7 @@ export class ClientEventLoop {
     this.worker.requestShutdown();
 
     const timer = new Promise<void>((resolve) => {
-      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS).unref();
+      setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
     });
     await Promise.race([sentinel, timer]);
     this._shutdownResolve = null;

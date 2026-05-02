@@ -31,6 +31,7 @@ use crate::event_loop::{
     self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, RX_PAUSE_HIGH_WATER, SEND_BUF_SIZE,
 };
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
+use crate::outbound_admission::{OutboundAdmission, outbound_payload_units};
 use crate::pending_write::{PendingWrite, PendingWriteSendOutcome, flush_pending_write};
 use crate::reactor_metrics::{self, SessionKind, WorkerSpawnKind};
 use crate::shared_client_reactor;
@@ -128,8 +129,12 @@ where
 
 fn worker_command_outbound_bytes(cmd: &WorkerCommand) -> usize {
     match cmd {
-        WorkerCommand::SendResponse { body, .. } => body.remaining_len(),
-        WorkerCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        WorkerCommand::SendResponse { body, fin, .. } => {
+            outbound_payload_units(body.remaining_len(), *fin)
+        }
+        WorkerCommand::StreamSend { chunk, fin, .. } => {
+            outbound_payload_units(chunk.remaining_len(), *fin)
+        }
         WorkerCommand::SendDatagram { data, .. } => data.remaining_len(),
         _ => 0,
     }
@@ -137,7 +142,9 @@ fn worker_command_outbound_bytes(cmd: &WorkerCommand) -> usize {
 
 fn client_worker_command_outbound_bytes(cmd: &ClientWorkerCommand) -> usize {
     match cmd {
-        ClientWorkerCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        ClientWorkerCommand::StreamSend { chunk, fin, .. } => {
+            outbound_payload_units(chunk.remaining_len(), *fin)
+        }
         ClientWorkerCommand::SendDatagram { data, .. } => data.remaining_len(),
         _ => 0,
     }
@@ -146,7 +153,9 @@ fn client_worker_command_outbound_bytes(cmd: &ClientWorkerCommand) -> usize {
 #[cfg(feature = "node-api")]
 fn shared_client_worker_command_outbound_bytes(cmd: &SharedClientWorkerCommand) -> usize {
     match cmd {
-        SharedClientWorkerCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        SharedClientWorkerCommand::StreamSend { chunk, fin, .. } => {
+            outbound_payload_units(chunk.remaining_len(), *fin)
+        }
         SharedClientWorkerCommand::SendDatagram { data, .. } => data.remaining_len(),
         _ => 0,
     }
@@ -160,6 +169,7 @@ pub struct H3ServerWorker {
     pub cmd_tx: Sender<WorkerCommand>,
     pub join_handle: Option<thread::JoinHandle<()>>,
     pub waker: Arc<dyn ErasedWaker>,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 /// Handle returned to the JS side for sending commands to the worker(s).
@@ -168,15 +178,32 @@ pub struct H3ServerWorker {
 pub struct WorkerHandle {
     workers: Vec<H3ServerWorker>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl WorkerHandle {
     /// Construct a `WorkerHandle` from a pre-spawned list of workers.
     pub fn from_workers(workers: Vec<H3ServerWorker>, local_addr: SocketAddr) -> Self {
+        let outbound_admission = workers
+            .first()
+            .map(|worker| Arc::clone(&worker.outbound_admission))
+            .unwrap_or_else(|| Arc::new(OutboundAdmission::default()));
         Self {
             workers,
             local_addr,
+            outbound_admission,
         }
+    }
+
+    pub(crate) fn try_admit_outbound(&self, payload_len: usize, fin: bool) -> bool {
+        self.outbound_admission
+            .try_admit(outbound_payload_units(payload_len, fin))
+    }
+
+    pub(crate) fn release_outbound_admission(&self, payload_len: usize, fin: bool) {
+        let _ = self
+            .outbound_admission
+            .release(outbound_payload_units(payload_len, fin));
     }
 
     /// Route a command to the worker that owns `conn_handle`.
@@ -561,6 +588,7 @@ struct SharedClientWorkerControl {
     cmd_tx: Sender<SharedClientWorkerCommand>,
     waker: Arc<dyn ErasedWaker>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
     join_handle: Mutex<Option<thread::JoinHandle<()>>>,
     running: AtomicBool,
     session_count: AtomicUsize,
@@ -591,9 +619,21 @@ enum ClientWorkerHandleKind {
 pub struct ClientWorkerHandle {
     kind: Option<ClientWorkerHandleKind>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl ClientWorkerHandle {
+    pub(crate) fn try_admit_outbound(&self, payload_len: usize, fin: bool) -> bool {
+        self.outbound_admission
+            .try_admit(outbound_payload_units(payload_len, fin))
+    }
+
+    pub(crate) fn release_outbound_admission(&self, payload_len: usize, fin: bool) {
+        let _ = self
+            .outbound_admission
+            .release(outbound_payload_units(payload_len, fin));
+    }
+
     /// Open a new request stream and return the stream ID.
     pub fn send_request(
         &self,
@@ -1071,6 +1111,8 @@ pub fn spawn_client_worker(
 
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
+    let outbound_admission = Arc::new(OutboundAdmission::default());
+    let admission_ref = Arc::clone(&outbound_admission);
 
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3ClientDedicated);
     let join_handle = thread::spawn(move || {
@@ -1084,6 +1126,7 @@ pub fn spawn_client_worker(
             qlog_dir.as_deref(),
             qlog_level.as_deref(),
             &mut quiche_config,
+            admission_ref,
         );
         let Some(mut handler) = handler else { return };
         event_loop::run_event_loop(
@@ -1102,6 +1145,7 @@ pub fn spawn_client_worker(
             waker: waker_clone,
         }),
         local_addr,
+        outbound_admission,
     })
 }
 
@@ -1142,10 +1186,12 @@ fn acquire_shared_client_worker(
     let (driver, waker, local_addr) =
         transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+    let outbound_admission = Arc::new(OutboundAdmission::default());
     let control = Arc::new(SharedClientWorkerControl {
         cmd_tx,
         waker: waker_arc.clone(),
         local_addr,
+        outbound_admission: Arc::clone(&outbound_admission),
         join_handle: Mutex::new(None),
         running: AtomicBool::new(true),
         session_count: AtomicUsize::new(0),
@@ -1155,7 +1201,7 @@ fn acquire_shared_client_worker(
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3ClientShared);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
-        run_shared_client_event_loop(&mut driver, cmd_rx, local_addr);
+        run_shared_client_event_loop(&mut driver, cmd_rx, local_addr, outbound_admission);
         control_for_thread.running.store(false, Ordering::Release);
     });
     if let Ok(mut slot) = control.join_handle.lock() {
@@ -1206,6 +1252,7 @@ fn spawn_shared_client_worker(
             worker: Arc::clone(&worker),
         }),
         local_addr: worker.local_addr,
+        outbound_admission: Arc::clone(&worker.outbound_admission),
     })
 }
 
@@ -1225,6 +1272,21 @@ fn emit_shared_client_runtime_error<D: transport::Driver>(
         err,
         |session| &mut session.batcher,
     );
+}
+
+#[cfg(feature = "node-api")]
+fn emit_shared_client_write_ready(
+    sessions: &mut Slab<SharedClientSession>,
+    pending_release: &mut Vec<u32>,
+) {
+    for (handle, session) in sessions.iter_mut() {
+        if !session
+            .batcher
+            .collect_atomic(|batch| batch.push(JsH3Event::write_ready(0)))
+        {
+            pending_release.push(handle as u32);
+        }
+    }
 }
 
 #[cfg(feature = "node-api")]
@@ -1306,6 +1368,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
     driver: &mut D,
     cmd_rx: crossbeam_channel::Receiver<SharedClientWorkerCommand>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
 ) {
     let mut sessions: Slab<SharedClientSession> = Slab::new();
     let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -1321,9 +1384,15 @@ fn run_shared_client_event_loop<D: transport::Driver>(
     // flush deliver any pending packets, then remove + emit
     // SHUTDOWN_COMPLETE below.
     let mut pending_release: Vec<u32> = Vec::new();
+    let mut poll_now = false;
 
     loop {
-        let deadline = timer_heap.next_deadline();
+        let deadline = if poll_now {
+            poll_now = false;
+            Some(Instant::now())
+        } else {
+            timer_heap.next_deadline()
+        };
 
         let outcome = match driver.poll(deadline) {
             Ok(outcome) => outcome,
@@ -1339,10 +1408,17 @@ fn run_shared_client_event_loop<D: transport::Driver>(
             }
         };
 
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            reactor_metrics::record_outbound_command_dequeued(
-                shared_client_worker_command_outbound_bytes(&cmd),
-            );
+        let mut commands_drained = 0;
+        while commands_drained < event_loop::MAX_COMMANDS_PER_TICK {
+            let Ok(cmd) = cmd_rx.try_recv() else {
+                break;
+            };
+            commands_drained += 1;
+            let outbound_units = shared_client_worker_command_outbound_bytes(&cmd);
+            reactor_metrics::record_outbound_command_dequeued(outbound_units);
+            if outbound_admission.release(outbound_units) {
+                emit_shared_client_write_ready(&mut sessions, &mut pending_release);
+            }
             match cmd {
                 SharedClientWorkerCommand::OpenSession {
                     mut quiche_config,
@@ -1362,6 +1438,7 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                         qlog_dir.as_deref(),
                         qlog_level.as_deref(),
                         &mut quiche_config,
+                        Arc::clone(&outbound_admission),
                     );
                     let result = handler.map_or_else(
                         || {
@@ -1490,6 +1567,9 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     pending_release.push(session_handle);
                 }
             }
+        }
+        if commands_drained == event_loop::MAX_COMMANDS_PER_TICK && !cmd_rx.is_empty() {
+            poll_now = true;
         }
 
         flush_shared_client_sends(&mut sessions, &mut handles_buf, &mut tx_pool, &mut outbound);
@@ -1777,6 +1857,7 @@ where
     };
 
     let tsfn = Arc::new(tsfn);
+    let outbound_admission = Arc::new(OutboundAdmission::default());
     let mut workers = Vec::with_capacity(num_workers);
 
     // Worker 0 uses the already-bound first socket.
@@ -1789,6 +1870,7 @@ where
             transport::create_platform_driver(first_socket, http3_config.runtime_mode)?;
         let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
         let tsfn_ref = Arc::clone(&tsfn);
+        let admission_ref = Arc::clone(&outbound_admission);
         let http3_clone = Http3Config {
             qlog_dir: http3_config.qlog_dir.clone(),
             qlog_level: http3_config.qlog_level.clone(),
@@ -1804,7 +1886,7 @@ where
         reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
         let join_handle = thread::spawn(move || {
             let mut driver = driver;
-            let mut handler = H3ServerHandler::new(config, http3_clone, 0);
+            let mut handler = H3ServerHandler::new(config, http3_clone, 0, admission_ref);
             event_loop::run_event_loop(
                 &mut driver,
                 cmd_rx,
@@ -1817,6 +1899,7 @@ where
             cmd_tx,
             join_handle: Some(join_handle),
             waker: waker_arc,
+            outbound_admission: Arc::clone(&outbound_admission),
         });
     }
 
@@ -1854,6 +1937,7 @@ where
             };
         let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
         let tsfn_ref = Arc::clone(&tsfn);
+        let admission_ref = Arc::clone(&outbound_admission);
         let http3_clone = Http3Config {
             qlog_dir: http3_config.qlog_dir.clone(),
             qlog_level: http3_config.qlog_level.clone(),
@@ -1870,7 +1954,8 @@ where
         reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
         let join_handle = thread::spawn(move || {
             let mut driver = driver;
-            let mut handler = H3ServerHandler::new(config, http3_clone, worker_index);
+            let mut handler =
+                H3ServerHandler::new(config, http3_clone, worker_index, admission_ref);
             event_loop::run_event_loop(
                 &mut driver,
                 cmd_rx,
@@ -1883,12 +1968,14 @@ where
             cmd_tx,
             join_handle: Some(join_handle),
             waker: waker_arc,
+            outbound_admission: Arc::clone(&outbound_admission),
         });
     }
 
     Ok(WorkerHandle {
         workers,
         local_addr,
+        outbound_admission,
     })
 }
 
@@ -1914,11 +2001,14 @@ where
 {
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
+    let outbound_admission = Arc::new(OutboundAdmission::default());
+    let admission_ref = Arc::clone(&outbound_admission);
 
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3Server);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
-        let mut handler = H3ServerHandler::new(quiche_config, http3_config, worker_index);
+        let mut handler =
+            H3ServerHandler::new(quiche_config, http3_config, worker_index, admission_ref);
         event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
     });
 
@@ -1926,6 +2016,7 @@ where
         cmd_tx,
         join_handle: Some(join_handle),
         waker: waker_clone,
+        outbound_admission,
     }
 }
 
@@ -1953,6 +2044,8 @@ where
 {
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
+    let outbound_admission = Arc::new(OutboundAdmission::default());
+    let admission_ref = Arc::clone(&outbound_admission);
 
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::H3ClientDedicated);
     let join_handle = thread::spawn(move || {
@@ -1966,6 +2059,7 @@ where
             qlog_dir.as_deref(),
             qlog_level.as_deref(),
             &mut quiche_config,
+            admission_ref,
         );
         let Some(mut handler) = handler else { return };
         event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
@@ -1978,6 +2072,7 @@ where
             waker: waker_clone,
         }),
         local_addr,
+        outbound_admission,
     }
 }
 
@@ -2002,10 +2097,16 @@ struct H3ServerHandler {
     handle_offset: u32,
     chunk_pool: ChunkPool,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl H3ServerHandler {
-    fn new(quiche_config: quiche::Config, http3_config: Http3Config, worker_index: u32) -> Self {
+    fn new(
+        quiche_config: quiche::Config,
+        http3_config: Http3Config,
+        worker_index: u32,
+        outbound_admission: Arc<OutboundAdmission>,
+    ) -> Self {
         let disable_retry = http3_config.disable_retry;
         let (chunk_pool, _chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
         Self {
@@ -2031,6 +2132,13 @@ impl H3ServerHandler {
             handle_offset: crate::server_sharding::handle_offset(worker_index),
             chunk_pool,
             chunk_pool_rx,
+            outbound_admission,
+        }
+    }
+
+    fn release_outbound_admission(&self, units: usize, batch: &mut Vec<JsH3Event>) {
+        if self.outbound_admission.release(units) {
+            batch.push(JsH3Event::write_ready(0));
         }
     }
 }
@@ -2040,7 +2148,9 @@ impl ProtocolHandler for H3ServerHandler {
 
     #[allow(clippy::too_many_lines)]
     fn dispatch_command(&mut self, cmd: WorkerCommand, batch: &mut Vec<JsH3Event>) -> bool {
-        reactor_metrics::record_outbound_command_dequeued(worker_command_outbound_bytes(&cmd));
+        let outbound_units = worker_command_outbound_bytes(&cmd);
+        reactor_metrics::record_outbound_command_dequeued(outbound_units);
+        self.release_outbound_admission(outbound_units, batch);
         match cmd {
             WorkerCommand::Shutdown => {
                 // Audit finding #11: close every live connection with an
@@ -2754,6 +2864,7 @@ struct H3ClientHandler {
     session_closed_emitted: bool,
     chunk_pool: ChunkPool,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl H3ClientHandler {
@@ -2765,6 +2876,7 @@ impl H3ClientHandler {
         qlog_dir: Option<&str>,
         qlog_level: Option<&str>,
         quiche_config: &mut quiche::Config,
+        outbound_admission: Arc<OutboundAdmission>,
     ) -> Option<Self> {
         let Ok(scid) = ConnectionMap::generate_random_scid() else {
             return None;
@@ -2809,6 +2921,7 @@ impl H3ClientHandler {
             session_closed_emitted: false,
             chunk_pool,
             chunk_pool_rx,
+            outbound_admission,
         })
     }
 
@@ -2932,6 +3045,12 @@ impl H3ClientHandler {
 
     fn qlog_path(&self) -> Option<String> {
         self.conn.qlog_path.clone()
+    }
+
+    fn release_outbound_admission(&self, units: usize, batch: &mut Vec<JsH3Event>) {
+        if self.outbound_admission.release(units) {
+            batch.push(JsH3Event::write_ready(0));
+        }
     }
 
     fn emit_session_close(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
@@ -3095,9 +3214,9 @@ impl ProtocolHandler for H3ClientHandler {
     type Command = ClientWorkerCommand;
 
     fn dispatch_command(&mut self, cmd: ClientWorkerCommand, batch: &mut Vec<JsH3Event>) -> bool {
-        reactor_metrics::record_outbound_command_dequeued(client_worker_command_outbound_bytes(
-            &cmd,
-        ));
+        let outbound_units = client_worker_command_outbound_bytes(&cmd);
+        reactor_metrics::record_outbound_command_dequeued(outbound_units);
+        self.release_outbound_admission(outbound_units, batch);
         match cmd {
             ClientWorkerCommand::Shutdown => {
                 if !self.session_closed_emitted {

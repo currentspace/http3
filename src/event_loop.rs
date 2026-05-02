@@ -114,6 +114,7 @@ impl EventBatcherStatsHandle {
 /// Larger batches amortize TSFN (Rust→JS thread boundary) overhead: at 10K
 /// streams, ~30K events per cycle ÷ 2048 ≈ 15 calls vs 60 at 512.
 pub const MAX_BATCH_SIZE: usize = 2048;
+pub(crate) const MAX_COMMANDS_PER_TICK: usize = 1024;
 
 /// Audit finding #14, step 5.2: when the JS-side outstanding-events gauge
 /// exceeds this threshold, the worker skips RX processing for one poll
@@ -513,9 +514,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         }
     }
 
+    let mut poll_now = false;
     loop {
         // 1. Compute deadline from protocol timers
-        let deadline = handler.next_deadline();
+        let deadline = if poll_now {
+            poll_now = false;
+            Some(Instant::now())
+        } else {
+            handler.next_deadline()
+        };
 
         // 2. Block until events occur
         let outcome = match driver.poll(deadline) {
@@ -533,8 +540,14 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             }
         };
 
-        // 3. Drain command channel (unconditional — waker just makes poll return early)
-        while let Ok(cmd) = cmd_rx.try_recv() {
+        // 3. Drain command channel. Keep this bounded so a JS producer cannot
+        // starve RX, timers, and close processing inside the native reactor.
+        let mut commands_drained = 0;
+        while commands_drained < MAX_COMMANDS_PER_TICK {
+            let Ok(cmd) = cmd_rx.try_recv() else {
+                break;
+            };
+            commands_drained += 1;
             let mut shutdown_requested = false;
             if !batcher.collect_atomic(|batch| {
                 shutdown_requested = handler.dispatch_command(cmd, batch);
@@ -574,6 +587,9 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 let _ = batcher.flush();
                 return;
             }
+        }
+        if commands_drained == MAX_COMMANDS_PER_TICK && !cmd_rx.is_empty() {
+            poll_now = true;
         }
 
         // 3b. Flush sends after commands (response data goes out immediately)

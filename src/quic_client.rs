@@ -108,11 +108,14 @@ impl NativeQuicClient {
             return false;
         };
         let body_len = data.as_ref().len();
-        let accepted = handle.stream_send_chunk(
-            stream_id as u64,
-            self.stream_ingress_pool.copy_napi_buffer(&data),
-            fin,
-        );
+        if !handle.try_admit_outbound(body_len, fin) {
+            return false;
+        }
+        let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
+        let accepted = handle.stream_send_chunk(stream_id as u64, chunk, fin);
+        if !accepted {
+            handle.release_outbound_admission(body_len, fin);
+        }
         if accepted {
             crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
         }

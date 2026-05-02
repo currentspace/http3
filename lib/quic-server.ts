@@ -18,6 +18,7 @@ const EVENT_RESET = 6;
 const EVENT_SESSION_CLOSE = 7;
 const EVENT_DRAIN = 8;
 const EVENT_STREAM_BLOCKED = 16;
+const EVENT_WRITE_READY = 18;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
@@ -104,8 +105,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
-    this.worker.streamSend(connHandle, streamId, data, fin);
-    return Math.max(data.length, fin ? 1 : 0);
+    return this.worker.streamSend(connHandle, streamId, data, fin) ? Math.max(data.length, fin ? 1 : 0) : 0;
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {
@@ -451,6 +451,9 @@ export class QuicServer extends EventEmitter {
         case EVENT_STREAM_BLOCKED:
           this._onStreamBlocked(event);
           break;
+        case EVENT_WRITE_READY:
+          this._onWriteReady(event);
+          break;
         case EVENT_HANDSHAKE_COMPLETE:
           this._onHandshakeComplete(event);
           break;
@@ -557,6 +560,22 @@ export class QuicServer extends EventEmitter {
     const stream = session._streams.get(event.streamId);
     if (stream) {
       stream._onNativeBlocked();
+    }
+  }
+
+  private _onWriteReady(event: NativeEvent): void {
+    if (event.connHandle !== 0) {
+      const session = this._sessions.get(event.connHandle);
+      if (!session) return;
+      for (const stream of session._streams.values()) {
+        stream._onNativeWriteReady();
+      }
+      return;
+    }
+    for (const session of this._sessions.values()) {
+      for (const stream of session._streams.values()) {
+        stream._onNativeWriteReady();
+      }
     }
   }
 

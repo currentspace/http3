@@ -82,4 +82,39 @@ describe('native write admission window', () => {
     assert.equal(stream.writableNeedDrain, false);
     stream.destroy();
   });
+
+  it('write-ready does not clear QUIC flow-control blocking', () => {
+    const stream = new QuicStream({ highWaterMark: 8 });
+    let nativeSends = 0;
+    let completed = false;
+
+    (stream as unknown as {
+      _clientLoop: {
+        streamSend: (streamId: number, data: Buffer, fin: boolean) => number;
+        streamClose: () => boolean;
+      };
+    })._clientLoop = {
+      streamSend: (_streamId, data, fin) => {
+        nativeSends += 1;
+        return Math.max(data.length, fin ? 1 : 0);
+      },
+      streamClose: () => true,
+    };
+    stream._streamId = 0;
+    stream._blocked = true;
+
+    stream.write(Buffer.alloc(4), (err) => {
+      assert.ifError(err);
+      completed = true;
+    });
+
+    stream._onNativeWriteReady();
+    assert.equal(nativeSends, 0);
+    assert.equal(completed, false);
+
+    stream._onNativeDrain();
+    assert.equal(nativeSends, 1);
+    assert.equal(completed, true);
+    stream.destroy();
+  });
 });

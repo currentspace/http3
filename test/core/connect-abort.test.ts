@@ -102,4 +102,34 @@ describe('resolveConnectionEndpoint AbortSignal', () => {
     );
     await session.close();
   });
+
+  it('rejects HTTP/3 ready() when the connect timeout expires', async () => {
+    const session = connect('https://127.0.0.1:19997', {
+      rejectUnauthorized: false,
+      connectTimeoutMs: 10,
+      maxIdleTimeoutMs: 10_000,
+    });
+    session.on('error', () => {});
+
+    await assert.rejects(
+      session.ready(),
+      (error: unknown) => error instanceof Error && /connect timed out/i.test(error.message),
+    );
+    await session.close();
+  });
+
+  it('rejects raw QUIC ready() when the connect timeout expires', async () => {
+    const session = connectQuic('127.0.0.1:19996', {
+      rejectUnauthorized: false,
+      connectTimeoutMs: 10,
+      maxIdleTimeoutMs: 10_000,
+    });
+    session.on('error', () => {});
+
+    await assert.rejects(
+      session.ready(),
+      (error: unknown) => error instanceof Error && /connect timed out/i.test(error.message),
+    );
+    await session.close();
+  });
 });

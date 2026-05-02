@@ -83,17 +83,67 @@ function createLatencyTracker(): LatencyTracker {
   };
 }
 
+interface BenchDiag {
+  enabled: boolean;
+  connectionsStarted: number;
+  connectionsOpened: number;
+  requestsStarted: number;
+  requestStreamsOpened: number;
+  responsesCompleted: number;
+  requestErrors: number;
+  closeStarted: number;
+  closeCompleted: number;
+  interval: NodeJS.Timeout | null;
+}
+
+function createDiag(): BenchDiag {
+  return {
+    enabled: process.env.H3_BENCH_DIAG === '1',
+    connectionsStarted: 0,
+    connectionsOpened: 0,
+    requestsStarted: 0,
+    requestStreamsOpened: 0,
+    responsesCompleted: 0,
+    requestErrors: 0,
+    closeStarted: 0,
+    closeCompleted: 0,
+    interval: null,
+  };
+}
+
+function startDiag(diag: BenchDiag, clientId: number | undefined): void {
+  if (!diag.enabled) return;
+  diag.interval = setInterval(() => {
+    process.stderr.write(
+      `h3-bench-client ${clientId ?? '?'} diag ` +
+      `conn=${diag.connectionsOpened}/${diag.connectionsStarted} ` +
+      `req=${diag.requestStreamsOpened}/${diag.requestsStarted} ` +
+      `done=${diag.responsesCompleted} err=${diag.requestErrors} ` +
+      `close=${diag.closeCompleted}/${diag.closeStarted}\n`,
+    );
+  }, 1000);
+}
+
+function stopDiag(diag: BenchDiag): void {
+  if (!diag.interval) return;
+  clearInterval(diag.interval);
+  diag.interval = null;
+}
+
 async function doRequest(
   session: Http3ClientSession,
   payload: Buffer,
   timeoutMs: number,
+  diag?: BenchDiag,
 ): Promise<Buffer> {
+  if (diag) diag.requestsStarted++;
   const stream = await session.requestAsync({
     ':method': 'POST',
     ':path': '/echo',
     ':authority': 'localhost',
     ':scheme': 'https',
   }, { endStream: false, timeoutMs });
+  if (diag) diag.requestStreamsOpened++;
   stream.end(payload);
 
   return new Promise((resolve, reject) => {
@@ -103,10 +153,12 @@ async function doRequest(
     stream.on('data', (chunk: Buffer) => { chunks.push(chunk); });
     stream.on('end', () => {
       clearTimeout(timer);
+      if (diag) diag.responsesCompleted++;
       resolve(Buffer.concat(chunks));
     });
     stream.on('error', (err: Error) => {
       clearTimeout(timer);
+      if (diag) diag.requestErrors++;
       reject(err);
     });
   });
@@ -143,6 +195,8 @@ async function main(): Promise<void> {
   }
 
   const config: BenchConfig = JSON.parse(configStr);
+  const diag = createDiag();
+  startDiag(diag, config.clientId);
   binding.resetRuntimeTelemetry();
   const cpuStart = process.cpuUsage();
   const memStart = process.memoryUsage();
@@ -166,17 +220,20 @@ async function main(): Promise<void> {
   // Phase 1: Open connections
   const clients: Http3ClientSession[] = [];
   for (let c = 0; c < config.connections; c++) {
+    diag.connectionsStarted++;
     const connStart = process.hrtime.bigint();
     try {
       const client = await connectAsync(`${host}:${config.port}`, {
         rejectUnauthorized: false,
         initialMaxStreamsBidi: 50_000,
+        connectTimeoutMs: Math.min(config.timeoutMs, 5_000),
         runtimeMode: config.runtimeMode,
         fallbackPolicy: config.fallbackPolicy,
       });
       const connMs = Number(process.hrtime.bigint() - connStart) / 1e6;
       connLatency.add(connMs);
       clients.push(client);
+      diag.connectionsOpened++;
       const runtimeKey = formatRuntimeSelection(client.runtimeInfo);
       runtimeSelections.set(runtimeKey, (runtimeSelections.get(runtimeKey) ?? 0) + 1);
     } catch (err) {
@@ -221,7 +278,7 @@ async function main(): Promise<void> {
         const phase = classifyMeasurementPhase(loadElapsedAtStartMs, warmupMs, durationMs);
 
         try {
-          const echoed = await doRequest(client, payload, config.timeoutMs);
+          const echoed = await doRequest(client, payload, config.timeoutMs, diag);
           const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
           if (echoed.length === payload.length) {
             recordCompletion(phase, echoed.length * 2, streamMs);
@@ -251,7 +308,7 @@ async function main(): Promise<void> {
           (async () => {
             const streamStart = process.hrtime.bigint();
             try {
-              const echoed = await doRequest(client, payload, config.timeoutMs);
+              const echoed = await doRequest(client, payload, config.timeoutMs, diag);
               const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
               if (echoed.length === payload.length) {
                 totalStreams++;
@@ -273,7 +330,12 @@ async function main(): Promise<void> {
   }
 
   // Phase 3: Close
-  await Promise.all(clients.map((c) => c.close()));
+  await Promise.all(clients.map(async (c) => {
+    diag.closeStarted++;
+    await c.close();
+    diag.closeCompleted++;
+  }));
+  stopDiag(diag);
 
   const hrEnd = process.hrtime.bigint();
   const elapsedMs = Number(hrEnd - hrStart) / 1e6;

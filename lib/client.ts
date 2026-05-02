@@ -15,6 +15,7 @@ import {
   Http3Error,
   ERR_HTTP3_GOAWAY,
   ERR_HTTP3_INVALID_STATE,
+  ERR_HTTP3_SESSION_ERROR,
   ERR_HTTP3_STREAM_BLOCKED,
   ERR_HTTP3_STREAM_ERROR,
 } from './errors.js';
@@ -31,6 +32,7 @@ const EVENT_RESET = 6;
 const EVENT_SESSION_CLOSE = 7;
 const EVENT_DRAIN = 8;
 const EVENT_STREAM_BLOCKED = 16;
+const EVENT_WRITE_READY = 18;
 const EVENT_GOAWAY = 9;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
@@ -68,6 +70,14 @@ function normalizeRequestTimeoutMs(timeoutMs: number | undefined): number {
   return Math.floor(timeoutMs);
 }
 
+function normalizeConnectTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return 30_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Http3Error('connect timeout must be a non-negative finite number', ERR_HTTP3_INVALID_STATE);
+  }
+  return Math.floor(timeoutMs);
+}
+
 function requestRetryDelayMs(attempt: number, deadlineMs: number): number {
   const base = Math.min(100, 2 ** Math.min(attempt, 6));
   const remaining = deadlineMs - Date.now();
@@ -93,6 +103,8 @@ export interface ConnectOptions {
   servername?: string;
   /** Idle timeout in milliseconds. Default: 30 000. */
   maxIdleTimeoutMs?: number;
+  /** Maximum time to wait for QUIC/TLS handshake completion. Default: 30 000; 0 disables. */
+  connectTimeoutMs?: number;
   /** Maximum UDP payload size. Default: 1350. */
   maxUdpPayloadSize?: number;
   /** Connection-level flow control window. Default: 100_000_000 bytes. */
@@ -171,6 +183,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
   private _connectAbortCleanup: (() => void) | null = null;
+  private _connectTimer: NodeJS.Timeout | null = null;
   private readonly _requestDrainResolvers = new Set<() => void>();
 
   constructor(authority: string, options?: Pick<ConnectOptions, 'allow0RTT' | 'allowUnsafe0RTTMethods' | 'onEarlyData'>) {
@@ -207,6 +220,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
 
   override async close(code?: number, reason?: string): Promise<void> {
     this._closeRequested = true;
+    this._clearConnectTimer();
     if (!this._handshakeComplete) {
       this._markReadyError(new Http3Error('session closed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
@@ -215,6 +229,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
 
   override async destroy(err?: Error): Promise<void> {
     this._closeRequested = true;
+    this._clearConnectTimer();
     if (!this._handshakeComplete) {
       this._markReadyError(err ?? new Http3Error('session destroyed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
@@ -228,8 +243,22 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   }
 
   /** @internal */
+  _setConnectTimer(timer: NodeJS.Timeout | null): void {
+    this._clearConnectTimer();
+    this._connectTimer = timer;
+  }
+
+  /** @internal */
+  _clearConnectTimer(): void {
+    if (!this._connectTimer) return;
+    clearTimeout(this._connectTimer);
+    this._connectTimer = null;
+  }
+
+  /** @internal */
   _abortConnect(err: Error): void {
     this._closeRequested = true;
+    this._clearConnectTimer();
     this._markReadyError(err);
     this._cleanupStreams();
     this._notifyRequestDrain();
@@ -375,6 +404,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
         case EVENT_STREAM_BLOCKED:
           this._onStreamBlocked(event);
           break;
+        case EVENT_WRITE_READY:
+          this._onWriteReady();
+          break;
         case EVENT_GOAWAY:
           this._goawayReceived = true;
           this._goawayLastStreamId = event.streamId;
@@ -482,6 +514,12 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     }
   }
 
+  private _onWriteReady(): void {
+    for (const stream of this._streams.values()) {
+      stream._onNativeWriteReady();
+    }
+  }
+
   private _onError(event: NativeEvent): void {
     if (event.streamId >= 0) {
       const stream = this._streams.get(event.streamId);
@@ -578,7 +616,6 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       timer = setTimeout(() => {
         settle();
       }, delayMs);
-      timer.unref();
       signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
@@ -586,6 +623,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   /** @internal */
   _markReady(): void {
     if (this._readySettled) return;
+    this._clearConnectTimer();
     this._setConnectAbortCleanup(null);
     this._readySettled = true;
     this._resolveReady?.();
@@ -596,6 +634,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   /** @internal */
   _markReadyError(err: Error): void {
     if (this._readySettled) return;
+    this._clearConnectTimer();
     this._setConnectAbortCleanup(null);
     this._readySettled = true;
     this._rejectReady?.(err);
@@ -668,6 +707,20 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
   }
   const shouldAbortConnect = (): boolean => session._closeRequested;
   installHttp3ConnectAbortHandler(session, options?.signal);
+  const connectTimeoutMs = normalizeConnectTimeoutMs(options?.connectTimeoutMs);
+  if (connectTimeoutMs > 0) {
+    session._setConnectTimer(setTimeout(() => {
+      if (session._closeRequested) return;
+      session._abortConnect(new Http3Error(
+        `HTTP/3 connect timed out after ${connectTimeoutMs} ms`,
+        ERR_HTTP3_SESSION_ERROR,
+        {
+          reasonCode: 'connect-timeout',
+          endpoint: authorityString,
+        },
+      ));
+    }, connectTimeoutMs));
+  }
 
   void (async (): Promise<void> => {
     try {

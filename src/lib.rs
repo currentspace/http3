@@ -17,6 +17,7 @@ mod event_loop;
 mod h3_event;
 #[cfg(feature = "node-api")]
 mod mock_quic_profile;
+mod outbound_admission;
 mod pending_write;
 mod ping_state;
 pub mod profile;
@@ -56,8 +57,8 @@ pub mod bench_exports {
         EVENT_DATA, EVENT_DATAGRAM, EVENT_DRAIN, EVENT_ERROR, EVENT_FINISHED, EVENT_GOAWAY,
         EVENT_HANDSHAKE_COMPLETE, EVENT_HEADERS, EVENT_METRICS, EVENT_NEW_SESSION,
         EVENT_NEW_STREAM, EVENT_PING_ACK, EVENT_RESET, EVENT_SESSION_CLOSE, EVENT_SESSION_TICKET,
-        EVENT_SHUTDOWN_COMPLETE, EVENT_STREAM_BLOCKED, JsEventMeta, JsH3Event, JsHeader,
-        JsSessionMetrics,
+        EVENT_SHUTDOWN_COMPLETE, EVENT_STREAM_BLOCKED, EVENT_WRITE_READY, JsEventMeta, JsH3Event,
+        JsHeader, JsSessionMetrics,
     };
     pub use crate::profile::event_sink::{
         TaggedEventBatch, channel_batcher, counting_batcher, noop_batcher,

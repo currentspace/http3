@@ -156,6 +156,7 @@ pub const EVENT_DATAGRAM: u8 = 14;
 pub const EVENT_SHUTDOWN_COMPLETE: u8 = 15;
 pub const EVENT_STREAM_BLOCKED: u8 = 16;
 pub const EVENT_PING_ACK: u8 = 17;
+pub const EVENT_WRITE_READY: u8 = 18;
 
 #[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
@@ -452,6 +453,19 @@ impl JsH3Event {
         }
     }
 
+    pub fn write_ready(conn_handle: u32) -> Self {
+        Self {
+            event_type: EVENT_WRITE_READY,
+            conn_handle,
+            stream_id: -1,
+            headers: Some(vec![]),
+            data: None,
+            fin: Some(false),
+            meta: Some(JsEventMeta::empty()),
+            metrics: Some(JsSessionMetrics::zeroed()),
+        }
+    }
+
     pub fn goaway(conn_handle: u32, stream_id: u64) -> Self {
         Self {
             event_type: EVENT_GOAWAY,
@@ -732,6 +746,16 @@ mod tests {
         assert_eq!(ev.event_type, EVENT_STREAM_BLOCKED);
         assert_eq!(ev.conn_handle, 2);
         assert_eq!(ev.stream_id, 32_i64);
+        assert!(ev.data.is_none());
+        assert!(ev.meta.is_some());
+    }
+
+    #[test]
+    fn test_write_ready_fields() {
+        let ev = JsH3Event::write_ready(2);
+        assert_eq!(ev.event_type, EVENT_WRITE_READY);
+        assert_eq!(ev.conn_handle, 2);
+        assert_eq!(ev.stream_id, -1);
         assert!(ev.data.is_none());
         assert!(ev.meta.is_some());
     }

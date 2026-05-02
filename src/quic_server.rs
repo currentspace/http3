@@ -107,12 +107,19 @@ impl NativeQuicServer {
             return false;
         };
         let body_len = data.as_ref().len();
+        if !handle.try_admit_outbound(body_len, fin) {
+            return false;
+        }
+        let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
         let accepted = handle.send_command(crate::quic_worker::QuicServerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            chunk: self.stream_ingress_pool.copy_napi_buffer(&data),
+            chunk,
             fin,
         });
+        if !accepted {
+            handle.release_outbound_admission(body_len, fin);
+        }
         if accepted {
             crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
         }

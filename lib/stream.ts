@@ -2,7 +2,6 @@ import { Duplex } from 'node:stream';
 import { constants as http2Constants } from 'node:http2';
 import type { IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from 'node:http2';
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
-import { Http3Error, ERR_HTTP3_STREAM_ERROR } from './errors.js';
 import {
   type BackpressureState,
   createBackpressureState,
@@ -16,13 +15,6 @@ import {
   rejectNativeWriteWindow,
 } from './stream-backpressure.js';
 
-/**
- * Maximum time `_final` will wait for the worker to accept the FIN before
- * destroying the stream with a timeout error. Prevents `end()` from
- * hanging forever if the worker is wedged or quiche flow control never
- * opens for the FIN.
- */
-const STREAM_FINISH_TIMEOUT_MS = 30_000;
 const EMPTY_BUFFER = Buffer.alloc(0);
 
 /** HTTP header map where each value is a string or string array. */
@@ -266,6 +258,12 @@ export class ServerHttp3Stream extends Duplex {
     fireDrainCallbacks(this._bp);
   }
 
+  /** @internal — native command queue has room; do not clear QUIC flow-control state. */
+  _onNativeWriteReady(): void {
+    this._onActivity();
+    fireDrainCallbacks(this._bp);
+  }
+
   /**
    * @internal — called by event dispatcher when the native worker has
    * buffered a chunk into pending_writes (quiche flow control). Future
@@ -335,43 +333,21 @@ export class ServerHttp3Stream extends Duplex {
       return;
     }
     this._finSent = true;
-    const written = this._blocked
-      ? 0
-      : this._eventLoop.streamSend(
-          this._connHandle,
-          this._streamId,
-          EMPTY_BUFFER,
-          true,
-        );
-    if (written === 0) {
-      // Audit finding #9: bound the wait so a wedged worker can't hang
-      // end() forever. Settled flag prevents double-firing if the timer
-      // and drain race.
-      let settled = false;
-      const settle = (err?: Error | null): void => {
-        if (settled) return;
-        settled = true;
-        callback(err);
-      };
-      const timer = setTimeout(() => {
-        settle(new Http3Error('stream finish timed out', ERR_HTTP3_STREAM_ERROR));
-      }, STREAM_FINISH_TIMEOUT_MS);
-      timer.unref();
-      this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push((err) => {
-        clearTimeout(timer);
-        if (err) { settle(err); return; }
-        this._eventLoop?.streamSend(
-          this._connHandle,
-          this._streamId,
-          EMPTY_BUFFER,
-          true,
-        );
-        settle();
-      });
-    } else {
+    const sendFin = (): void => {
+      const written = this._blocked
+        ? 0
+        : this._eventLoop?.streamSend(this._connHandle, this._streamId, EMPTY_BUFFER, true) ?? 0;
+      if (written === 0) {
+        this._bp = ensureBackpressureState(this._bp);
+        this._bp.drainCallbacks.push((err) => {
+          if (err) { callback(err); return; }
+          sendFin();
+        });
+        return;
+      }
       completeNativeWrite(this._nativeWriteWindow, written, callback);
-    }
+    };
+    sendFin();
   }
 
   /** @internal */
@@ -478,6 +454,12 @@ export class ClientHttp3Stream extends Duplex {
     fireDrainCallbacks(this._bp);
   }
 
+  /** @internal — native command queue has room; do not clear QUIC flow-control state. */
+  _onNativeWriteReady(): void {
+    this._onActivity();
+    fireDrainCallbacks(this._bp);
+  }
+
   /** @internal — see ServerHttp3Stream._onNativeBlocked. */
   _onNativeBlocked(): void {
     this._blocked = true;
@@ -531,31 +513,21 @@ export class ClientHttp3Stream extends Duplex {
       callback();
       return;
     }
-    const written = this._blocked
-      ? 0
-      : this._eventLoop.streamSend(this._streamId, EMPTY_BUFFER, true);
-    if (written === 0) {
-      // Audit finding #9: bound the wait, mirror server-side _final.
-      let settled = false;
-      const settle = (err?: Error | null): void => {
-        if (settled) return;
-        settled = true;
-        callback(err);
-      };
-      const timer = setTimeout(() => {
-        settle(new Http3Error('stream finish timed out', ERR_HTTP3_STREAM_ERROR));
-      }, STREAM_FINISH_TIMEOUT_MS);
-      timer.unref();
-      this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push((err) => {
-        clearTimeout(timer);
-        if (err) { settle(err); return; }
-        this._eventLoop?.streamSend(this._streamId, EMPTY_BUFFER, true);
-        settle();
-      });
-    } else {
+    const sendFin = (): void => {
+      const written = this._blocked
+        ? 0
+        : this._eventLoop?.streamSend(this._streamId, EMPTY_BUFFER, true) ?? 0;
+      if (written === 0) {
+        this._bp = ensureBackpressureState(this._bp);
+        this._bp.drainCallbacks.push((err) => {
+          if (err) { callback(err); return; }
+          sendFin();
+        });
+        return;
+      }
       completeNativeWrite(this._nativeWriteWindow, written, callback);
-    }
+    };
+    sendFin();
   }
 
   /** @internal */

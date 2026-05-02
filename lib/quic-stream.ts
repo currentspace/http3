@@ -1,5 +1,4 @@
 import { Duplex } from 'node:stream';
-import { Http3Error, ERR_HTTP3_STREAM_ERROR } from './errors.js';
 import {
   type BackpressureState,
   createBackpressureState,
@@ -13,8 +12,6 @@ import {
   rejectNativeWriteWindow,
 } from './stream-backpressure.js';
 
-/** Audit finding #9: bound on `_final` wait time. */
-const STREAM_FINISH_TIMEOUT_MS = 30_000;
 const EMPTY_BUFFER = Buffer.alloc(0);
 
 /**
@@ -82,6 +79,11 @@ export class QuicStream extends Duplex {
   /** @internal — called by event dispatcher when flow control window opens */
   _onNativeDrain(): void {
     this._blocked = false;
+    fireDrainCallbacks(this._bp);
+  }
+
+  /** @internal — native command queue has room; do not clear QUIC flow-control state. */
+  _onNativeWriteReady(): void {
     fireDrainCallbacks(this._bp);
   }
 
@@ -186,24 +188,7 @@ export class QuicStream extends Duplex {
   _final(callback: (error?: Error | null) => void): void {
     const finalChunk = this._finalChunk ?? EMPTY_BUFFER;
     this._finalChunk = null;
-
-    // Audit finding #9: wrap the entire _writeFinalChunk path with a
-    // timeout so a wedged worker / stuck drain can't hang end() forever.
-    let settled = false;
-    const settle = (err?: Error | null): void => {
-      if (settled) return;
-      settled = true;
-      callback(err);
-    };
-    const timer = setTimeout(() => {
-      settle(new Http3Error('stream finish timed out', ERR_HTTP3_STREAM_ERROR));
-    }, STREAM_FINISH_TIMEOUT_MS);
-    timer.unref();
-
-    this._writeFinalChunk(finalChunk, (err) => {
-      clearTimeout(timer);
-      settle(err);
-    });
+    this._writeFinalChunk(finalChunk, callback);
   }
 
   private _doSend(data: Buffer, fin: boolean): number {

@@ -34,6 +34,7 @@ use crate::event_loop::{
     self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, RX_PAUSE_HIGH_WATER, SEND_BUF_SIZE,
 };
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
+use crate::outbound_admission::{OutboundAdmission, outbound_payload_units};
 use crate::pending_write::{PendingWrite, PendingWriteSendOutcome, flush_pending_write};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{self, RawQuicClientCloseCause, SessionKind, WorkerSpawnKind};
@@ -88,6 +89,7 @@ pub struct QuicServerWorker {
     pub cmd_tx: Sender<QuicServerCommand>,
     pub join_handle: Option<thread::JoinHandle<()>>,
     pub waker: Arc<dyn ErasedWaker>,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 use crate::server_sharding;
@@ -95,14 +97,31 @@ use crate::server_sharding;
 pub struct QuicServerHandle {
     workers: Vec<QuicServerWorker>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl QuicServerHandle {
     pub fn from_workers(workers: Vec<QuicServerWorker>, local_addr: SocketAddr) -> Self {
+        let outbound_admission = workers
+            .first()
+            .map(|worker| Arc::clone(&worker.outbound_admission))
+            .unwrap_or_else(|| Arc::new(OutboundAdmission::default()));
         Self {
             workers,
             local_addr,
+            outbound_admission,
         }
+    }
+
+    pub(crate) fn try_admit_outbound(&self, payload_len: usize, fin: bool) -> bool {
+        self.outbound_admission
+            .try_admit(outbound_payload_units(payload_len, fin))
+    }
+
+    pub(crate) fn release_outbound_admission(&self, payload_len: usize, fin: bool) {
+        let _ = self
+            .outbound_admission
+            .release(outbound_payload_units(payload_len, fin));
     }
 
     /// Route a command to the worker that owns `conn_handle`.
@@ -412,6 +431,7 @@ struct SharedQuicClientWorkerControl {
     cmd_tx: Sender<SharedQuicClientCommand>,
     waker: Arc<dyn ErasedWaker>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
     join_handle: Mutex<Option<thread::JoinHandle<()>>>,
     running: AtomicBool,
     session_count: AtomicUsize,
@@ -439,9 +459,21 @@ enum QuicClientHandleKind {
 pub struct QuicClientHandle {
     kind: Option<QuicClientHandleKind>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl QuicClientHandle {
+    pub(crate) fn try_admit_outbound(&self, payload_len: usize, fin: bool) -> bool {
+        self.outbound_admission
+            .try_admit(outbound_payload_units(payload_len, fin))
+    }
+
+    pub(crate) fn release_outbound_admission(&self, payload_len: usize, fin: bool) {
+        let _ = self
+            .outbound_admission
+            .release(outbound_payload_units(payload_len, fin));
+    }
+
     pub fn open_stream(&self) -> Result<u64, Http3NativeError> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
         match &self.kind {
@@ -1069,7 +1101,9 @@ where
 
 fn quic_server_command_outbound_bytes(cmd: &QuicServerCommand) -> usize {
     match cmd {
-        QuicServerCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        QuicServerCommand::StreamSend { chunk, fin, .. } => {
+            outbound_payload_units(chunk.remaining_len(), *fin)
+        }
         QuicServerCommand::SendDatagram { data, .. } => data.remaining_len(),
         _ => 0,
     }
@@ -1077,7 +1111,9 @@ fn quic_server_command_outbound_bytes(cmd: &QuicServerCommand) -> usize {
 
 fn quic_client_command_outbound_bytes(cmd: &QuicClientCommand) -> usize {
     match cmd {
-        QuicClientCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        QuicClientCommand::StreamSend { chunk, fin, .. } => {
+            outbound_payload_units(chunk.remaining_len(), *fin)
+        }
         QuicClientCommand::SendDatagram { data, .. } => data.remaining_len(),
         _ => 0,
     }
@@ -1085,7 +1121,9 @@ fn quic_client_command_outbound_bytes(cmd: &QuicClientCommand) -> usize {
 
 fn shared_quic_client_command_outbound_bytes(cmd: &SharedQuicClientCommand) -> usize {
     match cmd {
-        SharedQuicClientCommand::StreamSend { chunk, .. } => chunk.remaining_len(),
+        SharedQuicClientCommand::StreamSend { chunk, fin, .. } => {
+            outbound_payload_units(chunk.remaining_len(), *fin)
+        }
         SharedQuicClientCommand::SendDatagram { data, .. } => data.remaining_len(),
         _ => 0,
     }
@@ -1118,13 +1156,50 @@ where
     D: transport::Driver + Send + 'static,
     D::Waker: Send + Sync + Clone + 'static,
 {
+    spawn_server_worker_on_driver_with_admission(
+        quiche_config,
+        server_config,
+        worker_index,
+        driver,
+        waker,
+        local_addr,
+        cmd_tx,
+        cmd_rx,
+        batcher,
+        Arc::new(OutboundAdmission::default()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_server_worker_on_driver_with_admission<D>(
+    quiche_config: quiche::Config,
+    server_config: QuicServerConfig,
+    worker_index: u32,
+    driver: D,
+    waker: D::Waker,
+    local_addr: SocketAddr,
+    cmd_tx: Sender<QuicServerCommand>,
+    cmd_rx: Receiver<QuicServerCommand>,
+    batcher: EventBatcher,
+    outbound_admission: Arc<OutboundAdmission>,
+) -> QuicServerWorker
+where
+    D: transport::Driver + Send + 'static,
+    D::Waker: Send + Sync + Clone + 'static,
+{
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
+    let worker_outbound_admission = Arc::clone(&outbound_admission);
 
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::RawQuicServer);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
-        let mut handler = QuicServerHandler::new(quiche_config, server_config, worker_index);
+        let mut handler = QuicServerHandler::new(
+            quiche_config,
+            server_config,
+            worker_index,
+            outbound_admission,
+        );
         event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
     });
 
@@ -1132,6 +1207,7 @@ where
         cmd_tx,
         join_handle: Some(join_handle),
         waker: waker_clone,
+        outbound_admission: worker_outbound_admission,
     }
 }
 
@@ -1156,6 +1232,8 @@ where
 {
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
+    let outbound_admission = Arc::new(OutboundAdmission::default());
+    let admission_ref = Arc::clone(&outbound_admission);
 
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::RawQuicClientDedicated);
     let join_handle = thread::spawn(move || {
@@ -1169,6 +1247,7 @@ where
             qlog_dir.as_deref(),
             qlog_level.as_deref(),
             &mut quiche_config,
+            admission_ref,
         );
         let Some(mut handler) = handler else { return };
         event_loop::run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
@@ -1181,6 +1260,7 @@ where
             waker: waker_clone,
         }),
         local_addr,
+        outbound_admission,
     })
 }
 
@@ -1266,6 +1346,7 @@ where
         crate::config::FALLBACK_MAX_UDP_PAYLOAD
     };
 
+    let outbound_admission = Arc::new(OutboundAdmission::default());
     let mut workers = Vec::with_capacity(num_workers);
 
     // Worker 0 uses first_socket directly.
@@ -1277,7 +1358,7 @@ where
         let mut quiche_config = make_quiche_config()?;
         quiche_config.set_max_send_udp_payload_size(server_ceiling);
         quiche_config.set_max_recv_udp_payload_size(server_ceiling);
-        workers.push(spawn_server_worker_on_driver(
+        workers.push(spawn_server_worker_on_driver_with_admission(
             quiche_config,
             QuicServerConfig {
                 qlog_dir: server_config.qlog_dir.clone(),
@@ -1295,6 +1376,7 @@ where
             cmd_tx,
             cmd_rx,
             batcher,
+            Arc::clone(&outbound_admission),
         ));
     }
 
@@ -1326,7 +1408,7 @@ where
         };
         quiche_config.set_max_send_udp_payload_size(server_ceiling);
         quiche_config.set_max_recv_udp_payload_size(server_ceiling);
-        workers.push(spawn_server_worker_on_driver(
+        workers.push(spawn_server_worker_on_driver_with_admission(
             quiche_config,
             QuicServerConfig {
                 qlog_dir: server_config.qlog_dir.clone(),
@@ -1344,12 +1426,14 @@ where
             cmd_tx,
             cmd_rx,
             batcher,
+            Arc::clone(&outbound_admission),
         ));
     }
 
     Ok(QuicServerHandle {
         workers,
         local_addr,
+        outbound_admission,
     })
 }
 
@@ -1461,10 +1545,12 @@ fn acquire_shared_quic_client_worker(
     let (driver, waker, local_addr) =
         transport::prepare_client_platform_driver(bind_addr, runtime_mode)?;
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
+    let outbound_admission = Arc::new(OutboundAdmission::default());
     let control = Arc::new(SharedQuicClientWorkerControl {
         cmd_tx,
         waker: waker_arc.clone(),
         local_addr,
+        outbound_admission: Arc::clone(&outbound_admission),
         join_handle: Mutex::new(None),
         running: AtomicBool::new(true),
         session_count: AtomicUsize::new(0),
@@ -1474,7 +1560,7 @@ fn acquire_shared_quic_client_worker(
     reactor_metrics::record_worker_thread_spawn(WorkerSpawnKind::RawQuicClientShared);
     let join_handle = thread::spawn(move || {
         let mut driver = driver;
-        run_shared_quic_client_event_loop(&mut driver, cmd_rx, local_addr);
+        run_shared_quic_client_event_loop(&mut driver, cmd_rx, local_addr, outbound_admission);
         control_for_thread.running.store(false, Ordering::Release);
     });
     if let Ok(mut slot) = control.join_handle.lock() {
@@ -1526,6 +1612,7 @@ fn spawn_shared_quic_client(
             worker: Arc::clone(&worker),
         }),
         local_addr: worker.local_addr,
+        outbound_admission: Arc::clone(&worker.outbound_admission),
     })
 }
 
@@ -1544,6 +1631,20 @@ fn emit_shared_quic_client_runtime_error<D: transport::Driver>(
         err,
         |session| &mut session.batcher,
     );
+}
+
+fn emit_shared_quic_client_write_ready(
+    sessions: &mut Slab<SharedQuicClientSession>,
+    pending_release: &mut Vec<u32>,
+) {
+    for (handle, session) in sessions.iter_mut() {
+        if !session
+            .batcher
+            .collect_atomic(|batch| batch.push(JsH3Event::write_ready(0)))
+        {
+            pending_release.push(handle as u32);
+        }
+    }
 }
 
 fn remove_shared_quic_client_session(
@@ -1642,6 +1743,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
     driver: &mut D,
     cmd_rx: crossbeam_channel::Receiver<SharedQuicClientCommand>,
     local_addr: SocketAddr,
+    outbound_admission: Arc<OutboundAdmission>,
 ) {
     let mut sessions: Slab<SharedQuicClientSession> = Slab::new();
     let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -1654,9 +1756,15 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
     // per-iteration flush so the CONNECTION_CLOSE frame queued by a
     // preceding `Close` reaches the wire before the session is removed.
     let mut pending_release: Vec<u32> = Vec::new();
+    let mut poll_now = false;
 
     loop {
-        let deadline = timer_heap.next_deadline();
+        let deadline = if poll_now {
+            poll_now = false;
+            Some(Instant::now())
+        } else {
+            timer_heap.next_deadline()
+        };
 
         let outcome = match driver.poll(deadline) {
             Ok(outcome) => outcome,
@@ -1672,10 +1780,17 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
             }
         };
 
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            reactor_metrics::record_outbound_command_dequeued(
-                shared_quic_client_command_outbound_bytes(&cmd),
-            );
+        let mut commands_drained = 0;
+        while commands_drained < event_loop::MAX_COMMANDS_PER_TICK {
+            let Ok(cmd) = cmd_rx.try_recv() else {
+                break;
+            };
+            commands_drained += 1;
+            let outbound_units = shared_quic_client_command_outbound_bytes(&cmd);
+            reactor_metrics::record_outbound_command_dequeued(outbound_units);
+            if outbound_admission.release(outbound_units) {
+                emit_shared_quic_client_write_ready(&mut sessions, &mut pending_release);
+            }
             match cmd {
                 SharedQuicClientCommand::OpenSession {
                     mut quiche_config,
@@ -1695,6 +1810,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                         qlog_dir.as_deref(),
                         qlog_level.as_deref(),
                         &mut quiche_config,
+                        Arc::clone(&outbound_admission),
                     );
                     let result = handler.map_or_else(
                         || {
@@ -1813,6 +1929,9 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     pending_release.push(session_handle);
                 }
             }
+        }
+        if commands_drained == event_loop::MAX_COMMANDS_PER_TICK && !cmd_rx.is_empty() {
+            poll_now = true;
         }
 
         flush_shared_quic_client_sends(
@@ -2061,6 +2180,7 @@ struct QuicServerHandler {
     handle_offset: u32,
     chunk_pool: ChunkPool,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl QuicServerHandler {
@@ -2068,6 +2188,7 @@ impl QuicServerHandler {
         quiche_config: quiche::Config,
         server_config: QuicServerConfig,
         worker_index: u32,
+        outbound_admission: Arc<OutboundAdmission>,
     ) -> Self {
         let disable_retry = server_config.disable_retry;
         let (chunk_pool, _chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
@@ -2089,6 +2210,7 @@ impl QuicServerHandler {
             handle_offset: server_sharding::handle_offset(worker_index),
             chunk_pool,
             chunk_pool_rx,
+            outbound_admission,
         }
     }
 
@@ -2096,13 +2218,21 @@ impl QuicServerHandler {
     fn global_handle(&self, local: usize) -> u32 {
         self.handle_offset | (local as u32)
     }
+
+    fn release_outbound_admission(&self, units: usize, batch: &mut Vec<JsH3Event>) {
+        if self.outbound_admission.release(units) {
+            batch.push(JsH3Event::write_ready(0));
+        }
+    }
 }
 
 impl ProtocolHandler for QuicServerHandler {
     type Command = QuicServerCommand;
 
     fn dispatch_command(&mut self, cmd: QuicServerCommand, batch: &mut Vec<JsH3Event>) -> bool {
-        reactor_metrics::record_outbound_command_dequeued(quic_server_command_outbound_bytes(&cmd));
+        let outbound_units = quic_server_command_outbound_bytes(&cmd);
+        reactor_metrics::record_outbound_command_dequeued(outbound_units);
+        self.release_outbound_admission(outbound_units, batch);
         match cmd {
             QuicServerCommand::Shutdown => {
                 // Audit finding #11: close every live connection with an
@@ -2660,6 +2790,7 @@ struct QuicClientHandler {
     session_closed_emitted: bool,
     chunk_pool: ChunkPool,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    outbound_admission: Arc<OutboundAdmission>,
 }
 
 impl QuicClientHandler {
@@ -2671,6 +2802,7 @@ impl QuicClientHandler {
         qlog_dir: Option<&str>,
         qlog_level: Option<&str>,
         quiche_config: &mut quiche::Config,
+        outbound_admission: Arc<OutboundAdmission>,
     ) -> Option<Self> {
         let Ok(scid) = CidEncoding::random().generate_scid() else {
             return None;
@@ -2710,6 +2842,7 @@ impl QuicClientHandler {
             session_closed_emitted: false,
             chunk_pool,
             chunk_pool_rx,
+            outbound_admission,
         })
     }
 
@@ -2832,6 +2965,12 @@ impl QuicClientHandler {
 
     fn qlog_path(&self) -> Option<String> {
         self.conn.qlog_path.clone()
+    }
+
+    fn release_outbound_admission(&self, units: usize, batch: &mut Vec<JsH3Event>) {
+        if self.outbound_admission.release(units) {
+            batch.push(JsH3Event::write_ready(0));
+        }
     }
 
     fn emit_session_close(
@@ -2991,7 +3130,9 @@ impl ProtocolHandler for QuicClientHandler {
     type Command = QuicClientCommand;
 
     fn dispatch_command(&mut self, cmd: QuicClientCommand, batch: &mut Vec<JsH3Event>) -> bool {
-        reactor_metrics::record_outbound_command_dequeued(quic_client_command_outbound_bytes(&cmd));
+        let outbound_units = quic_client_command_outbound_bytes(&cmd);
+        reactor_metrics::record_outbound_command_dequeued(outbound_units);
+        self.release_outbound_admission(outbound_units, batch);
         match cmd {
             QuicClientCommand::Shutdown => {
                 if !self.session_closed_emitted {
