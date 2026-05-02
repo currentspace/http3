@@ -43,10 +43,10 @@ pub struct JsReactorTelemetrySnapshot {
     pub eventBatchOutstanding: i64,
     pub eventBatchOutstandingHighWatermark: i64,
     pub eventBatchSelfHealedTotal: i64,
-    /// Audit #14, step 5.2: count of poll iterations where the worker
-    /// skipped RX processing because the outstanding-events gauge was
-    /// over the high-water mark. Coarse backpressure signal — if this
-    /// climbs without bound, JS dispatch is the bottleneck.
+    /// Audit #14, step 5.2: count of poll iterations where JS-facing
+    /// protocol event production was paused because the outstanding-events
+    /// gauge was over the high-water mark. Coarse backpressure signal — if
+    /// this climbs without bound, JS dispatch is the bottleneck.
     pub eventBatchRxPausesTotal: i64,
     /// Audit #18: ECN observability — counts of inbound datagrams by
     /// code point. Telemetry only (quiche 0.28 doesn't expose ECN).
@@ -221,8 +221,8 @@ static EVENT_BATCH_DROPPED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_SINK_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 /// Audit finding #14: gauge of events handed to TSFN minus events JS has
-/// acked. A persistently rising value flags an unbounded libuv queue —
-/// the early-warning signal that motivates the recv-pause in step 5.2.
+/// acked. A persistently rising value flags an unbounded libuv queue — the
+/// early-warning signal that motivates protocol-level app-event backpressure.
 static EVENT_BATCH_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_ACKED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -504,6 +504,10 @@ pub(crate) fn self_heal_event_batch_if_stuck(high_water: u64, stuck_after_ms: u6
     self_heal_event_batch_if_stuck_at(high_water, stuck_after_ms, now_ms())
 }
 
+pub(crate) fn event_batch_outstanding() -> u64 {
+    EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed)
+}
+
 fn self_heal_event_batch_if_stuck_at(high_water: u64, stuck_after_ms: u64, now_ms: u64) -> u64 {
     let outstanding = EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed);
     if outstanding <= high_water {
@@ -531,7 +535,7 @@ fn self_heal_event_batch_if_stuck_at(high_water: u64, stuck_after_ms: u64, now_m
     }
 }
 
-/// Audit #14, step 5.2: increment the count of RX pause iterations.
+/// Audit #14, step 5.2: increment the count of protocol app-event pause iterations.
 pub(crate) fn record_event_batch_rx_pause() {
     bump(&EVENT_BATCH_RX_PAUSES_TOTAL);
 }

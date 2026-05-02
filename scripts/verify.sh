@@ -90,6 +90,10 @@ step "rust unit tests"
 pnpm run test:rust:unit
 mark_done
 
+step "rust loom tests"
+cargo test --test buffer_recycler_loom --no-default-features
+mark_done
+
 step "rust mock-extended integration tests"
 pnpm run test:rust:mock:extended
 mark_done

@@ -120,6 +120,15 @@ pub trait Driver: Sized {
     /// If deadline is `None`, uses a 100ms default timeout.
     fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome>;
 
+    /// Poll wakeups, write readiness, and timers without admitting more RX
+    /// datagrams into protocol processing.
+    ///
+    /// Used when JS event delivery is behind real time. Readiness-based
+    /// drivers should leave datagrams in the kernel receive buffer. Completion
+    /// based drivers should preserve ownership of completed datagrams for a
+    /// later normal `poll()` rather than dropping them.
+    fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome>;
+
     /// Submit outbound datagrams. Ownership of each `TxDatagram` transfers
     /// to the driver. Packets that cannot be sent immediately are queued.
     fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()>;
@@ -349,6 +358,13 @@ impl Driver for PlatformDriver {
         match self {
             Self::IoUring(driver) => driver.poll(deadline),
             Self::Poll(driver) => driver.poll(deadline),
+        }
+    }
+
+    fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+        match self {
+            Self::IoUring(driver) => driver.poll_without_rx(deadline),
+            Self::Poll(driver) => driver.poll_without_rx(deadline),
         }
     }
 

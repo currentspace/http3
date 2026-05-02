@@ -198,7 +198,7 @@ impl NativeWorkerServer {
             return false;
         };
         let body_len = data.as_ref().len();
-        if !handle.try_admit_outbound(body_len, fin) {
+        if !handle.try_admit_outbound(conn_handle, body_len, fin) {
             return false;
         }
         let h: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
@@ -211,7 +211,7 @@ impl NativeWorkerServer {
             fin,
         });
         if !accepted {
-            handle.release_outbound_admission(body_len, fin);
+            handle.release_outbound_admission(conn_handle, body_len, fin);
         }
         if accepted {
             crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
@@ -225,7 +225,7 @@ impl NativeWorkerServer {
             return false;
         };
         let body_len = data.as_ref().len();
-        if !handle.try_admit_outbound(body_len, fin) {
+        if !handle.try_admit_outbound(conn_handle, body_len, fin) {
             return false;
         }
         let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
@@ -236,7 +236,7 @@ impl NativeWorkerServer {
             fin,
         });
         if !accepted {
-            handle.release_outbound_admission(body_len, fin);
+            handle.release_outbound_admission(conn_handle, body_len, fin);
         }
         if accepted {
             crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
@@ -287,14 +287,14 @@ impl NativeWorkerServer {
             return false;
         };
         let body_len = data.as_ref().len();
-        if !handle.try_admit_outbound(body_len, false) {
+        if !handle.try_admit_outbound(conn_handle, body_len, false) {
             return false;
         }
         let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
         match handle.send_datagram(conn_handle, chunk) {
             Ok(accepted) => accepted,
             Err(_) => {
-                handle.release_outbound_admission(body_len, false);
+                handle.release_outbound_admission(conn_handle, body_len, false);
                 false
             }
         }

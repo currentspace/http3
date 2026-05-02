@@ -203,6 +203,51 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll_inner(deadline, true)
+        }
+
+        fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll_inner(deadline, false)
+        }
+
+        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            if packets.is_empty() {
+                return Ok(());
+            }
+            self.send_batch(packets);
+            Ok(())
+        }
+
+        fn pending_tx_count(&self) -> usize {
+            self.unsent.len()
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.socket.local_addr()
+        }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::Poll
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            for buf in buffers {
+                let retained = self.rx_pool.checkin(buf);
+                reactor_metrics::record_rx_buffer_checkin(retained);
+            }
+        }
+    }
+
+    impl PollDriver {
+        fn poll_inner(
+            &mut self,
+            deadline: Option<Instant>,
+            receive_enabled: bool,
+        ) -> io::Result<PollOutcome> {
             let timeout_ms = deadline.map_or(100i32, |d| {
                 let dur = d.saturating_duration_since(Instant::now());
                 let millis = dur.as_millis().min(i32::MAX as u128);
@@ -256,46 +301,12 @@ mod inner {
                 self.drain_unsent();
             }
 
-            if (fds[0].revents & libc::POLLIN) != 0 {
+            if receive_enabled && (fds[0].revents & libc::POLLIN) != 0 {
                 self.recv_batch(&mut outcome);
             }
 
             Ok(outcome)
         }
-
-        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
-            if packets.is_empty() {
-                return Ok(());
-            }
-            self.send_batch(packets);
-            Ok(())
-        }
-
-        fn pending_tx_count(&self) -> usize {
-            self.unsent.len()
-        }
-
-        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
-            std::mem::take(&mut self.recycled_tx)
-        }
-
-        fn local_addr(&self) -> io::Result<SocketAddr> {
-            self.socket.local_addr()
-        }
-
-        fn driver_kind(&self) -> RuntimeDriverKind {
-            RuntimeDriverKind::Poll
-        }
-
-        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
-            for buf in buffers {
-                let retained = self.rx_pool.checkin(buf);
-                reactor_metrics::record_rx_buffer_checkin(retained);
-            }
-        }
-    }
-
-    impl PollDriver {
         /// Receive datagrams using recvmmsg(2).
         fn recv_batch(&mut self, outcome: &mut PollOutcome) {
             self.rx_batch.reset();

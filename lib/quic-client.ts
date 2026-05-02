@@ -310,7 +310,7 @@ export class QuicClientSession extends EventEmitter {
     this._closeRequested = true;
     this._clearConnectTimer();
     this._markReadyError(err);
-    this._cleanupStreams();
+    this._cleanupStreams(err);
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (loop_) {
@@ -344,13 +344,15 @@ export class QuicClientSession extends EventEmitter {
         case EVENT_RESET:
           this._onReset(event);
           break;
-        case EVENT_SESSION_CLOSE:
+        case EVENT_SESSION_CLOSE: {
+          const closeErr = toSessionError(event, 'session closed');
           if (!this._handshakeComplete) {
             this._markReadyError(new Error('session closed before handshake'));
           }
-          this._cleanupStreams();
+          this._cleanupStreams(closeErr);
           this._emitClose(sessionCloseInfoFromEvent(event));
           break;
+        }
         case EVENT_DRAIN:
           this._onDrain(event);
           break;
@@ -477,8 +479,7 @@ export class QuicClientSession extends EventEmitter {
     return stream;
   }
 
-  private _cleanupStreams(): void {
-    const err = new Error('session closed');
+  private _cleanupStreams(err = new Error('session closed')): void {
     for (const stream of [...this._streams.values()]) {
       if (stream.listenerCount('error') > 0) {
         stream.destroy(err);

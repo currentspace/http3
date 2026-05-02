@@ -3,7 +3,7 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,11 +19,35 @@ use crate::h3_event::{EventRecycler, JsH3Event, JsHeader};
 use crate::ping_state::PingState;
 use crate::reactor_metrics;
 
-// quiche::h3::send_body() needs room for the DATA frame type varint, the
-// largest DATA length varint, and at least one payload byte before reporting
-// H3 body streams writable again. Using the same scale here prevents
-// premature JS drain callbacks for blocked empty-FIN retries.
-const H3_WRITE_READY_MIN_CAPACITY: usize = 9;
+const H3_RECV_CHUNK: usize = 64 * 1024;
+
+struct PendingRecvBody {
+    buf: Vec<u8>,
+    len: usize,
+}
+
+fn take_pending_body_event(
+    pending_body_data: &mut HashMap<u64, PendingRecvBody>,
+    data_pool: &mut AdaptiveBufferPool,
+    conn_handle: u32,
+    stream_id: u64,
+    recycler: EventRecycler,
+) -> Option<JsH3Event> {
+    let mut pending = pending_body_data.remove(&stream_id)?;
+    if pending.len == 0 {
+        data_pool.checkin(pending.buf);
+        return None;
+    }
+
+    pending.buf.truncate(pending.len);
+    Some(JsH3Event::data(
+        conn_handle,
+        stream_id,
+        pending.buf,
+        false,
+        recycler,
+    ))
+}
 
 pub struct H3Connection {
     pub quiche_conn: quiche::Connection<ArcBufFactory>,
@@ -61,6 +85,7 @@ pub struct H3Connection {
     /// Receiving end of the recycler channel — drained periodically on the
     /// worker thread to pull returned buffers back into `data_pool`.
     pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    pending_body_data: HashMap<u64, PendingRecvBody>,
     ping_state: PingState,
 }
 
@@ -141,6 +166,7 @@ impl H3Connection {
             data_pool,
             data_recycler,
             data_recycle_rx,
+            pending_body_data: HashMap::new(),
             ping_state: PingState::default(),
         }
     }
@@ -181,86 +207,208 @@ impl H3Connection {
     }
 
     /// Poll for H3 events and push them into the provided batch.
-    pub fn poll_h3_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
+    ///
+    /// `app_event_budget` applies only to JS-facing stream/datagram events.
+    /// Drain events are still emitted so write-side backpressure can clear
+    /// without depending on another inbound packet.
+    pub fn poll_h3_events(
+        &mut self,
+        conn_handle: u32,
+        app_event_budget: usize,
+        events: &mut Vec<JsH3Event>,
+    ) {
         let recycler = self.event_recycler();
-        if let Some(h3_conn) = self.h3_conn.as_mut() {
-            loop {
-                match h3_conn.poll(&mut self.quiche_conn) {
-                    Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                        // Track the largest accepted request ID for our own
-                        // outgoing GoAway. monotonic since quiche delivers
-                        // events in order, but max() is defensive.
-                        if stream_id > self.largest_accepted_request_id {
-                            self.largest_accepted_request_id = stream_id;
-                        }
-                        let headers: Vec<JsHeader> = list
-                            .into_iter()
-                            .map(|h| JsHeader {
-                                name: String::from_utf8_lossy(h.name()).into_owned(),
-                                value: String::from_utf8_lossy(h.value()).into_owned(),
-                            })
-                            .collect();
-                        events.push(JsH3Event::headers(
-                            conn_handle,
-                            stream_id,
-                            headers,
-                            !more_frames,
-                        ));
+        let mut app_events_remaining = app_event_budget;
+        if app_events_remaining > 0 {
+            if let Some(h3_conn) = self.h3_conn.as_mut() {
+                loop {
+                    if app_events_remaining == 0 {
+                        break;
                     }
-                    Ok((stream_id, quiche::h3::Event::Data)) => loop {
-                        let (mut buf, _) = self.data_pool.checkout(16384);
-                        match h3_conn.recv_body(&mut self.quiche_conn, stream_id, &mut buf) {
-                            Ok(len) => {
-                                buf.truncate(len);
-                                events.push(JsH3Event::data(
+                    match h3_conn.poll(&mut self.quiche_conn) {
+                        Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
+                            if let Some(event) = take_pending_body_event(
+                                &mut self.pending_body_data,
+                                &mut self.data_pool,
+                                conn_handle,
+                                stream_id,
+                                recycler.clone(),
+                            ) {
+                                events.push(event);
+                                app_events_remaining = app_events_remaining.saturating_sub(1);
+                            }
+                            // Track the largest accepted request ID for our own
+                            // outgoing GoAway. monotonic since quiche delivers
+                            // events in order, but max() is defensive.
+                            if stream_id > self.largest_accepted_request_id {
+                                self.largest_accepted_request_id = stream_id;
+                            }
+                            let headers: Vec<JsHeader> = list
+                                .into_iter()
+                                .map(|h| JsHeader {
+                                    name: String::from_utf8_lossy(h.name()).into_owned(),
+                                    value: String::from_utf8_lossy(h.value()).into_owned(),
+                                })
+                                .collect();
+                            events.push(JsH3Event::headers(
+                                conn_handle,
+                                stream_id,
+                                headers,
+                                !more_frames,
+                            ));
+                            app_events_remaining = app_events_remaining.saturating_sub(1);
+                        }
+                        Ok((stream_id, quiche::h3::Event::Data)) => loop {
+                            if app_events_remaining == 0 {
+                                break;
+                            }
+
+                            let mut drained_current_event = false;
+                            let mut error = None;
+
+                            loop {
+                                if !self.pending_body_data.contains_key(&stream_id) {
+                                    let (buf, _) = self.data_pool.checkout(H3_RECV_CHUNK);
+                                    self.pending_body_data
+                                        .insert(stream_id, PendingRecvBody { buf, len: 0 });
+                                }
+
+                                let Some(pending) = self.pending_body_data.get_mut(&stream_id)
+                                else {
+                                    break;
+                                };
+                                if pending.len == pending.buf.len() {
+                                    break;
+                                }
+                                let start = pending.len;
+
+                                match h3_conn.recv_body(
+                                    &mut self.quiche_conn,
+                                    stream_id,
+                                    &mut pending.buf[start..],
+                                ) {
+                                    Ok(len) => {
+                                        if len == 0 {
+                                            break;
+                                        }
+                                        pending.len = start + len;
+                                    }
+                                    Err(quiche::h3::Error::Done) => {
+                                        drained_current_event = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        error = Some(e.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let pending_is_full = self
+                                .pending_body_data
+                                .get(&stream_id)
+                                .is_some_and(|pending| pending.len == pending.buf.len());
+                            if self
+                                .pending_body_data
+                                .get(&stream_id)
+                                .is_some_and(|pending| pending.len == 0)
+                            {
+                                if let Some(pending) = self.pending_body_data.remove(&stream_id) {
+                                    self.data_pool.checkin(pending.buf);
+                                }
+                            }
+                            if pending_is_full {
+                                if let Some(event) = take_pending_body_event(
+                                    &mut self.pending_body_data,
+                                    &mut self.data_pool,
                                     conn_handle,
                                     stream_id,
-                                    buf,
-                                    false,
                                     recycler.clone(),
-                                ));
+                                ) {
+                                    events.push(event);
+                                    app_events_remaining = app_events_remaining.saturating_sub(1);
+                                }
                             }
-                            Err(quiche::h3::Error::Done) => {
-                                self.data_pool.checkin(buf);
-                                break;
-                            }
-                            Err(e) => {
-                                self.data_pool.checkin(buf);
-                                events.push(JsH3Event::error(
+
+                            if let Some(message) = error {
+                                if let Some(event) = take_pending_body_event(
+                                    &mut self.pending_body_data,
+                                    &mut self.data_pool,
                                     conn_handle,
-                                    stream_id as i64,
-                                    0,
-                                    e.to_string(),
-                                ));
+                                    stream_id,
+                                    recycler.clone(),
+                                ) {
+                                    events.push(event);
+                                    app_events_remaining = app_events_remaining.saturating_sub(1);
+                                }
+                                if app_events_remaining > 0 {
+                                    events.push(JsH3Event::error(
+                                        conn_handle,
+                                        stream_id as i64,
+                                        0,
+                                        message,
+                                    ));
+                                    app_events_remaining = app_events_remaining.saturating_sub(1);
+                                }
                                 break;
                             }
+
+                            if drained_current_event || !pending_is_full {
+                                break;
+                            }
+                        },
+                        Ok((stream_id, quiche::h3::Event::Finished)) => {
+                            if let Some(event) = take_pending_body_event(
+                                &mut self.pending_body_data,
+                                &mut self.data_pool,
+                                conn_handle,
+                                stream_id,
+                                recycler.clone(),
+                            ) {
+                                events.push(event);
+                                app_events_remaining = app_events_remaining.saturating_sub(1);
+                            }
+                            events.push(JsH3Event::finished(conn_handle, stream_id));
+                            app_events_remaining = app_events_remaining.saturating_sub(1);
                         }
-                    },
-                    Ok((stream_id, quiche::h3::Event::Finished)) => {
-                        events.push(JsH3Event::finished(conn_handle, stream_id));
-                    }
-                    Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
-                        events.push(JsH3Event::reset(conn_handle, stream_id, error_code));
-                    }
-                    Ok((_, quiche::h3::Event::PriorityUpdate)) => {
-                        // Ignore priority updates for now
-                    }
-                    Ok((stream_id, quiche::h3::Event::GoAway)) => {
-                        // Peer's GoAway carries *their* watermark; do NOT
-                        // overwrite our own largest_accepted_request_id with
-                        // it (audit finding #1).
-                        events.push(JsH3Event::goaway(conn_handle, stream_id));
-                    }
-                    Err(quiche::h3::Error::Done) => break,
-                    Err(e) => {
-                        events.push(JsH3Event::error(conn_handle, -1, 0, e.to_string()));
-                        break;
+                        Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
+                            if let Some(event) = take_pending_body_event(
+                                &mut self.pending_body_data,
+                                &mut self.data_pool,
+                                conn_handle,
+                                stream_id,
+                                recycler.clone(),
+                            ) {
+                                events.push(event);
+                                app_events_remaining = app_events_remaining.saturating_sub(1);
+                            }
+                            events.push(JsH3Event::reset(conn_handle, stream_id, error_code));
+                            app_events_remaining = app_events_remaining.saturating_sub(1);
+                        }
+                        Ok((_, quiche::h3::Event::PriorityUpdate)) => {
+                            // Ignore priority updates for now
+                        }
+                        Ok((stream_id, quiche::h3::Event::GoAway)) => {
+                            // Peer's GoAway carries *their* watermark; do NOT
+                            // overwrite our own largest_accepted_request_id with
+                            // it (audit finding #1).
+                            events.push(JsH3Event::goaway(conn_handle, stream_id));
+                            app_events_remaining = app_events_remaining.saturating_sub(1);
+                        }
+                        Err(quiche::h3::Error::Done) => break,
+                        Err(e) => {
+                            events.push(JsH3Event::error(conn_handle, -1, 0, e.to_string()));
+                            app_events_remaining = app_events_remaining.saturating_sub(1);
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        self.poll_datagram_events(conn_handle, events);
+        if app_events_remaining > 0 {
+            self.poll_datagram_events(conn_handle, app_events_remaining, events);
+        }
 
         // Check for newly writable streams (drain events).
         // Also remove entries for streams that are finished/closed.
@@ -269,26 +417,10 @@ impl H3Connection {
 
     /// Check blocked streams for drain events without polling H3 events.
     pub fn poll_drain_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
-        let len = self.blocked_queue.len();
-        for _ in 0..len {
-            let Some(stream_id) = self.blocked_queue.pop_front() else {
-                break;
-            };
-            match self
-                .quiche_conn
-                .stream_writable(stream_id, H3_WRITE_READY_MIN_CAPACITY)
-            {
-                Ok(true) => {
-                    self.blocked_set.remove(&stream_id);
-                    events.push(JsH3Event::drain(conn_handle, stream_id));
-                }
-                Err(_) => {
-                    self.blocked_set.remove(&stream_id);
-                }
-                Ok(false) => {
-                    // Still blocked — re-enqueue at back
-                    self.blocked_queue.push_back(stream_id);
-                }
+        while let Some(stream_id) = self.quiche_conn.stream_writable_next() {
+            if self.blocked_set.remove(&stream_id) {
+                self.blocked_queue.retain(|&id| id != stream_id);
+                events.push(JsH3Event::drain(conn_handle, stream_id));
             }
         }
     }
@@ -532,6 +664,9 @@ impl H3Connection {
         if self.blocked_set.remove(&stream_id) {
             self.blocked_queue.retain(|&id| id != stream_id);
         }
+        if let Some(pending) = self.pending_body_data.remove(&stream_id) {
+            self.data_pool.checkin(pending.buf);
+        }
         Ok(())
     }
 
@@ -644,14 +779,26 @@ impl H3Connection {
             .map_err(Http3NativeError::Quiche)
     }
 
-    pub fn poll_datagram_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
+    pub fn poll_datagram_events(
+        &mut self,
+        conn_handle: u32,
+        app_event_budget: usize,
+        events: &mut Vec<JsH3Event>,
+    ) {
+        let mut remaining = app_event_budget;
         loop {
+            if remaining == 0 {
+                break;
+            }
             match self.quiche_conn.dgram_recv_buf() {
-                Ok(buf) => events.push(JsH3Event::datagram(
-                    conn_handle,
-                    buf.into_vec(),
-                    self.event_recycler(),
-                )),
+                Ok(buf) => {
+                    events.push(JsH3Event::datagram(
+                        conn_handle,
+                        buf.into_vec(),
+                        self.event_recycler(),
+                    ));
+                    remaining = remaining.saturating_sub(1);
+                }
                 Err(quiche::Error::Done) => {
                     break;
                 }

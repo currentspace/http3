@@ -1060,6 +1060,23 @@ mod inner {
             Ok(outcome)
         }
 
+        fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            // io_uring is completion-based: recv CQEs may already be ready
+            // because the multishot recv is armed. Drain completions so TX,
+            // wakeups, and buffer returns still make progress, but hold any
+            // received datagrams in `deferred_rx` for the next normal poll
+            // instead of dropping them or admitting them to protocol code.
+            let mut outcome = self.poll(deadline)?;
+            if !outcome.rx.is_empty() {
+                self.deferred_rx.extend(outcome.rx.drain(..));
+            }
+            Ok(PollOutcome {
+                rx: Vec::new(),
+                woken: outcome.woken,
+                timer_expired: outcome.timer_expired,
+            })
+        }
+
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
             let pkt_count = packets.len();
             // Log at warn level when under pressure so we can diagnose stalls.

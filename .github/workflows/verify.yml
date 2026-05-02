@@ -44,6 +44,36 @@ jobs:
       - name: Run full verify
         run: pnpm verify
 
+  verify-macos:
+    name: verify (${{ matrix.os }}, kqueue)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run full verify
+        run: pnpm verify
+
   verify-docker:
     name: verify (debian latest, docker)
     runs-on: ubuntu-latest

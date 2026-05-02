@@ -117,17 +117,11 @@ pub const MAX_BATCH_SIZE: usize = 2048;
 pub(crate) const MAX_COMMANDS_PER_TICK: usize = 1024;
 
 /// Audit finding #14, step 5.2: when the JS-side outstanding-events gauge
-/// exceeds this threshold, the worker skips RX processing for one poll
-/// iteration. The kernel UDP recv buffer absorbs the unread datagrams;
-/// once it fills, the kernel drops further inbound packets, peers
-/// observe loss, and quiche-level loss recovery throttles them.
-///
-/// 16× MAX_BATCH_SIZE is conservative: each batch holds at most
-/// ~100 KB of TSFN payload, so a 32 K-event backlog represents ~1.6 MB
-/// of unprocessed JS work — well past any reasonable steady-state
-/// dispatch latency, well below the kernel UDP buffer's spillover
-/// threshold on default configs.
-pub const RX_PAUSE_HIGH_WATER: u64 = (MAX_BATCH_SIZE as u64) * 16;
+/// reaches this threshold, workers keep receiving QUIC packets but pause
+/// JS-facing stream/datagram event production. This lets ACKs, timers and
+/// outbound packets keep progressing while QUIC/H3 flow control throttles the
+/// peer at the protocol boundary.
+pub const APP_EVENT_PAUSE_HIGH_WATER: u64 = (MAX_BATCH_SIZE as u64) * 2;
 
 /// Per-connection QUIC packet scratch buffer size.
 pub(crate) const SEND_BUF_SIZE: usize = 65535;
@@ -155,11 +149,12 @@ pub(crate) trait ProtocolHandler {
         peer: SocketAddr,
         local: SocketAddr,
         pending_outbound: &mut Vec<TxDatagram>,
+        app_event_budget: usize,
         batch: &mut Vec<JsH3Event>,
     );
 
     /// Call `on_timeout()` for expired timers, poll events, reschedule.
-    fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>);
+    fn process_timers(&mut self, now: Instant, app_event_budget: usize, batch: &mut Vec<JsH3Event>);
 
     /// Call `conn.send()` for every connection.  Pushes outbound packets.
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>);
@@ -168,7 +163,7 @@ pub(crate) trait ProtocolHandler {
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>);
 
     /// Check blocked_streams for writability.  Push drain events.
-    fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>);
+    fn poll_drain_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>);
 
     /// Remove closed connections.  Push session_close events.
     fn cleanup_closed(&mut self, batch: &mut Vec<JsH3Event>);
@@ -323,6 +318,26 @@ pub struct EventBatcher {
     pub batch: Vec<JsH3Event>,
     sink: Box<dyn EventSink>,
     stats: EventBatcherStatsHandle,
+}
+
+pub(crate) fn poll_with_event_backpressure<D: Driver>(
+    driver: &mut D,
+    deadline: Option<Instant>,
+) -> io::Result<crate::transport::PollOutcome> {
+    let outstanding =
+        reactor_metrics::self_heal_event_batch_if_stuck(APP_EVENT_PAUSE_HIGH_WATER, 5_000);
+    if outstanding >= APP_EVENT_PAUSE_HIGH_WATER {
+        reactor_metrics::record_event_batch_rx_pause();
+    }
+    driver.poll(deadline)
+}
+
+pub(crate) fn app_event_budget(pending_batch_len: usize) -> usize {
+    if reactor_metrics::event_batch_outstanding() >= APP_EVENT_PAUSE_HIGH_WATER {
+        return 0;
+    }
+
+    MAX_BATCH_SIZE.saturating_sub(pending_batch_len)
 }
 
 struct WorkerLoopStopGuard;
@@ -525,7 +540,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         };
 
         // 2. Block until events occur
-        let outcome = match driver.poll(deadline) {
+        let outcome = match poll_with_event_backpressure(driver, deadline) {
             Ok(o) => o,
             Err(err) => {
                 let _ = flush_runtime_error(
@@ -613,43 +628,8 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         //    peers promptly.  Without this, processing hundreds of inbound
         //    packets before any sends causes congestion-window stalls under
         //    fan-out (many connections sending concurrently).
-        //
-        //    Audit finding #14: when JS dispatch is too far behind real-time
-        //    (outstanding gauge > RX_PAUSE_HIGH_WATER), skip the RX loop this
-        //    iteration. Buffers go straight to the recycler; the kernel
-        //    socket buffer absorbs further inbound until it spills. Quiche
-        //    loss recovery handles the resulting drops, throttling the peer
-        //    naturally.
         let rx_count = outcome.rx.len();
         let mut rx_recycled: Vec<Vec<u8>> = Vec::new();
-        let outstanding =
-            reactor_metrics::self_heal_event_batch_if_stuck(RX_PAUSE_HIGH_WATER, 5_000);
-        if rx_count > 0 && outstanding > RX_PAUSE_HIGH_WATER {
-            reactor_metrics::record_event_batch_rx_pause();
-            for pkt in outcome.rx {
-                rx_recycled.push(pkt.data);
-            }
-            driver.recycle_rx_buffers(rx_recycled);
-            // Skip mid-RX flush, drain & timer steps below — they all
-            // depend on having processed packets. Loop back to poll().
-            handler.flush_sends(&mut outbound);
-            if !outbound.is_empty() {
-                if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
-                    let _ = flush_runtime_error(
-                        &mut batcher,
-                        driver,
-                        handler,
-                        "submit_sends",
-                        "driver-submit-sends-failed",
-                        &err,
-                    );
-                    return;
-                }
-            }
-            handler.drain_recycled_buffers();
-            let _ = batcher.flush();
-            continue;
-        }
         for (rx_idx, mut pkt) in outcome.rx.into_iter().enumerate() {
             pending_outbound.clear();
             if rx_idx == 0 {
@@ -673,12 +653,14 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 for chunk in pkt.data.chunks(seg) {
                     let (mut buf, reused) = gro_segment_pool.copy_from_slice(chunk);
                     reactor_metrics::record_gro_segment_buffer_checkout(reused, chunk.len());
+                    let app_budget = app_event_budget(batcher.len());
                     if !batcher.collect_atomic(|batch| {
                         handler.process_packet(
                             &mut buf,
                             pkt.peer,
                             pkt_local,
                             &mut pending_outbound,
+                            app_budget,
                             batch,
                         )
                     }) {
@@ -689,12 +671,14 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                     reactor_metrics::record_gro_segment_buffer_checkin(retained);
                 }
             } else {
+                let app_budget = app_event_budget(batcher.len());
                 if !batcher.collect_atomic(|batch| {
                     handler.process_packet(
                         &mut pkt.data,
                         pkt.peer,
                         pkt_local,
                         &mut pending_outbound,
+                        app_budget,
                         batch,
                     )
                 }) {
@@ -745,13 +729,17 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         }
 
         // 5. Process protocol timers (always — cheap when nothing is expired)
-        if !batcher.collect_atomic(|batch| handler.process_timers(Instant::now(), batch)) {
+        let app_budget = app_event_budget(batcher.len());
+        if !batcher
+            .collect_atomic(|batch| handler.process_timers(Instant::now(), app_budget, batch))
+        {
             record_sink_close_exit(driver);
             return;
         }
 
         // 6. Poll drain events + flush pending writes
-        if !batcher.collect_atomic(|batch| handler.poll_drain_events(batch)) {
+        let app_budget = app_event_budget(batcher.len());
+        if !batcher.collect_atomic(|batch| handler.poll_drain_events(app_budget, batch)) {
             record_sink_close_exit(driver);
             return;
         }
@@ -827,6 +815,9 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use crate::transport::{Driver, TxDatagram};
 
     /// Tracks the sizes of each batch delivered via `emit()`.
     type DeliveryLog = Arc<Mutex<Vec<usize>>>;
@@ -929,6 +920,49 @@ mod tests {
                 crate::h3_event::NO_RECYCLER,
             ),
         }
+    }
+
+    #[test]
+    fn test_app_event_budget_counts_pending_batch_and_outstanding() {
+        crate::reactor_metrics::reset();
+
+        assert_eq!(app_event_budget(0), MAX_BATCH_SIZE);
+        assert_eq!(app_event_budget(64), MAX_BATCH_SIZE - 64);
+        assert_eq!(app_event_budget(MAX_BATCH_SIZE + 1), 0);
+
+        crate::reactor_metrics::record_event_batch_flush(APP_EVENT_PAUSE_HIGH_WATER as usize);
+        assert_eq!(app_event_budget(0), 0);
+
+        crate::reactor_metrics::record_event_batch_ack(APP_EVENT_PAUSE_HIGH_WATER as usize);
+        assert_eq!(app_event_budget(0), MAX_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_event_backpressure_keeps_receiving_packets() {
+        crate::reactor_metrics::reset();
+        crate::reactor_metrics::record_event_batch_flush(APP_EVENT_PAUSE_HIGH_WATER as usize);
+
+        let left_addr = "127.0.0.1:44330".parse().unwrap();
+        let right_addr = "127.0.0.1:44331".parse().unwrap();
+        let ((mut left, _), (mut right, _)) =
+            crate::transport::mock::MockDriver::pair(left_addr, right_addr);
+
+        right
+            .submit_sends(vec![TxDatagram {
+                data: vec![1, 2, 3],
+                to: left_addr,
+                max_segment_size: None,
+            }])
+            .unwrap();
+
+        let outcome = poll_with_event_backpressure(
+            &mut left,
+            Some(Instant::now() + Duration::from_millis(10)),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.rx.len(), 1);
+        assert_eq!(outcome.rx[0].data, vec![1, 2, 3]);
     }
 
     #[test]

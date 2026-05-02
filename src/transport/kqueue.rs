@@ -150,6 +150,67 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll_inner(deadline, true)
+        }
+
+        fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll_inner(deadline, false)
+        }
+
+        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            for pkt in packets {
+                match self.socket.send_to(&pkt.data, pkt.to) {
+                    Ok(_) => {
+                        self.recycled_tx.push(pkt.data);
+                    }
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryableWouldBlock => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.unsent.push_back(pkt);
+                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            log::warn!(
+                                "kqueue driver: send_to failed with permanent error {error}; dropping datagram"
+                            );
+                            self.recycled_tx.push(pkt.data);
+                        }
+                    },
+                }
+            }
+            Ok(())
+        }
+
+        fn pending_tx_count(&self) -> usize {
+            self.unsent.len()
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(self.local_addr)
+        }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::Kqueue
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            for buf in buffers {
+                let retained = self.rx_pool.checkin(buf);
+                reactor_metrics::record_rx_buffer_checkin(retained);
+            }
+        }
+    }
+
+    impl KqueueDriver {
+        fn poll_inner(
+            &mut self,
+            deadline: Option<Instant>,
+            receive_enabled: bool,
+        ) -> io::Result<PollOutcome> {
             let timeout = deadline
                 .map(|d| {
                     let dur = d.saturating_duration_since(Instant::now());
@@ -226,96 +287,49 @@ mod inner {
                 self.drain_unsent();
             }
 
-            // Drain socket via recvmsg (audit finding #20) so the cmsg
-            // delivers per-datagram destination IP. Cap iterations to
-            // avoid starving the send path. Under fan-out an unbounded
-            // loop delays ACKs and causes congestion-window stalls; the
-            // cap lets flush_sends() run between batches and the next
-            // poll() returns immediately because EV_CLEAR re-arms on any
-            // remaining data.
-            let bound_to_specific = !self.local_addr.ip().is_unspecified();
-            for _ in 0..MAX_RX_PER_POLL {
-                match self.recvmsg_once() {
-                    Ok((len, peer, parsed_local)) => {
-                        let (data, reused) = self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
-                        reactor_metrics::record_rx_buffer_checkout(reused, len);
-                        // When bound to a concrete IP, use it directly — the
-                        // bind addr is authoritative and avoids picking up an
-                        // alternate-family pktinfo on dual-stack sockets.
-                        // When bound to 0.0.0.0 or [::], use the parsed cmsg
-                        // local so multi-homed servers can route by the actual
-                        // local IP each datagram arrived on.
-                        let local = if bound_to_specific {
-                            self.local_addr
-                        } else {
-                            parsed_local.map_or(self.local_addr, |ip| {
-                                SocketAddr::new(ip, self.local_addr.port())
-                            })
-                        };
-                        outcome.rx.push(RxDatagram {
-                            data,
-                            peer,
-                            local,
-                            segment_size: None,
-                        });
+            if receive_enabled {
+                // Drain socket via recvmsg (audit finding #20) so the cmsg
+                // delivers per-datagram destination IP. Cap iterations to
+                // avoid starving the send path. Under fan-out an unbounded
+                // loop delays ACKs and causes congestion-window stalls; the
+                // cap lets flush_sends() run between batches and the next
+                // poll() returns immediately because EV_CLEAR re-arms on any
+                // remaining data.
+                let bound_to_specific = !self.local_addr.ip().is_unspecified();
+                for _ in 0..MAX_RX_PER_POLL {
+                    match self.recvmsg_once() {
+                        Ok((len, peer, parsed_local)) => {
+                            let (data, reused) =
+                                self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
+                            reactor_metrics::record_rx_buffer_checkout(reused, len);
+                            // When bound to a concrete IP, use it directly — the
+                            // bind addr is authoritative and avoids picking up an
+                            // alternate-family pktinfo on dual-stack sockets.
+                            // When bound to 0.0.0.0 or [::], use the parsed cmsg
+                            // local so multi-homed servers can route by the actual
+                            // local IP each datagram arrived on.
+                            let local = if bound_to_specific {
+                                self.local_addr
+                            } else {
+                                parsed_local.map_or(self.local_addr, |ip| {
+                                    SocketAddr::new(ip, self.local_addr.port())
+                                })
+                            };
+                            outcome.rx.push(RxDatagram {
+                                data,
+                                peer,
+                                local,
+                                segment_size: None,
+                            });
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(_) => break,
                     }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
                 }
             }
 
             Ok(outcome)
         }
-
-        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
-            for pkt in packets {
-                match self.socket.send_to(&pkt.data, pkt.to) {
-                    Ok(_) => {
-                        self.recycled_tx.push(pkt.data);
-                    }
-                    Err(error) => match classify_kqueue_send_error(&error) {
-                        KqueueSendErrorClass::RetryableWouldBlock => {
-                            reactor_metrics::record_kqueue_would_block_send();
-                            self.unsent.push_back(pkt);
-                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
-                        }
-                        KqueueSendErrorClass::Permanent => {
-                            log::warn!(
-                                "kqueue driver: send_to failed with permanent error {error}; dropping datagram"
-                            );
-                            self.recycled_tx.push(pkt.data);
-                        }
-                    },
-                }
-            }
-            Ok(())
-        }
-
-        fn pending_tx_count(&self) -> usize {
-            self.unsent.len()
-        }
-
-        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
-            std::mem::take(&mut self.recycled_tx)
-        }
-
-        fn local_addr(&self) -> io::Result<SocketAddr> {
-            Ok(self.local_addr)
-        }
-
-        fn driver_kind(&self) -> RuntimeDriverKind {
-            RuntimeDriverKind::Kqueue
-        }
-
-        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
-            for buf in buffers {
-                let retained = self.rx_pool.checkin(buf);
-                reactor_metrics::record_rx_buffer_checkin(retained);
-            }
-        }
-    }
-
-    impl KqueueDriver {
         /// Receive a single datagram via `recvmsg`, returning the payload
         /// length, peer address, and any per-packet local IP parsed from
         /// the control message (`IP_RECVDSTADDR` / `IPV6_PKTINFO`).

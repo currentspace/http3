@@ -219,6 +219,7 @@ export class ServerHttp3Stream extends Duplex {
 
   /** Send trailing headers after the response body is complete. */
   sendTrailers(trailers: IncomingHeaders): void {
+    this._finSent = true;
     const h = incomingHeadersToNativeHeaders(trailers);
     this._eventLoop?.sendTrailers(this._connHandle, this._streamId, h);
   }

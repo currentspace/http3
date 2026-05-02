@@ -260,7 +260,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     this._closeRequested = true;
     this._clearConnectTimer();
     this._markReadyError(err);
-    this._cleanupStreams();
+    this._cleanupStreams(err);
     this._notifyRequestDrain();
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
@@ -387,17 +387,20 @@ export class Http3ClientSession extends Http3ClientSessionBase {
         case EVENT_RESET:
           this._onReset(event);
           break;
-        case EVENT_SESSION_CLOSE:
+        case EVENT_SESSION_CLOSE: {
+          const closeInfo = sessionCloseInfoFromEvent(event);
+          const closeErr = toSessionError(event, 'session closed');
           if (!this._handshakeComplete) {
             this._markReadyError(new Http3Error('session closed before handshake completed', ERR_HTTP3_INVALID_STATE));
           }
-          this._cleanupStreams();
+          this._cleanupStreams(closeErr);
           this._notifyRequestDrain();
           this._stopMetricsEmitter();
           this._stopKeylogEmitter();
-          this._rejectPendingPings(new Error('session closed'));
-          this._emitClose(sessionCloseInfoFromEvent(event));
+          this._rejectPendingPings(closeErr);
+          this._emitClose(closeInfo);
           break;
+        }
         case EVENT_DRAIN:
           this._onDrain(event);
           break;
@@ -431,8 +434,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     }
   }
 
-  private _cleanupStreams(): void {
-    const err = new Error('session closed');
+  private _cleanupStreams(err = new Error('session closed')): void {
     for (const stream of this._streams.values()) {
       if (stream.listenerCount('error') > 0) {
         stream.destroy(err);
