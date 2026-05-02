@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding, streamSendOutcomeBytes } from './event-loop.js';
 import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
@@ -108,7 +108,7 @@ class QuicClientEventLoop implements QuicClientEventLoopLike {
   }
 
   streamSend(streamId: number, data: Buffer, fin: boolean): number {
-    return this.worker.streamSend(streamId, data, fin) ? Math.max(data.length, fin ? 1 : 0) : 0;
+    return streamSendOutcomeBytes(this.worker.streamSend(streamId, data, fin));
   }
 
   streamClose(streamId: number, errorCode: number): boolean {

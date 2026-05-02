@@ -65,6 +65,32 @@ export interface NativeOutboundPacket {
   addr: string;
 }
 
+/** Native stream-send status: write command accepted into local native queue. */
+export const STREAM_SEND_ACCEPTED = 0;
+/** Native stream-send status: local native command/backpressure window is closed. */
+export const STREAM_SEND_BACKPRESSURE = 1;
+
+export type NativeStreamSendStatus =
+  | typeof STREAM_SEND_ACCEPTED
+  | typeof STREAM_SEND_BACKPRESSURE;
+
+/**
+ * Structured result from the native JS -> worker write-admission boundary.
+ *
+ * `written` is local admission units, not peer ACKed bytes. For FIN-only
+ * writes it is `1` so `_final()` can distinguish success from backpressure.
+ * @internal
+ */
+export interface NativeStreamSendOutcome {
+  status: NativeStreamSendStatus;
+  written: number;
+}
+
+/** @internal Convert native admission outcome to the stream-layer contract. */
+export function streamSendOutcomeBytes(outcome: NativeStreamSendOutcome): number {
+  return outcome.status === STREAM_SEND_ACCEPTED ? outcome.written : 0;
+}
+
 /**
  * N-API binding for the worker-mode HTTP/3 server.
  * @internal
@@ -73,7 +99,7 @@ export interface NativeWorkerServerBinding {
   listen(port: number, host: string): { address: string; family: string; port: number };
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): boolean;
   sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): boolean;
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): boolean;
   closeSession(connHandle: number, errorCode: number, reason: string): boolean;
@@ -106,7 +132,7 @@ export interface NativeWorkerServerBinding {
 export interface NativeWorkerClientBinding {
   connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
   sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number;
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean;
+  streamSend(streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(streamId: number, errorCode: number): boolean;
   sendDatagram(data: Buffer): boolean;
   getSessionMetrics(): {
@@ -186,7 +212,7 @@ export interface NativeQuicClientOptions {
  */
 export interface NativeQuicServerBinding {
   listen(port: number, host: string): { address: string; family: string; port: number };
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
   closeSession(connHandle: number, errorCode: number, reason: string): boolean;
   sendDatagram(connHandle: number, data: Buffer): boolean;
@@ -212,7 +238,7 @@ export interface NativeQuicServerBinding {
 export interface NativeQuicClientBinding {
   connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
   openStream(): number;
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean;
+  streamSend(streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(streamId: number, errorCode: number): boolean;
   sendDatagram(data: Buffer): boolean;
   getSessionMetrics(): {
@@ -505,10 +531,7 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
-    const accepted = this.worker.streamSend(connHandle, streamId, data, fin);
-    // When sending FIN with empty data (stream._final), return 1 so the
-    // caller knows the command was accepted (0 would look like a block).
-    return accepted ? Math.max(data.length, fin ? 1 : 0) : 0;
+    return streamSendOutcomeBytes(this.worker.streamSend(connHandle, streamId, data, fin));
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {
@@ -614,7 +637,7 @@ export class ClientEventLoop {
   }
 
   streamSend(streamId: number, data: Buffer, fin: boolean): number {
-    return this.worker.streamSend(streamId, data, fin) ? Math.max(data.length, fin ? 1 : 0) : 0;
+    return streamSendOutcomeBytes(this.worker.streamSend(streamId, data, fin));
   }
 
   streamClose(streamId: number, errorCode: number): boolean {

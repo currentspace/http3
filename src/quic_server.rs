@@ -6,6 +6,7 @@ use napi_derive::napi;
 
 use crate::config::{ClientAuthMode, JsQuicServerOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsSessionMetrics};
+use crate::write_outcome::JsStreamSendOutcome;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -102,13 +103,19 @@ impl NativeQuicServer {
     }
 
     #[napi]
-    pub fn stream_send(&self, conn_handle: u32, stream_id: i64, data: Buffer, fin: bool) -> bool {
+    pub fn stream_send(
+        &self,
+        conn_handle: u32,
+        stream_id: i64,
+        data: Buffer,
+        fin: bool,
+    ) -> JsStreamSendOutcome {
         let Some(handle) = &self.handle else {
-            return false;
+            return JsStreamSendOutcome::backpressured();
         };
         let body_len = data.as_ref().len();
         if !handle.try_admit_outbound(conn_handle, body_len, fin) {
-            return false;
+            return JsStreamSendOutcome::backpressured();
         }
         let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
         let accepted = handle.send_command(crate::quic_worker::QuicServerCommand::StreamSend {
@@ -122,8 +129,10 @@ impl NativeQuicServer {
         }
         if accepted {
             crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+            JsStreamSendOutcome::accepted(body_len, fin)
+        } else {
+            JsStreamSendOutcome::backpressured()
         }
-        accepted
     }
 
     #[napi]

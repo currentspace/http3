@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { X509Certificate } from 'node:crypto';
-import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, SHUTDOWN_TIMEOUT_MS, binding, streamSendOutcomeBytes } from './event-loop.js';
 import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
@@ -105,7 +105,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
-    return this.worker.streamSend(connHandle, streamId, data, fin) ? Math.max(data.length, fin ? 1 : 0) : 0;
+    return streamSendOutcomeBytes(this.worker.streamSend(connHandle, streamId, data, fin));
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {

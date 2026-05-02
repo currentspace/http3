@@ -16,6 +16,27 @@ import {
 } from './stream-backpressure.js';
 
 const EMPTY_BUFFER = Buffer.alloc(0);
+type EndChunk = Buffer | Uint8Array | string;
+
+function resolveEndArgs(
+  chunk?: EndChunk | (() => void),
+  encoding?: BufferEncoding | (() => void),
+  callback?: () => void,
+): { finalChunk?: EndChunk; finalEncoding?: BufferEncoding; finalCallback?: () => void } {
+  if (typeof chunk === 'function') {
+    return { finalCallback: chunk };
+  }
+  if (typeof encoding === 'function') {
+    return { finalChunk: chunk, finalCallback: encoding };
+  }
+  return { finalChunk: chunk, finalEncoding: encoding, finalCallback: callback };
+}
+
+function bufferFromEndChunk(chunk: EndChunk, encoding?: BufferEncoding): Buffer {
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  return Buffer.from(chunk, encoding);
+}
 
 /** HTTP header map where each value is a string or string array. */
 export type IncomingHeaders = Record<string, string | string[]>;
@@ -154,6 +175,7 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
+  private _finalChunk: Buffer | null = null;
 
   /** The HTTP/3 stream ID. */
   get id(): number { return this._streamId; }
@@ -293,6 +315,18 @@ export class ServerHttp3Stream extends Duplex {
     this._writeChunk(chunk, callback);
   }
 
+  override end(
+    chunk?: EndChunk | (() => void),
+    encoding?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    const { finalChunk, finalEncoding, finalCallback } = resolveEndArgs(chunk, encoding, callback);
+    if (finalChunk != null) {
+      this._finalChunk = bufferFromEndChunk(finalChunk, finalEncoding);
+    }
+    return super.end(finalCallback);
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
     if (this._blocked) {
@@ -327,6 +361,38 @@ export class ServerHttp3Stream extends Duplex {
     }
   }
 
+  private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    this._onActivity();
+    const written = this._blocked
+      ? 0
+      : this._eventLoop?.streamSend(this._connHandle, this._streamId, chunk, true) ?? 0;
+
+    if (chunk.length === 0) {
+      if (written > 0) {
+        completeNativeWrite(this._nativeWriteWindow, written, callback);
+        return;
+      }
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeFinalChunk(chunk, callback);
+      });
+      return;
+    }
+
+    if (written >= chunk.length) {
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
+      return;
+    }
+
+    const remaining = chunk.subarray(written);
+    this._bp = ensureBackpressureState(this._bp);
+    this._bp.drainCallbacks.push((err) => {
+      if (err) { callback(err); return; }
+      this._writeFinalChunk(remaining, callback);
+    });
+  }
+
   _final(callback: (error?: Error | null) => void): void {
     this._onActivity();
     if (this._finSent || !this._eventLoop) {
@@ -334,21 +400,9 @@ export class ServerHttp3Stream extends Duplex {
       return;
     }
     this._finSent = true;
-    const sendFin = (): void => {
-      const written = this._blocked
-        ? 0
-        : this._eventLoop?.streamSend(this._connHandle, this._streamId, EMPTY_BUFFER, true) ?? 0;
-      if (written === 0) {
-        this._bp = ensureBackpressureState(this._bp);
-        this._bp.drainCallbacks.push((err) => {
-          if (err) { callback(err); return; }
-          sendFin();
-        });
-        return;
-      }
-      completeNativeWrite(this._nativeWriteWindow, written, callback);
-    };
-    sendFin();
+    const finalChunk = this._finalChunk ?? EMPTY_BUFFER;
+    this._finalChunk = null;
+    this._writeFinalChunk(finalChunk, callback);
   }
 
   /** @internal */
@@ -409,6 +463,8 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
   /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
+  /** @internal */ _finSent = false;
+  private _finalChunk: Buffer | null = null;
   /**
    * @internal — set after the response HEADERS arrive. Subsequent
    * HEADERS frames are treated as trailing headers and emitted as
@@ -485,6 +541,18 @@ export class ClientHttp3Stream extends Duplex {
     this._writeChunk(chunk, callback);
   }
 
+  override end(
+    chunk?: EndChunk | (() => void),
+    encoding?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    const { finalChunk, finalEncoding, finalCallback } = resolveEndArgs(chunk, encoding, callback);
+    if (finalChunk != null) {
+      this._finalChunk = bufferFromEndChunk(finalChunk, finalEncoding);
+    }
+    return super.end(finalCallback);
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
     if (this._blocked) {
@@ -508,27 +576,48 @@ export class ClientHttp3Stream extends Duplex {
     }
   }
 
+  private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    this._onActivity();
+    const written = this._blocked
+      ? 0
+      : this._eventLoop?.streamSend(this._streamId, chunk, true) ?? 0;
+
+    if (chunk.length === 0) {
+      if (written > 0) {
+        completeNativeWrite(this._nativeWriteWindow, written, callback);
+        return;
+      }
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeFinalChunk(chunk, callback);
+      });
+      return;
+    }
+
+    if (written >= chunk.length) {
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
+      return;
+    }
+
+    const remaining = chunk.subarray(written);
+    this._bp = ensureBackpressureState(this._bp);
+    this._bp.drainCallbacks.push((err) => {
+      if (err) { callback(err); return; }
+      this._writeFinalChunk(remaining, callback);
+    });
+  }
+
   _final(callback: (error?: Error | null) => void): void {
     this._onActivity();
-    if (!this._eventLoop) {
+    if (this._finSent || !this._eventLoop) {
       callback();
       return;
     }
-    const sendFin = (): void => {
-      const written = this._blocked
-        ? 0
-        : this._eventLoop?.streamSend(this._streamId, EMPTY_BUFFER, true) ?? 0;
-      if (written === 0) {
-        this._bp = ensureBackpressureState(this._bp);
-        this._bp.drainCallbacks.push((err) => {
-          if (err) { callback(err); return; }
-          sendFin();
-        });
-        return;
-      }
-      completeNativeWrite(this._nativeWriteWindow, written, callback);
-    };
-    sendFin();
+    this._finSent = true;
+    const finalChunk = this._finalChunk ?? EMPTY_BUFFER;
+    this._finalChunk = null;
+    this._writeFinalChunk(finalChunk, callback);
   }
 
   /** @internal */

@@ -36,6 +36,7 @@ mod timer_heap;
 mod transport;
 pub mod unsafe_boundary;
 mod worker;
+mod write_outcome;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench_exports {

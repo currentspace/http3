@@ -10,7 +10,7 @@ export declare class NativeQuicClient {
   constructor(options: JsQuicClientOptions, callback: (err: Error | null, events: Array<JsH3Event>) => void)
   connect(serverAddr: string, serverName: string): JsAddressInfo
   openStream(): number
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean
+  streamSend(streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   streamClose(streamId: number, errorCode: number): boolean
   close(errorCode: number, reason: string): boolean
   sendDatagram(data: Buffer): boolean
@@ -33,7 +33,7 @@ export declare class NativeQuicClient {
 export declare class NativeQuicServer {
   constructor(options: JsQuicServerOptions, callback: (err: Error | null, events: Array<JsH3Event>) => void)
   listen(port: number, host: string): JsAddressInfo
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean
   closeSession(connHandle: number, errorCode: number, reason: string): boolean
   sendDatagram(connHandle: number, data: Buffer): boolean
@@ -58,7 +58,7 @@ export declare class NativeWorkerClient {
   constructor(options: JsClientOptions, callback: (err: Error | null, events: Array<JsH3Event>) => void)
   connect(serverAddr: string, serverName: string): JsAddressInfo
   sendRequest(headers: Array<JsHeader>, fin: boolean): number
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean
+  streamSend(streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   streamClose(streamId: number, errorCode: number): boolean
   close(errorCode: number, reason: string): boolean
   sendDatagram(data: Buffer): boolean
@@ -90,7 +90,7 @@ export declare class NativeWorkerServer {
    * FFI boundary crossings for the common respond-then-end pattern.
    */
   sendResponse(connHandle: number, streamId: number, headers: Array<JsHeader>, data: Buffer, fin: boolean): boolean
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   sendTrailers(connHandle: number, streamId: number, headers: Array<JsHeader>): boolean
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean
   closeSession(connHandle: number, errorCode: number, reason: string): boolean
@@ -422,6 +422,11 @@ export interface JsSessionMetrics {
 export interface JsSetting {
   id: number
   value: number
+}
+
+export interface JsStreamSendOutcome {
+  status: number
+  written: number
 }
 
 export declare function lifecycleTraceSnapshot(): JsLifecycleTraceSnapshot
