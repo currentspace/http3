@@ -78,6 +78,7 @@ changes.
 ### HTTP/3 client sessions and request streams
 
 - `Http3ClientSession#request()` throws `Http3Error` with `ERR_HTTP3_INVALID_STATE` if the session is not ready or if 0-RTT restrictions are violated. This is an intentional HTTP/2 parity difference: HTTP/3 requests are not queued before the QUIC/TLS handshake unless the caller explicitly opts into the 0-RTT path.
+- `Http3ClientSession#request()` throws `ERR_HTTP3_STREAM_BLOCKED` when quiche reports transient `StreamBlocked` while creating the request stream. Use `requestAsync()` for high-concurrency clients that should wait for request-stream capacity instead of failing synchronously.
 - `Http3ClientSession` emits `'error'` for session-level transport failures.
 - `ClientHttp3Stream` instances are destroyed with `Http3Error` on stream resets and stream-scoped native failures.
 - GOAWAY is surfaced via the session `'goaway'` event, followed by normal close/drain behavior.

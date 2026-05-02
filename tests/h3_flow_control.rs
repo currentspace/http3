@@ -446,3 +446,46 @@ fn test_h3_large_post_with_small_window() {
     let status = resp_hdrs.iter().find(|h| h.name == ":status").unwrap();
     assert_eq!(status.value, "200");
 }
+
+#[test]
+fn test_h3_request_stream_blocked_emits_drain_for_retry() {
+    let pair = setup_h3_pair_with_flow_control(4_096, 600);
+    let (_server_conn, _client_conn) = wait_for_h3_handshake(&pair);
+    let mut next_request_stream_id = 0;
+    let mut blocked_error = None;
+    let pad = "x".repeat(400);
+
+    for i in 0..16 {
+        let headers = vec![
+            (":method".into(), "GET".into()),
+            (":scheme".into(), "https".into()),
+            (":authority".into(), "localhost".into()),
+            (":path".into(), format!("/request-blocked-{i}")),
+            ("x-pad".into(), pad.clone()),
+        ];
+        match pair.client.send_request(headers, true) {
+            Ok(stream_id) => {
+                next_request_stream_id = stream_id + 4;
+            }
+            Err(error) if error.to_string().contains("StreamBlocked") => {
+                blocked_error = Some(error);
+                break;
+            }
+            Err(error) => panic!("unexpected send_request error: {error}"),
+        }
+    }
+
+    let blocked = blocked_error.expect("request creation should hit StreamBlocked");
+    assert!(
+        blocked.to_string().contains("StreamBlocked"),
+        "unexpected send_request error: {blocked}"
+    );
+
+    let drain = recv_event_matching(&pair.client_rx, RECV_TIMEOUT, |event| {
+        event.event_type == EVENT_DRAIN && event.stream_id == next_request_stream_id as i64
+    });
+    assert!(
+        drain.is_some(),
+        "request StreamBlocked should route the pending request stream into drain events"
+    );
+}

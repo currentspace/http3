@@ -11,7 +11,7 @@ export { createSecureServer, Http3SecureServer } from './server.js';
 export type { ServerOptions, TlsOptions, StreamListener, AddressInfo } from './server.js';
 
 export { connect, connectAsync, Http3ClientSession } from './client.js';
-export type { ConnectOptions, RequestOptions } from './client.js';
+export type { ConnectOptions, RequestAsyncOptions, RequestOptions } from './client.js';
 
 export { Http3Session, Http3ServerSession } from './session.js';
 export type { GoawayInfo, SessionCloseInfo, SessionOptions, SessionMetrics, PingCallback } from './session.js';
@@ -21,6 +21,7 @@ export type { IncomingHeaders, StreamFlags, RespondOptions } from './stream.js';
 
 export {
   Http3Error,
+  ERR_HTTP3_STREAM_BLOCKED,
   ERR_HTTP3_STREAM_ERROR,
   ERR_HTTP3_SESSION_ERROR,
   ERR_HTTP3_HEADERS_SENT,

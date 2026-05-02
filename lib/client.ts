@@ -11,7 +11,13 @@ import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.
 import type { NativeEvent } from './event-loop.js';
 import type { ConnectionEndpoint } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
-import { Http3Error, ERR_HTTP3_GOAWAY, ERR_HTTP3_INVALID_STATE, ERR_HTTP3_STREAM_ERROR } from './errors.js';
+import {
+  Http3Error,
+  ERR_HTTP3_GOAWAY,
+  ERR_HTTP3_INVALID_STATE,
+  ERR_HTTP3_STREAM_BLOCKED,
+  ERR_HTTP3_STREAM_ERROR,
+} from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
@@ -36,6 +42,37 @@ function normalizeCaOption(ca?: string | Buffer | Array<string | Buffer>): Buffe
   if (!ca) return undefined;
   const first = Array.isArray(ca) ? ca[0] : ca;
   return typeof first === 'string' ? Buffer.from(first) : first;
+}
+
+function isNativeStreamBlockedError(err: unknown): err is Error {
+  return err instanceof Error && err.message.includes('StreamBlocked');
+}
+
+function isRequestStreamBlockedError(err: unknown): boolean {
+  return err instanceof Http3Error && err.code === ERR_HTTP3_STREAM_BLOCKED;
+}
+
+function requestStreamBlockedError(cause: Error): Http3Error {
+  return new Http3Error(
+    `request stream is flow-control blocked (StreamBlocked); retry with requestAsync()`,
+    ERR_HTTP3_STREAM_BLOCKED,
+    { cause },
+  );
+}
+
+function normalizeRequestTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return 30_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Http3Error('request timeout must be a non-negative finite number', ERR_HTTP3_INVALID_STATE);
+  }
+  return Math.floor(timeoutMs);
+}
+
+function requestRetryDelayMs(attempt: number, deadlineMs: number): number {
+  const base = Math.min(100, 2 ** Math.min(attempt, 6));
+  const remaining = deadlineMs - Date.now();
+  if (remaining <= 0) return 0;
+  return Math.max(1, Math.min(base, remaining));
 }
 
 /** Options for connecting to an HTTP/3 server. */
@@ -90,6 +127,14 @@ export interface RequestOptions {
   endStream?: boolean;
 }
 
+/** Options for awaitable HTTP/3 request creation. */
+export interface RequestAsyncOptions extends RequestOptions {
+  /** Abort waiting for request stream capacity. */
+  signal?: AbortSignal;
+  /** Maximum time to wait for request stream capacity. Default: 30 000. */
+  timeoutMs?: number;
+}
+
 /**
  * Typed event declarations for {@link Http3ClientSession}.
  */
@@ -126,6 +171,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
   private _connectAbortCleanup: (() => void) | null = null;
+  private readonly _requestDrainResolvers = new Set<() => void>();
 
   constructor(authority: string, options?: Pick<ConnectOptions, 'allow0RTT' | 'allowUnsafe0RTTMethods' | 'onEarlyData'>) {
     super();
@@ -186,6 +232,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     this._closeRequested = true;
     this._markReadyError(err);
     this._cleanupStreams();
+    this._notifyRequestDrain();
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
     const loop_ = this._eventLoop;
@@ -233,12 +280,61 @@ export class Http3ClientSession extends Http3ClientSessionBase {
 
     const h = incomingHeadersToNativeHeaders(headers);
 
-    const streamId = this._eventLoop.sendRequest(h, options?.endStream ?? false);
+    let streamId: number;
+    try {
+      streamId = this._eventLoop.sendRequest(h, options?.endStream ?? false);
+    } catch (err: unknown) {
+      if (isNativeStreamBlockedError(err)) {
+        throw requestStreamBlockedError(err);
+      }
+      throw err;
+    }
     const stream = new ClientHttp3Stream();
     stream._streamId = streamId;
     stream._eventLoop = this._eventLoop;
     this._streams.set(streamId, stream);
     return stream;
+  }
+
+  /**
+   * Open a new HTTP/3 request stream, waiting when quiche reports that the
+   * request HEADERS cannot yet fit in the QUIC flow-control window.
+   *
+   * `request()` remains the synchronous node:http2-style primitive. This
+   * helper is for high-concurrency clients that want request creation itself
+   * to participate in backpressure instead of handling transient
+   * `ERR_HTTP3_STREAM_BLOCKED` failures manually.
+   */
+  async requestAsync(headers: IncomingHeaders, options?: RequestAsyncOptions): Promise<ClientHttp3Stream> {
+    if (!this._handshakeComplete && !this._allow0RTT) {
+      await this.ready();
+    }
+
+    const timeoutMs = normalizeRequestTimeoutMs(options?.timeoutMs);
+    const deadlineMs = timeoutMs === 0 ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
+    let attempt = 0;
+
+    for (;;) {
+      if (options?.signal?.aborted) {
+        throw abortSignalError(options.signal);
+      }
+
+      try {
+        return this.request(headers, options);
+      } catch (err: unknown) {
+        if (!isRequestStreamBlockedError(err)) {
+          throw err;
+        }
+        const delayMs = requestRetryDelayMs(attempt, deadlineMs);
+        if (delayMs <= 0) {
+          throw new Http3Error('timed out waiting for HTTP/3 request stream capacity', ERR_HTTP3_STREAM_BLOCKED, {
+            cause: err instanceof Error ? err : undefined,
+          });
+        }
+        attempt += 1;
+        await this._waitForRequestRetry(delayMs, options?.signal);
+      }
+    }
   }
 
   /** @internal */
@@ -267,6 +363,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
             this._markReadyError(new Http3Error('session closed before handshake completed', ERR_HTTP3_INVALID_STATE));
           }
           this._cleanupStreams();
+          this._notifyRequestDrain();
           this._stopMetricsEmitter();
           this._stopKeylogEmitter();
           this._rejectPendingPings(new Error('session closed'));
@@ -281,6 +378,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
         case EVENT_GOAWAY:
           this._goawayReceived = true;
           this._goawayLastStreamId = event.streamId;
+          this._notifyRequestDrain();
           this.emit('goaway', { lastStreamId: event.streamId });
           break;
         case EVENT_ERROR:
@@ -372,7 +470,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const stream = this._streams.get(event.streamId);
     if (stream) {
       stream._onNativeDrain();
+      return;
     }
+    this._notifyRequestDrain();
   }
 
   private _onStreamBlocked(event: NativeEvent): void {
@@ -390,6 +490,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       }
     } else {
       this._emitSessionError(toSessionError(event));
+      this._notifyRequestDrain();
       if (!this._handshakeComplete) {
         this._markReadyError(toSessionError(event));
       }
@@ -418,6 +519,68 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   private _onDatagram(event: NativeEvent): void {
     if (!event.data) return;
     this.emit('datagram', event.data);
+  }
+
+  private _notifyRequestDrain(): void {
+    const resolvers = Array.from(this._requestDrainResolvers);
+    this._requestDrainResolvers.clear();
+    for (const resolve of resolvers) {
+      resolve();
+    }
+  }
+
+  private _waitForRequestRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(abortSignalError(signal));
+        return;
+      }
+
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+      let onAbort: (() => void) | null = null;
+      let onDrain: (() => void) | null = null;
+
+      const cleanup = (): void => {
+        if (onDrain) {
+          this._requestDrainResolvers.delete(onDrain);
+        }
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (signal && onAbort) {
+          signal.removeEventListener('abort', onAbort);
+          onAbort = null;
+        }
+      };
+
+      const settle = (err?: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (err) {
+          reject(err);
+        } else {
+          resolve();
+        }
+      };
+
+      onDrain = (): void => {
+        settle();
+      };
+
+      onAbort = (): void => {
+        settle(abortSignalError(signal));
+      };
+
+      this._requestDrainResolvers.add(onDrain);
+      timer = setTimeout(() => {
+        settle();
+      }, delayMs);
+      timer.unref();
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /** @internal */

@@ -83,26 +83,20 @@ function createLatencyTracker(): LatencyTracker {
   };
 }
 
-function doRequest(
+async function doRequest(
   session: Http3ClientSession,
   payload: Buffer,
   timeoutMs: number,
 ): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    let stream;
-    try {
-      stream = session.request({
-        ':method': 'POST',
-        ':path': '/echo',
-        ':authority': 'localhost',
-        ':scheme': 'https',
-      }, { endStream: false });
-    } catch (err: unknown) {
-      reject(err);
-      return;
-    }
-    stream.end(payload);
+  const stream = await session.requestAsync({
+    ':method': 'POST',
+    ':path': '/echo',
+    ':authority': 'localhost',
+    ':scheme': 'https',
+  }, { endStream: false, timeoutMs });
+  stream.end(payload);
 
+  return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     const timer = setTimeout(() => reject(new Error('h3 request timed out')), timeoutMs);
     stream.on('response', () => { /* headers received */ });
@@ -116,25 +110,6 @@ function doRequest(
       reject(err);
     });
   });
-}
-
-async function doRetriedRequest(
-  session: Http3ClientSession,
-  payload: Buffer,
-  timeoutMs: number,
-): Promise<Buffer> {
-  for (let attempt = 0; attempt < 50; attempt++) {
-    try {
-      return await doRequest(session, payload, Math.min(timeoutMs, 15_000));
-    } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes('StreamBlocked') && attempt < 49) {
-        await new Promise<void>((resolve) => { setTimeout(resolve, 5); });
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw new Error('h3 request remained StreamBlocked after retries');
 }
 
 function hasSteadyStateWindow(config: BenchConfig): boolean {
@@ -246,7 +221,7 @@ async function main(): Promise<void> {
         const phase = classifyMeasurementPhase(loadElapsedAtStartMs, warmupMs, durationMs);
 
         try {
-          const echoed = await doRetriedRequest(client, payload, config.timeoutMs);
+          const echoed = await doRequest(client, payload, config.timeoutMs);
           const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
           if (echoed.length === payload.length) {
             recordCompletion(phase, echoed.length * 2, streamMs);
@@ -276,7 +251,7 @@ async function main(): Promise<void> {
           (async () => {
             const streamStart = process.hrtime.bigint();
             try {
-              const echoed = await doRetriedRequest(client, payload, config.timeoutMs);
+              const echoed = await doRequest(client, payload, config.timeoutMs);
               const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
               if (echoed.length === payload.length) {
                 totalStreams++;

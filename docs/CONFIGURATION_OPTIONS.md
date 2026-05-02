@@ -103,11 +103,18 @@ certificate identity.
 
 ## `RequestOptions`
 
-Used by `Http3ClientSession#request()`.
+Used by `Http3ClientSession#request()` and `Http3ClientSession#requestAsync()`.
 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `endStream` | `boolean` | `false` | Set `true` for body-less requests that should send FIN immediately. |
+
+`requestAsync()` also accepts:
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `signal` | `AbortSignal` | `undefined` | Cancels waiting for request-stream capacity. |
+| `timeoutMs` | `number` | `30000` | Maximum time to wait for transient request-stream `StreamBlocked` to clear. |
 
 ## `QuicServerOptions`
 

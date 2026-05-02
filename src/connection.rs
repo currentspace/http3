@@ -35,6 +35,14 @@ pub struct H3Connection {
     pub session_ticket: Option<Vec<u8>>,
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
+    /// Next client-initiated request stream ID we expect quiche::h3 to use.
+    ///
+    /// quiche keeps this field private, but `send_request()` only advances it
+    /// after the request HEADERS have been buffered. Tracking the successful
+    /// stream IDs lets us route `StreamBlocked` during request creation into
+    /// the existing drain machinery, so JS can retry when quiche reports the
+    /// same stream writable again.
+    pub next_client_request_stream_id_hint: u64,
     /// Largest peer-initiated request stream ID we have accepted (i.e.
     /// produced a Headers event for). Used as the value carried in the
     /// server's outgoing GoAway frame per RFC 9114 §5.2. Audit finding #1.
@@ -122,6 +130,7 @@ impl H3Connection {
             session_ticket: None,
             qpack_max_table_capacity: init.qpack_max_table_capacity,
             qpack_blocked_streams: init.qpack_blocked_streams,
+            next_client_request_stream_id_hint: 0,
             largest_accepted_request_id: 0,
             data_pool,
             data_recycler,
@@ -340,8 +349,20 @@ impl H3Connection {
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
-        h3.send_request(&mut self.quiche_conn, headers, fin)
-            .map_err(Http3NativeError::H3)
+        match h3.send_request(&mut self.quiche_conn, headers, fin) {
+            Ok(stream_id) => {
+                self.next_client_request_stream_id_hint = stream_id.saturating_add(4);
+                Ok(stream_id)
+            }
+            Err(quiche::h3::Error::StreamBlocked) => {
+                let stream_id = self.next_client_request_stream_id_hint;
+                if self.blocked_set.insert(stream_id) {
+                    self.blocked_queue.push_back(stream_id);
+                }
+                Err(Http3NativeError::H3(quiche::h3::Error::StreamBlocked))
+            }
+            Err(error) => Err(Http3NativeError::H3(error)),
+        }
     }
 
     /// Send body data on a stream using zero-copy. Returns bytes written.

@@ -26,6 +26,7 @@ This matrix defines compatibility expectations for users migrating from
 |---|---|---|---|
 | Connect | `connect(authority, options)` | `connect(authority, options)` | Returns session immediately, emits `connect` on handshake completion. |
 | Request | `session.request(headers)` | `session.request(headers)` | Same call pattern and stream-based lifecycle after the H3 session is ready. |
+| Awaitable request admission | n/a | `session.requestAsync(headers, options)` | Waits for QUIC/H3 request-stream capacity when quiche reports transient `StreamBlocked`. |
 | Session close | `session.close()` | `session.close()` | Supported for graceful shutdown. |
 | Session destroy | `session.destroy()` | `session.destroy()` | Supported for immediate teardown. |
 | Settings access | `remoteSettings` | `getRemoteSettings()` | Returned as normalized key/value map. |
@@ -54,6 +55,10 @@ This matrix defines compatibility expectations for users migrating from
   `session.ready()` or the `'connect'` event. The only intentional pre-ready
   request path is opt-in 0-RTT, guarded by `allow0RTT`,
   `allowUnsafe0RTTMethods`, and `onEarlyData`.
+- `session.request()` stays synchronous for parity. Under extreme request
+  creation pressure it can throw `ERR_HTTP3_STREAM_BLOCKED`; high-concurrency
+  clients should use `session.requestAsync()` to wait for request-stream
+  capacity without blocking the Node.js event loop.
 - Certain HTTP/2-specific internals have no direct QUIC equivalent and are not
   exposed as stable parity guarantees.
 

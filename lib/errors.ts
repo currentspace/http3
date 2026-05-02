@@ -85,6 +85,8 @@ export class Http3Error extends Error {
 
 /** A stream-level error occurred (reset, flow-control violation, etc.). */
 export const ERR_HTTP3_STREAM_ERROR = 'ERR_HTTP3_STREAM_ERROR';
+/** Request creation is temporarily blocked by QUIC flow control. */
+export const ERR_HTTP3_STREAM_BLOCKED = 'ERR_HTTP3_STREAM_BLOCKED';
 /** A session-level error occurred (connection close, transport error). */
 export const ERR_HTTP3_SESSION_ERROR = 'ERR_HTTP3_SESSION_ERROR';
 /** Response headers have already been sent on this stream. */
