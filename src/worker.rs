@@ -2710,13 +2710,14 @@ impl ProtocolHandler for H3ServerHandler {
                     hdr.version,
                     &mut out,
                 ) {
-                    pending_outbound.push(TxDatagram {
-                        data: out[..len].to_vec(),
-                        to: peer,
+                    pending_outbound.push(TxDatagram::new(
+                        out[..len].to_vec(),
+                        len,
+                        peer,
                         // Retry/version-negotiation: pre-handshake, no per-
                         // connection PMTU yet — fall back to default cap.
-                        max_segment_size: None,
-                    });
+                        None,
+                    ));
                 }
                 self.buffer_pool.checkin(out);
                 return;
@@ -2876,12 +2877,7 @@ impl ProtocolHandler for H3ServerHandler {
                     let mut tx_buf = self.tx_pool.checkout();
                     if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
                         let mtu = u16::try_from(conn.quiche_conn.max_send_udp_payload_size()).ok();
-                        tx_buf.truncate(len);
-                        outbound.push(TxDatagram {
-                            data: tx_buf,
-                            to: send_info.to,
-                            max_segment_size: mtu,
-                        });
+                        outbound.push(TxDatagram::new(tx_buf, len, send_info.to, mtu));
                         true
                     } else {
                         self.tx_pool.checkin(tx_buf);
@@ -3412,12 +3408,7 @@ impl H3ClientHandler {
             return None;
         };
         let mtu = u16::try_from(conn.quiche_conn.max_send_udp_payload_size()).ok();
-        tx_buf.truncate(len);
-        Some(TxDatagram {
-            data: tx_buf,
-            to: send_info.to,
-            max_segment_size: mtu,
-        })
+        Some(TxDatagram::new(tx_buf, len, send_info.to, mtu))
     }
 
     fn flush_pending_writes_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {

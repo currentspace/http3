@@ -948,11 +948,11 @@ mod tests {
             crate::transport::mock::MockDriver::pair(left_addr, right_addr);
 
         right
-            .submit_sends(vec![TxDatagram {
-                data: vec![1, 2, 3],
-                to: left_addr,
-                max_segment_size: None,
-            }])
+            .submit_sends(vec![TxDatagram::from_payload(
+                vec![1, 2, 3],
+                left_addr,
+                None,
+            )])
             .unwrap();
 
         let outcome = poll_with_event_backpressure(

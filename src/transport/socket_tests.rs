@@ -305,11 +305,7 @@ mod tests {
         // Move driver_a to a worker thread, send from there to b_addr.
         let handle = thread::spawn(move || {
             eprintln!("  worker A on {:?}", thread::current().id());
-            let pkt = TxDatagram {
-                data: vec![0xAB; 100],
-                to: b_addr,
-                max_segment_size: None,
-            };
+            let pkt = TxDatagram::from_payload(vec![0xAB; 100], b_addr, None);
             driver_a.submit_sends(vec![pkt]).unwrap();
             // Poll to flush (poll driver's sendmmsg happens inside send_batch).
             // The submit_sends already calls sendmmsg synchronously.
@@ -801,13 +797,9 @@ mod tests {
 
         // Build packets like the test does
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram {
-                data: vec![i as u8; 200],
-                to: recv_addr,
-                max_segment_size: None,
-            })
+            .map(|i| TxDatagram::from_payload(vec![i as u8; 200], recv_addr, None))
             .collect();
-        let batches = group_for_gso(packets);
+        let batches = group_for_gso(packets).batches;
         assert_eq!(batches.len(), 1, "4 same-size should coalesce into 1 batch");
         let batch = &batches[0];
         eprintln!(
@@ -920,11 +912,7 @@ mod tests {
 
         // Send 4 same-sized packets — ALL ON THE SAME THREAD.
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram {
-                data: vec![i as u8; 200],
-                to: recv_addr,
-                max_segment_size: None,
-            })
+            .map(|i| TxDatagram::from_payload(vec![i as u8; 200], recv_addr, None))
             .collect();
         sender.submit_sends(packets).unwrap();
         eprintln!("  submit_sends done, checking receiver...");
@@ -975,11 +963,7 @@ mod tests {
 
         // Send 4 same-sized packets (triggers GSO if supported).
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram {
-                data: vec![i as u8; 200],
-                to: recv_addr,
-                max_segment_size: None,
-            })
+            .map(|i| TxDatagram::from_payload(vec![i as u8; 200], recv_addr, None))
             .collect();
         sender.submit_sends(packets).unwrap();
 
@@ -1042,11 +1026,7 @@ mod tests {
         // GSO coalesces these into one 4800B sendmsg. On loopback, GRO should
         // coalesce them back into one 4800B recvmsg with UDP_GRO segment_size=1200.
         let packets: Vec<TxDatagram> = (0..4)
-            .map(|i| TxDatagram {
-                data: vec![i as u8; 1200],
-                to: recv_addr,
-                max_segment_size: None,
-            })
+            .map(|i| TxDatagram::from_payload(vec![i as u8; 1200], recv_addr, None))
             .collect();
         sender.submit_sends(packets).unwrap();
         let _ = sender.poll(Some(Instant::now() + Duration::from_millis(50)));
@@ -1114,10 +1094,8 @@ mod tests {
         for round in 0..5 {
             // Send 16 same-sized packets per round.
             let packets: Vec<TxDatagram> = (0..16)
-                .map(|i| TxDatagram {
-                    data: vec![(round * 16 + i) as u8; 200],
-                    to: recv_addr,
-                    max_segment_size: None,
+                .map(|i| {
+                    TxDatagram::from_payload(vec![(round * 16 + i) as u8; 200], recv_addr, None)
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1179,10 +1157,12 @@ mod tests {
 
         for call in 0..calls {
             let packets: Vec<TxDatagram> = (0..pkts_per_call)
-                .map(|i| TxDatagram {
-                    data: vec![(call * pkts_per_call + i) as u8; pkt_size],
-                    to: recv_addr,
-                    max_segment_size: None,
+                .map(|i| {
+                    TxDatagram::from_payload(
+                        vec![(call * pkts_per_call + i) as u8; pkt_size],
+                        recv_addr,
+                        None,
+                    )
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1249,10 +1229,12 @@ mod tests {
         for round in 0..rounds {
             // A sends to B.
             let packets: Vec<TxDatagram> = (0..pkts_per_round)
-                .map(|i| TxDatagram {
-                    data: vec![(round * pkts_per_round + i) as u8; pkt_size],
-                    to: addr_b,
-                    max_segment_size: None,
+                .map(|i| {
+                    TxDatagram::from_payload(
+                        vec![(round * pkts_per_round + i) as u8; pkt_size],
+                        addr_b,
+                        None,
+                    )
                 })
                 .collect();
             a.submit_sends(packets).unwrap();
@@ -1260,10 +1242,12 @@ mod tests {
 
             // B sends to A.
             let packets: Vec<TxDatagram> = (0..pkts_per_round)
-                .map(|i| TxDatagram {
-                    data: vec![(round * pkts_per_round + i) as u8; pkt_size],
-                    to: addr_a,
-                    max_segment_size: None,
+                .map(|i| {
+                    TxDatagram::from_payload(
+                        vec![(round * pkts_per_round + i) as u8; pkt_size],
+                        addr_a,
+                        None,
+                    )
                 })
                 .collect();
             b.submit_sends(packets).unwrap();
@@ -1411,10 +1395,8 @@ mod tests {
             if client_sent < total_client_pkts {
                 let batch_end = (client_sent + batch_size).min(total_client_pkts);
                 let packets: Vec<TxDatagram> = (client_sent..batch_end)
-                    .map(|i| TxDatagram {
-                        data: vec![(i % 256) as u8; pkt_size],
-                        to: server_addr,
-                        max_segment_size: None,
+                    .map(|i| {
+                        TxDatagram::from_payload(vec![(i % 256) as u8; pkt_size], server_addr, None)
                     })
                     .collect();
                 client.submit_sends(packets).unwrap();
@@ -1433,18 +1415,18 @@ mod tests {
                     // Split GRO-coalesced packets for echo (like event_loop does).
                     if let Some(seg) = pkt.segment_size {
                         for chunk in pkt.data.chunks(seg as usize) {
-                            echo_packets.push(TxDatagram {
-                                data: chunk.to_vec(),
-                                to: client_addr,
-                                max_segment_size: None,
-                            });
+                            echo_packets.push(TxDatagram::from_payload(
+                                chunk.to_vec(),
+                                client_addr,
+                                None,
+                            ));
                         }
                     } else {
-                        echo_packets.push(TxDatagram {
-                            data: pkt.data.clone(),
-                            to: client_addr,
-                            max_segment_size: None,
-                        });
+                        echo_packets.push(TxDatagram::from_payload(
+                            pkt.data.clone(),
+                            client_addr,
+                            None,
+                        ));
                     }
                 }
                 let echo_count = echo_packets.len();
@@ -1570,11 +1552,11 @@ mod tests {
                 let mut echo = Vec::new();
                 for pkt in &out.rx {
                     rx_bytes += pkt.data.len();
-                    echo.push(TxDatagram {
-                        data: pkt.data.clone(),
-                        to: client_addr,
-                        max_segment_size: None,
-                    });
+                    echo.push(TxDatagram::from_payload(
+                        pkt.data.clone(),
+                        client_addr,
+                        None,
+                    ));
                 }
                 if !echo.is_empty() {
                     server.submit_sends(echo).unwrap();
@@ -1604,10 +1586,8 @@ mod tests {
             if sent_pkts < total_pkts {
                 let n = batch_size.min(total_pkts - sent_pkts);
                 let packets: Vec<TxDatagram> = (sent_pkts..sent_pkts + n)
-                    .map(|i| TxDatagram {
-                        data: vec![(i % 256) as u8; pkt_size],
-                        to: server_addr,
-                        max_segment_size: None,
+                    .map(|i| {
+                        TxDatagram::from_payload(vec![(i % 256) as u8; pkt_size], server_addr, None)
                     })
                     .collect();
                 client.submit_sends(packets).unwrap();
@@ -1707,11 +1687,7 @@ mod tests {
         ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let _ = sender.poll(Some(Instant::now() + Duration::from_millis(1)));
         let packets: Vec<TxDatagram> = (0..packet_count)
-            .map(|i| TxDatagram {
-                data: vec![(i % 251) as u8; packet_size],
-                to: recv_addr,
-                max_segment_size: None,
-            })
+            .map(|i| TxDatagram::from_payload(vec![(i % 251) as u8; packet_size], recv_addr, None))
             .collect();
 
         let submit_started = Instant::now();
@@ -1784,10 +1760,8 @@ mod tests {
 
             // Send 32 packets.
             let packets: Vec<TxDatagram> = (0..32)
-                .map(|i| TxDatagram {
-                    data: vec![(round * 32 + i) as u8; 200],
-                    to: recv_addr,
-                    max_segment_size: None,
+                .map(|i| {
+                    TxDatagram::from_payload(vec![(round * 32 + i) as u8; 200], recv_addr, None)
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1868,10 +1842,12 @@ mod tests {
 
         for round in 0..rounds {
             let packets: Vec<TxDatagram> = (0..pkts_per_round)
-                .map(|i| TxDatagram {
-                    data: vec![((round * pkts_per_round + i) % 256) as u8; pkt_size],
-                    to: recv_addr,
-                    max_segment_size: None,
+                .map(|i| {
+                    TxDatagram::from_payload(
+                        vec![((round * pkts_per_round + i) % 256) as u8; pkt_size],
+                        recv_addr,
+                        None,
+                    )
                 })
                 .collect();
             sender.submit_sends(packets).unwrap();
@@ -1937,11 +1913,7 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let packets: Vec<TxDatagram> = (0..4)
-                .map(|i| TxDatagram {
-                    data: vec![i as u8; 200],
-                    to: recv_addr,
-                    max_segment_size: None,
-                })
+                .map(|i| TxDatagram::from_payload(vec![i as u8; 200], recv_addr, None))
                 .collect();
             sender.submit_sends(packets).unwrap();
             sender

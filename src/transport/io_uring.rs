@@ -67,7 +67,7 @@ mod inner {
     fn send_bundle_prefix_len(packets: &[TxDatagram]) -> usize {
         let mut count = 0usize;
         for packet in packets.iter().take(TX_RING_ENTRIES as usize) {
-            if packet.data.len() > TX_BUF_ENTRY_SIZE {
+            if packet.payload_len() > TX_BUF_ENTRY_SIZE {
                 break;
             }
             count += 1;
@@ -351,13 +351,13 @@ mod inner {
             self.in_flight_lengths.clear();
             for i in 0..n {
                 let slot = (self.tail % TX_RING_ENTRIES) as usize;
-                let len = packets[i].data.len();
+                let len = packets[i].payload_len();
                 let buf_offset = slot * TX_BUF_ENTRY_SIZE;
 
                 // SAFETY: slot is in [0, TX_RING_ENTRIES), buf_offset is valid.
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        packets[i].data.as_ptr(),
+                        packets[i].payload().as_ptr(),
                         self.buf_base.add(buf_offset),
                         len,
                     );
@@ -408,11 +408,7 @@ mod inner {
                 let data = unsafe {
                     std::slice::from_raw_parts(self.buf_base.add(buf_offset), len).to_vec()
                 };
-                unsent.push(TxDatagram {
-                    data,
-                    to: self.connected_peer,
-                    max_segment_size: None,
-                });
+                unsent.push(TxDatagram::from_payload(data, self.connected_peer, None));
             }
 
             self.in_flight = false;
@@ -456,6 +452,7 @@ mod inner {
         iov: Box<libc::iovec>,
         msg: Box<libc::msghdr>,
         cmsg_buf: Box<[u8; 32]>,
+        payload_len: usize,
         /// Non-zero when this slot holds a GSO batch. Used to split on retry.
         gso_segment_size: u16,
         in_flight: bool,
@@ -475,6 +472,7 @@ mod inner {
                 // SAFETY: zeroed msghdr is valid (null pointers, zero lengths).
                 msg: Box::new(unsafe { std::mem::zeroed() }),
                 cmsg_buf: Box::new([0u8; 32]),
+                payload_len: 0,
                 gso_segment_size: 0,
                 in_flight: false,
             };
@@ -485,10 +483,11 @@ mod inner {
         }
 
         fn prepare(&mut self, packet: TxDatagram) {
+            self.payload_len = packet.payload_len();
             self.data = packet.data;
             self.peer = packet.to;
             self.iov.iov_base = self.data.as_mut_ptr().cast();
-            self.iov.iov_len = self.data.len();
+            self.iov.iov_len = self.payload_len;
             self.msg.msg_namelen = socketaddr_to_sockaddr(self.peer, self.addr.as_mut());
             self.msg.msg_control = std::ptr::null_mut();
             self.msg.msg_controllen = 0;
@@ -497,11 +496,18 @@ mod inner {
             self.in_flight = true;
         }
 
-        fn prepare_gso(&mut self, data: Vec<u8>, to: SocketAddr, segment_size: u16) {
+        fn prepare_gso(
+            &mut self,
+            data: Vec<u8>,
+            payload_len: usize,
+            to: SocketAddr,
+            segment_size: u16,
+        ) {
             self.data = data;
+            self.payload_len = payload_len;
             self.peer = to;
             self.iov.iov_base = self.data.as_mut_ptr().cast();
-            self.iov.iov_len = self.data.len();
+            self.iov.iov_len = self.payload_len;
             self.msg.msg_namelen = socketaddr_to_sockaddr(self.peer, self.addr.as_mut());
             let cmsg_len = build_gso_cmsg(&mut *self.cmsg_buf, segment_size);
             self.msg.msg_control = self.cmsg_buf.as_mut_ptr().cast();
@@ -514,16 +520,14 @@ mod inner {
         fn take_packet(&mut self) -> TxDatagram {
             self.in_flight = false;
             self.gso_segment_size = 0;
-            TxDatagram {
-                data: std::mem::take(&mut self.data),
-                to: self.peer,
-                max_segment_size: None,
-            }
+            let payload_len = std::mem::take(&mut self.payload_len);
+            TxDatagram::new(std::mem::take(&mut self.data), payload_len, self.peer, None)
         }
 
         fn recycle_buffer(&mut self) -> Vec<u8> {
             self.in_flight = false;
             self.gso_segment_size = 0;
+            self.payload_len = 0;
             std::mem::take(&mut self.data)
         }
     }
@@ -531,30 +535,29 @@ mod inner {
     fn enqueue_retry_data(
         pending_tx: &mut VecDeque<TxDatagram>,
         data: Vec<u8>,
+        payload_len: usize,
         peer: SocketAddr,
         gso_segment_size: u16,
     ) {
         if gso_segment_size == 0 {
-            pending_tx.push_back(TxDatagram {
-                data,
-                to: peer,
-                max_segment_size: None,
-            });
+            pending_tx.push_back(TxDatagram::new(data, payload_len, peer, None));
             return;
         }
 
         let seg = gso_segment_size as usize;
-        for chunk in data.chunks(seg) {
-            pending_tx.push_back(TxDatagram {
-                data: chunk.to_vec(),
-                to: peer,
-                max_segment_size: None,
-            });
+        for chunk in data[..payload_len].chunks(seg) {
+            pending_tx.push_back(TxDatagram::from_payload(chunk.to_vec(), peer, None));
         }
     }
 
     fn enqueue_gso_batch_for_retry(pending_tx: &mut VecDeque<TxDatagram>, batch: GsoBatch) {
-        enqueue_retry_data(pending_tx, batch.data, batch.to, batch.segment_size);
+        enqueue_retry_data(
+            pending_tx,
+            batch.data,
+            batch.payload_len,
+            batch.to,
+            batch.segment_size,
+        );
     }
 
     fn requeue_tx_slot_for_retry(pending_tx: &mut VecDeque<TxDatagram>, slot: &mut TxSlot) {
@@ -563,8 +566,9 @@ mod inner {
         if seg == 0 {
             pending_tx.push_back(slot.take_packet());
         } else {
+            let payload_len = slot.payload_len;
             let data = slot.recycle_buffer();
-            enqueue_retry_data(pending_tx, data, peer, seg);
+            enqueue_retry_data(pending_tx, data, payload_len, peer, seg);
         }
     }
 
@@ -931,13 +935,13 @@ mod inner {
                         self.tx_in_flight -= 1;
                         let slot = &mut self.tx_slots[idx];
                         self.tx_bytes_in_flight =
-                            self.tx_bytes_in_flight.saturating_sub(slot.data.len());
+                            self.tx_bytes_in_flight.saturating_sub(slot.payload_len);
                         if result >= 0 {
                             if slot.gso_segment_size > 0 {
                                 log::trace!(
                                     "io_uring OP_SEND GSO complete: idx={idx} result={result} seg_size={} data_len={} in_flight={}",
                                     slot.gso_segment_size,
-                                    slot.data.len(),
+                                    slot.payload_len,
                                     self.tx_in_flight,
                                 );
                             }
@@ -948,7 +952,7 @@ mod inner {
                             log::warn!(
                                 "io_uring OP_SEND error: idx={idx} errno={errno} gso_seg={} data_len={} in_flight={} retryable={}",
                                 slot.gso_segment_size,
-                                slot.data.len(),
+                                slot.payload_len,
                                 self.tx_in_flight,
                                 errno == libc::EAGAIN
                                     || errno == libc::ENOBUFS
@@ -1114,13 +1118,14 @@ mod inner {
             if self.gso_supported && packets.len() > 1 {
                 // Group into GSO batches, then route through pending_tx so
                 // the SQE creation path is identical to non-GSO sends.
-                let batches = group_for_gso(packets);
-                for batch in batches {
-                    if batch.data.len() > batch.segment_size as usize {
+                let batching = group_for_gso(packets);
+                self.recycled_tx.extend(batching.recycled);
+                for batch in batching.batches {
+                    if batch.segment_size > 0 && batch.payload_len() > batch.segment_size as usize {
                         // Multi-segment batch: needs GSO SQE with cmsg.
                         // Bytes-cap check: if we'd exceed the peer's estimated
                         // receive buffer, split to pending_tx for the drain loop.
-                        if self.tx_bytes_in_flight + batch.data.len() > self.tx_bytes_cap
+                        if self.tx_bytes_in_flight + batch.payload_len() > self.tx_bytes_cap
                             && self.tx_in_flight > 0
                         {
                             enqueue_gso_batch_for_retry(&mut self.pending_tx, batch);
@@ -1132,7 +1137,12 @@ mod inner {
                             enqueue_gso_batch_for_retry(&mut self.pending_tx, batch);
                             continue;
                         };
-                        self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
+                        self.tx_slots[idx].prepare_gso(
+                            batch.data,
+                            batch.payload_len,
+                            batch.to,
+                            batch.segment_size,
+                        );
                         let slot = &mut self.tx_slots[idx];
                         let entry = io_uring::opcode::SendMsg::new(
                             FIXED_SOCKET,
@@ -1148,17 +1158,18 @@ mod inner {
                             );
                             reactor_metrics::record_io_uring_sq_full_event();
                         } else {
-                            self.tx_bytes_in_flight += self.tx_slots[idx].data.len();
+                            self.tx_bytes_in_flight += self.tx_slots[idx].payload_len;
                             self.tx_in_flight += 1;
                             sqes_pushed += 1;
                         }
                     } else {
                         // Single-packet batch: route through pending_tx (no cmsg needed).
-                        self.pending_tx.push_back(TxDatagram {
-                            data: batch.data,
-                            to: batch.to,
-                            max_segment_size: None,
-                        });
+                        self.pending_tx.push_back(TxDatagram::new(
+                            batch.data,
+                            batch.payload_len,
+                            batch.to,
+                            None,
+                        ));
                     }
                 }
             } else {
@@ -1353,7 +1364,7 @@ mod inner {
 
         /// Submit packets via send bundle (connected socket, kernel ≥6.10).
         /// Falls back to GSO/SendMsg for overflow packets.
-        fn submit_send_bundle(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+        fn submit_send_bundle(&mut self, mut packets: Vec<TxDatagram>) -> io::Result<()> {
             let tx_ring = self.tx_buf_ring.as_mut().unwrap();
             let enqueued = tx_ring.fill_and_publish(&packets);
 
@@ -1382,10 +1393,16 @@ mod inner {
                 }
             }
 
+            if enqueued > 0 {
+                for pkt in packets.drain(..enqueued) {
+                    self.recycled_tx.push(pkt.into_recycle_buffer());
+                }
+            }
+
             // Overflow packets that didn't fit in the ring: fall back to GSO/SendMsg.
             let mut overflow_sqes = 0usize;
-            if enqueued < packets.len() {
-                let overflow: Vec<TxDatagram> = packets.into_iter().skip(enqueued).collect();
+            if !packets.is_empty() {
+                let overflow = packets;
                 if self.gso_supported && overflow.len() > 1 {
                     overflow_sqes += self.submit_sends_gso(overflow)?;
                 } else {
@@ -1449,20 +1466,28 @@ mod inner {
         /// Packets that don't fit into available slots are put back into pending_tx.
         /// Returns the number of SQEs pushed to the submission ring.
         fn submit_sends_gso(&mut self, packets: Vec<TxDatagram>) -> io::Result<usize> {
-            let batches = group_for_gso(packets);
+            let batching = group_for_gso(packets);
+            self.recycled_tx.extend(batching.recycled);
             log::trace!(
                 "io_uring::submit_sends_gso: {} packets -> {} batches, tx_in_flight={} pending_tx={} tid={:?}",
-                batches
+                batching
+                    .batches
                     .iter()
-                    .map(|b| b.data.len() / b.segment_size as usize)
+                    .map(|b| {
+                        if b.segment_size == 0 {
+                            1
+                        } else {
+                            b.payload_len() / b.segment_size as usize
+                        }
+                    })
                     .sum::<usize>(),
-                batches.len(),
+                batching.batches.len(),
                 self.tx_in_flight,
                 self.pending_tx.len(),
                 std::thread::current().id(),
             );
             let mut sqes_pushed = 0usize;
-            let mut batches = batches.into_iter();
+            let mut batches = batching.batches.into_iter();
             while let Some(batch) = batches.next() {
                 let Some(idx) = self.tx_slots.iter().position(|s| !s.in_flight) else {
                     // No free slot — split batch back into individual packets.
@@ -1474,14 +1499,20 @@ mod inner {
                 // Only attach UDP_SEGMENT cmsg when the batch has >1 segment.
                 // Single-packet batches sent with UDP_SEGMENT can trigger EMSGSIZE
                 // when the segment size exceeds the path MTU.
-                if batch.data.len() > batch.segment_size as usize {
-                    self.tx_slots[idx].prepare_gso(batch.data, batch.to, batch.segment_size);
+                if batch.segment_size > 0 && batch.payload_len() > batch.segment_size as usize {
+                    self.tx_slots[idx].prepare_gso(
+                        batch.data,
+                        batch.payload_len,
+                        batch.to,
+                        batch.segment_size,
+                    );
                 } else {
-                    self.tx_slots[idx].prepare(TxDatagram {
-                        data: batch.data,
-                        to: batch.to,
-                        max_segment_size: None,
-                    });
+                    self.tx_slots[idx].prepare(TxDatagram::new(
+                        batch.data,
+                        batch.payload_len,
+                        batch.to,
+                        None,
+                    ));
                 }
                 let slot = &mut self.tx_slots[idx];
                 let entry = io_uring::opcode::SendMsg::new(
@@ -1505,7 +1536,7 @@ mod inner {
 
                 sqes_pushed += 1;
                 self.tx_in_flight += 1;
-                self.tx_bytes_in_flight += self.tx_slots[idx].data.len();
+                self.tx_bytes_in_flight += self.tx_slots[idx].payload_len;
                 reactor_metrics::record_io_uring_submitted_sqes(1);
                 reactor_metrics::record_io_uring_tx_in_flight(self.tx_in_flight);
                 reactor_metrics::record_io_uring_tx_datagrams_submitted(1);
@@ -1540,7 +1571,7 @@ mod inner {
                     break;
                 };
 
-                let pkt_bytes = packet.data.len();
+                let pkt_bytes = packet.payload_len();
                 self.tx_slots[idx].prepare(packet);
                 let slot = &mut self.tx_slots[idx];
                 let entry = io_uring::opcode::SendMsg::new(
@@ -1677,7 +1708,7 @@ mod inner {
                         tx_freed += 1;
                         let slot = &mut self.tx_slots[idx];
                         self.tx_bytes_in_flight =
-                            self.tx_bytes_in_flight.saturating_sub(slot.data.len());
+                            self.tx_bytes_in_flight.saturating_sub(slot.payload_len);
                         if result >= 0 {
                             self.recycled_tx.push(slot.recycle_buffer());
                             reactor_metrics::record_io_uring_tx_datagrams_completed(1);
@@ -1686,7 +1717,7 @@ mod inner {
                             log::warn!(
                                 "io_uring OP_SEND error (inline): idx={idx} errno={errno} gso_seg={} data_len={} in_flight={}",
                                 slot.gso_segment_size,
-                                slot.data.len(),
+                                slot.payload_len,
                                 self.tx_in_flight,
                             );
                             if errno == libc::EAGAIN
@@ -1892,11 +1923,7 @@ mod inner {
         }
 
         fn test_tx_datagram(len: usize) -> TxDatagram {
-            TxDatagram {
-                data: vec![7; len],
-                to: "127.0.0.1:4433".parse().unwrap(),
-                max_segment_size: None,
-            }
+            TxDatagram::from_payload(vec![7; len], "127.0.0.1:4433".parse().unwrap(), None)
         }
 
         #[test]
@@ -1939,11 +1966,7 @@ mod inner {
             let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
             let mut pending = VecDeque::new();
             let mut slot = TxSlot::new();
-            slot.prepare(TxDatagram {
-                data: vec![1, 2, 3],
-                to: peer,
-                max_segment_size: None,
-            });
+            slot.prepare(TxDatagram::from_payload(vec![1, 2, 3], peer, None));
 
             requeue_tx_slot_for_retry(&mut pending, &mut slot);
 
@@ -1961,7 +1984,7 @@ mod inner {
             let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
             let mut pending = VecDeque::new();
             let mut slot = TxSlot::new();
-            slot.prepare_gso(vec![1, 2, 3, 4, 5], peer, 2);
+            slot.prepare_gso(vec![1, 2, 3, 4, 5], 5, peer, 2);
 
             requeue_tx_slot_for_retry(&mut pending, &mut slot);
 
@@ -1978,7 +2001,7 @@ mod inner {
             let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
             let mut pending = VecDeque::new();
 
-            enqueue_retry_data(&mut pending, Vec::new(), peer, 0);
+            enqueue_retry_data(&mut pending, Vec::new(), 0, peer, 0);
 
             assert_eq!(pending.len(), 1);
             let packet = pending.pop_front().unwrap();

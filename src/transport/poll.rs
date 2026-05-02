@@ -31,25 +31,18 @@ mod inner {
     fn requeue_gso_batch(
         unsent: &mut VecDeque<TxDatagram>,
         data: Vec<u8>,
+        payload_len: usize,
         to: SocketAddr,
         segment_size: u16,
     ) {
         let seg = segment_size as usize;
-        if seg == 0 || data.len() <= seg {
-            unsent.push_back(TxDatagram {
-                data,
-                to,
-                max_segment_size: None,
-            });
+        if seg == 0 || payload_len <= seg {
+            unsent.push_back(TxDatagram::new(data, payload_len, to, None));
             return;
         }
 
-        for chunk in data.chunks(seg) {
-            unsent.push_back(TxDatagram {
-                data: chunk.to_vec(),
-                to,
-                max_segment_size: None,
-            });
+        for chunk in data[..payload_len].chunks(seg) {
+            unsent.push_back(TxDatagram::from_payload(chunk.to_vec(), to, None));
         }
     }
 
@@ -397,16 +390,18 @@ mod inner {
 
             // Stash packets so data pointers remain valid during sendmmsg.
             let mut pkt_data: Vec<Vec<u8>> = Vec::with_capacity(count);
+            let mut pkt_lens: Vec<usize> = Vec::with_capacity(count);
             let mut pkt_addrs: Vec<SocketAddr> = Vec::with_capacity(count);
             for pkt in packets {
                 pkt_addrs.push(pkt.to);
+                pkt_lens.push(pkt.payload_len());
                 pkt_data.push(pkt.data);
             }
 
             for i in 0..count {
                 let addrlen = socketaddr_to_sockaddr(pkt_addrs[i], &mut self.tx_addrs[i]);
                 self.tx_iovs[i].iov_base = pkt_data[i].as_ptr() as *mut libc::c_void;
-                self.tx_iovs[i].iov_len = pkt_data[i].len();
+                self.tx_iovs[i].iov_len = pkt_lens[i];
                 self.tx_hdrs[i].msg_hdr.msg_name =
                     (&mut self.tx_addrs[i] as *mut libc::sockaddr_storage).cast();
                 self.tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
@@ -451,18 +446,17 @@ mod inner {
                 if i < sent_count || !requeue_remainder {
                     self.recycled_tx.push(data);
                 } else {
-                    self.unsent.push_back(TxDatagram {
-                        data,
-                        to: pkt_addrs[i],
-                        max_segment_size: None,
-                    });
+                    self.unsent
+                        .push_back(TxDatagram::new(data, pkt_lens[i], pkt_addrs[i], None));
                 }
             }
         }
 
         /// GSO-accelerated send: group packets by (dest, size) and use UDP_SEGMENT cmsg.
         fn send_batch_gso(&mut self, packets: Vec<TxDatagram>) {
-            let batches = group_for_gso(packets);
+            let batching = group_for_gso(packets);
+            self.recycled_tx.extend(batching.recycled);
+            let batches = batching.batches;
             let count = batches.len();
 
             // Allocate fresh each time to avoid stale pointer issues from
@@ -483,18 +477,20 @@ mod inner {
 
             // Stash batch data so pointers remain valid during sendmmsg.
             let mut batch_data: Vec<Vec<u8>> = Vec::with_capacity(count);
+            let mut batch_lens: Vec<usize> = Vec::with_capacity(count);
             let mut batch_addrs: Vec<SocketAddr> = Vec::with_capacity(count);
             let mut batch_seg_sizes: Vec<u16> = Vec::with_capacity(count);
             for batch in batches {
                 batch_addrs.push(batch.to);
                 batch_seg_sizes.push(batch.segment_size);
+                batch_lens.push(batch.payload_len);
                 batch_data.push(batch.data);
             }
 
             for i in 0..count {
                 let addrlen = socketaddr_to_sockaddr(batch_addrs[i], &mut tx_addrs[i]);
                 tx_iovs[i].iov_base = batch_data[i].as_ptr() as *mut libc::c_void;
-                tx_iovs[i].iov_len = batch_data[i].len();
+                tx_iovs[i].iov_len = batch_lens[i];
                 tx_hdrs[i].msg_hdr.msg_name =
                     (&mut tx_addrs[i] as *mut libc::sockaddr_storage).cast();
                 tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
@@ -502,7 +498,7 @@ mod inner {
                 tx_hdrs[i].msg_hdr.msg_iovlen = 1;
 
                 // Attach UDP_SEGMENT cmsg when the batch holds >1 segment.
-                if batch_data[i].len() > batch_seg_sizes[i] as usize {
+                if batch_seg_sizes[i] > 0 && batch_lens[i] > batch_seg_sizes[i] as usize {
                     let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[i], batch_seg_sizes[i]);
                     tx_hdrs[i].msg_hdr.msg_control = tx_cmsg_bufs[i].as_mut_ptr().cast();
                     tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
@@ -548,7 +544,13 @@ mod inner {
                 if i < sent_count || !requeue_remainder {
                     self.recycled_tx.push(data);
                 } else {
-                    requeue_gso_batch(&mut self.unsent, data, batch_addrs[i], batch_seg_sizes[i]);
+                    requeue_gso_batch(
+                        &mut self.unsent,
+                        data,
+                        batch_lens[i],
+                        batch_addrs[i],
+                        batch_seg_sizes[i],
+                    );
                 }
             }
         }
@@ -559,11 +561,11 @@ mod inner {
             // dropped packets doesn't disappear silently. Both Ok and
             // permanent-error pop the packet; only WouldBlock keeps it.
             while let Some(front) = self.unsent.front() {
-                match self.socket.send_to(&front.data, front.to) {
+                match self.socket.send_to(front.payload(), front.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
                     Ok(_) => {
                         if let Some(pkt) = self.unsent.pop_front() {
-                            self.recycled_tx.push(pkt.data);
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
                         }
                     }
                     Err(e) => {
@@ -571,7 +573,7 @@ mod inner {
                             "poll driver: drain_unsent send_to failed: {e}; dropping datagram"
                         );
                         if let Some(pkt) = self.unsent.pop_front() {
-                            self.recycled_tx.push(pkt.data);
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
                         }
                     }
                 }
@@ -682,7 +684,7 @@ mod inner {
             let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
             let mut unsent = VecDeque::new();
 
-            requeue_gso_batch(&mut unsent, vec![1, 2, 3, 4, 5], peer, 2);
+            requeue_gso_batch(&mut unsent, vec![1, 2, 3, 4, 5], 5, peer, 2);
 
             assert_eq!(unsent.len(), 3);
             assert_eq!(unsent.pop_front().unwrap().data, vec![1, 2]);
@@ -695,7 +697,7 @@ mod inner {
             let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
             let mut unsent = VecDeque::new();
 
-            requeue_gso_batch(&mut unsent, Vec::new(), peer, 0);
+            requeue_gso_batch(&mut unsent, Vec::new(), 0, peer, 0);
 
             assert_eq!(unsent.len(), 1);
             assert!(unsent.pop_front().unwrap().data.is_empty());

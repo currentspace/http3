@@ -159,9 +159,9 @@ mod inner {
 
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
             for pkt in packets {
-                match self.socket.send_to(&pkt.data, pkt.to) {
+                match self.socket.send_to(pkt.payload(), pkt.to) {
                     Ok(_) => {
-                        self.recycled_tx.push(pkt.data);
+                        self.recycled_tx.push(pkt.into_recycle_buffer());
                     }
                     Err(error) => match classify_kqueue_send_error(&error) {
                         KqueueSendErrorClass::RetryableWouldBlock => {
@@ -173,7 +173,7 @@ mod inner {
                             log::warn!(
                                 "kqueue driver: send_to failed with permanent error {error}; dropping datagram"
                             );
-                            self.recycled_tx.push(pkt.data);
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
                         }
                     },
                 }
@@ -388,10 +388,10 @@ mod inner {
 
         fn drain_unsent(&mut self) {
             while let Some(front) = self.unsent.front() {
-                match self.socket.send_to(&front.data, front.to) {
+                match self.socket.send_to(front.payload(), front.to) {
                     Ok(_) => {
                         if let Some(pkt) = self.unsent.pop_front() {
-                            self.recycled_tx.push(pkt.data);
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
                         }
                     }
                     Err(error) => match classify_kqueue_send_error(&error) {
@@ -405,7 +405,7 @@ mod inner {
                                 "kqueue driver: drain_unsent send_to failed with permanent error {error}; dropping datagram"
                             );
                             if let Some(pkt) = self.unsent.pop_front() {
-                                self.recycled_tx.push(pkt.data);
+                                self.recycled_tx.push(pkt.into_recycle_buffer());
                             }
                         }
                     },

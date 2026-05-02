@@ -307,7 +307,7 @@ impl Driver for MockDriver {
     fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
         for packet in packets {
             if let Some(trace) = &self.trace {
-                trace.record_datagram(self.local_addr, packet.to, &packet.data);
+                trace.record_datagram(self.local_addr, packet.to, packet.payload());
             }
             // Simulate packet loss if configured.
             let dropped = self
@@ -321,11 +321,11 @@ impl Driver for MockDriver {
                 self.outbound_tx
                     .send(MockInboundDatagram {
                         from: self.local_addr,
-                        bytes: packet.data.clone(),
+                        bytes: packet.payload().to_vec(),
                     })
                     .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mock peer closed"))?;
             }
-            self.recycled_tx.push(packet.data);
+            self.recycled_tx.push(packet.into_recycle_buffer());
         }
         Ok(())
     }

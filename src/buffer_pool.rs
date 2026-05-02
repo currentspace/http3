@@ -32,19 +32,17 @@ impl BufferPool {
             .unwrap_or_else(|| InitializedPacketBuf::zeroed(self.buf_size).into_vec())
     }
 
-    /// Return a buffer to the pool. Only keeps it if capacity is sufficient.
-    pub fn checkin(&mut self, mut buf: Vec<u8>) {
-        if buf.capacity() >= self.buf_size {
-            // Audit finding #23: zero-init instead of `set_len` on uninit
-            // memory. Eliminates the foot-gun where any future caller that
-            // reads before writing would see stale bytes from a prior
-            // connection. ~300 ns for 16 KB on modern CPUs — negligible
-            // vs network I/O.
-            buf.clear();
-            buf.resize(self.buf_size, 0);
+    /// Return a buffer to the pool.
+    ///
+    /// Fixed packet buffers are recycled only when their initialized length is
+    /// still `buf_size`. The transport layer carries an explicit payload length
+    /// for sends, so recycled buffers do not need to be cleared or resized here.
+    pub fn checkin(&mut self, buf: Vec<u8>) {
+        if buf.len() == self.buf_size && buf.capacity() >= self.buf_size {
             self.buffers.push(buf);
         }
-        // Undersized buffers are dropped
+        // Truncated or undersized buffers are dropped. Retaining them would
+        // require a resize, which is the hot-path memset this pool avoids.
     }
 }
 
@@ -239,6 +237,17 @@ mod tests {
         let proper = vec![0u8; 1500];
         pool.checkin(proper);
         assert_eq!(pool.buffers.len(), 1);
+    }
+
+    #[test]
+    fn test_checkin_truncated_large_buffer_is_dropped() {
+        let mut pool = BufferPool::new(1, 1500);
+        let mut buf = pool.checkout();
+        buf.truncate(1200);
+
+        pool.checkin(buf);
+
+        assert_eq!(pool.buffers.len(), 0);
     }
 
     #[test]
