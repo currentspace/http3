@@ -50,9 +50,39 @@ function waitForDrain(stream: QuicStream): Promise<void> {
   });
 }
 
+function endAndWait(stream: QuicStream, chunk?: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      stream.off('finish', onFinish);
+      stream.off('error', onError);
+      stream.off('close', onClose);
+    };
+    const onFinish = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error('stream closed before finish'));
+    };
+    stream.once('finish', onFinish);
+    stream.once('error', onError);
+    stream.once('close', onClose);
+    if (chunk === undefined) {
+      stream.end();
+    } else {
+      stream.end(chunk);
+    }
+  });
+}
+
 async function writeChunkedResponse(stream: QuicStream, chunks: Buffer[]): Promise<void> {
   if (chunks.length === 0) {
-    stream.end();
+    await endAndWait(stream);
     return;
   }
 
@@ -62,7 +92,7 @@ async function writeChunkedResponse(stream: QuicStream, chunks: Buffer[]): Promi
     }
   }
 
-  stream.end(chunks[chunks.length - 1]);
+  await endAndWait(stream, chunks[chunks.length - 1]);
 }
 
 function loadConfig(): BenchServerConfig {
