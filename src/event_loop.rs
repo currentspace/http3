@@ -141,8 +141,14 @@ pub(crate) trait ProtocolHandler {
     /// Process one command from the JS thread.  Returns `true` → shut down loop.
     fn dispatch_command(&mut self, cmd: Self::Command, batch: &mut Vec<JsH3Event>) -> bool;
 
-    /// Parse QUIC header, route to connection, `conn.recv()`, poll protocol events.
-    /// Pushes retry / version-negotiation packets to `pending_outbound`.
+    /// Parse QUIC header, route to connection, and feed the packet into quiche.
+    ///
+    /// `app_event_budget` is zero during RX-batch draining so quiche can
+    /// coalesce stream data across all packets observed in the poll cycle before
+    /// JS-facing events are emitted by `poll_app_events()`. Handlers may still
+    /// emit control/session events that are required to keep connection state
+    /// correct, and may push retry / version-negotiation packets to
+    /// `pending_outbound`.
     fn process_packet(
         &mut self,
         buf: &mut [u8],
@@ -658,14 +664,13 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 for chunk in pkt.data.chunks(seg) {
                     let (mut buf, reused) = gro_segment_pool.copy_from_slice(chunk);
                     reactor_metrics::record_gro_segment_buffer_checkout(reused, chunk.len());
-                    let app_budget = app_event_budget(batcher.len());
                     if !batcher.collect_atomic(|batch| {
                         handler.process_packet(
                             &mut buf,
                             pkt.peer,
                             pkt_local,
                             &mut pending_outbound,
-                            app_budget,
+                            0,
                             batch,
                         )
                     }) {
@@ -676,14 +681,13 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                     reactor_metrics::record_gro_segment_buffer_checkin(retained);
                 }
             } else {
-                let app_budget = app_event_budget(batcher.len());
                 if !batcher.collect_atomic(|batch| {
                     handler.process_packet(
                         &mut pkt.data,
                         pkt.peer,
                         pkt_local,
                         &mut pending_outbound,
-                        app_budget,
+                        0,
                         batch,
                     )
                 }) {
@@ -839,7 +843,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use crate::transport::{Driver, TxDatagram};
+    use crate::transport::{
+        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+    };
 
     /// Tracks the sizes of each batch delivered via `emit()`.
     type DeliveryLog = Arc<Mutex<Vec<usize>>>;
@@ -944,6 +950,142 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct NoopWaker;
+
+    impl DriverWaker for NoopWaker {
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct OneShotRxDriver {
+        local_addr: SocketAddr,
+        rx: Option<Vec<RxDatagram>>,
+        recycled_rx: usize,
+        recycled_tx: Vec<Vec<u8>>,
+    }
+
+    impl OneShotRxDriver {
+        fn new(local_addr: SocketAddr, rx: Vec<RxDatagram>) -> Self {
+            Self {
+                local_addr,
+                rx: Some(rx),
+                recycled_rx: 0,
+                recycled_tx: Vec::new(),
+            }
+        }
+    }
+
+    impl Driver for OneShotRxDriver {
+        type Waker = NoopWaker;
+
+        fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
+            Ok((Self::new(socket.local_addr()?, Vec::new()), NoopWaker))
+        }
+
+        fn poll(&mut self, _deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            let rx = self.rx.take().unwrap_or_default();
+            let timer_expired = rx.is_empty();
+            Ok(PollOutcome {
+                rx,
+                woken: false,
+                timer_expired,
+            })
+        }
+
+        fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll(deadline)
+        }
+
+        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            self.recycled_tx
+                .extend(packets.into_iter().map(TxDatagram::into_recycle_buffer));
+            Ok(())
+        }
+
+        fn pending_tx_count(&self) -> usize {
+            0
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(self.local_addr)
+        }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::Mock
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            self.recycled_rx += buffers.len();
+        }
+    }
+
+    #[derive(Default)]
+    struct CoalescingProbeHandler {
+        process_budgets: Vec<usize>,
+        poll_app_budgets: Vec<usize>,
+        processed_packets: usize,
+        done: bool,
+    }
+
+    impl ProtocolHandler for CoalescingProbeHandler {
+        type Command = ();
+
+        fn dispatch_command(&mut self, _cmd: Self::Command, _batch: &mut Vec<JsH3Event>) -> bool {
+            false
+        }
+
+        fn process_packet(
+            &mut self,
+            _buf: &mut [u8],
+            _peer: SocketAddr,
+            _local: SocketAddr,
+            _pending_outbound: &mut Vec<TxDatagram>,
+            app_event_budget: usize,
+            _batch: &mut Vec<JsH3Event>,
+        ) {
+            self.processed_packets += 1;
+            self.process_budgets.push(app_event_budget);
+        }
+
+        fn process_timers(
+            &mut self,
+            _now: Instant,
+            _app_event_budget: usize,
+            _batch: &mut Vec<JsH3Event>,
+        ) {
+        }
+
+        fn poll_app_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
+            self.poll_app_budgets.push(app_event_budget);
+            if app_event_budget > 0 {
+                batch.push(typed_event(crate::h3_event::EVENT_DATA, 7, 11));
+                self.done = true;
+            }
+        }
+
+        fn flush_sends(&mut self, _outbound: &mut Vec<TxDatagram>) {}
+
+        fn flush_pending_writes(&mut self, _batch: &mut Vec<JsH3Event>) {}
+
+        fn poll_drain_events(&mut self, _app_event_budget: usize, _batch: &mut Vec<JsH3Event>) {}
+
+        fn cleanup_closed(&mut self, _batch: &mut Vec<JsH3Event>) {}
+
+        fn next_deadline(&mut self) -> Option<Instant> {
+            None
+        }
+
+        fn is_done(&self) -> bool {
+            self.done
+        }
+    }
+
     #[test]
     fn test_app_event_budget_counts_pending_batch_and_outstanding() {
         crate::reactor_metrics::reset();
@@ -985,6 +1127,63 @@ mod tests {
 
         assert_eq!(outcome.rx.len(), 1);
         assert_eq!(outcome.rx[0].data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_rx_batch_defers_app_events_until_after_all_packets() {
+        crate::reactor_metrics::reset();
+
+        let local_addr = "127.0.0.1:44340".parse().unwrap();
+        let peer_addr = "127.0.0.1:44341".parse().unwrap();
+        let rx = vec![
+            RxDatagram {
+                data: vec![1],
+                peer: peer_addr,
+                local: local_addr,
+                segment_size: None,
+            },
+            RxDatagram {
+                data: vec![2],
+                peer: peer_addr,
+                local: local_addr,
+                segment_size: None,
+            },
+        ];
+        let mut driver = OneShotRxDriver::new(local_addr, rx);
+        let (_cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<()>();
+        let (sink, delivered) = CaptureEventsSink::new();
+        let batcher = EventBatcher::with_sink(sink);
+        let mut handler = CoalescingProbeHandler::default();
+
+        run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
+
+        assert_eq!(handler.processed_packets, 2);
+        assert_eq!(handler.process_budgets, vec![0, 0]);
+        assert!(
+            handler.poll_app_budgets.iter().any(|budget| *budget > 0),
+            "app events should be polled after the RX batch with real budget"
+        );
+        assert_eq!(driver.recycled_rx, 2);
+
+        let delivered = delivered.lock().unwrap();
+        assert!(
+            delivered
+                .iter()
+                .flatten()
+                .any(|(event_type, conn_handle, stream_id)| {
+                    *event_type == crate::h3_event::EVENT_DATA
+                        && *conn_handle == 7
+                        && *stream_id == 11
+                }),
+            "deferred poll_app_events should deliver the app data event"
+        );
+        assert!(
+            delivered
+                .iter()
+                .flatten()
+                .any(|(event_type, _, _)| *event_type == crate::h3_event::EVENT_SHUTDOWN_COMPLETE),
+            "handler completion should still emit shutdown sentinel"
+        );
     }
 
     #[test]

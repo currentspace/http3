@@ -17,7 +17,7 @@ mod inner {
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::{
-        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, macos_msg_x,
     };
 
     const WAKER_IDENT: usize = 0xCAFE;
@@ -25,13 +25,16 @@ mod inner {
 
     #[derive(Debug, PartialEq, Eq)]
     enum KqueueSendErrorClass {
-        RetryableWouldBlock,
+        RetryablePressure,
         Permanent,
     }
 
     fn classify_kqueue_send_error(error: &io::Error) -> KqueueSendErrorClass {
-        if error.kind() == io::ErrorKind::WouldBlock {
-            KqueueSendErrorClass::RetryableWouldBlock
+        if error.kind() == io::ErrorKind::WouldBlock
+            || error.kind() == io::ErrorKind::Interrupted
+            || error.raw_os_error() == Some(libc::ENOBUFS)
+        {
+            KqueueSendErrorClass::RetryablePressure
         } else {
             KqueueSendErrorClass::Permanent
         }
@@ -39,8 +42,9 @@ mod inner {
 
     /// Max datagrams to recv per poll iteration.  Prevents the recv loop from
     /// starving the send path under fan-out: after this many packets the loop
-    /// yields so flush_sends() can push ACKs out, then the next poll() returns
-    /// immediately (EV_CLEAR edge-triggered re-arms after read).
+    /// yields so flush_sends() can push ACKs out. If the cap is reached, the
+    /// driver remembers read backlog and the next receive-enabled poll uses a
+    /// zero timeout instead of waiting for another kqueue edge.
     const MAX_RX_PER_POLL: usize = 256;
 
     pub struct KqueueDriver {
@@ -50,9 +54,11 @@ mod inner {
         local_addr: SocketAddr,
         unsent: VecDeque<TxDatagram>,
         write_interest_registered: bool,
+        read_backlog: bool,
         event_buf: Vec<KEvent>,
         recv_buf: Vec<u8>,
         rx_pool: AdaptiveBufferPool,
+        msg_x: macos_msg_x::MsgXSelection,
         /// Buffers from successfully sent packets, ready for pool recycling.
         recycled_tx: Vec<Vec<u8>>,
     }
@@ -86,8 +92,22 @@ mod inner {
             // quiche 0.28 doesn't expose ECN, so this is observability only;
             // see reactor_metrics::record_ecn_recv.
             crate::transport::socket::set_recv_ecn(&socket);
+            let msg_x = macos_msg_x::selection_from_env();
+            if msg_x.probe_attempted {
+                reactor_metrics::record_kqueue_msg_x_probe(msg_x.probe_ok);
+            }
+            reactor_metrics::record_kqueue_msg_x_enabled(msg_x.send_enabled, msg_x.recv_enabled);
+            if msg_x.send_enabled || msg_x.recv_enabled {
+                log::debug!(
+                    "kqueue driver: Darwin msg_x enabled send={} recv={}",
+                    msg_x.send_enabled,
+                    msg_x.recv_enabled
+                );
+            }
 
-            // Register EVFILT_READ permanently (EV_ADD | EV_CLEAR = edge-triggered, auto-rearm)
+            // Register EVFILT_READ permanently. The receive loop drains until
+            // EWOULDBLOCK or the fairness budget; budget hits are resumed via
+            // the read_backlog zero-timeout path.
             let read_ev = KEvent::new(
                 socket_fd as usize,
                 EventFilter::EVFILT_READ,
@@ -130,6 +150,7 @@ mod inner {
                     local_addr,
                     unsent: VecDeque::new(),
                     write_interest_registered: false,
+                    read_backlog: false,
                     recycled_tx: Vec::new(),
                     event_buf: vec![
                         KEvent::new(
@@ -144,6 +165,7 @@ mod inner {
                     ],
                     recv_buf: vec![0u8; RX_BUF_SIZE],
                     rx_pool: AdaptiveBufferPool::new(MAX_RX_PER_POLL, RX_BUF_SIZE),
+                    msg_x,
                 },
                 waker,
             ))
@@ -158,26 +180,11 @@ mod inner {
         }
 
         fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
-            for pkt in packets {
-                match self.socket.send_to(pkt.payload(), pkt.to) {
-                    Ok(_) => {
-                        self.recycled_tx.push(pkt.into_recycle_buffer());
-                    }
-                    Err(error) => match classify_kqueue_send_error(&error) {
-                        KqueueSendErrorClass::RetryableWouldBlock => {
-                            reactor_metrics::record_kqueue_would_block_send();
-                            self.unsent.push_back(pkt);
-                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
-                        }
-                        KqueueSendErrorClass::Permanent => {
-                            log::warn!(
-                                "kqueue driver: send_to failed with permanent error {error}; dropping datagram"
-                            );
-                            self.recycled_tx.push(pkt.into_recycle_buffer());
-                        }
-                    },
-                }
+            if self.msg_x.send_enabled {
+                self.submit_sends_msg_x(packets);
+                return Ok(());
             }
+            self.submit_sends_send_to(packets);
             Ok(())
         }
 
@@ -206,23 +213,118 @@ mod inner {
     }
 
     impl KqueueDriver {
+        fn submit_sends_send_to<I>(&mut self, packets: I)
+        where
+            I: IntoIterator<Item = TxDatagram>,
+        {
+            for pkt in packets {
+                match self.socket.send_to(pkt.payload(), pkt.to) {
+                    Ok(_) => {
+                        self.recycled_tx.push(pkt.into_recycle_buffer());
+                    }
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryablePressure => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.unsent.push_back(pkt);
+                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            log::warn!(
+                                "kqueue driver: send_to failed with permanent error {error}; dropping datagram"
+                            );
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
+                        }
+                    },
+                }
+            }
+        }
+
+        fn submit_sends_msg_x(&mut self, packets: Vec<TxDatagram>) {
+            self.send_msg_x_queue(packets.into_iter().collect());
+        }
+
+        fn enqueue_unsent_queue(&mut self, mut queue: VecDeque<TxDatagram>) {
+            self.unsent.append(&mut queue);
+            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+        }
+
+        fn send_msg_x_queue(&mut self, mut queue: VecDeque<TxDatagram>) {
+            while !queue.is_empty() {
+                let batch_len = queue.len().min(macos_msg_x::MSG_X_BATCH_SIZE);
+                let result = {
+                    let slice = queue.make_contiguous();
+                    macos_msg_x::send_batch(self.socket_fd, &slice[..batch_len])
+                };
+
+                match result {
+                    Ok(sent) => {
+                        let sent = sent.min(batch_len);
+                        if sent > 0 {
+                            reactor_metrics::record_kqueue_sendmsg_x_submit(sent);
+                            for _ in 0..sent {
+                                if let Some(pkt) = queue.pop_front() {
+                                    self.recycled_tx.push(pkt.into_recycle_buffer());
+                                }
+                            }
+                        }
+                        if sent < batch_len {
+                            reactor_metrics::record_kqueue_sendmsg_x_partial();
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.enqueue_unsent_queue(queue);
+                            return;
+                        }
+                    }
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryablePressure => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.enqueue_unsent_queue(queue);
+                            return;
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            reactor_metrics::record_kqueue_sendmsg_x_fallback();
+                            if matches!(
+                                error.raw_os_error(),
+                                Some(libc::ENOSYS | libc::EOPNOTSUPP | libc::EINVAL)
+                            ) {
+                                self.msg_x.send_enabled = false;
+                            }
+                            log::warn!(
+                                "kqueue driver: sendmsg_x failed with permanent error {error}; falling back to send_to"
+                            );
+                            self.submit_sends_send_to(queue);
+                            return;
+                        }
+                    },
+                }
+            }
+
+            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+        }
+
         fn poll_inner(
             &mut self,
             deadline: Option<Instant>,
             receive_enabled: bool,
         ) -> io::Result<PollOutcome> {
-            let timeout = deadline
-                .map(|d| {
-                    let dur = d.saturating_duration_since(Instant::now());
-                    libc::timespec {
-                        tv_sec: dur.as_secs() as libc::time_t,
-                        tv_nsec: dur.subsec_nanos() as libc::c_long,
-                    }
-                })
-                .unwrap_or(libc::timespec {
+            let timeout = if receive_enabled && self.read_backlog {
+                libc::timespec {
                     tv_sec: 0,
-                    tv_nsec: 100_000_000, // 100ms default
-                });
+                    tv_nsec: 0,
+                }
+            } else {
+                deadline
+                    .map(|d| {
+                        let dur = d.saturating_duration_since(Instant::now());
+                        libc::timespec {
+                            tv_sec: dur.as_secs() as libc::time_t,
+                            tv_nsec: dur.subsec_nanos() as libc::c_long,
+                        }
+                    })
+                    .unwrap_or(libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 100_000_000, // 100ms default
+                    })
+            };
 
             // Manage EVFILT_WRITE: register only when unsent queue is non-empty
             let mut changes: Vec<KEvent> = Vec::new();
@@ -288,48 +390,114 @@ mod inner {
             }
 
             if receive_enabled {
-                // Drain socket via recvmsg (audit finding #20) so the cmsg
-                // delivers per-datagram destination IP. Cap iterations to
-                // avoid starving the send path. Under fan-out an unbounded
-                // loop delays ACKs and causes congestion-window stalls; the
-                // cap lets flush_sends() run between batches and the next
-                // poll() returns immediately because EV_CLEAR re-arms on any
-                // remaining data.
-                let bound_to_specific = !self.local_addr.ip().is_unspecified();
-                for _ in 0..MAX_RX_PER_POLL {
-                    match self.recvmsg_once() {
-                        Ok((len, peer, parsed_local)) => {
-                            let (data, reused) =
-                                self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
-                            reactor_metrics::record_rx_buffer_checkout(reused, len);
-                            // When bound to a concrete IP, use it directly — the
-                            // bind addr is authoritative and avoids picking up an
-                            // alternate-family pktinfo on dual-stack sockets.
-                            // When bound to 0.0.0.0 or [::], use the parsed cmsg
-                            // local so multi-homed servers can route by the actual
-                            // local IP each datagram arrived on.
-                            let local = if bound_to_specific {
-                                self.local_addr
-                            } else {
-                                parsed_local.map_or(self.local_addr, |ip| {
-                                    SocketAddr::new(ip, self.local_addr.port())
-                                })
-                            };
-                            outcome.rx.push(RxDatagram {
-                                data,
-                                peer,
-                                local,
-                                segment_size: None,
-                            });
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(_) => break,
-                    }
-                }
+                self.read_backlog = if self.msg_x.recv_enabled {
+                    self.recvmsg_x_loop_into(&mut outcome)
+                } else {
+                    self.recvmsg_loop_into(&mut outcome)
+                };
             }
 
             Ok(outcome)
         }
+
+        fn recvmsg_loop_into(&mut self, outcome: &mut PollOutcome) -> bool {
+            // Drain socket via recvmsg (audit finding #20) so the cmsg
+            // delivers per-datagram destination IP. Cap iterations to
+            // avoid starving the send path. Under fan-out an unbounded
+            // loop delays ACKs and causes congestion-window stalls; the
+            // cap lets flush_sends() run between batches. If the cap is hit,
+            // poll_inner records read_backlog so the next receive-enabled
+            // poll continues with a zero-timeout kevent.
+            let bound_to_specific = !self.local_addr.ip().is_unspecified();
+            for _ in 0..MAX_RX_PER_POLL {
+                match self.recvmsg_once() {
+                    Ok((len, peer, parsed_local)) => {
+                        let (data, reused) = self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
+                        reactor_metrics::record_rx_buffer_checkout(reused, len);
+                        // When bound to a concrete IP, use it directly — the
+                        // bind addr is authoritative and avoids picking up an
+                        // alternate-family pktinfo on dual-stack sockets.
+                        // When bound to 0.0.0.0 or [::], use the parsed cmsg
+                        // local so multi-homed servers can route by the actual
+                        // local IP each datagram arrived on.
+                        let local = if bound_to_specific {
+                            self.local_addr
+                        } else {
+                            parsed_local.map_or(self.local_addr, |ip| {
+                                SocketAddr::new(ip, self.local_addr.port())
+                            })
+                        };
+                        outcome.rx.push(RxDatagram {
+                            data,
+                            peer,
+                            local,
+                            segment_size: None,
+                        });
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(_) => return false,
+                }
+            }
+            true
+        }
+
+        fn recvmsg_x_loop_into(&mut self, outcome: &mut PollOutcome) -> bool {
+            let bound_to_specific = !self.local_addr.ip().is_unspecified();
+            let mut remaining = MAX_RX_PER_POLL;
+            while remaining > 0 {
+                match macos_msg_x::recv_batch(
+                    self.socket_fd,
+                    &mut self.rx_pool,
+                    remaining,
+                    RX_BUF_SIZE,
+                ) {
+                    Ok(datagrams) if datagrams.is_empty() => return false,
+                    Ok(datagrams) => {
+                        reactor_metrics::record_kqueue_recvmsg_x_batch(datagrams.len());
+                        remaining = remaining.saturating_sub(datagrams.len());
+                        let mut saw_truncated = false;
+                        for datagram in datagrams {
+                            reactor_metrics::record_rx_buffer_checkout(datagram.reused, 0);
+                            if let Some(tos) = datagram.tos {
+                                reactor_metrics::record_ecn_recv(
+                                    crate::transport::socket::EcnCodePoint::from_tos(tos),
+                                );
+                            }
+                            let local = if bound_to_specific {
+                                self.local_addr
+                            } else {
+                                datagram.local_ip.map_or(self.local_addr, |ip| {
+                                    SocketAddr::new(ip, self.local_addr.port())
+                                })
+                            };
+                            if datagram.flags & libc::MSG_TRUNC != 0 {
+                                saw_truncated = true;
+                            }
+                            outcome.rx.push(RxDatagram {
+                                data: datagram.data,
+                                peer: datagram.peer,
+                                local,
+                                segment_size: None,
+                            });
+                        }
+                        if saw_truncated {
+                            return true;
+                        }
+                    }
+                    Err(ref error) if error.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(error) => {
+                        reactor_metrics::record_kqueue_recvmsg_x_fallback();
+                        self.msg_x.recv_enabled = false;
+                        log::warn!(
+                            "kqueue driver: recvmsg_x failed with permanent error {error}; disabling msg_x receive path"
+                        );
+                        return self.recvmsg_loop_into(outcome);
+                    }
+                }
+            }
+            true
+        }
+
         /// Receive a single datagram via `recvmsg`, returning the payload
         /// length, peer address, and any per-packet local IP parsed from
         /// the control message (`IP_RECVDSTADDR` / `IPV6_PKTINFO`).
@@ -387,6 +555,15 @@ mod inner {
         }
 
         fn drain_unsent(&mut self) {
+            if self.msg_x.send_enabled {
+                let queue = std::mem::take(&mut self.unsent);
+                self.send_msg_x_queue(queue);
+                return;
+            }
+            self.drain_unsent_send_to();
+        }
+
+        fn drain_unsent_send_to(&mut self) {
             while let Some(front) = self.unsent.front() {
                 match self.socket.send_to(front.payload(), front.to) {
                     Ok(_) => {
@@ -395,7 +572,7 @@ mod inner {
                         }
                     }
                     Err(error) => match classify_kqueue_send_error(&error) {
-                        KqueueSendErrorClass::RetryableWouldBlock => {
+                        KqueueSendErrorClass::RetryablePressure => {
                             reactor_metrics::record_kqueue_would_block_send();
                             reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
                             return;
@@ -462,10 +639,14 @@ mod inner {
         use super::*;
 
         #[test]
-        fn kqueue_send_error_classifier_only_retries_would_block() {
+        fn kqueue_send_error_classifier_retries_pressure() {
             assert_eq!(
                 classify_kqueue_send_error(&io::Error::from(io::ErrorKind::WouldBlock)),
-                KqueueSendErrorClass::RetryableWouldBlock
+                KqueueSendErrorClass::RetryablePressure
+            );
+            assert_eq!(
+                classify_kqueue_send_error(&io::Error::from_raw_os_error(libc::ENOBUFS)),
+                KqueueSendErrorClass::RetryablePressure
             );
             assert_eq!(
                 classify_kqueue_send_error(&io::Error::from_raw_os_error(libc::EINVAL)),

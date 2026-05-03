@@ -1,7 +1,7 @@
 # Plan: @currentspace/http3 hardening sprint
 
 **Branch base:** `main` (audit rollup `fix/audit-rollup` already merged 36 findings as of 2026-05-01)
-**Codebase:** `@currentspace/http3`, ~21k LoC Rust + ~7.5k LoC TS, quiche 0.28, napi-rs 3, Node ≥ 24
+**Codebase:** @currentspace/http3, ~21k LoC Rust + ~7.5k LoC TS, quiche 0.28, napi-rs 3, Node >= 24
 **Repo conventions:**
 - pnpm only — never npm/yarn
 - Never prefix env vars on commands; use `.cargo/config.toml`

@@ -1220,12 +1220,18 @@ impl Drop for ClientWorkerHandle {
 
 // ── Spawn functions ─────────────────────────────────────────────────
 
+fn apply_h3_client_path_mtu_ceiling(config: &mut quiche::Config, server_addr: &SocketAddr) {
+    let ceiling = crate::config::effective_pmtud_ceiling(server_addr);
+    config.set_max_send_udp_payload_size(ceiling);
+    config.set_max_recv_udp_payload_size(ceiling);
+}
+
 // --- Node-API-dependent spawn functions (use EventTsfn / shared workers) ---
 #[cfg(feature = "node-api")]
 /// Spawn a client worker thread that owns UDP I/O and QUIC/H3 processing.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_client_worker(
-    quiche_config: quiche::Config,
+    mut quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
@@ -1234,6 +1240,8 @@ pub fn spawn_client_worker(
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
+    apply_h3_client_path_mtu_ceiling(&mut quiche_config, &server_addr);
+
     if default_h3_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
         return spawn_shared_client_worker(
             quiche_config,
@@ -1794,13 +1802,12 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     let mut should_remove = false;
                     if let Some(session) = sessions.get_mut(handle) {
                         if peer == session.server_addr {
-                            let app_budget = event_loop::app_event_budget(session.batcher.len());
                             if !session.batcher.collect_atomic(|batch| {
                                 session.handler.process_packet_for_handle(
                                     data.as_mut_slice(),
                                     peer,
                                     local_addr,
-                                    app_budget,
+                                    0,
                                     batch,
                                     handle as u32,
                                 );
@@ -2227,7 +2234,7 @@ where
 /// This is the H3 analogue of `quic_worker::spawn_dedicated_quic_client_on_driver`.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_h3_client_on_driver<D>(
-    quiche_config: quiche::Config,
+    mut quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
@@ -2244,6 +2251,8 @@ where
     D: transport::Driver + Send + 'static,
     D::Waker: Send + Sync + Clone + 'static,
 {
+    apply_h3_client_path_mtu_ceiling(&mut quiche_config, &server_addr);
+
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
     let outbound_admission = Arc::new(OutboundAdmission::default());

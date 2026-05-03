@@ -106,6 +106,17 @@ pub struct JsReactorTelemetrySnapshot {
     pub kqueueUnsentHighWatermark: i64,
     pub kqueueWouldBlockSends: i64,
     pub kqueueWriteWakeups: i64,
+    pub kqueueMsgXProbeSuccesses: i64,
+    pub kqueueMsgXProbeFailures: i64,
+    pub kqueueSendmsgXEnabled: i64,
+    pub kqueueRecvmsgXEnabled: i64,
+    pub kqueueSendmsgXSubmitCalls: i64,
+    pub kqueueSendmsgXDatagramsSubmitted: i64,
+    pub kqueueSendmsgXPartialSends: i64,
+    pub kqueueSendmsgXFallbacks: i64,
+    pub kqueueRecvmsgXCalls: i64,
+    pub kqueueRecvmsgXDatagramsReceived: i64,
+    pub kqueueRecvmsgXFallbacks: i64,
     pub rxBufferReuses: i64,
     pub rxBufferAllocations: i64,
     pub rxBufferCheckins: i64,
@@ -306,6 +317,17 @@ static IO_URING_SQ_FULL_EVENTS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_UNSENT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WOULD_BLOCK_SENDS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WRITE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_MSG_X_PROBE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_MSG_X_PROBE_FAILURES: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_ENABLED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_ENABLED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_SUBMIT_CALLS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_PARTIAL_SENDS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_CALLS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static RX_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
 static RX_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static RX_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
@@ -812,6 +834,52 @@ pub(crate) fn record_kqueue_write_wakeup() {
     bump(&KQUEUE_WRITE_WAKEUPS);
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_msg_x_probe(ok: bool) {
+    if ok {
+        bump(&KQUEUE_MSG_X_PROBE_SUCCESSES);
+    } else {
+        bump(&KQUEUE_MSG_X_PROBE_FAILURES);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_msg_x_enabled(send: bool, recv: bool) {
+    if send {
+        bump(&KQUEUE_SENDMSG_X_ENABLED);
+    }
+    if recv {
+        bump(&KQUEUE_RECVMSG_X_ENABLED);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_sendmsg_x_submit(count: usize) {
+    bump(&KQUEUE_SENDMSG_X_SUBMIT_CALLS);
+    KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_sendmsg_x_partial() {
+    bump(&KQUEUE_SENDMSG_X_PARTIAL_SENDS);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_sendmsg_x_fallback() {
+    bump(&KQUEUE_SENDMSG_X_FALLBACKS);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_recvmsg_x_batch(count: usize) {
+    bump(&KQUEUE_RECVMSG_X_CALLS);
+    KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_recvmsg_x_fallback() {
+    bump(&KQUEUE_RECVMSG_X_FALLBACKS);
+}
+
 pub(crate) fn record_rx_buffer_checkout(reused: bool, bytes: usize) {
     if reused {
         bump(&RX_BUFFER_REUSES);
@@ -1032,6 +1100,17 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         kqueueUnsentHighWatermark: load(&KQUEUE_UNSENT_HIGH_WATERMARK),
         kqueueWouldBlockSends: load(&KQUEUE_WOULD_BLOCK_SENDS),
         kqueueWriteWakeups: load(&KQUEUE_WRITE_WAKEUPS),
+        kqueueMsgXProbeSuccesses: load(&KQUEUE_MSG_X_PROBE_SUCCESSES),
+        kqueueMsgXProbeFailures: load(&KQUEUE_MSG_X_PROBE_FAILURES),
+        kqueueSendmsgXEnabled: load(&KQUEUE_SENDMSG_X_ENABLED),
+        kqueueRecvmsgXEnabled: load(&KQUEUE_RECVMSG_X_ENABLED),
+        kqueueSendmsgXSubmitCalls: load(&KQUEUE_SENDMSG_X_SUBMIT_CALLS),
+        kqueueSendmsgXDatagramsSubmitted: load(&KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED),
+        kqueueSendmsgXPartialSends: load(&KQUEUE_SENDMSG_X_PARTIAL_SENDS),
+        kqueueSendmsgXFallbacks: load(&KQUEUE_SENDMSG_X_FALLBACKS),
+        kqueueRecvmsgXCalls: load(&KQUEUE_RECVMSG_X_CALLS),
+        kqueueRecvmsgXDatagramsReceived: load(&KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED),
+        kqueueRecvmsgXFallbacks: load(&KQUEUE_RECVMSG_X_FALLBACKS),
         rxBufferReuses: load(&RX_BUFFER_REUSES),
         rxBufferAllocations: load(&RX_BUFFER_ALLOCATIONS),
         rxBufferCheckins: load(&RX_BUFFER_CHECKINS),
@@ -1157,6 +1236,17 @@ pub fn reset() {
         &KQUEUE_UNSENT_HIGH_WATERMARK,
         &KQUEUE_WOULD_BLOCK_SENDS,
         &KQUEUE_WRITE_WAKEUPS,
+        &KQUEUE_MSG_X_PROBE_SUCCESSES,
+        &KQUEUE_MSG_X_PROBE_FAILURES,
+        &KQUEUE_SENDMSG_X_ENABLED,
+        &KQUEUE_RECVMSG_X_ENABLED,
+        &KQUEUE_SENDMSG_X_SUBMIT_CALLS,
+        &KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED,
+        &KQUEUE_SENDMSG_X_PARTIAL_SENDS,
+        &KQUEUE_SENDMSG_X_FALLBACKS,
+        &KQUEUE_RECVMSG_X_CALLS,
+        &KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED,
+        &KQUEUE_RECVMSG_X_FALLBACKS,
         &RX_BUFFER_REUSES,
         &RX_BUFFER_ALLOCATIONS,
         &RX_BUFFER_CHECKINS,

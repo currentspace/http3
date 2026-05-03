@@ -15,7 +15,7 @@ type ByteBuf = napi::bindgen_prelude::Buffer;
 type ByteBuf = Vec<u8>;
 
 /// Fallback DPLPMTUD probe ceiling used when path MTU auto-detection is
-/// unavailable (non-Linux, unresolvable destination, etc.).
+/// unavailable (unresolvable destination, unsupported platform, etc.).
 ///
 /// 1472 = 1500 (Ethernet MTU) - 20 (IPv4) - 8 (UDP).  quiche probes from
 /// 1200 up to this ceiling; on standard Ethernet the first probe succeeds
@@ -31,7 +31,8 @@ const DEFAULT_INITIAL_MAX_STREAMS_UNI: u64 = 1_000;
 /// Queries the kernel routing table for the interface MTU on the path to
 /// `peer` and caps at 16383 (quiche's max data packet size, limited by
 /// 2-byte QUIC varint encoding).  On loopback this returns 16383; on
-/// standard Ethernet it returns 1472; on jumbo frames ~8972.
+/// standard Ethernet it returns 1472; on jumbo frames ~8972. Loopback is
+/// platform-dependent but should land near quiche's 16 KB data-packet cap.
 ///
 /// Falls back to `FALLBACK_MAX_UDP_PAYLOAD` (1472) if the query fails.
 pub fn effective_pmtud_ceiling(peer: &std::net::SocketAddr) -> usize {

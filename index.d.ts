@@ -351,6 +351,17 @@ export interface JsReactorTelemetrySnapshot {
   kqueueUnsentHighWatermark: number
   kqueueWouldBlockSends: number
   kqueueWriteWakeups: number
+  kqueueMsgXProbeSuccesses: number
+  kqueueMsgXProbeFailures: number
+  kqueueSendmsgXEnabled: number
+  kqueueRecvmsgXEnabled: number
+  kqueueSendmsgXSubmitCalls: number
+  kqueueSendmsgXDatagramsSubmitted: number
+  kqueueSendmsgXPartialSends: number
+  kqueueSendmsgXFallbacks: number
+  kqueueRecvmsgXCalls: number
+  kqueueRecvmsgXDatagramsReceived: number
+  kqueueRecvmsgXFallbacks: number
   rxBufferReuses: number
   rxBufferAllocations: number
   rxBufferCheckins: number

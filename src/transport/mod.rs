@@ -276,6 +276,8 @@ pub(crate) mod mock;
 
 #[cfg(target_os = "macos")]
 mod kqueue;
+#[cfg(target_os = "macos")]
+mod macos_msg_x;
 
 #[cfg(all(target_os = "linux", feature = "bench-internals"))]
 pub mod io_uring;

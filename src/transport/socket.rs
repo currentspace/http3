@@ -99,10 +99,12 @@ const QUIC_MAX_PACKET_SIZE: usize = 16383;
 /// Query the link-layer MTU for the path to `peer` and return the maximum
 /// useful PMTUD probe ceiling.
 ///
-/// Creates a temporary connected UDP socket to `peer`, calls
-/// `getsockopt(IP_MTU)`, and returns `min(mtu - headers, 16383)`.
-/// Returns `None` if the query fails (non-Linux, permission error, etc.),
-/// in which case the caller should fall back to a conservative default.
+/// On Linux, creates a temporary connected UDP socket to `peer` and calls
+/// `getsockopt(IP_MTU)`. On macOS, matches `peer` against the interface list
+/// from `getifaddrs` and reads the link MTU for the best-prefix interface.
+/// Returns `min(mtu - headers, 16383)`.
+/// Returns `None` if the query fails, in which case the caller should fall
+/// back to a conservative default.
 ///
 /// This is NOT a loopback hack — it queries the kernel routing table for
 /// the actual interface MTU on the path to any destination.
@@ -148,9 +150,126 @@ pub(crate) fn query_path_mtu(peer: &SocketAddr) -> Option<usize> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = peer;
-        None
+        query_path_mtu_from_interfaces(peer)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn query_path_mtu_from_interfaces(peer: &SocketAddr) -> Option<usize> {
+    use std::ffi::CStr;
+    use std::net::IpAddr;
+
+    struct IfAddrs(*mut libc::ifaddrs);
+
+    impl Drop for IfAddrs {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `self.0` was returned by `getifaddrs` and is freed
+                // exactly once by this guard.
+                unsafe {
+                    libc::freeifaddrs(self.0);
+                }
+            }
+        }
+    }
+
+    let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` initializes `addrs` on success; the guard releases
+    // the linked list with `freeifaddrs`.
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 || addrs.is_null() {
+        return None;
+    }
+    let _guard = IfAddrs(addrs);
+
+    let mut interface_mtu: Vec<(Vec<u8>, usize)> = Vec::new();
+    let mut current = addrs;
+    while !current.is_null() {
+        // SAFETY: `current` walks the valid `getifaddrs` linked list until
+        // the null terminator.
+        let ifa = unsafe { &*current };
+        if !ifa.ifa_name.is_null() && !ifa.ifa_addr.is_null() && !ifa.ifa_data.is_null() {
+            // SAFETY: `ifa_addr` is a valid sockaddr for this list entry.
+            let family = unsafe { (*ifa.ifa_addr).sa_family as libc::c_int };
+            if family == libc::AF_LINK {
+                // SAFETY: Darwin exposes link-layer MTU in `if_data` for
+                // AF_LINK entries from `getifaddrs`.
+                let if_data = unsafe { &*(ifa.ifa_data.cast::<libc::if_data>()) };
+                let mtu = if_data.ifi_mtu as usize;
+                if mtu > 0 {
+                    // SAFETY: `ifa_name` is a NUL-terminated interface name
+                    // owned by the live `getifaddrs` list.
+                    let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes().to_vec();
+                    interface_mtu.push((name, mtu));
+                }
+            }
+        }
+        current = ifa.ifa_next;
+    }
+
+    let mut best: Option<(u32, usize)> = None;
+    let mut current = addrs;
+    while !current.is_null() {
+        // SAFETY: `current` walks the valid `getifaddrs` linked list until
+        // the null terminator.
+        let ifa = unsafe { &*current };
+        if !ifa.ifa_name.is_null() && !ifa.ifa_addr.is_null() && !ifa.ifa_netmask.is_null() {
+            // SAFETY: `ifa_addr` is a valid sockaddr for this list entry.
+            let family = unsafe { (*ifa.ifa_addr).sa_family as libc::c_int };
+            let candidate = match (family, peer.ip()) {
+                (libc::AF_INET, IpAddr::V4(peer_ip)) => {
+                    // SAFETY: family checks prove these sockaddr pointers have
+                    // IPv4 layout for this entry.
+                    let addr = unsafe { *(ifa.ifa_addr.cast::<libc::sockaddr_in>()) };
+                    let mask = unsafe { *(ifa.ifa_netmask.cast::<libc::sockaddr_in>()) };
+                    let addr = u32::from_be(addr.sin_addr.s_addr);
+                    let mask = u32::from_be(mask.sin_addr.s_addr);
+                    let peer = u32::from(peer_ip);
+                    ((peer & mask) == (addr & mask)).then_some(mask.count_ones())
+                }
+                (libc::AF_INET6, IpAddr::V6(peer_ip)) => {
+                    // SAFETY: family checks prove these sockaddr pointers have
+                    // IPv6 layout for this entry.
+                    let addr = unsafe { *(ifa.ifa_addr.cast::<libc::sockaddr_in6>()) };
+                    let mask = unsafe { *(ifa.ifa_netmask.cast::<libc::sockaddr_in6>()) };
+                    let peer = peer_ip.octets();
+                    let addr = addr.sin6_addr.s6_addr;
+                    let mask = mask.sin6_addr.s6_addr;
+                    let matches = peer
+                        .iter()
+                        .zip(addr.iter())
+                        .zip(mask.iter())
+                        .all(|((peer, addr), mask)| (peer & mask) == (addr & mask));
+                    matches.then_some(mask.iter().map(|byte| byte.count_ones()).sum())
+                }
+                _ => None,
+            };
+
+            if let Some(prefix_len) = candidate {
+                // SAFETY: `ifa_name` is a NUL-terminated interface name owned
+                // by the live `getifaddrs` list.
+                let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes();
+                if let Some((_, mtu)) = interface_mtu.iter().find(|(mtu_name, _)| mtu_name == name)
+                {
+                    if best.is_none_or(|(best_prefix, _)| prefix_len > best_prefix) {
+                        best = Some((prefix_len, *mtu));
+                    }
+                }
+            }
+        }
+        current = ifa.ifa_next;
+    }
+
+    let mtu = best?.1;
+    let header_overhead = if peer.is_ipv4() { 28 } else { 48 };
+    Some(
+        mtu.saturating_sub(header_overhead)
+            .min(QUIC_MAX_PACKET_SIZE),
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn query_path_mtu_from_interfaces(_peer: &SocketAddr) -> Option<usize> {
+    None
 }
 
 // ── Control message (cmsg) utilities ────────────────────────────────
@@ -568,5 +687,13 @@ mod tests {
         // DSCP bits (high 6) must not affect classification.
         assert_eq!(EcnCodePoint::from_tos(0b1110_1011), EcnCodePoint::Ce);
         assert_eq!(EcnCodePoint::from_tos(0b1110_1010), EcnCodePoint::Ect0);
+    }
+
+    #[test]
+    fn query_path_mtu_finds_loopback_ceiling() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 4433));
+        let ceiling = query_path_mtu(&peer).expect("loopback path MTU should be discoverable");
+        assert!(ceiling >= crate::config::FALLBACK_MAX_UDP_PAYLOAD);
+        assert!(ceiling <= QUIC_MAX_PACKET_SIZE);
     }
 }

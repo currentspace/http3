@@ -2033,13 +2033,12 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     let mut should_remove = false;
                     if let Some(session) = sessions.get_mut(handle) {
                         if peer == session.server_addr {
-                            let app_budget = event_loop::app_event_budget(session.batcher.len());
                             if !session.batcher.collect_atomic(|batch| {
                                 session.handler.process_packet_for_handle(
                                     data.as_mut_slice(),
                                     peer,
                                     local_addr,
-                                    app_budget,
+                                    0,
                                     batch,
                                     handle as u32,
                                 );

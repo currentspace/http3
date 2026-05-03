@@ -8,10 +8,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEFAULTS = {
-  remoteHost: 'remote-host.local',
+  remoteHost: process.env.HTTP3_BENCH_REMOTE_HOST ?? 'remote-host.local',
   remoteTargetHost: null,
-  remoteRoot: '/tmp/nodejs_http3-crossbench',
-  localHostForRemote: null,
+  remoteRoot: process.env.HTTP3_BENCH_REMOTE_ROOT ?? '/tmp/nodejs_http3-crossbench',
+  localHostForRemote: process.env.HTTP3_BENCH_LOCAL_HOST_FOR_REMOTE ?? null,
   durationMs: 5000,
   warmupMs: 1000,
   connections: 8,
@@ -26,25 +26,44 @@ const DEFAULTS = {
   label: 'cross-host-echo',
 };
 
-const BENCH_TLS_KEY = String.raw`TEST_PRIVATE_KEY_REMOVED`;
+const TLS_HELPER = String.raw`
+const { execFileSync } = require('node:child_process');
+const { mkdtempSync, readFileSync, rmSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
 
-const BENCH_TLS_CERT = String.raw`-----BEGIN CERTIFICATE-----
-MIIBfTCCASOgAwIBAgIUIYJVmHvqGOHg+0ZFCtpYXMKcPoYwCgYIKoZIzj0EAwIw
-FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMwNDIxNTEzMloXDTI3MDMwNDIx
-NTEzMlowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
-AQcDQgAEGKIky2tl/NkHrUT5quS2Oed1i91W/63+6eMz9XfJxblz269uKnb6ViV6
-L5U7I3o0NnyvgmG3AdahB9lPIlvZEKNTMFEwHQYDVR0OBBYEFFFx2izVzrz6Uglr
-s6VValN31xL7MB8GA1UdIwQYMBaAFFFx2izVzrz6Uglrs6VValN31xL7MA8GA1Ud
-EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIhAO7pfRc/CAApNrSuyPZ+ont5
-ZkIn91V8xuPHheC36vC5AiBXKObo45wgXGCil4QWfojm4yPzbZbATfqJuPh1uwvi
-Jg==
------END CERTIFICATE-----`;
+function makeTlsOptions() {
+  const dir = mkdtempSync(join(tmpdir(), 'http3-bench-tls-'));
+  const keyPath = join(dir, 'key.pem');
+  const certPath = join(dir, 'cert.pem');
+  try {
+    execFileSync('openssl', [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-keyout',
+      keyPath,
+      '-out',
+      certPath,
+      '-subj',
+      '/CN=localhost',
+      '-days',
+      '1',
+      '-sha256',
+    ], { stdio: 'ignore' });
+    return { key: readFileSync(keyPath), cert: readFileSync(certPath) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+`;
 
 const HTTP_SERVER = String.raw`
 const https = require('node:https');
 const cfg = JSON.parse(process.argv[1]);
-const TLS_KEY = ${JSON.stringify(BENCH_TLS_KEY)};
-const TLS_CERT = ${JSON.stringify(BENCH_TLS_CERT)};
+${TLS_HELPER}
 let requests = 0;
 let bytesIn = 0;
 let bytesOut = 0;
@@ -73,7 +92,7 @@ async function writeChunks(stream, chunks) {
   }
   stream.end(chunks[chunks.length - 1]);
 }
-const server = https.createServer({ key: TLS_KEY, cert: TLS_CERT }, (req, res) => {
+const server = https.createServer(makeTlsOptions(), (req, res) => {
   const chunks = [];
   let len = 0;
   req.on('data', (chunk) => {
@@ -237,8 +256,7 @@ const HTTP2_SERVER = String.raw`
 const http2 = require('node:http2');
 const { constants } = http2;
 const cfg = JSON.parse(process.argv[1]);
-const TLS_KEY = ${JSON.stringify(BENCH_TLS_KEY)};
-const TLS_CERT = ${JSON.stringify(BENCH_TLS_CERT)};
+${TLS_HELPER}
 let streams = 0;
 let bytesIn = 0;
 let bytesOut = 0;
@@ -268,8 +286,7 @@ async function writeChunks(stream, chunks) {
   stream.end(chunks[chunks.length - 1]);
 }
 const server = http2.createSecureServer({
-  key: TLS_KEY,
-  cert: TLS_CERT,
+  ...makeTlsOptions(),
   settings: {
     initialWindowSize: 16 * 1024 * 1024,
     maxConcurrentStreams: 50000,
@@ -724,6 +741,21 @@ function normalizeProtocol(value) {
     case 'http3':
     case 'http/3':
       return 'h3';
+    case 'h3-msgx-off':
+    case 'h3-sendmsgx-off':
+    case 'h3-recvmsgx-off':
+    case 'http3-msgx-off':
+      return 'h3-msgx-off';
+    case 'h3-msgx-auto':
+    case 'h3-sendmsgx-auto':
+    case 'h3-recvmsgx-auto':
+    case 'http3-msgx-auto':
+      return 'h3-msgx-auto';
+    case 'h3-msgx-on':
+    case 'h3-sendmsgx-on':
+    case 'h3-recvmsgx-on':
+    case 'http3-msgx-on':
+      return 'h3-msgx-on';
     case 'http2':
     case 'https2':
     case 'h2':
@@ -769,6 +801,12 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
+function shellEnv(env) {
+  return Object.entries(env ?? {})
+    .map(([key, value]) => `${key}=${shellQuote(value)}`)
+    .join(' ');
+}
+
 function nodeEvalCommand(script, config) {
   return `node -e ${shellQuote(script)} ${shellQuote(JSON.stringify(config))}`;
 }
@@ -777,36 +815,42 @@ function remoteCommand(options, command) {
   return ['ssh', options.remoteHost, command];
 }
 
-function localNodeScript(scriptPath, config) {
+function localNodeScript(scriptPath, config, env = {}) {
   return {
     cmd: process.execPath,
     args: [scriptPath, JSON.stringify(config)],
     cwd: ROOT,
+    env,
   };
 }
 
-function remoteNodeScript(options, scriptPath, config) {
-  const command = `cd ${shellQuote(options.remoteRoot)} && node ${shellQuote(scriptPath)} ${shellQuote(JSON.stringify(config))}`;
+function remoteNodeScript(options, scriptPath, config, env = {}) {
+  const envPrefix = shellEnv(env);
+  const command = `cd ${shellQuote(options.remoteRoot)} && ${envPrefix ? `${envPrefix} ` : ''}node ${shellQuote(scriptPath)} ${shellQuote(JSON.stringify(config))}`;
   const [cmd, ...args] = remoteCommand(options, command);
   return { cmd, args, cwd: ROOT };
 }
 
-function localEval(script, config) {
+function localEval(script, config, env = {}) {
   return {
     cmd: process.execPath,
     args: ['-e', script, JSON.stringify(config)],
     cwd: ROOT,
+    env,
   };
 }
 
-function remoteEval(options, script, config) {
-  const [cmd, ...args] = remoteCommand(options, nodeEvalCommand(script, config));
+function remoteEval(options, script, config, env = {}) {
+  const envPrefix = shellEnv(env);
+  const command = `${envPrefix ? `${envPrefix} ` : ''}${nodeEvalCommand(script, config)}`;
+  const [cmd, ...args] = remoteCommand(options, command);
   return { cmd, args, cwd: ROOT };
 }
 
 function spawnJsonProcess(spec) {
   return spawn(spec.cmd, spec.args, {
     cwd: spec.cwd,
+    env: { ...process.env, ...(spec.env ?? {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
@@ -931,6 +975,35 @@ function benchmarkScript(protocol, role) {
   return base;
 }
 
+function runtimeForProtocol(protocol) {
+  switch (protocol) {
+    case 'h3-msgx-off':
+      return {
+        baseProtocol: 'h3',
+        label: protocol,
+        env: { HTTP3_MACOS_MSG_X: '0' },
+      };
+    case 'h3-msgx-auto':
+      return {
+        baseProtocol: 'h3',
+        label: protocol,
+        env: { HTTP3_MACOS_MSG_X: 'auto' },
+      };
+    case 'h3-msgx-on':
+      return {
+        baseProtocol: 'h3',
+        label: protocol,
+        env: { HTTP3_MACOS_MSG_X: '1' },
+      };
+    default:
+      return {
+        baseProtocol: protocol,
+        label: protocol,
+        env: {},
+      };
+  }
+}
+
 function summarizeResult(protocol, direction, result, server, hosts) {
   return {
     protocol,
@@ -943,11 +1016,28 @@ function summarizeResult(protocol, direction, result, server, hosts) {
     p50Ms: result.streamLatency?.p50Ms ?? 0,
     p95Ms: result.streamLatency?.p95Ms ?? 0,
     serverSummary: server.summary ?? server.latest ?? null,
+    clientReactorTelemetry: result.reactorTelemetry ?? null,
     runtimeSelections: result.runtimeSelections ?? null,
   };
 }
 
+function formatMsgXTelemetry(telemetry) {
+  if (!telemetry) return '';
+  const probeSuccesses = telemetry.kqueueMsgXProbeSuccesses ?? 0;
+  const probeFailures = telemetry.kqueueMsgXProbeFailures ?? 0;
+  const sendCalls = telemetry.kqueueSendmsgXSubmitCalls ?? 0;
+  const recvCalls = telemetry.kqueueRecvmsgXCalls ?? 0;
+  const sendFallbacks = telemetry.kqueueSendmsgXFallbacks ?? 0;
+  const recvFallbacks = telemetry.kqueueRecvmsgXFallbacks ?? 0;
+  if (probeSuccesses === 0 && probeFailures === 0 && sendCalls === 0 && recvCalls === 0) {
+    return '';
+  }
+  return `probe ${probeSuccesses}/${probeFailures}; send ${sendCalls}; recv ${recvCalls}; fb ${sendFallbacks + recvFallbacks}`;
+}
+
 async function runProtocol(options, protocol, direction) {
+  const runtime = runtimeForProtocol(protocol);
+  const baseProtocol = runtime.baseProtocol;
   const loopback = direction === 'loopback';
   const macToLinux = direction === 'mac-to-linux';
   const serverIsRemote = macToLinux;
@@ -978,17 +1068,17 @@ async function runProtocol(options, protocol, direction) {
 
   let serverSpec;
   let clientSpec;
-  if (protocol === 'quic' || protocol === 'h3') {
+  if (baseProtocol === 'quic' || baseProtocol === 'h3') {
     serverSpec = serverIsRemote
-      ? remoteNodeScript(options, benchmarkScript(protocol, 'server'), serverConfig)
-      : localNodeScript(join(ROOT, benchmarkScript(protocol, 'server')), serverConfig);
+      ? remoteNodeScript(options, benchmarkScript(baseProtocol, 'server'), serverConfig, runtime.env)
+      : localNodeScript(join(ROOT, benchmarkScript(baseProtocol, 'server')), serverConfig, runtime.env);
     clientSpec = (port) => clientIsRemote
-      ? remoteNodeScript(options, benchmarkScript(protocol, 'client'), { ...clientConfig, port })
-      : localNodeScript(join(ROOT, benchmarkScript(protocol, 'client')), { ...clientConfig, port });
+      ? remoteNodeScript(options, benchmarkScript(baseProtocol, 'client'), { ...clientConfig, port }, runtime.env)
+      : localNodeScript(join(ROOT, benchmarkScript(baseProtocol, 'client')), { ...clientConfig, port }, runtime.env);
   } else {
     let serverScript;
     let clientScript;
-    switch (protocol) {
+    switch (baseProtocol) {
       case 'h1':
         serverScript = HTTP_SERVER;
         clientScript = HTTP_CLIENT;
@@ -1005,18 +1095,18 @@ async function runProtocol(options, protocol, direction) {
         throw new Error(`unknown protocol ${protocol}`);
     }
     serverSpec = serverIsRemote
-      ? remoteEval(options, serverScript, serverConfig)
-      : localEval(serverScript, serverConfig);
+      ? remoteEval(options, serverScript, serverConfig, runtime.env)
+      : localEval(serverScript, serverConfig, runtime.env);
     clientSpec = (port) => clientIsRemote
-      ? remoteEval(options, clientScript, { ...clientConfig, port })
-      : localEval(clientScript, { ...clientConfig, port });
+      ? remoteEval(options, clientScript, { ...clientConfig, port }, runtime.env)
+      : localEval(clientScript, { ...clientConfig, port }, runtime.env);
   }
 
-  const label = `${protocol} ${direction}`;
+  const label = `${runtime.label} ${direction}`;
   const server = await startServer(label, serverSpec);
   try {
     const result = await runClient(label, clientSpec(server.ready.port));
-    return summarizeResult(protocol, direction, result, server, {
+    return summarizeResult(runtime.label, direction, result, server, {
       serverHost: serverIsRemote ? options.remoteHost : 'local',
       clientHost: clientIsRemote ? options.remoteHost : 'local',
       targetHost: clientHost,
@@ -1028,15 +1118,17 @@ async function runProtocol(options, protocol, direction) {
 
 function formatMarkdown(summary) {
   const rows = [
-    '| Direction | Protocol | Throughput Mbps | Streams/s | p50 ms | p95 ms | Errors | Runtime |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+    '| Direction | Protocol | Throughput Mbps | Streams/s | p50 ms | p95 ms | Errors | Runtime | Client msg_x | Server msg_x |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |',
   ];
   for (const result of summary.results) {
     const runtime = result.runtimeSelections
       ? JSON.stringify(result.runtimeSelections)
       : '';
+    const clientMsgX = formatMsgXTelemetry(result.clientReactorTelemetry);
+    const serverMsgX = formatMsgXTelemetry(result.serverSummary?.reactorTelemetry);
     rows.push(
-      `| ${result.direction} | ${result.protocol} | ${result.throughputMbps} | ${result.streamsPerSecond} | ${result.p50Ms} | ${result.p95Ms} | ${result.errors} | ${runtime} |`,
+      `| ${result.direction} | ${result.protocol} | ${result.throughputMbps} | ${result.streamsPerSecond} | ${result.p50Ms} | ${result.p95Ms} | ${result.errors} | ${runtime} | ${clientMsgX} | ${serverMsgX} |`,
     );
   }
   return `${rows.join('\n')}\n`;

@@ -183,6 +183,16 @@ impl AdaptiveBufferPool {
         (Vec::with_capacity(len.max(self.min_capacity)), false)
     }
 
+    /// Take an empty buffer with enough capacity for an OS receive call.
+    ///
+    /// The returned vector has length 0, so safe Rust cannot read stale or
+    /// uninitialized bytes. Platform receive wrappers may pass its spare
+    /// capacity to the kernel and set the initialized length after the syscall
+    /// reports how many bytes were written.
+    pub(crate) fn checkout_empty_for_os_recv(&mut self, len: usize) -> (Vec<u8>, bool) {
+        self.checkout_empty_vec(len)
+    }
+
     /// Take a buffer with at least `len` bytes of capacity.
     /// Returns `(buffer, reused_from_pool)`.
     pub fn checkout(&mut self, len: usize) -> (Vec<u8>, bool) {
