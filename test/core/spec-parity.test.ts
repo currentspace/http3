@@ -88,6 +88,47 @@ describe('Spec parity additions', () => {
     await server.close();
   });
 
+  it('invokes HTTP/3 ping callbacks after an ACK-driven native event', async () => {
+    const server = createSecureServer({
+      key: certs.key,
+      cert: certs.cert,
+      disableRetry: true,
+    });
+
+    const port = await new Promise<number>((resolve) => {
+      server.on('listening', () => {
+        const addr = server.address();
+        assert.ok(addr);
+        resolve(addr.port);
+      });
+      server.listen(0, '127.0.0.1');
+    });
+
+    const client = connect(`127.0.0.1:${port}`, {
+      rejectUnauthorized: false,
+    });
+    await client.ready();
+
+    let sync = true;
+    const callback = new Promise<void>((resolve, reject) => {
+      client.ping((err, duration) => {
+        try {
+          assert.strictEqual(sync, false);
+          assert.ifError(err);
+          assert.ok(duration >= 0);
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    sync = false;
+    await callback;
+
+    await client.close();
+    await server.close();
+  });
+
   it('supports stream timeout callbacks for HTTP/3 streams', async () => {
     const server = createSecureServer({
       key: certs.key,

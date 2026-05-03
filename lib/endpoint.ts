@@ -131,10 +131,54 @@ export function parseConnectionEndpoint(
   }
 }
 
+export function abortSignalError(signal: AbortSignal | undefined): Error {
+  const reason: unknown = signal?.reason;
+  if (reason instanceof Error && reason.name === 'AbortError') {
+    return reason;
+  }
+
+  const error = new Error(reason instanceof Error
+    ? reason.message
+    : typeof reason === 'string' ? reason : 'The operation was aborted');
+  error.name = 'AbortError';
+  if (reason instanceof Error) {
+    (error as Error & { cause?: unknown }).cause = reason;
+  }
+  return error;
+}
+
+/** Throws synchronously if the signal is already aborted. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw abortSignalError(signal);
+  }
+}
+
+/** Race a promise against the abort signal so a long-running lookup can
+ *  be cut short. Audit finding #15. */
+async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted(signal);
+  let rejectAbort: ((error: Error) => void) | undefined;
+  const handler = (): void => {
+    rejectAbort?.(abortSignalError(signal));
+  };
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+    signal.addEventListener('abort', handler, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener('abort', handler);
+  }
+}
+
 export async function resolveConnectionEndpoint(
   endpoint: ConnectionEndpoint,
-  options: { defaultScheme: string; defaultPort: number },
+  options: { defaultScheme: string; defaultPort: number; signal?: AbortSignal },
 ): Promise<ResolvedConnectionEndpoint> {
+  throwIfAborted(options.signal);
   const parsed = parseConnectionEndpoint(endpoint, options);
   const family = isIP(parsed.host);
 
@@ -148,7 +192,11 @@ export async function resolveConnectionEndpoint(
   }
 
   try {
-    const resolved = await lookup(parsed.host, { all: true, verbatim: true });
+    const resolved = await raceAbort(
+      lookup(parsed.host, { all: true, verbatim: true }),
+      options.signal,
+    );
+    throwIfAborted(options.signal);
     const [firstResolved] = resolved;
     const selected = resolved.find((entry) => entry.family === 4) ?? firstResolved;
     return {
@@ -158,6 +206,10 @@ export async function resolveConnectionEndpoint(
       socketAddress: formatSocketAddress(selected.address, parsed.port),
     };
   } catch (err: unknown) {
+    // Pass through abort errors verbatim — caller distinguishes by name.
+    if (err instanceof Error && (err.name === 'AbortError' || options.signal?.aborted)) {
+      throw err;
+    }
     throw new Http3Error(
       `failed to resolve endpoint host ${parsed.host}`,
       ERR_HTTP3_ENDPOINT_RESOLUTION,

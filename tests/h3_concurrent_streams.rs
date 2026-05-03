@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -43,7 +43,10 @@ fn generate_test_certs_bytes() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 fn generate_test_certs_string() -> (String, String) {
@@ -508,7 +511,10 @@ fn test_h3_50_concurrent_post_requests() {
                 .expect("send_request should succeed");
 
             let body = vec![(i & 0xFF) as u8; body_size];
-            assert!(pair.client.stream_send(stream_id, Chunk::unpooled(body), true));
+            assert!(
+                pair.client
+                    .stream_send(stream_id, Chunk::unpooled(body), true)
+            );
             batch_ids.push(stream_id);
             all_stream_ids.push(stream_id);
         }
@@ -570,9 +576,7 @@ fn test_h3_50_concurrent_post_requests() {
             match pair.client_rx.recv_timeout(remaining) {
                 Ok(batch) => {
                     for event in batch.events {
-                        if event.event_type == EVENT_HEADERS
-                            || event.event_type == EVENT_FINISHED
-                        {
+                        if event.event_type == EVENT_HEADERS || event.event_type == EVENT_FINISHED {
                             total_client_completed.insert(event.stream_id);
                         }
                     }
@@ -696,7 +700,8 @@ fn test_quic_100_concurrent_bidi_streams() {
         let expected = vec![(i & 0xFF) as u8; payload_size];
         let received = client_data.get(&sid).cloned().unwrap_or_default();
         assert_eq!(
-            received, expected,
+            received,
+            expected,
             "payload mismatch on stream {sid}: got {} bytes, expected {payload_size}",
             received.len()
         );

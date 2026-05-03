@@ -3,9 +3,13 @@ name: Security
 on:
   pull_request:
   push:
-    branches: ['**']
+    branches: [main]
   schedule:
     - cron: '0 6 * * 1'
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   dependency-review:
@@ -16,27 +20,51 @@ jobs:
       pull-requests: read
     steps:
       - uses: actions/checkout@v6
+      - name: Probe dependency graph
+        id: dependency-graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/dependency-graph/sbom" >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Dependency graph is not available for ${GITHUB_REPOSITORY}; skipping dependency review."
+          fi
       - name: Dependency review
+        if: steps.dependency-graph.outputs.available == 'true'
         uses: actions/dependency-review-action@v4
+      - name: Dependency review unavailable
+        if: steps.dependency-graph.outputs.available != 'true'
+        run: |
+          {
+            echo "Dependency review was skipped because GitHub dependency graph is not available for this repository."
+            echo
+            echo "The npm audit and dependency inventory job still runs as the blocking dependency check."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   npm-audit-and-sbom:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --no-optional
       - name: Audit dependencies
-        run: npm audit --audit-level=high
-      - name: Generate SBOM
-        run: npm run sbom
-      - name: Upload SBOM
+        run: pnpm audit --audit-level high
+      - name: Generate dependency inventory
+        run: pnpm licenses list --prod --json > dependency-inventory.json
+      - name: Upload dependency inventory
         uses: actions/upload-artifact@v7
         with:
-          name: sbom-spdx
-          path: sbom.spdx.json
+          name: dependency-inventory-json
+          path: dependency-inventory.json
 
   codeql:
     runs-on: ubuntu-latest
@@ -53,10 +81,13 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
       - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci
-      - run: npm run build
+      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm run build
       - uses: github/codeql-action/analyze@v4

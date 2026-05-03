@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -42,7 +42,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +238,7 @@ fn test_quic_rapid_connect_disconnect_10_cycles() {
             match pair.server_rx.recv_timeout(remaining) {
                 Ok(batch) => {
                     for event in batch.events {
-                        if (event.event_type == EVENT_NEW_STREAM
-                            || event.event_type == EVENT_DATA)
+                        if (event.event_type == EVENT_NEW_STREAM || event.event_type == EVENT_DATA)
                             && event.stream_id == 0
                         {
                             got_data = true;
@@ -246,7 +248,10 @@ fn test_quic_rapid_connect_disconnect_10_cycles() {
                 Err(_) => break,
             }
         }
-        assert!(got_data, "cycle {cycle}: server should receive data on stream 0");
+        assert!(
+            got_data,
+            "cycle {cycle}: server should receive data on stream 0"
+        );
 
         // Shut down both sides.
         pair.server.shutdown();

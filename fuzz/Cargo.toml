@@ -1,0 +1,37 @@
+[package]
+name = "http3-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.http3]
+path = ".."
+default-features = false
+features = ["fuzzing"]
+
+[[bin]]
+name = "parse_recv_cmsgs"
+path = "fuzz_targets/parse_recv_cmsgs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unsafe_wrappers"
+path = "fuzz_targets/unsafe_wrappers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pending_write_state"
+path = "fuzz_targets/pending_write_state.rs"
+test = false
+doc = false
+bench = false

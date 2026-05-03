@@ -64,7 +64,11 @@ pnpm run test:runtime                     # runtime selection + driver pressure
 pnpm run test:coverage                    # c8 coverage (core + ffi)
 ```
 
-All TS tests use Node.js built-in `node:test` runner with `--test-timeout=120000`.
+All TS tests use Node.js built-in `node:test` runner with
+`--test-isolation=none --test-timeout=15000`. Single-process isolation
+keeps the full suite under 15 s on a developer machine; the 15 s
+per-test cap surfaces hangs quickly. Long-running stress and longhaul
+suites have their own scripts with looser timeouts.
 
 ### Long-running Tests
 
@@ -77,6 +81,7 @@ pnpm run test:browser:e2e                 # Playwright (needs HTTP3_BROWSER_E2E=
 ### Verification Sequence (before commit)
 
 ```bash
+# Or just run the canonical script: `pnpm verify` (see scripts/verify.sh).
 cargo test --lib --no-default-features && \
 pnpm run test:rust:mock:extended && \
 npx napi build --platform --release && \

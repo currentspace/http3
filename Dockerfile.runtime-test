@@ -1,4 +1,7 @@
+# syntax=docker/dockerfile:1.7
 FROM node:24-bookworm
+
+ARG TARGETPLATFORM
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
@@ -14,22 +17,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   strace \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.85.0
-ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.94.0
+ENV PNPM_HOME="/pnpm"
+ENV PATH="${PNPM_HOME}:/root/.cargo/bin:${PATH}"
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm install --ignore-scripts
+COPY package.json pnpm-lock.yaml ./
+RUN --mount=type=cache,id=http3-runtime-pnpm-${TARGETPLATFORM},target=/pnpm/store \
+  pnpm install --frozen-lockfile --ignore-scripts --no-optional --store-dir /pnpm/store
 
 COPY build.rs Cargo.toml Cargo.lock ./
+COPY benches ./benches
 COPY src ./src
 COPY lib ./lib
 COPY scripts ./scripts
 COPY test ./test
 COPY index.js index.d.ts tsconfig.json tsconfig.test.json ./
 
-RUN npm run build
-RUN npm run build:test
+RUN --mount=type=cache,id=http3-runtime-cargo-registry-${TARGETPLATFORM},target=/root/.cargo/registry \
+  --mount=type=cache,id=http3-runtime-cargo-git-${TARGETPLATFORM},target=/root/.cargo/git \
+  --mount=type=cache,id=http3-runtime-cargo-target-${TARGETPLATFORM},target=/app/target \
+  pnpm run build
+RUN pnpm run build:test
 
 CMD ["node", "--version"]

@@ -39,6 +39,21 @@ pub struct JsReactorTelemetrySnapshot {
     pub eventBatchDroppedEventsTotal: i64,
     pub eventBatchSinkErrorsTotal: i64,
     pub eventBatchMaxSizeHighWatermark: i64,
+    pub eventBatchAckedEventsTotal: i64,
+    pub eventBatchOutstanding: i64,
+    pub eventBatchOutstandingHighWatermark: i64,
+    pub eventBatchSelfHealedTotal: i64,
+    /// Audit #14, step 5.2: count of poll iterations where JS-facing
+    /// protocol event production was paused because the outstanding-events
+    /// gauge was over the high-water mark. Coarse backpressure signal — if
+    /// this climbs without bound, JS dispatch is the bottleneck.
+    pub eventBatchRxPausesTotal: i64,
+    /// Audit #18: ECN observability — counts of inbound datagrams by
+    /// code point. Telemetry only (quiche 0.28 doesn't expose ECN).
+    pub ecnRecvNotEctTotal: i64,
+    pub ecnRecvEct0Total: i64,
+    pub ecnRecvEct1Total: i64,
+    pub ecnRecvCeTotal: i64,
     pub rawQuicServerWorkerSpawns: i64,
     pub rawQuicClientDedicatedWorkerSpawns: i64,
     pub rawQuicClientSharedWorkersCreated: i64,
@@ -91,6 +106,17 @@ pub struct JsReactorTelemetrySnapshot {
     pub kqueueUnsentHighWatermark: i64,
     pub kqueueWouldBlockSends: i64,
     pub kqueueWriteWakeups: i64,
+    pub kqueueMsgXProbeSuccesses: i64,
+    pub kqueueMsgXProbeFailures: i64,
+    pub kqueueSendmsgXEnabled: i64,
+    pub kqueueRecvmsgXEnabled: i64,
+    pub kqueueSendmsgXSubmitCalls: i64,
+    pub kqueueSendmsgXDatagramsSubmitted: i64,
+    pub kqueueSendmsgXPartialSends: i64,
+    pub kqueueSendmsgXFallbacks: i64,
+    pub kqueueRecvmsgXCalls: i64,
+    pub kqueueRecvmsgXDatagramsReceived: i64,
+    pub kqueueRecvmsgXFallbacks: i64,
     pub rxBufferReuses: i64,
     pub rxBufferAllocations: i64,
     pub rxBufferCheckins: i64,
@@ -108,6 +134,18 @@ pub struct JsReactorTelemetrySnapshot {
     pub pendingWriteCopiedBytes: i64,
     pub pendingWriteTailAllocations: i64,
     pub pendingWriteGrowthReallocations: i64,
+    pub outboundIngressBufferReuses: i64,
+    pub outboundIngressBufferAllocations: i64,
+    pub outboundIngressCopiedBytes: i64,
+    pub outboundStreamJsAdmittedBytesTotal: i64,
+    pub outboundStreamJsAdmittedWritesTotal: i64,
+    pub outboundCommandQueuedBytes: i64,
+    pub outboundCommandQueuedBytesHighWatermark: i64,
+    pub outboundPendingWriteBytes: i64,
+    pub outboundPendingWriteBytesHighWatermark: i64,
+    pub outboundAdmissionBackpressureEventsTotal: i64,
+    pub outboundAdmissionReleasedUnitsTotal: i64,
+    pub outboundAdmissionWriteReadyEventsTotal: i64,
     pub txBuffersRecycled: i64,
 }
 
@@ -196,6 +234,35 @@ static EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_DROPPED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_SINK_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+/// Audit finding #14: gauge of events handed to TSFN minus events JS has
+/// acked. A persistently rising value flags an unbounded libuv queue — the
+/// early-warning signal that motivates protocol-level app-event backpressure.
+static EVENT_BATCH_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_ACKED_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_RX_PAUSES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_SELF_HEALED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static EVENT_BATCH_LAST_PROGRESS_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Audit finding #18: ECN code point counts on inbound datagrams,
+/// observed via IP_RECVTOS / IPV6_RECVTCLASS cmsg. quiche 0.28 doesn't
+/// expose ECN through RecvInfo, so we can't drive congestion control
+/// from these — they are observability only. CE rising indicates path
+/// congestion; ECT(0)/ECT(1) climbing means the peer is marking us
+/// ECN-capable.
+static ECN_RECV_NOT_ECT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ECN_RECV_ECT0_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ECN_RECV_ECT1_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ECN_RECV_CE_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Buffers handed to a `BufferRecycler` whose receiver was already
+/// dropped (or whose channel was full at the moment). Audit finding #31.
+static RECYCLER_DROPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// io_uring multishot recv CQEs that arrived without a buffer-id flag,
+/// indicating the kernel's provided-buffer ring was exhausted and a
+/// datagram was dropped. Audit finding #32.
+static IOURING_BUF_EXHAUSTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_SERVER_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS: AtomicU64 = AtomicU64::new(0);
 static RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED: AtomicU64 = AtomicU64::new(0);
@@ -250,6 +317,17 @@ static IO_URING_SQ_FULL_EVENTS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_UNSENT_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WOULD_BLOCK_SENDS: AtomicU64 = AtomicU64::new(0);
 static KQUEUE_WRITE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_MSG_X_PROBE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_MSG_X_PROBE_FAILURES: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_ENABLED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_ENABLED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_SUBMIT_CALLS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_PARTIAL_SENDS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_SENDMSG_X_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_CALLS: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static KQUEUE_RECVMSG_X_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static RX_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
 static RX_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static RX_BUFFER_CHECKINS: AtomicU64 = AtomicU64::new(0);
@@ -267,6 +345,20 @@ static PENDING_WRITE_BUFFER_DROPS: AtomicU64 = AtomicU64::new(0);
 static PENDING_WRITE_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
 static PENDING_WRITE_TAIL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static PENDING_WRITE_GROWTH_REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+static OUTBOUND_INGRESS_BUFFER_REUSES: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_INGRESS_BUFFER_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_INGRESS_COPIED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+static OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_COMMAND_QUEUED_BYTES: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_PENDING_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 static TX_BUFFERS_RECYCLED: AtomicU64 = AtomicU64::new(0);
 
@@ -292,6 +384,24 @@ fn observe_max(counter: &AtomicU64, value: usize) {
     counter.fetch_max(value as u64, Ordering::Relaxed);
 }
 
+fn add_to_gauge(gauge: &AtomicU64, high_watermark: &AtomicU64, amount: usize) {
+    if amount == 0 {
+        return;
+    }
+    let current = gauge.fetch_add(amount as u64, Ordering::Relaxed) + amount as u64;
+    high_watermark.fetch_max(current, Ordering::Relaxed);
+}
+
+fn release_gauge(gauge: &AtomicU64, amount: usize) {
+    if amount == 0 {
+        return;
+    }
+    let amount = amount as u64;
+    let _ = gauge.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+        Some(prev.saturating_sub(amount))
+    });
+}
+
 fn lifecycle_trace_events() -> &'static Mutex<VecDeque<JsLifecycleTraceEvent>> {
     LIFECYCLE_TRACE_EVENTS
         .get_or_init(|| Mutex::new(VecDeque::with_capacity(LIFECYCLE_TRACE_CAPACITY)))
@@ -302,6 +412,13 @@ fn lifecycle_trace_timestamp_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 pub(crate) fn record_driver_setup_attempt(kind: RuntimeDriverKind) {
@@ -364,17 +481,114 @@ pub(crate) fn record_shutdown_complete_emitted() {
 }
 
 pub(crate) fn record_event_batch_flush(count: usize) {
+    EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
     bump(&EVENT_BATCH_FLUSHES_TOTAL);
     EVENT_BATCH_ATTEMPTED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
     observe_max(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK, count);
+    let outstanding =
+        EVENT_BATCH_OUTSTANDING.fetch_add(count as u64, Ordering::Relaxed) + count as u64;
+    let mut hwm = EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK.load(Ordering::Relaxed);
+    while outstanding > hwm {
+        match EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK.compare_exchange_weak(
+            hwm,
+            outstanding,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => hwm = actual,
+        }
+    }
 }
 
 pub(crate) fn record_event_batch_drop(count: usize) {
+    EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
     EVENT_BATCH_DROPPED_EVENTS_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+    // Drops never reach JS, so they shouldn't sit in the outstanding gauge.
+    release_event_batch_outstanding(count as u64);
 }
 
 pub(crate) fn record_event_batch_sink_error() {
     bump(&EVENT_BATCH_SINK_ERRORS_TOTAL);
+}
+
+/// Audit finding #14: JS has finished dispatching `count` events from a
+/// TSFN batch. Releases credit on the outstanding gauge so the worker
+/// can quantify how far JS is behind real-time.
+pub(crate) fn record_event_batch_ack(count: usize) {
+    EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms(), Ordering::Relaxed);
+    let count = count as u64;
+    EVENT_BATCH_ACKED_EVENTS_TOTAL.fetch_add(count, Ordering::Relaxed);
+    release_event_batch_outstanding(count);
+}
+
+fn release_event_batch_outstanding(count: u64) {
+    let _ = EVENT_BATCH_OUTSTANDING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+        Some(prev.saturating_sub(count))
+    });
+}
+
+pub(crate) fn self_heal_event_batch_if_stuck(high_water: u64, stuck_after_ms: u64) -> u64 {
+    self_heal_event_batch_if_stuck_at(high_water, stuck_after_ms, now_ms())
+}
+
+pub(crate) fn event_batch_outstanding() -> u64 {
+    EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed)
+}
+
+fn self_heal_event_batch_if_stuck_at(high_water: u64, stuck_after_ms: u64, now_ms: u64) -> u64 {
+    let outstanding = EVENT_BATCH_OUTSTANDING.load(Ordering::Relaxed);
+    if outstanding <= high_water {
+        return outstanding;
+    }
+    let last_progress = EVENT_BATCH_LAST_PROGRESS_MS.load(Ordering::Relaxed);
+    if last_progress == 0 || now_ms.saturating_sub(last_progress) <= stuck_after_ms {
+        return outstanding;
+    }
+    match EVENT_BATCH_OUTSTANDING.compare_exchange(
+        outstanding,
+        0,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        Ok(stuck) => {
+            EVENT_BATCH_SELF_HEALED_TOTAL.fetch_add(stuck, Ordering::Relaxed);
+            EVENT_BATCH_LAST_PROGRESS_MS.store(now_ms, Ordering::Relaxed);
+            log::warn!(
+                "event batch outstanding gauge self-healed stuck_events={stuck} high_water={high_water} stuck_after_ms={stuck_after_ms}"
+            );
+            0
+        }
+        Err(actual) => actual,
+    }
+}
+
+/// Audit #14, step 5.2: increment the count of protocol app-event pause iterations.
+pub(crate) fn record_event_batch_rx_pause() {
+    bump(&EVENT_BATCH_RX_PAUSES_TOTAL);
+}
+
+/// Audit #18: bump the ECN counter that matches the observed code point
+/// on an inbound datagram. Telemetry-only — quiche 0.28 doesn't expose
+/// these through its API.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn record_ecn_recv(point: crate::transport::socket::EcnCodePoint) {
+    use crate::transport::socket::EcnCodePoint;
+    let counter = match point {
+        EcnCodePoint::NotEct => &ECN_RECV_NOT_ECT_TOTAL,
+        EcnCodePoint::Ect0 => &ECN_RECV_ECT0_TOTAL,
+        EcnCodePoint::Ect1 => &ECN_RECV_ECT1_TOTAL,
+        EcnCodePoint::Ce => &ECN_RECV_CE_TOTAL,
+    };
+    bump(counter);
+}
+
+pub(crate) fn record_recycler_drop() {
+    bump(&RECYCLER_DROPS_TOTAL);
+}
+
+pub(crate) fn record_iouring_buf_exhausted() {
+    bump(&IOURING_BUF_EXHAUSTED_TOTAL);
 }
 
 pub fn set_lifecycle_trace_enabled(enabled: bool) {
@@ -620,6 +834,52 @@ pub(crate) fn record_kqueue_write_wakeup() {
     bump(&KQUEUE_WRITE_WAKEUPS);
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_msg_x_probe(ok: bool) {
+    if ok {
+        bump(&KQUEUE_MSG_X_PROBE_SUCCESSES);
+    } else {
+        bump(&KQUEUE_MSG_X_PROBE_FAILURES);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_msg_x_enabled(send: bool, recv: bool) {
+    if send {
+        bump(&KQUEUE_SENDMSG_X_ENABLED);
+    }
+    if recv {
+        bump(&KQUEUE_RECVMSG_X_ENABLED);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_sendmsg_x_submit(count: usize) {
+    bump(&KQUEUE_SENDMSG_X_SUBMIT_CALLS);
+    KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_sendmsg_x_partial() {
+    bump(&KQUEUE_SENDMSG_X_PARTIAL_SENDS);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_sendmsg_x_fallback() {
+    bump(&KQUEUE_SENDMSG_X_FALLBACKS);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_recvmsg_x_batch(count: usize) {
+    bump(&KQUEUE_RECVMSG_X_CALLS);
+    KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn record_kqueue_recvmsg_x_fallback() {
+    bump(&KQUEUE_RECVMSG_X_FALLBACKS);
+}
+
 pub(crate) fn record_rx_buffer_checkout(reused: bool, bytes: usize) {
     if reused {
         bump(&RX_BUFFER_REUSES);
@@ -683,6 +943,68 @@ pub(crate) fn record_pending_write_growth_reallocation() {
     bump(&PENDING_WRITE_GROWTH_REALLOCATIONS);
 }
 
+pub(crate) fn record_outbound_ingress_buffer_checkout(reused: bool, bytes: usize) {
+    if reused {
+        bump(&OUTBOUND_INGRESS_BUFFER_REUSES);
+    } else {
+        bump(&OUTBOUND_INGRESS_BUFFER_ALLOCATIONS);
+    }
+    OUTBOUND_INGRESS_COPIED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_outbound_stream_js_admitted(bytes: usize) {
+    if bytes == 0 {
+        return;
+    }
+    OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
+    bump(&OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL);
+}
+
+pub(crate) fn record_outbound_command_queued(bytes: usize) {
+    add_to_gauge(
+        &OUTBOUND_COMMAND_QUEUED_BYTES,
+        &OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK,
+        bytes,
+    );
+}
+
+pub(crate) fn record_outbound_command_dequeued(bytes: usize) {
+    release_gauge(&OUTBOUND_COMMAND_QUEUED_BYTES, bytes);
+}
+
+pub(crate) fn record_outbound_pending_write_added(bytes: usize) {
+    add_to_gauge(
+        &OUTBOUND_PENDING_WRITE_BYTES,
+        &OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK,
+        bytes,
+    );
+}
+
+pub(crate) fn record_outbound_pending_write_removed(bytes: usize) {
+    release_gauge(&OUTBOUND_PENDING_WRITE_BYTES, bytes);
+}
+
+pub(crate) fn record_outbound_pending_write_change(before: usize, after: usize) {
+    if after > before {
+        record_outbound_pending_write_added(after - before);
+    } else {
+        record_outbound_pending_write_removed(before - after);
+    }
+}
+
+pub(crate) fn record_outbound_admission_backpressure() {
+    bump(&OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL);
+}
+
+pub(crate) fn record_outbound_admission_release(units: usize, emitted_write_ready: bool) {
+    if units > 0 {
+        OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL.fetch_add(units as u64, Ordering::Relaxed);
+    }
+    if emitted_write_ready {
+        bump(&OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL);
+    }
+}
+
 pub(crate) fn record_tx_buffers_recycled(count: usize) {
     TX_BUFFERS_RECYCLED.fetch_add(count as u64, Ordering::Relaxed);
 }
@@ -717,6 +1039,15 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         eventBatchDroppedEventsTotal: event_batch_dropped_events_total,
         eventBatchSinkErrorsTotal: load(&EVENT_BATCH_SINK_ERRORS_TOTAL),
         eventBatchMaxSizeHighWatermark: load(&EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK),
+        eventBatchAckedEventsTotal: load(&EVENT_BATCH_ACKED_EVENTS_TOTAL),
+        eventBatchOutstanding: load(&EVENT_BATCH_OUTSTANDING),
+        eventBatchOutstandingHighWatermark: load(&EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK),
+        eventBatchSelfHealedTotal: load(&EVENT_BATCH_SELF_HEALED_TOTAL),
+        eventBatchRxPausesTotal: load(&EVENT_BATCH_RX_PAUSES_TOTAL),
+        ecnRecvNotEctTotal: load(&ECN_RECV_NOT_ECT_TOTAL),
+        ecnRecvEct0Total: load(&ECN_RECV_ECT0_TOTAL),
+        ecnRecvEct1Total: load(&ECN_RECV_ECT1_TOTAL),
+        ecnRecvCeTotal: load(&ECN_RECV_CE_TOTAL),
         rawQuicServerWorkerSpawns: load(&RAW_QUIC_SERVER_WORKER_SPAWNS),
         rawQuicClientDedicatedWorkerSpawns: load(&RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS),
         rawQuicClientSharedWorkersCreated: load(&RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED),
@@ -769,6 +1100,17 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         kqueueUnsentHighWatermark: load(&KQUEUE_UNSENT_HIGH_WATERMARK),
         kqueueWouldBlockSends: load(&KQUEUE_WOULD_BLOCK_SENDS),
         kqueueWriteWakeups: load(&KQUEUE_WRITE_WAKEUPS),
+        kqueueMsgXProbeSuccesses: load(&KQUEUE_MSG_X_PROBE_SUCCESSES),
+        kqueueMsgXProbeFailures: load(&KQUEUE_MSG_X_PROBE_FAILURES),
+        kqueueSendmsgXEnabled: load(&KQUEUE_SENDMSG_X_ENABLED),
+        kqueueRecvmsgXEnabled: load(&KQUEUE_RECVMSG_X_ENABLED),
+        kqueueSendmsgXSubmitCalls: load(&KQUEUE_SENDMSG_X_SUBMIT_CALLS),
+        kqueueSendmsgXDatagramsSubmitted: load(&KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED),
+        kqueueSendmsgXPartialSends: load(&KQUEUE_SENDMSG_X_PARTIAL_SENDS),
+        kqueueSendmsgXFallbacks: load(&KQUEUE_SENDMSG_X_FALLBACKS),
+        kqueueRecvmsgXCalls: load(&KQUEUE_RECVMSG_X_CALLS),
+        kqueueRecvmsgXDatagramsReceived: load(&KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED),
+        kqueueRecvmsgXFallbacks: load(&KQUEUE_RECVMSG_X_FALLBACKS),
         rxBufferReuses: load(&RX_BUFFER_REUSES),
         rxBufferAllocations: load(&RX_BUFFER_ALLOCATIONS),
         rxBufferCheckins: load(&RX_BUFFER_CHECKINS),
@@ -786,6 +1128,22 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         pendingWriteCopiedBytes: load(&PENDING_WRITE_COPIED_BYTES),
         pendingWriteTailAllocations: load(&PENDING_WRITE_TAIL_ALLOCATIONS),
         pendingWriteGrowthReallocations: load(&PENDING_WRITE_GROWTH_REALLOCATIONS),
+        outboundIngressBufferReuses: load(&OUTBOUND_INGRESS_BUFFER_REUSES),
+        outboundIngressBufferAllocations: load(&OUTBOUND_INGRESS_BUFFER_ALLOCATIONS),
+        outboundIngressCopiedBytes: load(&OUTBOUND_INGRESS_COPIED_BYTES),
+        outboundStreamJsAdmittedBytesTotal: load(&OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL),
+        outboundStreamJsAdmittedWritesTotal: load(&OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL),
+        outboundCommandQueuedBytes: load(&OUTBOUND_COMMAND_QUEUED_BYTES),
+        outboundCommandQueuedBytesHighWatermark: load(
+            &OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK,
+        ),
+        outboundPendingWriteBytes: load(&OUTBOUND_PENDING_WRITE_BYTES),
+        outboundPendingWriteBytesHighWatermark: load(&OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK),
+        outboundAdmissionBackpressureEventsTotal: load(
+            &OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL,
+        ),
+        outboundAdmissionReleasedUnitsTotal: load(&OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL),
+        outboundAdmissionWriteReadyEventsTotal: load(&OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL),
         txBuffersRecycled: load(&TX_BUFFERS_RECYCLED),
     }
 }
@@ -816,6 +1174,16 @@ pub fn reset() {
         &EVENT_BATCH_DROPPED_EVENTS_TOTAL,
         &EVENT_BATCH_SINK_ERRORS_TOTAL,
         &EVENT_BATCH_MAX_SIZE_HIGH_WATERMARK,
+        &EVENT_BATCH_OUTSTANDING,
+        &EVENT_BATCH_OUTSTANDING_HIGH_WATERMARK,
+        &EVENT_BATCH_ACKED_EVENTS_TOTAL,
+        &EVENT_BATCH_RX_PAUSES_TOTAL,
+        &EVENT_BATCH_SELF_HEALED_TOTAL,
+        &EVENT_BATCH_LAST_PROGRESS_MS,
+        &ECN_RECV_NOT_ECT_TOTAL,
+        &ECN_RECV_ECT0_TOTAL,
+        &ECN_RECV_ECT1_TOTAL,
+        &ECN_RECV_CE_TOTAL,
         &RAW_QUIC_SERVER_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_DEDICATED_WORKER_SPAWNS,
         &RAW_QUIC_CLIENT_SHARED_WORKERS_CREATED,
@@ -868,6 +1236,17 @@ pub fn reset() {
         &KQUEUE_UNSENT_HIGH_WATERMARK,
         &KQUEUE_WOULD_BLOCK_SENDS,
         &KQUEUE_WRITE_WAKEUPS,
+        &KQUEUE_MSG_X_PROBE_SUCCESSES,
+        &KQUEUE_MSG_X_PROBE_FAILURES,
+        &KQUEUE_SENDMSG_X_ENABLED,
+        &KQUEUE_RECVMSG_X_ENABLED,
+        &KQUEUE_SENDMSG_X_SUBMIT_CALLS,
+        &KQUEUE_SENDMSG_X_DATAGRAMS_SUBMITTED,
+        &KQUEUE_SENDMSG_X_PARTIAL_SENDS,
+        &KQUEUE_SENDMSG_X_FALLBACKS,
+        &KQUEUE_RECVMSG_X_CALLS,
+        &KQUEUE_RECVMSG_X_DATAGRAMS_RECEIVED,
+        &KQUEUE_RECVMSG_X_FALLBACKS,
         &RX_BUFFER_REUSES,
         &RX_BUFFER_ALLOCATIONS,
         &RX_BUFFER_CHECKINS,
@@ -885,6 +1264,18 @@ pub fn reset() {
         &PENDING_WRITE_COPIED_BYTES,
         &PENDING_WRITE_TAIL_ALLOCATIONS,
         &PENDING_WRITE_GROWTH_REALLOCATIONS,
+        &OUTBOUND_INGRESS_BUFFER_REUSES,
+        &OUTBOUND_INGRESS_BUFFER_ALLOCATIONS,
+        &OUTBOUND_INGRESS_COPIED_BYTES,
+        &OUTBOUND_STREAM_JS_ADMITTED_BYTES_TOTAL,
+        &OUTBOUND_STREAM_JS_ADMITTED_WRITES_TOTAL,
+        &OUTBOUND_COMMAND_QUEUED_BYTES,
+        &OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK,
+        &OUTBOUND_PENDING_WRITE_BYTES,
+        &OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK,
+        &OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL,
+        &OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL,
+        &OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL,
         &TX_BUFFERS_RECYCLED,
     ] {
         reset_counter(counter);
@@ -892,21 +1283,33 @@ pub fn reset() {
 }
 
 #[cfg(test)]
+pub(crate) fn test_metrics_guard() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
 
     /// Reset all global counters and lifecycle trace state before each test
     /// to isolate from other tests (global atomics are shared across the
     /// process, but `cargo test` runs tests on separate threads).
-    fn setup() {
+    fn setup() -> MutexGuard<'static, ()> {
+        let guard = test_metrics_guard();
         reset();
         set_lifecycle_trace_enabled(false);
         reset_lifecycle_trace();
+        guard
     }
 
     #[test]
     fn test_snapshot_after_reset() {
-        setup();
+        let _guard = setup();
         let snap = snapshot();
         assert_eq!(snap.driverSetupAttemptsTotal, 0);
         assert_eq!(snap.driverSetupSuccessTotal, 0);
@@ -919,14 +1322,29 @@ mod tests {
         assert_eq!(snap.eventBatchDroppedEventsTotal, 0);
         assert_eq!(snap.eventBatchSinkErrorsTotal, 0);
         assert_eq!(snap.eventBatchMaxSizeHighWatermark, 0);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 0);
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchOutstandingHighWatermark, 0);
+        assert_eq!(snap.eventBatchSelfHealedTotal, 0);
+        assert_eq!(snap.eventBatchRxPausesTotal, 0);
+        assert_eq!(snap.ecnRecvNotEctTotal, 0);
+        assert_eq!(snap.ecnRecvEct0Total, 0);
+        assert_eq!(snap.ecnRecvEct1Total, 0);
+        assert_eq!(snap.ecnRecvCeTotal, 0);
         assert_eq!(snap.rawQuicServerWorkerSpawns, 0);
         assert_eq!(snap.h3ServerWorkerSpawns, 0);
+        assert_eq!(snap.outboundIngressBufferReuses, 0);
+        assert_eq!(snap.outboundIngressBufferAllocations, 0);
+        assert_eq!(snap.outboundIngressCopiedBytes, 0);
+        assert_eq!(snap.outboundStreamJsAdmittedBytesTotal, 0);
+        assert_eq!(snap.outboundCommandQueuedBytes, 0);
+        assert_eq!(snap.outboundPendingWriteBytes, 0);
         assert_eq!(snap.txBuffersRecycled, 0);
     }
 
     #[test]
     fn test_record_driver_setup_attempt() {
-        setup();
+        let _guard = setup();
         record_driver_setup_attempt(RuntimeDriverKind::Poll);
         record_driver_setup_attempt(RuntimeDriverKind::Poll);
         let snap = snapshot();
@@ -938,7 +1356,7 @@ mod tests {
 
     #[test]
     fn test_record_worker_thread_spawn() {
-        setup();
+        let _guard = setup();
         record_worker_thread_spawn(WorkerSpawnKind::RawQuicServer);
         record_worker_thread_spawn(WorkerSpawnKind::H3Server);
         record_worker_thread_spawn(WorkerSpawnKind::H3Server);
@@ -953,18 +1371,145 @@ mod tests {
 
     #[test]
     fn test_record_event_batch_flush() {
-        setup();
+        let _guard = setup();
         record_event_batch_flush(10);
         record_event_batch_flush(20);
         let snap = snapshot();
         assert_eq!(snap.eventBatchFlushesTotal, 2);
         assert_eq!(snap.eventBatchAttemptedEventsTotal, 30);
         assert_eq!(snap.eventBatchMaxSizeHighWatermark, 20);
+        // Audit #14: outstanding gauge climbs with each flush.
+        assert_eq!(snap.eventBatchOutstanding, 30);
+        assert_eq!(snap.eventBatchOutstandingHighWatermark, 30);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 0);
+    }
+
+    #[test]
+    fn test_record_event_batch_ack() {
+        let _guard = setup();
+        record_event_batch_flush(50);
+        record_event_batch_ack(20);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 30);
+        assert_eq!(snap.eventBatchOutstandingHighWatermark, 50);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 20);
+    }
+
+    #[test]
+    fn test_record_event_batch_ack_saturates() {
+        let _guard = setup();
+        record_event_batch_flush(5);
+        // Stray ack with count > outstanding shouldn't underflow.
+        record_event_batch_ack(100);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchAckedEventsTotal, 100);
+    }
+
+    #[test]
+    fn test_record_event_batch_drop_releases_outstanding() {
+        let _guard = setup();
+        record_event_batch_flush(50);
+        record_event_batch_drop(50);
+        let snap = snapshot();
+        // Dropped events never reach JS, so they shouldn't sit in the gauge.
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchDroppedEventsTotal, 50);
+    }
+
+    #[test]
+    fn test_record_event_batch_drop_saturates() {
+        let _guard = setup();
+        record_event_batch_drop(10);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchDroppedEventsTotal, 10);
+    }
+
+    #[test]
+    fn test_record_event_batch_rx_pause() {
+        let _guard = setup();
+        record_event_batch_rx_pause();
+        record_event_batch_rx_pause();
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchRxPausesTotal, 2);
+    }
+
+    #[test]
+    fn test_record_outbound_write_pressure() {
+        let _guard = setup();
+
+        record_outbound_ingress_buffer_checkout(false, 1024);
+        record_outbound_ingress_buffer_checkout(true, 2048);
+
+        record_outbound_stream_js_admitted(1024);
+        record_outbound_stream_js_admitted(0);
+        record_outbound_stream_js_admitted(2048);
+
+        record_outbound_command_queued(4096);
+        record_outbound_command_queued(1024);
+        record_outbound_command_dequeued(2048);
+        record_outbound_command_dequeued(10_000);
+
+        record_outbound_pending_write_added(8192);
+        record_outbound_pending_write_added(1024);
+        record_outbound_pending_write_change(4096, 1024);
+        record_outbound_pending_write_removed(10_000);
+        record_outbound_admission_backpressure();
+        record_outbound_admission_release(4096, false);
+        record_outbound_admission_release(1024, true);
+
+        let snap = snapshot();
+        assert_eq!(snap.outboundIngressBufferAllocations, 1);
+        assert_eq!(snap.outboundIngressBufferReuses, 1);
+        assert_eq!(snap.outboundIngressCopiedBytes, 3072);
+        assert_eq!(snap.outboundStreamJsAdmittedBytesTotal, 3072);
+        assert_eq!(snap.outboundStreamJsAdmittedWritesTotal, 2);
+        assert_eq!(snap.outboundCommandQueuedBytes, 0);
+        assert_eq!(snap.outboundCommandQueuedBytesHighWatermark, 5120);
+        assert_eq!(snap.outboundPendingWriteBytes, 0);
+        assert_eq!(snap.outboundPendingWriteBytesHighWatermark, 9216);
+        assert_eq!(snap.outboundAdmissionBackpressureEventsTotal, 1);
+        assert_eq!(snap.outboundAdmissionReleasedUnitsTotal, 5120);
+        assert_eq!(snap.outboundAdmissionWriteReadyEventsTotal, 1);
+    }
+
+    #[test]
+    fn test_event_batch_self_heal_only_after_stuck_window() {
+        let _guard = setup();
+        record_event_batch_flush(100);
+        EVENT_BATCH_LAST_PROGRESS_MS.store(1_000, Ordering::Relaxed);
+
+        assert_eq!(self_heal_event_batch_if_stuck_at(50, 5_000, 5_999), 100);
+        assert_eq!(snapshot().eventBatchOutstanding, 100);
+
+        assert_eq!(self_heal_event_batch_if_stuck_at(50, 5_000, 6_001), 0);
+        let snap = snapshot();
+        assert_eq!(snap.eventBatchOutstanding, 0);
+        assert_eq!(snap.eventBatchSelfHealedTotal, 100);
+    }
+
+    #[test]
+    fn test_record_ecn_recv_classification() {
+        use crate::transport::socket::EcnCodePoint;
+        let _guard = setup();
+        record_ecn_recv(EcnCodePoint::NotEct);
+        record_ecn_recv(EcnCodePoint::Ect0);
+        record_ecn_recv(EcnCodePoint::Ect0);
+        record_ecn_recv(EcnCodePoint::Ect1);
+        record_ecn_recv(EcnCodePoint::Ce);
+        record_ecn_recv(EcnCodePoint::Ce);
+        record_ecn_recv(EcnCodePoint::Ce);
+        let snap = snapshot();
+        assert_eq!(snap.ecnRecvNotEctTotal, 1);
+        assert_eq!(snap.ecnRecvEct0Total, 2);
+        assert_eq!(snap.ecnRecvEct1Total, 1);
+        assert_eq!(snap.ecnRecvCeTotal, 3);
     }
 
     #[test]
     fn test_lifecycle_trace_enable_disable() {
-        setup();
+        let _guard = setup();
 
         // Initially disabled
         let trace = lifecycle_trace_snapshot();
@@ -987,6 +1532,9 @@ mod tests {
         assert!(!trace.enabled);
         record_lifecycle_trace("test-component", "ignored", None, None, None, None);
         let trace = lifecycle_trace_snapshot();
-        assert_eq!(trace.eventCount, 1, "event should not be recorded when trace is disabled");
+        assert_eq!(
+            trace.eventCount, 1,
+            "event should not be recorded when trace is disabled"
+        );
     }
 }

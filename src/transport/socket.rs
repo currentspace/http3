@@ -33,30 +33,31 @@ pub(crate) fn set_socket_buffers(socket: &UdpSocket, hint: usize) -> Result<(), 
     Ok(())
 }
 
-/// Bind a UDP socket, optionally with `SO_REUSEPORT`.
-/// Target UDP socket buffer size (2 MB). QUIC implementations typically need
-/// large buffers to absorb packet bursts without kernel drops.  The kernel may
-/// cap this at `net.core.rmem_max` / `net.core.wmem_max`, but `setsockopt`
-/// silently clamps — it never fails.
-const SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
+/// Minimum socket buffer size we'll accept after kernel clamping. Below this
+/// QUIC will likely drop packets under bursts; we warn the operator.
+const MIN_SOCKET_BUF_SIZE: usize = 2 * 1024 * 1024;
 
-/// Try to enlarge the socket's receive and send buffers.  Best-effort: if the
-/// kernel clamps the value we still proceed with whatever size we got.
-/// Logs the effective sizes so operators can diagnose buffer-related drops.
+/// Try to enlarge the socket's receive and send buffers using the same 8 MB
+/// → 4 MB → 2 MB tier list as `set_socket_buffers`. Logs a `warn!` if the
+/// kernel clamped below the minimum acceptable size. Audit finding #21:
+/// previously this function only attempted 2 MB, while
+/// `set_socket_buffers` (used by client paths) tried 8 MB first — server
+/// sockets ended up at 2 MB while clients got 8 MB.
 fn set_socket_buffer_sizes(socket: &socket2::Socket) {
-    let _ = socket.set_recv_buffer_size(SOCKET_BUF_SIZE);
-    let _ = socket.set_send_buffer_size(SOCKET_BUF_SIZE);
+    for &size in BUFFER_SIZES {
+        if socket.set_send_buffer_size(size).is_ok() && socket.set_recv_buffer_size(size).is_ok() {
+            break;
+        }
+    }
     let effective_rcv = socket.recv_buffer_size().unwrap_or(0);
     let effective_snd = socket.send_buffer_size().unwrap_or(0);
-    if effective_rcv < SOCKET_BUF_SIZE || effective_snd < SOCKET_BUF_SIZE {
+    if effective_rcv < MIN_SOCKET_BUF_SIZE || effective_snd < MIN_SOCKET_BUF_SIZE {
         log::warn!(
-            "UDP socket buffer sizes clamped by kernel: rcvbuf={}KB (wanted {}KB) sndbuf={}KB (wanted {}KB). \
-             Raise net.core.rmem_max / net.core.wmem_max to at least {} for best QUIC performance.",
+            "UDP socket buffer sizes clamped by kernel: rcvbuf={}KB sndbuf={}KB (wanted at least {}KB). \
+             Raise net.core.rmem_max / net.core.wmem_max for best QUIC performance.",
             effective_rcv / 1024,
-            SOCKET_BUF_SIZE / 1024,
             effective_snd / 1024,
-            SOCKET_BUF_SIZE / 1024,
-            SOCKET_BUF_SIZE,
+            MIN_SOCKET_BUF_SIZE / 1024,
         );
     }
 }
@@ -98,10 +99,12 @@ const QUIC_MAX_PACKET_SIZE: usize = 16383;
 /// Query the link-layer MTU for the path to `peer` and return the maximum
 /// useful PMTUD probe ceiling.
 ///
-/// Creates a temporary connected UDP socket to `peer`, calls
-/// `getsockopt(IP_MTU)`, and returns `min(mtu - headers, 16383)`.
-/// Returns `None` if the query fails (non-Linux, permission error, etc.),
-/// in which case the caller should fall back to a conservative default.
+/// On Linux, creates a temporary connected UDP socket to `peer` and calls
+/// `getsockopt(IP_MTU)`. On macOS, matches `peer` against the interface list
+/// from `getifaddrs` and reads the link MTU for the best-prefix interface.
+/// Returns `min(mtu - headers, 16383)`.
+/// Returns `None` if the query fails, in which case the caller should fall
+/// back to a conservative default.
 ///
 /// This is NOT a loopback hack — it queries the kernel routing table for
 /// the actual interface MTU on the path to any destination.
@@ -147,15 +150,133 @@ pub(crate) fn query_path_mtu(peer: &SocketAddr) -> Option<usize> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = peer;
-        None
+        query_path_mtu_from_interfaces(peer)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn query_path_mtu_from_interfaces(peer: &SocketAddr) -> Option<usize> {
+    use std::ffi::CStr;
+    use std::net::IpAddr;
+
+    struct IfAddrs(*mut libc::ifaddrs);
+
+    impl Drop for IfAddrs {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `self.0` was returned by `getifaddrs` and is freed
+                // exactly once by this guard.
+                unsafe {
+                    libc::freeifaddrs(self.0);
+                }
+            }
+        }
+    }
+
+    let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` initializes `addrs` on success; the guard releases
+    // the linked list with `freeifaddrs`.
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 || addrs.is_null() {
+        return None;
+    }
+    let _guard = IfAddrs(addrs);
+
+    let mut interface_mtu: Vec<(Vec<u8>, usize)> = Vec::new();
+    let mut current = addrs;
+    while !current.is_null() {
+        // SAFETY: `current` walks the valid `getifaddrs` linked list until
+        // the null terminator.
+        let ifa = unsafe { &*current };
+        if !ifa.ifa_name.is_null() && !ifa.ifa_addr.is_null() && !ifa.ifa_data.is_null() {
+            // SAFETY: `ifa_addr` is a valid sockaddr for this list entry.
+            let family = unsafe { (*ifa.ifa_addr).sa_family as libc::c_int };
+            if family == libc::AF_LINK {
+                // SAFETY: Darwin exposes link-layer MTU in `if_data` for
+                // AF_LINK entries from `getifaddrs`.
+                let if_data = unsafe { &*(ifa.ifa_data.cast::<libc::if_data>()) };
+                let mtu = if_data.ifi_mtu as usize;
+                if mtu > 0 {
+                    // SAFETY: `ifa_name` is a NUL-terminated interface name
+                    // owned by the live `getifaddrs` list.
+                    let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes().to_vec();
+                    interface_mtu.push((name, mtu));
+                }
+            }
+        }
+        current = ifa.ifa_next;
+    }
+
+    let mut best: Option<(u32, usize)> = None;
+    let mut current = addrs;
+    while !current.is_null() {
+        // SAFETY: `current` walks the valid `getifaddrs` linked list until
+        // the null terminator.
+        let ifa = unsafe { &*current };
+        if !ifa.ifa_name.is_null() && !ifa.ifa_addr.is_null() && !ifa.ifa_netmask.is_null() {
+            // SAFETY: `ifa_addr` is a valid sockaddr for this list entry.
+            let family = unsafe { (*ifa.ifa_addr).sa_family as libc::c_int };
+            let candidate = match (family, peer.ip()) {
+                (libc::AF_INET, IpAddr::V4(peer_ip)) => {
+                    // SAFETY: family checks prove these sockaddr pointers have
+                    // IPv4 layout for this entry.
+                    let addr = unsafe { *(ifa.ifa_addr.cast::<libc::sockaddr_in>()) };
+                    let mask = unsafe { *(ifa.ifa_netmask.cast::<libc::sockaddr_in>()) };
+                    let addr = u32::from_be(addr.sin_addr.s_addr);
+                    let mask = u32::from_be(mask.sin_addr.s_addr);
+                    let peer = u32::from(peer_ip);
+                    ((peer & mask) == (addr & mask)).then_some(mask.count_ones())
+                }
+                (libc::AF_INET6, IpAddr::V6(peer_ip)) => {
+                    // SAFETY: family checks prove these sockaddr pointers have
+                    // IPv6 layout for this entry.
+                    let addr = unsafe { *(ifa.ifa_addr.cast::<libc::sockaddr_in6>()) };
+                    let mask = unsafe { *(ifa.ifa_netmask.cast::<libc::sockaddr_in6>()) };
+                    let peer = peer_ip.octets();
+                    let addr = addr.sin6_addr.s6_addr;
+                    let mask = mask.sin6_addr.s6_addr;
+                    let matches = peer
+                        .iter()
+                        .zip(addr.iter())
+                        .zip(mask.iter())
+                        .all(|((peer, addr), mask)| (peer & mask) == (addr & mask));
+                    matches.then_some(mask.iter().map(|byte| byte.count_ones()).sum())
+                }
+                _ => None,
+            };
+
+            if let Some(prefix_len) = candidate {
+                // SAFETY: `ifa_name` is a NUL-terminated interface name owned
+                // by the live `getifaddrs` list.
+                let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes();
+                if let Some((_, mtu)) = interface_mtu.iter().find(|(mtu_name, _)| mtu_name == name)
+                {
+                    if best.is_none_or(|(best_prefix, _)| prefix_len > best_prefix) {
+                        best = Some((prefix_len, *mtu));
+                    }
+                }
+            }
+        }
+        current = ifa.ifa_next;
+    }
+
+    let mtu = best?.1;
+    let header_overhead = if peer.is_ipv4() { 28 } else { 48 };
+    Some(
+        mtu.saturating_sub(header_overhead)
+            .min(QUIC_MAX_PACKET_SIZE),
+    )
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn query_path_mtu_from_interfaces(_peer: &SocketAddr) -> Option<usize> {
+    None
 }
 
 // ── Control message (cmsg) utilities ────────────────────────────────
 
-/// Control message buffer size for IP_PKTINFO / IPV6_PKTINFO.
-#[cfg(target_os = "linux")]
+/// Control message buffer size for IP_PKTINFO / IPV6_PKTINFO (Linux) or
+/// IP_RECVDSTADDR / IPV6_PKTINFO (Darwin).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const CMSG_CONTROL_LEN: usize = 128;
 
 /// Enable IP_PKTINFO (v4) and IPV6_RECVPKTINFO (v6) on the socket so that
@@ -186,48 +307,115 @@ pub(crate) fn set_pktinfo(socket: &UdpSocket) {
     }
 }
 
-/// Parse cmsg control data for IP_PKTINFO / IPV6_PKTINFO.
-/// Returns the local IP address if found.
-#[cfg(target_os = "linux")]
-pub(crate) fn parse_pktinfo_cmsg(control: &[u8]) -> Option<std::net::IpAddr> {
-    let mut offset = 0;
-    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
-        // SAFETY: bounds checked above; read_unaligned handles alignment.
-        let hdr: libc::cmsghdr =
-            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
-        if hdr.cmsg_len == 0 {
-            break;
-        }
-        let data_off = offset + cmsg_data_offset();
+// ── macOS / Darwin variants ─────────────────────────────────────────
 
-        if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_PKTINFO {
-            if data_off + std::mem::size_of::<libc::in_pktinfo>() <= control.len() {
-                let info: libc::in_pktinfo =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                let ip = std::net::Ipv4Addr::from(u32::from_be(info.ipi_spec_dst.s_addr));
-                return Some(std::net::IpAddr::V4(ip));
-            }
-        } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
-            if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
-                let info: libc::in6_pktinfo =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                let ip = std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr);
-                return Some(std::net::IpAddr::V6(ip));
-            }
-        }
-
-        offset += cmsg_align(hdr.cmsg_len as usize);
+/// Enable `IP_RECVDSTADDR` (v4) and `IPV6_RECVPKTINFO` (v6) on the socket so
+/// that `recvmsg` returns the per-packet *destination* address as a cmsg.
+/// Audit finding #20: needed so a server bound to `0.0.0.0` can route by
+/// the actual local IP each datagram arrived on, not the bind address.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_pktinfo(socket: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let enable: libc::c_int = 1;
+    // SAFETY: fd is a valid socket descriptor, enable points to a valid int.
+    // The wrong family silently fails (per setsockopt semantics).
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_RECVDSTADDR,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
     }
-    None
 }
 
-#[cfg(target_os = "linux")]
+// ── ECN (audit #18) ─────────────────────────────────────────────────
+//
+// quiche 0.28 has no `ecn` field on RecvInfo and explicitly states
+// "sending ECN is not supported at this time" (lib.rs:4501), so we
+// can't feed observed ECN into the QUIC congestion controller. But
+// ECN bits live in the IP header, not the QUIC payload — the socket
+// layer can still observe them. Surface CE / ECT(0) / ECT(1) /
+// Not-ECT counts as telemetry so operators can see whether their
+// path is congested without waiting on a quiche bump.
+
+/// ECN code points (RFC 3168, lower 2 bits of the IP TOS byte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EcnCodePoint {
+    NotEct = 0b00,
+    Ect1 = 0b01,
+    Ect0 = 0b10,
+    Ce = 0b11,
+}
+
+impl EcnCodePoint {
+    pub(crate) fn from_tos(tos: u8) -> Self {
+        match tos & 0b11 {
+            0b00 => Self::NotEct,
+            0b01 => Self::Ect1,
+            0b10 => Self::Ect0,
+            _ => Self::Ce,
+        }
+    }
+}
+
+/// Enable `IP_RECVTOS` (v4) and `IPV6_RECVTCLASS` (v6) on the socket so
+/// `recvmsg` returns the per-packet TOS byte (which holds the ECN bits)
+/// as a cmsg. Best-effort: silently no-ops if the kernel rejects the
+/// option — ECN telemetry just stays at zero in that case.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn set_recv_ecn(socket: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let enable: libc::c_int = 1;
+    // SAFETY: fd is a valid socket; enable points to a valid int.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_RECVTOS,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVTCLASS,
+            &enable as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        );
+    }
+}
+
+// ── Unified cmsg / sockaddr helpers ────────────────────────────────
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cmsg_align(len: usize) -> usize {
+    // Linux's `CMSG_ALIGN` uses sizeof(size_t) = 8 on 64-bit; Darwin's
+    // `__DARWIN_ALIGN32` uses sizeof(uint32_t) = 4. Mismatching the
+    // alignment makes `cmsg_data_offset()` skip past the actual payload
+    // and silently bounds-fail every read. (Pre-existing bug — audit #20
+    // shipped because the IPv4 destination addr it extracts was never
+    // observably consumed.)
+    #[cfg(target_os = "linux")]
     let align = std::mem::size_of::<usize>();
+    #[cfg(target_os = "macos")]
+    let align = std::mem::size_of::<u32>();
     (len + align - 1) & !(align - 1)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cmsg_data_offset() -> usize {
     cmsg_align(std::mem::size_of::<libc::cmsghdr>())
 }
@@ -235,6 +423,144 @@ fn cmsg_data_offset() -> usize {
 #[cfg(all(target_os = "linux", test))]
 pub(crate) fn cmsg_data_offset_for_test() -> usize {
     cmsg_data_offset()
+}
+
+/// Everything the recv path extracts from a single cmsg control buffer.
+///
+/// `parse_recv_cmsgs` walks the buffer once and emits all three fields,
+/// avoiding the 2–3× duplicate scans that separate per-cmsg-type parsers
+/// produced on the hot path (one inbound datagram = one walk).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ParsedRecvCmsgs {
+    /// Per-datagram destination IP. From `IP_PKTINFO` / `IP_RECVDSTADDR` /
+    /// `IPV6_PKTINFO` cmsgs (audit #20).
+    pub local_ip: Option<std::net::IpAddr>,
+    /// Inbound TOS byte. The low 2 bits hold the ECN code point
+    /// (audit #18).
+    pub tos: Option<u8>,
+    /// UDP GRO segment size — Linux only; always `None` on macOS.
+    pub segment_size: Option<u16>,
+}
+
+/// Walk the recvmsg control buffer once and extract pktinfo + TOS + GRO
+/// segment-size fields together. See `ParsedRecvCmsgs`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
+    let mut out = ParsedRecvCmsgs::default();
+    let mut offset = 0;
+    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
+        // SAFETY: bounds checked above; read_unaligned handles alignment.
+        #[allow(unsafe_code)]
+        let hdr: libc::cmsghdr =
+            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
+        if hdr.cmsg_len == 0 {
+            break;
+        }
+        let data_off = offset + cmsg_data_offset();
+
+        // IPv6 destination address — same cmsg type on Linux and macOS.
+        if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
+            if data_off + std::mem::size_of::<libc::in6_pktinfo>() <= control.len() {
+                #[allow(unsafe_code)]
+                let info: libc::in6_pktinfo =
+                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+                let ip = std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr);
+                out.local_ip = Some(std::net::IpAddr::V6(ip));
+            }
+        } else if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_TCLASS {
+            // IPV6_TCLASS payload is an int (4 bytes); only the low byte
+            // holds the traffic class.
+            if data_off + std::mem::size_of::<libc::c_int>() <= control.len() {
+                #[allow(unsafe_code)]
+                let tclass: libc::c_int =
+                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+                out.tos = Some((tclass & 0xff) as u8);
+            }
+        } else if hdr.cmsg_level == libc::IPPROTO_IP
+            && (hdr.cmsg_type == libc::IP_TOS
+                // Darwin delivers the TOS byte under cmsg_type = IP_RECVTOS
+                // (the same option used to enable the cmsg) rather than
+                // IP_TOS the way Linux does. Match either to stay portable.
+                || cfg!(target_os = "macos") && hdr.cmsg_type == libc::IP_RECVTOS)
+        {
+            // Payload is a single byte, padded to int alignment.
+            if data_off < control.len() {
+                out.tos = Some(control[data_off]);
+            }
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                if hdr.cmsg_level == libc::IPPROTO_IP && hdr.cmsg_type == libc::IP_PKTINFO {
+                    if data_off + std::mem::size_of::<libc::in_pktinfo>() <= control.len() {
+                        #[allow(unsafe_code)]
+                        let info: libc::in_pktinfo = unsafe {
+                            std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
+                        };
+                        let ip = std::net::Ipv4Addr::from(u32::from_be(info.ipi_spec_dst.s_addr));
+                        out.local_ip = Some(std::net::IpAddr::V4(ip));
+                    }
+                } else if hdr.cmsg_level == SOL_UDP && hdr.cmsg_type == UDP_GRO {
+                    if data_off + std::mem::size_of::<u16>() <= control.len() {
+                        #[allow(unsafe_code)]
+                        let seg: u16 = unsafe {
+                            std::ptr::read_unaligned(control.as_ptr().add(data_off).cast())
+                        };
+                        out.segment_size = Some(seg);
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if hdr.cmsg_level == libc::IPPROTO_IP
+                    && hdr.cmsg_type == libc::IP_RECVDSTADDR
+                    && data_off + std::mem::size_of::<libc::in_addr>() <= control.len()
+                {
+                    // IP_RECVDSTADDR delivers a bare `struct in_addr` (4 bytes).
+                    #[allow(unsafe_code)]
+                    let addr: libc::in_addr =
+                        unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
+                    let ip = std::net::Ipv4Addr::from(u32::from_be(addr.s_addr));
+                    out.local_ip = Some(std::net::IpAddr::V4(ip));
+                }
+            }
+        }
+
+        offset += cmsg_align(hdr.cmsg_len as usize);
+    }
+    out
+}
+
+/// Convert a `sockaddr_storage` (filled by `recvmsg` / `recvmmsg`) into a
+/// `SocketAddr`. Returns `None` for unrecognised address families.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn sockaddr_to_socketaddr(
+    addr: &libc::sockaddr_storage,
+    len: libc::socklen_t,
+) -> Option<std::net::SocketAddr> {
+    if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
+        && i32::from(addr.ss_family) == libc::AF_INET
+    {
+        // SAFETY: ss_family is AF_INET and len covers sockaddr_in.
+        #[allow(unsafe_code)]
+        let sin: &libc::sockaddr_in =
+            unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in>() };
+        let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+        let port = u16::from_be(sin.sin_port);
+        Some(std::net::SocketAddr::from((ip, port)))
+    } else if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
+        && i32::from(addr.ss_family) == libc::AF_INET6
+    {
+        // SAFETY: ss_family is AF_INET6 and len covers sockaddr_in6.
+        #[allow(unsafe_code)]
+        let sin6: &libc::sockaddr_in6 =
+            unsafe { &*std::ptr::from_ref(addr).cast::<libc::sockaddr_in6>() };
+        let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+        let port = u16::from_be(sin6.sin6_port);
+        Some(std::net::SocketAddr::from((ip, port)))
+    } else {
+        None
+    }
 }
 
 // ── UDP GSO (Generic Segmentation Offload) ──────────────────────────
@@ -321,32 +647,6 @@ pub(crate) fn enable_gro(socket: &UdpSocket) {
     }
 }
 
-/// Parse cmsg control data for `UDP_GRO` segment size.
-/// Returns the segment size if a GRO cmsg is present.
-#[cfg(target_os = "linux")]
-pub(crate) fn parse_gro_cmsg(control: &[u8]) -> Option<u16> {
-    let mut offset = 0;
-    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
-        let hdr: libc::cmsghdr =
-            unsafe { std::ptr::read_unaligned(control.as_ptr().add(offset).cast()) };
-        if hdr.cmsg_len == 0 {
-            break;
-        }
-        let data_off = offset + cmsg_data_offset();
-
-        if hdr.cmsg_level == SOL_UDP && hdr.cmsg_type == UDP_GRO {
-            if data_off + std::mem::size_of::<u16>() <= control.len() {
-                let seg: u16 =
-                    unsafe { std::ptr::read_unaligned(control.as_ptr().add(data_off).cast()) };
-                return Some(seg);
-            }
-        }
-
-        offset += cmsg_align(hdr.cmsg_len as usize);
-    }
-    None
-}
-
 #[cfg(unix)]
 fn set_unix_reuse_port(socket: &socket2::Socket) -> Result<(), std::io::Error> {
     use std::os::fd::AsRawFd;
@@ -369,5 +669,31 @@ fn set_unix_reuse_port(socket: &socket2::Socket) -> Result<(), std::io::Error> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ecn_code_point_decodes_lower_two_tos_bits() {
+        // RFC 3168 §5: ECN bits live in the low 2 bits of TOS / Traffic
+        // Class. Upper 6 bits are DSCP and must be ignored.
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0000), EcnCodePoint::NotEct);
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0001), EcnCodePoint::Ect1);
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0010), EcnCodePoint::Ect0);
+        assert_eq!(EcnCodePoint::from_tos(0b0000_0011), EcnCodePoint::Ce);
+        // DSCP bits (high 6) must not affect classification.
+        assert_eq!(EcnCodePoint::from_tos(0b1110_1011), EcnCodePoint::Ce);
+        assert_eq!(EcnCodePoint::from_tos(0b1110_1010), EcnCodePoint::Ect0);
+    }
+
+    #[test]
+    fn query_path_mtu_finds_loopback_ceiling() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 4433));
+        let ceiling = query_path_mtu(&peer).expect("loopback path MTU should be discoverable");
+        assert!(ceiling >= crate::config::FALLBACK_MAX_UDP_PAYLOAD);
+        assert!(ceiling <= QUIC_MAX_PACKET_SIZE);
     }
 }

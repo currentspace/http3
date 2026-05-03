@@ -1,10 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { X509Certificate } from 'node:crypto';
-import { EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, binding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
 import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
 import { toSessionError } from './error-map.js';
+import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
 import { resolveServerClientAuthMode } from './tls-client-auth.js';
@@ -16,6 +17,8 @@ const EVENT_FINISHED = 5;
 const EVENT_RESET = 6;
 const EVENT_SESSION_CLOSE = 7;
 const EVENT_DRAIN = 8;
+const EVENT_STREAM_BLOCKED = 16;
+const EVENT_WRITE_READY = 18;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
@@ -102,8 +105,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
-    this.worker.streamSend(connHandle, streamId, data, fin);
-    return Math.max(data.length, fin ? 1 : 0);
+    return streamSendOutcomeBytes(this.worker.streamSend(connHandle, streamId, data, fin));
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {
@@ -121,7 +123,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   getSessionMetrics(connHandle: number): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   } {
     return this.worker.getSessionMetrics(connHandle);
   }
@@ -133,7 +135,18 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+
+    const sentinel = this._shutdownObserved
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          this._shutdownResolve = resolve;
+        });
+
     this.worker.requestShutdown();
+
+    await waitForShutdownOrTimeout(sentinel);
+    this._shutdownResolve = null;
+
     this.worker.joinWorker();
   }
 }
@@ -143,7 +156,7 @@ class QuicWorkerEventLoop implements QuicServerEventLoopLike {
  */
 export interface QuicServerSession {
   on(event: 'stream', listener: (stream: QuicStream) => void): this;
-  on(event: 'close', listener: () => void): this;
+  on(event: 'close', listener: (info: SessionCloseInfo) => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'datagram', listener: (data: Buffer) => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
@@ -160,6 +173,8 @@ export class QuicServerSession extends EventEmitter {
   private readonly _eventLoop: QuicWorkerEventLoop;
   /** @internal */ readonly _streams = new Map<number, QuicStream>();
   /** @internal */ _nextBidiStreamId = 1; // Server-initiated bidi: 1, 5, 9, ...
+  private _closeEmitted = false;
+  private _closeInfo: SessionCloseInfo | null = null;
 
   /** @internal */
   constructor(connHandle: number, remoteAddress: string, remotePort: number, eventLoop: QuicWorkerEventLoop) {
@@ -203,7 +218,7 @@ export class QuicServerSession extends EventEmitter {
   getMetrics(): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   } | null {
     try {
       return this._eventLoop.getSessionMetrics(this.connHandle);
@@ -216,6 +231,8 @@ export class QuicServerSession extends EventEmitter {
   ping(): boolean {
     return this._eventLoop.pingSession(this.connHandle);
   }
+
+  // Raw QUIC has no HTTP/3 SETTINGS frames; intentionally no getRemoteSettings().
 
   /** Return the peer leaf certificate, or `null` when the peer did not present one. */
   getPeerCertificate(): X509Certificate | null {
@@ -262,6 +279,14 @@ export class QuicServerSession extends EventEmitter {
       }
     }
     this._streams.clear();
+  }
+
+  /** @internal */
+  _emitClose(info: SessionCloseInfo = defaultSessionCloseInfo()): void {
+    this._closeInfo = info;
+    if (this._closeEmitted) return;
+    this._closeEmitted = true;
+    this.emit('close', info);
   }
 
   private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
@@ -345,17 +370,23 @@ export class QuicServer extends EventEmitter {
           keylog: opts.keylog,
         },
         (_err: Error | null, events: NativeEvent[]) => {
-          let hasShutdown = false;
-          for (const event of events) {
-            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-              hasShutdown = true;
+          try {
+            let hasShutdown = false;
+            for (const event of events) {
+              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                hasShutdown = true;
+              }
             }
-          }
-          if (!hasShutdown) {
-            this._dispatchEvents(events);
-          } else {
-            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-            eventLoop._onShutdownSentinel();
+            if (!hasShutdown) {
+              this._dispatchEvents(events);
+            } else {
+              this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+              eventLoop._onShutdownSentinel();
+            }
+          } finally {
+            // Audit #14: release credit on the outstanding-events gauge even
+            // when user event handlers throw during dispatch.
+            native.ackEventBatch(events.length);
           }
         },
       );
@@ -414,6 +445,12 @@ export class QuicServer extends EventEmitter {
         case EVENT_DRAIN:
           this._onDrain(event);
           break;
+        case EVENT_STREAM_BLOCKED:
+          this._onStreamBlocked(event);
+          break;
+        case EVENT_WRITE_READY:
+          this._onWriteReady(event);
+          break;
         case EVENT_HANDSHAKE_COMPLETE:
           this._onHandshakeComplete(event);
           break;
@@ -470,6 +507,12 @@ export class QuicServer extends EventEmitter {
     if (!session || !event.data) return;
     const stream = session._getOrCreateStream(event.streamId);
     stream._pushData(event.data);
+    if (event.fin) {
+      stream._pushData(null);
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
+    }
   }
 
   private _onFinished(event: NativeEvent): void {
@@ -500,7 +543,7 @@ export class QuicServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (session) {
       session._cleanup();
-      session.emit('close');
+      session._emitClose(sessionCloseInfoFromEvent(event));
       this._sessions.delete(event.connHandle);
     }
   }
@@ -511,6 +554,31 @@ export class QuicServer extends EventEmitter {
     const stream = session._streams.get(event.streamId);
     if (stream) {
       stream._onNativeDrain();
+    }
+  }
+
+  private _onStreamBlocked(event: NativeEvent): void {
+    const session = this._sessions.get(event.connHandle);
+    if (!session) return;
+    const stream = session._streams.get(event.streamId);
+    if (stream) {
+      stream._onNativeBlocked();
+    }
+  }
+
+  private _onWriteReady(event: NativeEvent): void {
+    if (event.connHandle !== 0) {
+      const session = this._sessions.get(event.connHandle);
+      if (!session) return;
+      for (const stream of session._streams.values()) {
+        stream._onNativeWriteReady();
+      }
+      return;
+    }
+    for (const session of this._sessions.values()) {
+      for (const stream of session._streams.values()) {
+        stream._onNativeWriteReady();
+      }
     }
   }
 

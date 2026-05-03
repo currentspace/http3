@@ -9,6 +9,34 @@ import { join, resolve } from 'node:path';
 /** Sentinel event emitted by each Rust worker thread before exit. */
 export const EVENT_SHUTDOWN_COMPLETE = 15;
 
+/**
+ * Maximum time `close()` will wait for the worker's SHUTDOWN_COMPLETE
+ * sentinel before falling through to `joinWorker()`. A wedged worker
+ * shouldn't hang the host process indefinitely.
+ */
+export const SHUTDOWN_TIMEOUT_MS = 5000;
+
+/**
+ * Await worker shutdown without leaving the fallback timer referenced after
+ * the sentinel wins. A referenced timer here keeps `node --test` alive even
+ * though every stream/session has closed correctly.
+ * @internal
+ */
+export async function waitForShutdownOrTimeout(sentinel: Promise<void>): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timer = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
+  });
+
+  try {
+    await Promise.race([sentinel, timer]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 // ----- Native binding type definitions -----
 
 /**
@@ -38,6 +66,7 @@ export interface NativeEvent {
     syscall?: string;
     peerCertificatePresented?: boolean;
     peerCertificateChain?: Buffer[];
+    durationMs?: number;
   };
   metrics?: {
     packetsIn: number;
@@ -47,6 +76,7 @@ export interface NativeEvent {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
 }
 
@@ -54,6 +84,32 @@ export interface NativeEvent {
 export interface NativeOutboundPacket {
   data: Buffer;
   addr: string;
+}
+
+/** Native stream-send status: write command accepted into local native queue. */
+export const STREAM_SEND_ACCEPTED = 0;
+/** Native stream-send status: local native command/backpressure window is closed. */
+export const STREAM_SEND_BACKPRESSURE = 1;
+
+export type NativeStreamSendStatus =
+  | typeof STREAM_SEND_ACCEPTED
+  | typeof STREAM_SEND_BACKPRESSURE;
+
+/**
+ * Structured result from the native JS -> worker write-admission boundary.
+ *
+ * `written` is local admission units, not peer ACKed bytes. For FIN-only
+ * writes it is `1` so `_final()` can distinguish success from backpressure.
+ * @internal
+ */
+export interface NativeStreamSendOutcome {
+  status: NativeStreamSendStatus;
+  written: number;
+}
+
+/** @internal Convert native admission outcome to the stream-layer contract. */
+export function streamSendOutcomeBytes(outcome: NativeStreamSendOutcome): number {
+  return outcome.status === STREAM_SEND_ACCEPTED ? outcome.written : 0;
 }
 
 /**
@@ -64,7 +120,7 @@ export interface NativeWorkerServerBinding {
   listen(port: number, host: string): { address: string; family: string; port: number };
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): boolean;
   sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): boolean;
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): boolean;
   closeSession(connHandle: number, errorCode: number, reason: string): boolean;
@@ -77,11 +133,14 @@ export interface NativeWorkerServerBinding {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
   getRemoteSettings(connHandle: number): Array<{ id: number; value: number }>;
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;
@@ -94,7 +153,7 @@ export interface NativeWorkerServerBinding {
 export interface NativeWorkerClientBinding {
   connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
   sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number;
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean;
+  streamSend(streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(streamId: number, errorCode: number): boolean;
   sendDatagram(data: Buffer): boolean;
   getSessionMetrics(): {
@@ -105,12 +164,15 @@ export interface NativeWorkerClientBinding {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
   getRemoteSettings(): Array<{ id: number; value: number }>;
   ping(): boolean;
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;
@@ -171,18 +233,20 @@ export interface NativeQuicClientOptions {
  */
 export interface NativeQuicServerBinding {
   listen(port: number, host: string): { address: string; family: string; port: number };
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean;
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
   closeSession(connHandle: number, errorCode: number, reason: string): boolean;
   sendDatagram(connHandle: number, data: Buffer): boolean;
   getSessionMetrics(connHandle: number): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   };
   pingSession(connHandle: number): boolean;
   getQlogPath(connHandle: number): string | null;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;
@@ -194,18 +258,21 @@ export interface NativeQuicServerBinding {
  */
 export interface NativeQuicClientBinding {
   connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean;
+  openStream(): number;
+  streamSend(streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
   streamClose(streamId: number, errorCode: number): boolean;
   sendDatagram(data: Buffer): boolean;
   getSessionMetrics(): {
     packetsIn: number; packetsOut: number;
     bytesIn: number; bytesOut: number;
-    handshakeTimeMs: number; rttMs: number; cwnd: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
   };
   ping(): boolean;
   getQlogPath(): string | null;
   close(errorCode: number, reason: string): boolean;
   localAddress(): { address: string; family: string; port: number };
+  /** Audit #14: release credit on the native outstanding-events gauge. */
+  ackEventBatch(count: number): void;
   requestShutdown(): boolean;
   joinWorker(): void;
   shutdown(): void;
@@ -281,6 +348,15 @@ export interface ReactorTelemetrySnapshot {
   eventBatchDroppedEventsTotal: number;
   eventBatchSinkErrorsTotal: number;
   eventBatchMaxSizeHighWatermark: number;
+  eventBatchAckedEventsTotal: number;
+  eventBatchOutstanding: number;
+  eventBatchOutstandingHighWatermark: number;
+  eventBatchSelfHealedTotal: number;
+  eventBatchRxPausesTotal: number;
+  ecnRecvNotEctTotal: number;
+  ecnRecvEct0Total: number;
+  ecnRecvEct1Total: number;
+  ecnRecvCeTotal: number;
   rawQuicServerWorkerSpawns: number;
   rawQuicClientDedicatedWorkerSpawns: number;
   rawQuicClientSharedWorkersCreated: number;
@@ -329,6 +405,18 @@ export interface ReactorTelemetrySnapshot {
   kqueueUnsentHighWatermark: number;
   kqueueWouldBlockSends: number;
   kqueueWriteWakeups: number;
+  outboundIngressBufferReuses: number;
+  outboundIngressBufferAllocations: number;
+  outboundIngressCopiedBytes: number;
+  outboundStreamJsAdmittedBytesTotal: number;
+  outboundStreamJsAdmittedWritesTotal: number;
+  outboundCommandQueuedBytes: number;
+  outboundCommandQueuedBytesHighWatermark: number;
+  outboundPendingWriteBytes: number;
+  outboundPendingWriteBytesHighWatermark: number;
+  outboundAdmissionBackpressureEventsTotal: number;
+  outboundAdmissionReleasedUnitsTotal: number;
+  outboundAdmissionWriteReadyEventsTotal: number;
   txBuffersRecycled: number;
 }
 
@@ -422,6 +510,7 @@ export interface ServerEventLoopLike {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   };
   getRemoteSettings(connHandle: number): Array<{ id: number; value: number }>;
   pingSession(connHandle: number): boolean;
@@ -466,12 +555,7 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   }
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
-    // Command is queued to worker thread via unbounded channel — always succeeds.
-    // The worker will generate drain events if flow-control blocks at the quiche level.
-    this.worker.streamSend(connHandle, streamId, data, fin);
-    // When sending FIN with empty data (stream._final), return 1 so the
-    // caller knows the command was accepted (0 would look like a block).
-    return Math.max(data.length, fin ? 1 : 0);
+    return streamSendOutcomeBytes(this.worker.streamSend(connHandle, streamId, data, fin));
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {
@@ -498,6 +582,7 @@ export class WorkerEventLoop implements ServerEventLoopLike {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   } {
     return this.worker.getSessionMetrics(connHandle);
   }
@@ -517,7 +602,22 @@ export class WorkerEventLoop implements ServerEventLoopLike {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+
+    // Audit finding #33: await the SHUTDOWN_COMPLETE sentinel before
+    // joinWorker so late TSFN events can't land on cleared maps.
+    // Bounded by SHUTDOWN_TIMEOUT_MS so a wedged worker can't hang the
+    // host process indefinitely.
+    const sentinel = this._shutdownObserved
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          this._shutdownResolve = resolve;
+        });
+
     this.worker.requestShutdown();
+
+    await waitForShutdownOrTimeout(sentinel);
+    this._shutdownResolve = null;
+
     this.worker.joinWorker();
   }
 }
@@ -558,8 +658,7 @@ export class ClientEventLoop {
   }
 
   streamSend(streamId: number, data: Buffer, fin: boolean): number {
-    this.worker.streamSend(streamId, data, fin);
-    return Math.max(data.length, fin ? 1 : 0);
+    return streamSendOutcomeBytes(this.worker.streamSend(streamId, data, fin));
   }
 
   streamClose(streamId: number, errorCode: number): boolean {
@@ -578,6 +677,7 @@ export class ClientEventLoop {
     handshakeTimeMs: number;
     rttMs: number;
     cwnd: number;
+    datagramQueueDepth: number;
   } {
     return this.worker.getSessionMetrics();
   }
@@ -594,11 +694,22 @@ export class ClientEventLoop {
     return this.worker.getQlogPath();
   }
 
-  async close(): Promise<void> {
+  async close(errorCode = 0, reason = 'client close'): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.worker.close(0, 'client close');
+
+    const sentinel = this._shutdownObserved
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          this._shutdownResolve = resolve;
+        });
+
+    this.worker.close(errorCode, reason);
     this.worker.requestShutdown();
+
+    await waitForShutdownOrTimeout(sentinel);
+    this._shutdownResolve = null;
+
     this.worker.joinWorker();
   }
 }

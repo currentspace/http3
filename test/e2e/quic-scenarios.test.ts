@@ -8,6 +8,7 @@ import { createQuicServer, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServer, QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
 import { generateTestCerts } from '../support/generate-certs.js';
+import { withTimeoutError } from '../support/async-race.js';
 
 let certs: { key: Buffer; cert: Buffer };
 let server: QuicServer;
@@ -269,11 +270,13 @@ describe('QUIC E2E scenarios', () => {
     const keepaliveDone = collect(keepalive);
 
     const receivedSet = new Set<string>();
+    let onDatagram: ((data: Buffer) => void) | null = null;
     const allReceived = new Promise<void>((resolve) => {
-      client.on('datagram', (data: Buffer) => {
+      onDatagram = (data: Buffer): void => {
         receivedSet.add(data.toString());
         if (receivedSet.size >= 18) resolve();
-      });
+      };
+      client.on('datagram', onDatagram);
     });
 
     // Wait for keepalive to ensure session is fully established
@@ -283,12 +286,17 @@ describe('QUIC E2E scenarios', () => {
       client.sendDatagram(Buffer.from(`dg-${i}`));
     }
 
-    await Promise.race([
-      allReceived,
-      new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error(`only received ${receivedSet.size}/18 datagrams`)), 10_000),
-      ),
-    ]);
+    try {
+      await withTimeoutError(
+        allReceived,
+        10_000,
+        () => new Error(`only received ${receivedSet.size}/18 datagrams`),
+      );
+    } finally {
+      if (onDatagram !== null) {
+        client.off('datagram', onDatagram);
+      }
+    }
 
     assert.ok(receivedSet.size >= 18, `expected >= 18 datagrams, got ${receivedSet.size}`);
 

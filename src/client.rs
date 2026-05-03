@@ -6,6 +6,7 @@ use napi_derive::napi;
 
 use crate::config::{Http3Config, JsClientOptions, TransportRuntimeMode};
 use crate::h3_event::{JsAddressInfo, JsHeader, JsSessionMetrics, JsSetting};
+use crate::write_outcome::JsStreamSendOutcome;
 
 use std::net::SocketAddr;
 
@@ -20,6 +21,7 @@ pub struct NativeWorkerClient {
     qlog_dir: Option<String>,
     qlog_level: Option<String>,
     runtime_mode: TransportRuntimeMode,
+    stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress,
 }
 
 #[napi]
@@ -42,6 +44,7 @@ impl NativeWorkerClient {
             qlog_level: options.qlog_level,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())
                 .map_err(napi::Error::from)?,
+            stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress::new(64),
         })
     }
 
@@ -101,11 +104,25 @@ impl NativeWorkerClient {
     }
 
     #[napi]
-    pub fn stream_send(&self, stream_id: i64, data: Buffer, fin: bool) -> bool {
+    pub fn stream_send(&self, stream_id: i64, data: Buffer, fin: bool) -> JsStreamSendOutcome {
         let Some(handle) = &self.handle else {
-            return false;
+            return JsStreamSendOutcome::backpressured();
         };
-        handle.stream_send(stream_id as u64, crate::chunk_pool::Chunk::unpooled(data.to_vec()), fin)
+        let body_len = data.as_ref().len();
+        if !handle.try_admit_outbound(body_len, fin) {
+            return JsStreamSendOutcome::backpressured();
+        }
+        let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
+        let accepted = handle.stream_send(stream_id as u64, chunk, fin);
+        if !accepted {
+            handle.release_outbound_admission(body_len, fin);
+        }
+        if accepted {
+            crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+            JsStreamSendOutcome::accepted(body_len, fin)
+        } else {
+            JsStreamSendOutcome::backpressured()
+        }
     }
 
     #[napi]
@@ -129,7 +146,18 @@ impl NativeWorkerClient {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle.send_datagram(data.to_vec()).unwrap_or(false)
+        let body_len = data.as_ref().len();
+        if !handle.try_admit_outbound(body_len, false) {
+            return false;
+        }
+        let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
+        match handle.send_datagram(chunk) {
+            Ok(accepted) => accepted,
+            Err(_) => {
+                handle.release_outbound_admission(body_len, false);
+                false
+            }
+        }
     }
 
     #[napi]
@@ -206,6 +234,17 @@ impl NativeWorkerClient {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Audit finding #14: see Http3SecureServer::ack_event_batch.
+    #[napi]
+    pub fn ack_event_batch(&self, count: u32) {
+        crate::reactor_metrics::record_event_batch_ack(count as usize);
+        if count > 0 {
+            if let Some(handle) = &self.handle {
+                handle.wake_event_loop();
+            }
         }
     }
 

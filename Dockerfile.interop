@@ -1,0 +1,43 @@
+# Cross-platform interop image. Reuses the verify image (which has rust +
+# pnpm + source + offline node_modules baked in) and adds the napi release
+# build + dist artifacts so we can `docker run` an HTTP/3 echo server in
+# under 1s. The test in test/interop/cross-platform.test.ts uses this to
+# stand up a Debian H3 server and connect a macOS host client.
+#
+# io_uring inside Docker:
+#   Docker's default seccomp profile (since ~2022) blocks the io_uring_*
+#   syscalls due to historical CVEs. To exercise the io_uring driver
+#   inside the container, run with `--security-opt seccomp=unconfined`
+#   (the canonical pnpm scripts do this when HTTP3_INTEROP_DOCKER_IO_URING=1
+#   is set). Without the flag the runtime auto-falls-back to poll, which
+#   is also a valid Linux driver — just not the production-fast path.
+FROM http3-verify AS build
+
+WORKDIR /workspace
+RUN npx napi build --platform --release \
+    && pnpm run build:dist
+# .dockerignore strips dev certs from production builds; generate a fresh
+# self-signed pair inside the image so the interop server can start.
+RUN mkdir -p examples/certs \
+    && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+       -keyout examples/certs/server.key \
+       -out examples/certs/server.crt \
+       -days 365 -nodes -subj "/CN=localhost"
+
+# The runtime image strips the rust toolchain and crate cache (~1GB) since
+# they're not needed for `node examples/raw-api/server.ts`.
+FROM node:24-trixie-slim AS runtime
+
+WORKDIR /workspace
+COPY --from=build /workspace/dist ./dist
+COPY --from=build /workspace/index.js /workspace/index.d.ts /workspace/package.json ./
+COPY --from=build /workspace/*.node ./
+COPY --from=build /workspace/node_modules ./node_modules
+COPY --from=build /workspace/examples ./examples
+COPY --from=build /workspace/lib ./lib
+COPY --from=build /workspace/tsconfig.json ./
+
+ENV HTTP3_INTEROP_PORT=4433
+EXPOSE 4433/udp
+
+ENTRYPOINT ["node", "examples/interop/echo-server.mjs"]

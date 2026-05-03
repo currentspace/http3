@@ -6,7 +6,13 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
-import { createSecureServer, connect, connectAsync } from '../../lib/index.js';
+import {
+  ERR_HTTP3_SESSION_ERROR,
+  Http3Error,
+  createSecureServer,
+  connect,
+  connectAsync,
+} from '../../lib/index.js';
 import type { Http3SecureServer, Http3ClientSession, ServerHttp3Stream, IncomingHeaders, StreamFlags } from '../../lib/index.js';
 
 async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {
@@ -194,7 +200,11 @@ describe('H3 edge cases', () => {
           ':authority': 'localhost',
           ':scheme': 'https',
         }, { endStream: true });
-      }, /not connected|closed|invalid state/i);
+      }, (err) => (
+        err instanceof Http3Error &&
+        err.code === ERR_HTTP3_SESSION_ERROR &&
+        /client close|not connected|closed|invalid state/i.test(err.message)
+      ));
     } finally {
       await server.close();
     }

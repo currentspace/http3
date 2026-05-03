@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -46,7 +46,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 fn generate_test_certs_string() -> (String, String) {
@@ -389,8 +392,7 @@ fn test_sustained_quic_throughput_5_minutes() {
         next_stream_id += 4; // QUIC bidi client-initiated: 0, 4, 8, ...
 
         // Client sends 4KB on a new stream with fin
-        pair.client
-            .stream_send(stream_id, payload.clone(), true);
+        pair.client.stream_send(stream_id, payload.clone(), true);
 
         // Drain server events with short timeout, looking for data on this stream
         let mut got_server_data = false;
@@ -401,8 +403,7 @@ fn test_sustained_quic_throughput_5_minutes() {
                     for event in batch.events {
                         if event.stream_id == stream_id as i64
                             && (event.event_type == EVENT_FINISHED
-                                || (event.event_type == EVENT_DATA
-                                    && event.fin == Some(true))
+                                || (event.event_type == EVENT_DATA && event.fin == Some(true))
                                 || (event.event_type == EVENT_NEW_STREAM
                                     && event.fin == Some(true)))
                         {
@@ -436,8 +437,7 @@ fn test_sustained_quic_throughput_5_minutes() {
                     for event in batch.events {
                         if event.stream_id == stream_id as i64
                             && (event.event_type == EVENT_FINISHED
-                                || (event.event_type == EVENT_DATA
-                                    && event.fin == Some(true)))
+                                || (event.event_type == EVENT_DATA && event.fin == Some(true)))
                         {
                             got_client_echo = true;
                         }
@@ -500,8 +500,7 @@ fn test_sustained_h3_throughput_5_minutes() {
             match pair.server_rx.recv_timeout(SHORT_RECV_TIMEOUT) {
                 Ok(batch) => {
                     for event in batch.events {
-                        if event.event_type == EVENT_HEADERS
-                            && event.stream_id == stream_id as i64
+                        if event.event_type == EVENT_HEADERS && event.stream_id == stream_id as i64
                         {
                             got_headers = true;
                         }
@@ -544,8 +543,7 @@ fn test_sustained_h3_throughput_5_minutes() {
                     for event in batch.events {
                         if event.stream_id == stream_id as i64
                             && (event.event_type == EVENT_FINISHED
-                                || (event.event_type == EVENT_DATA
-                                    && event.fin == Some(true)))
+                                || (event.event_type == EVENT_DATA && event.fin == Some(true)))
                         {
                             got_response = true;
                         }

@@ -5,6 +5,7 @@ import {
   ERR_HTTP3_RUNTIME_UNSUPPORTED,
   ERR_HTTP3_SESSION_ERROR,
   ERR_HTTP3_STREAM_ERROR,
+  ERR_HTTP3_INVALID_STATE,
 } from './errors.js';
 import type { NativeEvent } from './event-loop.js';
 
@@ -28,6 +29,29 @@ function runtimeOptionsFromEvent(event: NativeEvent): ConstructorParameters<type
   };
 }
 
+function quicErrorMessage(errorCode: number | undefined, fallback: string): string {
+  switch (errorCode) {
+    case 0x0: return 'connection closed';
+    case 0x1: return 'internal error';
+    case 0x2: return 'connection refused';
+    case 0x3: return 'flow control error';
+    case 0x4: return 'stream limit error';
+    case 0x5: return 'stream state error';
+    case 0x6: return 'final size error';
+    case 0x7: return 'frame encoding error';
+    case 0x8: return 'transport parameter error';
+    case 0x9: return 'connection ID limit error';
+    case 0xa: return 'protocol violation';
+    case 0xb: return 'invalid token';
+    case 0xc: return 'application error';
+    case 0xd: return 'crypto buffer exceeded';
+    case 0xe: return 'key update error';
+    case 0xf: return 'AEAD limit reached';
+    case 0x10: return 'no viable path';
+    default: return fallback;
+  }
+}
+
 /**
  * Convert a native stream-error event into an {@link Http3Error}.
  * @internal
@@ -47,11 +71,78 @@ export function toStreamError(event: NativeEvent, fallback = 'stream error'): Ht
  * @internal
  */
 export function toSessionError(event: NativeEvent, fallback = 'session error'): Http3Error {
-  const message = event.meta?.errorReason ?? fallback;
+  const message = event.meta?.errorReason
+    || quicErrorMessage(event.meta?.errorCode, fallback);
   if (event.meta?.errorCategory === 'runtime') {
     return new Http3Error(message, runtimeCodeForEvent(event), runtimeOptionsFromEvent(event));
   }
   return new Http3Error(message, ERR_HTTP3_SESSION_ERROR, {
     quicCode: event.meta?.errorCode,
   });
+}
+
+/**
+ * Parse the structured prefix that the Rust side stamps onto napi::Error
+ * messages (audit finding #30). Format:
+ *
+ *     [h3:<category>|key=value|key=value|…] <human message>
+ *
+ * Returns `null` when the input is not a tagged napi error so callers
+ * can fall through to default Error handling.
+ *
+ * @internal
+ */
+export function fromNapiError(value: unknown): Http3Error | null {
+  if (!(value instanceof Error)) return null;
+  const match = /^\[h3:([^\]|]+)((?:\|[^\]]*)?)\]\s*(.*)$/s.exec(value.message);
+  if (!match) return null;
+  const category = match[1];
+  const meta: Partial<Record<string, string>> = {};
+  if (match[2]) {
+    for (const part of match[2].split('|').filter(Boolean)) {
+      const eq = part.indexOf('=');
+      if (eq > 0) {
+        meta[part.slice(0, eq)] = part.slice(eq + 1);
+      }
+    }
+  }
+  const message = match[3];
+
+  const parseInt = (v: string | undefined): number | undefined =>
+    v === undefined ? undefined : Number.parseInt(v, 10);
+
+  switch (category) {
+    case 'fast-path':
+      return new Http3Error(message, ERR_HTTP3_FAST_PATH_UNAVAILABLE, {
+        driver: meta.driver as RuntimeDriver | undefined,
+        syscall: meta.syscall,
+        errno: parseInt(meta.errno),
+        reasonCode: 'fast-path-unavailable',
+      });
+    case 'runtime-io':
+      return new Http3Error(message, ERR_HTTP3_RUNTIME_UNSUPPORTED, {
+        driver: meta.driver as RuntimeDriver | undefined,
+        syscall: meta.syscall,
+        errno: parseInt(meta.errno),
+        reasonCode: meta.reason,
+      });
+    case 'invalid-state':
+    case 'config':
+    case 'not-found':
+      return new Http3Error(message, ERR_HTTP3_INVALID_STATE);
+    case 'quic':
+      return new Http3Error(message, ERR_HTTP3_SESSION_ERROR, {
+        quicCode: parseInt(meta.h3code),
+      });
+    case 'h3':
+      return new Http3Error(message, ERR_HTTP3_STREAM_ERROR, {
+        h3Code: parseInt(meta.h3code),
+      });
+    case 'io':
+      return new Http3Error(message, ERR_HTTP3_RUNTIME_UNSUPPORTED, {
+        errno: parseInt(meta.errno),
+      });
+    default:
+      return null;
+  }
 }

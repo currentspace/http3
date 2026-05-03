@@ -10,6 +10,7 @@ import { createQuicServer, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
 import { echoStream } from '../support/echo-stream.js';
+import { withTimeoutError } from '../support/async-race.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -135,10 +136,7 @@ describe('QUIC race condition verification', () => {
     );
 
     // Wait for server to confirm all FINs received
-    await Promise.race([
-      serverReceivedAll,
-      new Promise<void>((_, reject) => { setTimeout(() => reject(new Error('server FIN timeout')), 5000); }),
-    ]);
+    await withTimeoutError(serverReceivedAll, 5000, new Error('server FIN timeout'));
 
     assert.strictEqual(clientFinCount, 50, `client received ${clientFinCount}/50 FINs`);
     assert.strictEqual(serverFinCount, 50, `server received ${serverFinCount}/50 FINs`);

@@ -1,6 +1,8 @@
 //! Min-heap for QUIC connection timeout deadlines, supporting lazy removal
 //! and efficient next-expiry queries.
 
+#![deny(unsafe_code)]
+
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::time::Instant;

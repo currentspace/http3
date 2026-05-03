@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { Http2Session } from 'node:http2';
-import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
+import type { NativeEvent, ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
 import type { RuntimeInfo } from './runtime.js';
 
 /** QUIC transport tuning parameters shared by server and client. */
@@ -41,15 +41,42 @@ export interface SessionMetrics {
   rttMs: number;
   /** Current congestion window in bytes. */
   cwnd: number;
+  /** Current outbound DATAGRAM retry queue depth. */
+  datagramQueueDepth: number;
+}
+
+export type PingCallback = (err: Error | null, duration: number) => void;
+
+/** Details supplied with H3/raw QUIC session close events. */
+export interface SessionCloseInfo {
+  errorCode: number;
+  reason: string;
+}
+
+/** Details supplied with H3 GOAWAY events. */
+export interface GoawayInfo {
+  lastStreamId: number;
+}
+
+export function defaultSessionCloseInfo(): SessionCloseInfo {
+  return { errorCode: 0, reason: '' };
+}
+
+/** @internal */
+export function sessionCloseInfoFromEvent(event: NativeEvent): SessionCloseInfo {
+  return {
+    errorCode: event.meta?.errorCode ?? 0,
+    reason: event.meta?.errorReason ?? '',
+  };
 }
 
 /**
  * Typed event declarations for {@link Http3Session}.
  */
 export interface Http3Session {
-  on(event: 'close', listener: () => void): this;
+  on(event: 'close', listener: (info: SessionCloseInfo) => void): this;
   on(event: 'error', listener: (err: Error) => void): this;
-  on(event: 'goaway', listener: () => void): this;
+  on(event: 'goaway', listener: (info: GoawayInfo) => void): this;
   on(event: 'metrics', listener: (metrics: SessionMetrics) => void): this;
   on(event: 'keylog', listener: (line: Buffer) => void): this;
   on(event: 'datagram', listener: (data: Buffer) => void): this;
@@ -84,7 +111,13 @@ export class Http3Session extends EventEmitter {
   /** @internal */
   _keylogUnsubscribe: (() => void) | null = null;
   /** @internal */
+  _pendingPingCallbacks: PingCallback[] = [];
+  /** @internal */
   _runtimeInfo: RuntimeInfo | null = null;
+  /** @internal */
+  _closeEmitted = false;
+  /** @internal */
+  _closeInfo: SessionCloseInfo | null = null;
 
   /** Negotiated ALPN protocol (`'h3'` or `'h2'`). */
   get alpnProtocol(): string { return this._alpnProtocol; }
@@ -96,6 +129,8 @@ export class Http3Session extends EventEmitter {
   get handshakeComplete(): boolean { return this._handshakeComplete; }
   /** Runtime mode/driver information for this session, when available. */
   get runtimeInfo(): RuntimeInfo | null { return this._runtimeInfo; }
+  /** Whether the session has reached a terminal close state. */
+  get closed(): boolean { return this._closeEmitted; }
 
   /** @internal */
   _startMetricsEmitter(
@@ -149,8 +184,34 @@ export class Http3Session extends EventEmitter {
   }
 
   /** Send a PING frame and return the last known RTT in milliseconds. */
-  ping(): number {
-    return this._lastMetrics?.rttMs ?? 0;
+  ping(cb?: PingCallback): number {
+    const snapshot = this._lastMetrics?.rttMs ?? 0;
+    if (cb) process.nextTick(cb, null, snapshot);
+    return snapshot;
+  }
+
+  /** @internal */
+  _onPingAck(durationMs: number): void {
+    const cb = this._pendingPingCallbacks.shift();
+    if (cb) {
+      cb(null, durationMs);
+    }
+  }
+
+  /** @internal */
+  _rejectPendingPings(err: Error): void {
+    const callbacks = this._pendingPingCallbacks.splice(0);
+    for (const cb of callbacks) {
+      cb(err, 0);
+    }
+  }
+
+  /** @internal */
+  _emitClose(info: SessionCloseInfo = defaultSessionCloseInfo()): void {
+    this._closeInfo = info;
+    if (this._closeEmitted) return;
+    this._closeEmitted = true;
+    this.emit('close', info);
   }
 
   /** Return the peer's advertised QUIC transport settings, or `null`. */
@@ -167,14 +228,16 @@ export class Http3Session extends EventEmitter {
   async close(_code?: number): Promise<void> {
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
-    this.emit('close');
+    this._rejectPendingPings(new Error('session closed'));
+    this._emitClose();
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await
   async destroy(_err?: Error): Promise<void> {
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
-    this.emit('close');
+    this._rejectPendingPings(_err ?? new Error('session destroyed'));
+    this._emitClose();
   }
 }
 
@@ -202,26 +265,11 @@ export class Http3ServerSession extends Http3Session {
    * Gracefully close the session. Sends CONNECTION_CLOSE frame and waits
    * for the QUIC draining period to complete before resolving.
    */
-  async close(code?: number): Promise<void> {
-    if (this._closing) return;
+  async close(code?: number, reason = ''): Promise<void> {
+    if (this._closing || this._closeEmitted) return;
     this._closing = true;
 
-    if (this._h2Session) {
-      if (code && code !== 0) {
-        try {
-          this._h2Session.goaway(code);
-        } catch {
-          // Ignore GOAWAY errors while shutting down.
-        }
-      }
-      this._h2Session.close();
-    } else if (this._eventLoop) {
-      this._eventLoop.closeSession(this._connHandle, code ?? 0, '');
-    }
-
-    // Wait for the native SESSION_CLOSE event (emitted by server._onSessionClose
-    // when quiche finishes draining). Times out after 5s to prevent hanging.
-    await new Promise<void>((resolve) => {
+    const closeObserved = new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
         this.removeListener('close', onClose);
         resolve();
@@ -234,8 +282,26 @@ export class Http3ServerSession extends Http3Session {
       };
       this.once('close', onClose);
     });
+
+    if (this._h2Session) {
+      if (code && code !== 0) {
+        try {
+          this._h2Session.goaway(code);
+        } catch {
+          // Ignore GOAWAY errors while shutting down.
+        }
+      }
+      this._h2Session.close();
+    } else if (this._eventLoop) {
+      this._eventLoop.closeSession(this._connHandle, code ?? 0, reason);
+    }
+
+    // Wait for the native SESSION_CLOSE event (emitted by server._onSessionClose
+    // when quiche finishes draining). Times out after 5s to prevent hanging.
+    await closeObserved;
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
+    this._rejectPendingPings(new Error('session closed'));
   }
 
   /**
@@ -247,13 +313,15 @@ export class Http3ServerSession extends Http3Session {
       this._h2Session.destroy(err);
       this._stopMetricsEmitter();
       this._stopKeylogEmitter();
-      this.emit('close');
+      this._rejectPendingPings(err ?? new Error('session destroyed'));
+      this._emitClose();
       return;
     }
     if (this._eventLoop) this._eventLoop.closeSession(this._connHandle, 0, err?.message ?? '');
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
-    this.emit('close');
+    this._rejectPendingPings(err ?? new Error('session destroyed'));
+    this._emitClose({ errorCode: 0, reason: err?.message ?? '' });
   }
 
   override getMetrics(): SessionMetrics | null {
@@ -269,6 +337,7 @@ export class Http3ServerSession extends Http3Session {
         handshakeTimeMs: metrics.handshakeTimeMs,
         rttMs: metrics.rttMs,
         cwnd: metrics.cwnd,
+        datagramQueueDepth: metrics.datagramQueueDepth,
       };
     } catch {
       // Keep the last known snapshot on transient native-read failures.
@@ -276,23 +345,33 @@ export class Http3ServerSession extends Http3Session {
     return this._lastMetrics;
   }
 
-  override ping(): number {
+  override ping(cb?: PingCallback): number {
     if (this._h2Session) {
-      this._h2Session.ping((_err: Error | null, duration: number) => {
+      this._h2Session.ping((err: Error | null, duration: number) => {
         if (this._lastMetrics) {
           this._lastMetrics.rttMs = duration;
         }
+        cb?.(err, duration);
       });
       return this._lastMetrics?.rttMs ?? 0;
     }
-    if (!this._eventLoop) return 0;
-    try {
-      this._eventLoop.pingSession(this._connHandle);
-    } catch {
-      return this._lastMetrics?.rttMs ?? 0;
+    if (!this._eventLoop) return super.ping(cb);
+    const snapshot = this.getMetrics()?.rttMs ?? 0;
+    if (cb) {
+      this._pendingPingCallbacks.push(cb);
     }
-    const metrics = this.getMetrics();
-    return metrics?.rttMs ?? 0;
+    try {
+      if (!this._eventLoop.pingSession(this._connHandle) && cb) {
+        const pending = this._pendingPingCallbacks.pop();
+        process.nextTick(pending ?? cb, new Error('ping was not queued'), 0);
+      }
+    } catch {
+      if (cb) {
+        const pending = this._pendingPingCallbacks.pop();
+        process.nextTick(pending ?? cb, new Error('ping failed'), 0);
+      }
+    }
+    return snapshot;
   }
 
   override getRemoteSettings(): Record<string, number | boolean> | null {
@@ -350,13 +429,13 @@ export class Http2ServerSessionAdapter extends Http3ServerSession {
       : '';
 
     h2Session.once('close', () => {
-      this.emit('close');
+      this._emitClose();
     });
     h2Session.on('error', (err: Error) => {
       this.emit('error', err);
     });
-    h2Session.on('goaway', () => {
-      this.emit('goaway');
+    h2Session.on('goaway', (_errorCode: number, lastStreamId: number) => {
+      this.emit('goaway', { lastStreamId });
     });
     this._startMetricsEmitter(1000, () => this.getMetrics());
   }
@@ -372,6 +451,7 @@ export class Http2ServerSessionAdapter extends Http3ServerSession {
       handshakeTimeMs: 0,
       rttMs: 0,
       cwnd: 0,
+      datagramQueueDepth: 0,
     };
     return this._lastMetrics;
   }
@@ -390,14 +470,15 @@ export class Http3ClientSessionBase extends Http3Session {
   _qlogPath: string | null = null;
 
   /** Gracefully close the client session and release resources. */
-  async close(_code?: number): Promise<void> {
+  async close(code?: number, reason = 'client close'): Promise<void> {
     if (this._eventLoop) {
-      await this._eventLoop.close();
+      await this._eventLoop.close(code ?? 0, reason);
       this._eventLoop = null;
     }
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
-    this.emit('close');
+    this._rejectPendingPings(new Error('session closed'));
+    this._emitClose({ errorCode: code ?? 0, reason });
   }
 
   /** Immediately destroy the session without waiting for draining. */
@@ -408,7 +489,8 @@ export class Http3ClientSessionBase extends Http3Session {
     }
     this._stopMetricsEmitter();
     this._stopKeylogEmitter();
-    this.emit('close');
+    this._rejectPendingPings(_err ?? new Error('session destroyed'));
+    this._emitClose({ errorCode: 0, reason: _err?.message ?? '' });
   }
 
   override getMetrics(): SessionMetrics | null {
@@ -423,6 +505,7 @@ export class Http3ClientSessionBase extends Http3Session {
         handshakeTimeMs: metrics.handshakeTimeMs,
         rttMs: metrics.rttMs,
         cwnd: metrics.cwnd,
+        datagramQueueDepth: metrics.datagramQueueDepth,
       };
     } catch {
       // Keep the previous snapshot on transient native-read failures.
@@ -430,15 +513,24 @@ export class Http3ClientSessionBase extends Http3Session {
     return this._lastMetrics;
   }
 
-  override ping(): number {
-    if (!this._eventLoop) return 0;
-    try {
-      this._eventLoop.ping();
-    } catch {
-      return this._lastMetrics?.rttMs ?? 0;
+  override ping(cb?: PingCallback): number {
+    if (!this._eventLoop) return super.ping(cb);
+    const snapshot = this.getMetrics()?.rttMs ?? 0;
+    if (cb) {
+      this._pendingPingCallbacks.push(cb);
     }
-    const metrics = this.getMetrics();
-    return metrics?.rttMs ?? 0;
+    try {
+      if (!this._eventLoop.ping() && cb) {
+        const pending = this._pendingPingCallbacks.pop();
+        process.nextTick(pending ?? cb, new Error('ping was not queued'), 0);
+      }
+    } catch {
+      if (cb) {
+        const pending = this._pendingPingCallbacks.pop();
+        process.nextTick(pending ?? cb, new Error('ping failed'), 0);
+      }
+    }
+    return snapshot;
   }
 
   override getRemoteSettings(): Record<string, number | boolean> | null {

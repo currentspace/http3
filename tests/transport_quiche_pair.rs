@@ -985,11 +985,7 @@ fn test_raw_quic_multi_stream_interleave() {
     let mut buf = vec![0u8; 1024];
     for (sid, expected) in stream_ids.iter().zip(payloads.iter()) {
         let (len, fin) = pair.server_mut().stream_recv(*sid, &mut buf).unwrap();
-        assert_eq!(
-            &buf[..len],
-            *expected,
-            "payload mismatch on stream {sid}"
-        );
+        assert_eq!(&buf[..len], *expected, "payload mismatch on stream {sid}");
         assert!(fin, "stream {sid} should be finished");
     }
 }
@@ -1038,7 +1034,11 @@ fn test_raw_quic_datagram() {
     // Server receives the datagram.
     let mut buf = vec![0u8; 1024];
     let len = pair.server_mut().dgram_recv(&mut buf).unwrap();
-    assert_eq!(&buf[..len], payload, "server should receive client datagram");
+    assert_eq!(
+        &buf[..len],
+        payload,
+        "server should receive client datagram"
+    );
 
     // Server sends a datagram back.
     let reply = b"datagram-pong";

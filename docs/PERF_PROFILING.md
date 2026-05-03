@@ -94,15 +94,16 @@ Notes:
 ### macOS profiler wrappers
 
 ```bash
-npm run perf:macos:quic -- --sample --profile throughput --results-dir perf-results --label quic-macos
+npm run perf:macos:quic -- --profile throughput --results-dir perf-results --label quic-macos
 npm run perf:macos:h3 -- --xctrace --profile stress --results-dir perf-results --label h3-macos
 ```
 
 Notes:
 
-- Prefer `sample` for quick local captures.
-- Prefer `xctrace` / Instruments Time Profiler for deeper captures you plan to
-  inspect in Instruments.
+- The macOS wrapper defaults to `xctrace` / Instruments Time Profiler when no
+  profiler flag is supplied.
+- Use `--sample` only when you explicitly want a quick low-overhead local
+  capture.
 - Use longer workloads than `smoke` when you need the profiler to capture enough
   activity to be useful.
 
@@ -308,6 +309,22 @@ Do not promote new benchmark gates into CI until these conditions hold:
   count grows.
 - macOS comparisons are judged by topology and backlog behavior, not by trying
   to imitate `io_uring` internals.
+
+## Benchmark-gated backlog decisions
+
+The hardening backlog has two performance-only ideas that should stay deferred
+until the benchmark artifacts above justify the added complexity:
+
+- Native outbound buffer pinning: do not implement NAPI `Reference<Buffer>`
+  pinning unless the comparison matrix in
+  [`NATIVE_WRITE_LEASE_RESEARCH.md`](./NATIVE_WRITE_LEASE_RESEARCH.md) shows a
+  repeatable bottleneck after the current owned-send and chunk-pool paths.
+  Required evidence is at least three comparable samples showing meaningful
+  throughput or allocation wins without worse p95/p99 latency.
+- JS-side QPACK pre-encode: do not implement a JavaScript header pre-encoding
+  path unless header-heavy workloads show worker-thread header conversion or
+  allocation as the limiting factor. Use small-request, gRPC-style, and
+  high-cardinality-header profiles before promoting this from backlog to design.
 
 Investigate before accepting a new baseline when any like-for-like group shows:
 

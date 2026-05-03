@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -124,14 +124,15 @@ struct H3Pair {
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn setup_h3_pair_with_flow_control(
-    initial_max_stream_data: u64,
-    initial_max_data: u64,
-) -> H3Pair {
+fn setup_h3_pair_with_flow_control(initial_max_stream_data: u64, initial_max_data: u64) -> H3Pair {
     let (cert_pem, key_pem) = generate_test_certs();
     let (client_addr, server_addr) = next_pair_addrs();
-    let (server_quiche, client_quiche) =
-        build_h3_quiche_configs_with_flow_control(&cert_pem, &key_pem, initial_max_stream_data, initial_max_data);
+    let (server_quiche, client_quiche) = build_h3_quiche_configs_with_flow_control(
+        &cert_pem,
+        &key_pem,
+        initial_max_stream_data,
+        initial_max_data,
+    );
 
     let http3_config = Http3Config {
         qlog_dir: None,
@@ -217,6 +218,17 @@ fn recv_event_matching(
             Err(_) => return None,
         }
     }
+}
+
+fn append_event_data(event: &JsH3Event, out: &mut Vec<u8>) -> bool {
+    let Some(data) = event.data.as_ref() else {
+        return false;
+    };
+    if data.is_empty() {
+        return false;
+    }
+    out.extend_from_slice(data);
+    true
 }
 
 /// Wait for the H3 handshake to complete.  Returns (server_conn_handle,
@@ -306,13 +318,11 @@ fn test_h3_large_response_with_small_window() {
             Ok(batch) => {
                 for event in batch.events {
                     if event.stream_id == stream_id as i64 {
+                        append_event_data(&event, &mut client_data);
                         if event.event_type == EVENT_HEADERS {
                             got_headers = true;
                         }
                         if event.event_type == EVENT_DATA {
-                            if let Some(data) = event.data.as_ref() {
-                                client_data.extend_from_slice(data);
-                            }
                             if event.fin == Some(true) {
                                 got_fin = true;
                             }
@@ -370,7 +380,10 @@ fn test_h3_large_post_with_small_window() {
     // Client sends the 32KB POST body
     let body_len = 32 * 1024;
     let post_body = vec![0xEF_u8; body_len];
-    assert!(pair.client.stream_send(stream_id, Chunk::unpooled(post_body.clone()), true));
+    assert!(
+        pair.client
+            .stream_send(stream_id, Chunk::unpooled(post_body.clone()), true)
+    );
 
     // Collect all server events for this stream: HEADERS, DATA, FINISHED
     let mut got_headers = false;
@@ -384,13 +397,11 @@ fn test_h3_large_post_with_small_window() {
             Ok(batch) => {
                 for event in batch.events {
                     if event.stream_id == stream_id as i64 {
+                        append_event_data(&event, &mut server_data);
                         if event.event_type == EVENT_HEADERS {
                             got_headers = true;
                         }
                         if event.event_type == EVENT_DATA {
-                            if let Some(data) = event.data.as_ref() {
-                                server_data.extend_from_slice(data);
-                            }
                             if event.fin == Some(true) {
                                 got_fin = true;
                             }
@@ -441,4 +452,53 @@ fn test_h3_large_post_with_small_window() {
     let resp_hdrs = client_headers.headers.as_ref().unwrap();
     let status = resp_hdrs.iter().find(|h| h.name == ":status").unwrap();
     assert_eq!(status.value, "200");
+}
+
+#[test]
+fn test_h3_request_stream_blocked_emits_drain_for_retry() {
+    let pair = setup_h3_pair_with_flow_control(4_096, 600);
+    let (_server_conn, _client_conn) = wait_for_h3_handshake(&pair);
+    let mut next_request_stream_id = 0;
+    let mut blocked_error = None;
+    let pad = "x".repeat(400);
+
+    for i in 0..128 {
+        let headers = vec![
+            (":method".into(), "GET".into()),
+            (":scheme".into(), "https".into()),
+            (":authority".into(), "localhost".into()),
+            (":path".into(), format!("/request-blocked-{i}")),
+            ("x-pad".into(), pad.clone()),
+        ];
+        match pair.client.send_request(headers, true) {
+            Ok(stream_id) => {
+                next_request_stream_id = stream_id + 4;
+            }
+            Err(error) if error.to_string().contains("StreamBlocked") => {
+                blocked_error = Some(error);
+                break;
+            }
+            Err(error) => panic!("unexpected send_request error: {error}"),
+        }
+    }
+
+    let Some(blocked) = blocked_error else {
+        // This worker-level integration path is allowed to drain fast enough
+        // that request creation never observes StreamBlocked.  The
+        // deterministic H3Connection unit test covers the blocked-stream
+        // bookkeeping without racing the peer worker.
+        return;
+    };
+    assert!(
+        blocked.to_string().contains("StreamBlocked"),
+        "unexpected send_request error: {blocked}"
+    );
+
+    let drain = recv_event_matching(&pair.client_rx, RECV_TIMEOUT, |event| {
+        event.event_type == EVENT_DRAIN && event.stream_id == next_request_stream_id as i64
+    });
+    assert!(
+        drain.is_some(),
+        "request StreamBlocked should route the pending request stream into drain events"
+    );
 }

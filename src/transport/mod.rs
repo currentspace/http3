@@ -26,16 +26,78 @@ pub struct RxDatagram {
 
 /// A transmit request. Ownership transfers to the driver.
 pub struct TxDatagram {
-    pub data: Vec<u8>,
+    data: Vec<u8>,
+    payload_len: usize,
     pub to: SocketAddr,
+    /// Quiche's negotiated max_send_udp_payload_size for this connection
+    /// at the moment the packet was emitted, used by the GSO grouper to
+    /// cap (or extend) coalescing per real PMTU instead of the hardcoded
+    /// `GSO_MAX_SEGMENT` Ethernet default. Audit finding #19. `None` =
+    /// caller didn't supply a hint, fall back to the Ethernet cap.
+    pub max_segment_size: Option<u16>,
+}
+
+impl TxDatagram {
+    pub fn new(
+        data: Vec<u8>,
+        payload_len: usize,
+        to: SocketAddr,
+        max_segment_size: Option<u16>,
+    ) -> Self {
+        assert!(
+            payload_len <= data.len(),
+            "payload length must fit in the backing buffer"
+        );
+        Self {
+            data,
+            payload_len,
+            to,
+            max_segment_size,
+        }
+    }
+
+    pub fn from_payload(data: Vec<u8>, to: SocketAddr, max_segment_size: Option<u16>) -> Self {
+        let payload_len = data.len();
+        Self::new(data, payload_len, to, max_segment_size)
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.data[..self.payload_len]
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    pub fn into_recycle_buffer(self) -> Vec<u8> {
+        self.data
+    }
 }
 
 /// A batch of same-size packets to the same peer, coalesced for UDP GSO.
 #[cfg(target_os = "linux")]
 pub(crate) struct GsoBatch {
     pub data: Vec<u8>,
+    pub payload_len: usize,
     pub to: SocketAddr,
     pub segment_size: u16,
+}
+
+#[cfg(target_os = "linux")]
+impl GsoBatch {
+    pub fn payload(&self) -> &[u8] {
+        &self.data[..self.payload_len]
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct GsoBatching {
+    pub batches: Vec<GsoBatch>,
+    pub recycled: Vec<Vec<u8>>,
 }
 
 /// Group consecutive same-(destination, packet-size) packets into GSO batches.
@@ -58,28 +120,50 @@ const GSO_MAX_PAYLOAD: usize = 65535;
 const GSO_MAX_SEGMENT: usize = 1472;
 
 #[cfg(target_os = "linux")]
-pub(crate) fn group_for_gso(packets: Vec<TxDatagram>) -> Vec<GsoBatch> {
+pub(crate) fn group_for_gso(packets: Vec<TxDatagram>) -> GsoBatching {
     let mut batches: Vec<GsoBatch> = Vec::new();
+    let mut recycled: Vec<Vec<u8>> = Vec::new();
     for pkt in packets {
-        let seg_size = pkt.data.len() as u16;
+        let payload_len = pkt.payload_len();
+        let Ok(seg_size) = u16::try_from(payload_len) else {
+            batches.push(GsoBatch {
+                data: pkt.data,
+                payload_len,
+                to: pkt.to,
+                segment_size: 0,
+            });
+            continue;
+        };
+        // Per-packet cap from quiche's negotiated PMTU when supplied;
+        // falls back to the Ethernet default for callers that don't set it.
+        let seg_cap = pkt.max_segment_size.map_or(GSO_MAX_SEGMENT, |s| s as usize);
         if let Some(last) = batches.last_mut() {
             if last.to == pkt.to
                 && last.segment_size == seg_size
-                && (seg_size as usize) <= GSO_MAX_SEGMENT
-                && (last.data.len() / seg_size as usize) < 64
-                && last.data.len() + pkt.data.len() <= GSO_MAX_PAYLOAD
+                && seg_size > 0
+                && (seg_size as usize) <= seg_cap
+                && (last.payload_len / seg_size as usize) < 64
+                && last.payload_len + payload_len <= GSO_MAX_PAYLOAD
             {
-                last.data.extend_from_slice(&pkt.data);
+                let start = last.payload_len;
+                let end = start + payload_len;
+                if last.data.len() < end {
+                    last.data.resize(end, 0);
+                }
+                last.data[start..end].copy_from_slice(pkt.payload());
+                last.payload_len = end;
+                recycled.push(pkt.into_recycle_buffer());
                 continue;
             }
         }
         batches.push(GsoBatch {
             data: pkt.data,
+            payload_len: pkt.payload_len,
             to: pkt.to,
             segment_size: seg_size,
         });
     }
-    batches
+    GsoBatching { batches, recycled }
 }
 
 /// Outcome of a single `Driver::poll()` cycle.
@@ -110,6 +194,15 @@ pub trait Driver: Sized {
     /// Block until: datagrams received, waker fired, or deadline reached.
     /// If deadline is `None`, uses a 100ms default timeout.
     fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome>;
+
+    /// Poll wakeups, write readiness, and timers without admitting more RX
+    /// datagrams into protocol processing.
+    ///
+    /// Used when JS event delivery is behind real time. Readiness-based
+    /// drivers should leave datagrams in the kernel receive buffer. Completion
+    /// based drivers should preserve ownership of completed datagrams for a
+    /// later normal `poll()` rather than dropping them.
+    fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome>;
 
     /// Submit outbound datagrams. Ownership of each `TxDatagram` transfers
     /// to the driver. Packets that cannot be sent immediately are queued.
@@ -183,6 +276,8 @@ pub(crate) mod mock;
 
 #[cfg(target_os = "macos")]
 mod kqueue;
+#[cfg(target_os = "macos")]
+mod macos_msg_x;
 
 #[cfg(all(target_os = "linux", feature = "bench-internals"))]
 pub mod io_uring;
@@ -267,9 +362,7 @@ pub(crate) fn create_platform_driver(
                         | Some(libc::ENOMEM) => {
                             // Auto-fallback to poll driver
                             if let Some(sock) = fallback_socket {
-                                log::warn!(
-                                    "io_uring setup failed ({error}), falling back to poll"
-                                );
+                                log::warn!("io_uring setup failed ({error}), falling back to poll");
                                 reactor_metrics::record_driver_setup_attempt(
                                     RuntimeDriverKind::Poll,
                                 );
@@ -345,6 +438,13 @@ impl Driver for PlatformDriver {
         }
     }
 
+    fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+        match self {
+            Self::IoUring(driver) => driver.poll_without_rx(deadline),
+            Self::Poll(driver) => driver.poll_without_rx(deadline),
+        }
+    }
+
     fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
         match self {
             Self::IoUring(driver) => driver.submit_sends(packets),
@@ -411,21 +511,23 @@ mod tests {
     }
 
     fn pkt(size: usize, port: u16) -> TxDatagram {
-        TxDatagram {
-            data: vec![0xAB; size],
-            to: addr(port),
-        }
+        TxDatagram::from_payload(vec![0xAB; size], addr(port), None)
+    }
+
+    fn pkt_with_cap(size: usize, port: u16, cap: u16) -> TxDatagram {
+        TxDatagram::from_payload(vec![0xAB; size], addr(port), Some(cap))
     }
 
     #[test]
     fn test_gso_empty_input() {
-        let batches = group_for_gso(vec![]);
-        assert!(batches.is_empty());
+        let batching = group_for_gso(vec![]);
+        assert!(batching.batches.is_empty());
+        assert!(batching.recycled.is_empty());
     }
 
     #[test]
     fn test_gso_single_packet() {
-        let batches = group_for_gso(vec![pkt(1200, 4433)]);
+        let batches = group_for_gso(vec![pkt(1200, 4433)]).batches;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].data.len(), 1200);
         assert_eq!(batches[0].segment_size, 1200);
@@ -433,9 +535,46 @@ mod tests {
     }
 
     #[test]
+    fn test_tx_datagram_payload_len_preserves_backing_buffer() {
+        let pkt = TxDatagram::new(vec![1, 2, 3, 9, 9], 3, addr(4433), None);
+
+        assert_eq!(pkt.payload(), &[1, 2, 3]);
+        assert_eq!(pkt.payload_len(), 3);
+        assert_eq!(pkt.into_recycle_buffer().len(), 5);
+    }
+
+    #[test]
+    fn test_gso_uses_payload_len_and_recycles_backing_buffer() {
+        let first = TxDatagram::new(vec![1, 2, 3, 0, 0, 0, 0, 0], 3, addr(4433), None);
+        let second = TxDatagram::new(vec![4, 5, 6, 9, 9, 9, 9, 9], 3, addr(4433), None);
+
+        let batching = group_for_gso(vec![first, second]);
+
+        assert_eq!(batching.batches.len(), 1);
+        assert_eq!(batching.batches[0].payload(), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(batching.batches[0].data.len(), 8);
+        assert_eq!(batching.recycled.len(), 1);
+        assert_eq!(batching.recycled[0].len(), 8);
+    }
+
+    #[test]
+    fn test_gso_zero_payload_does_not_coalesce() {
+        let packets = vec![
+            TxDatagram::from_payload(Vec::new(), addr(4433), None),
+            TxDatagram::from_payload(Vec::new(), addr(4433), None),
+        ];
+
+        let batches = group_for_gso(packets).batches;
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].segment_size, 0);
+        assert_eq!(batches[1].segment_size, 0);
+    }
+
+    #[test]
     fn test_gso_same_dest_same_size() {
         let packets = vec![pkt(1200, 4433), pkt(1200, 4433), pkt(1200, 4433)];
-        let batches = group_for_gso(packets);
+        let batches = group_for_gso(packets).batches;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].data.len(), 1200 * 3);
         assert_eq!(batches[0].segment_size, 1200);
@@ -445,7 +584,7 @@ mod tests {
     #[test]
     fn test_gso_different_dest_splits() {
         let packets = vec![pkt(1200, 4433), pkt(1200, 4434), pkt(1200, 4433)];
-        let batches = group_for_gso(packets);
+        let batches = group_for_gso(packets).batches;
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].to, addr(4433));
         assert_eq!(batches[1].to, addr(4434));
@@ -455,7 +594,7 @@ mod tests {
     #[test]
     fn test_gso_different_size_splits() {
         let packets = vec![pkt(1200, 4433), pkt(800, 4433), pkt(1200, 4433)];
-        let batches = group_for_gso(packets);
+        let batches = group_for_gso(packets).batches;
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].segment_size, 1200);
         assert_eq!(batches[1].segment_size, 800);
@@ -469,7 +608,7 @@ mod tests {
         // The 65th packet must start a new batch.
         packets.push(pkt(100, 4433));
 
-        let batches = group_for_gso(packets);
+        let batches = group_for_gso(packets).batches;
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].data.len(), 100 * 64);
         assert_eq!(batches[0].segment_size, 100);
@@ -488,12 +627,11 @@ mod tests {
         let max_in_batch = GSO_MAX_PAYLOAD / seg; // 59
         assert_eq!(max_in_batch, 59);
 
-        let mut packets: Vec<TxDatagram> =
-            (0..max_in_batch).map(|_| pkt(seg, 4433)).collect();
+        let mut packets: Vec<TxDatagram> = (0..max_in_batch).map(|_| pkt(seg, 4433)).collect();
         // One more packet should start a new batch.
         packets.push(pkt(seg, 4433));
 
-        let batches = group_for_gso(packets);
+        let batches = group_for_gso(packets).batches;
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].data.len(), seg * max_in_batch);
         assert_eq!(batches[1].data.len(), seg);
@@ -504,9 +642,40 @@ mod tests {
         // Segments larger than GSO_MAX_SEGMENT (1472) must not be coalesced.
         let big = GSO_MAX_SEGMENT + 1; // 1473
         let packets = vec![pkt(big, 4433), pkt(big, 4433)];
-        let batches = group_for_gso(packets);
+        let batches = group_for_gso(packets).batches;
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].data.len(), big);
         assert_eq!(batches[1].data.len(), big);
+    }
+
+    /// Audit finding #19: with a per-packet PMTU hint above GSO_MAX_SEGMENT,
+    /// jumbo-sized packets should now coalesce. Before the fix, the
+    /// hardcoded 1472 cap would refuse coalescing on jumbo paths.
+    #[test]
+    fn test_gso_jumbo_coalesces_when_pmtu_supplied() {
+        let jumbo = 4000usize; // > GSO_MAX_SEGMENT (1472)
+        let packets = vec![
+            pkt_with_cap(jumbo, 4433, 4000),
+            pkt_with_cap(jumbo, 4433, 4000),
+        ];
+        let batches = group_for_gso(packets).batches;
+        assert_eq!(
+            batches.len(),
+            1,
+            "jumbo packets must coalesce when PMTU permits"
+        );
+        assert_eq!(batches[0].data.len(), jumbo * 2);
+        assert_eq!(batches[0].segment_size as usize, jumbo);
+    }
+
+    /// And a per-packet hint *below* the packet size still rejects.
+    #[test]
+    fn test_gso_packet_above_pmtu_hint_does_not_coalesce() {
+        let packets = vec![
+            pkt_with_cap(1500, 4433, 1200),
+            pkt_with_cap(1500, 4433, 1200),
+        ];
+        let batches = group_for_gso(packets).batches;
+        assert_eq!(batches.len(), 2);
     }
 }

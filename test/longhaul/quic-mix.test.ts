@@ -10,6 +10,9 @@ import type { QuicServer, QuicServerSession, QuicClientSession } from '../../lib
 import type { QuicStream } from '../../lib/quic-stream.js';
 import { generateTestCerts } from '../support/generate-certs.js';
 import { LatencyTracker, pickWeighted } from '../support/scenario-helpers.js';
+import {
+  assertMemoryDriftWithinLimit,
+} from '../support/native-test-helpers.js';
 
 function formatMB(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1);
@@ -105,13 +108,17 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       }).catch(() => {});
     });
 
+    try {
+
     const tracker = new LatencyTracker();
     const DURATION_S = 300;
     const CHECKPOINT_INTERVAL_S = 30;
+    const MEMORY_BASELINE_AFTER_S = 120;
     let totalOps = 0;
     let errors = 0;
     const start = Date.now();
     let lastCheckpoint = start;
+    let baselineMem: ReturnType<typeof process.memoryUsage> | null = null;
 
     const scenarios: Array<[string, number]> = [
       ['echo-256', 40],
@@ -131,11 +138,12 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
           throw new Error(`echo mismatch: expected ${size}, got ${echoed.length}`);
         }
       } catch (err: unknown) {
-        // Add diagnostic info
+        // Add diagnostic info; preserve the original via `cause`.
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(
           `${msg} (streamId=${stream.id} destroyed=${stream.destroyed} ` +
           `readableEnded=${stream.readableEnded} writableFinished=${stream.writableFinished})`,
+          { cause: err },
         );
       }
     }
@@ -228,6 +236,9 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
         if (typeof global.gc === 'function') global.gc();
         const mem = process.memoryUsage();
         const elapsedS = (now - start) / 1000;
+        if (elapsedS >= MEMORY_BASELINE_AFTER_S) {
+          baselineMem ??= mem;
+        }
         const stats = tracker.stats();
         console.log(
           `  [quic-mix] ${elapsedS.toFixed(0)}s: ` +
@@ -266,8 +277,17 @@ describe('QUIC mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL 
       finalMem.heapUsed < 100 * 1024 * 1024,
       `heap too large: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
     );
+    assertMemoryDriftWithinLimit(
+      'quic-mix post-warmup',
+      baselineMem ?? finalMem,
+      finalMem,
+    );
 
     await client.close();
     await server.close();
+    } finally {
+      try { await client.close(); } catch { /* ignore */ }
+      try { await server.close(); } catch { /* ignore */ }
+    }
   });
 });

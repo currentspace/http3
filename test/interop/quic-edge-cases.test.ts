@@ -11,6 +11,7 @@ import { ERR_HTTP3_ENDPOINT_RESOLUTION, ERR_HTTP3_TLS_CONFIG_ERROR } from '../..
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
 import { echoStream } from '../support/echo-stream.js';
+import { withTimeoutValue } from '../support/async-race.js';
 
 let certs: { key: Buffer; cert: Buffer };
 
@@ -401,13 +402,14 @@ describe('QUIC edge cases', () => {
       maxIdleTimeoutMs: 2000,
     });
 
-    const result = await Promise.race([
+    const result = await withTimeoutValue(
       session.ready().then(
         () => 'ready' as const,
         (err: Error) => ({ error: err }),
       ),
-      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 5000)),
-    ]);
+      5000,
+      'timeout' as const,
+    );
 
     if (result === 'timeout') {
       // Timed out waiting — that's acceptable, connection never established

@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use std::net::SocketAddr;
 
 use crate::config::TransportRuntimeMode;

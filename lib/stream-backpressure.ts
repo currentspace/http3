@@ -21,14 +21,94 @@
 
 import type { Duplex } from 'node:stream';
 
+/**
+ * Drain callback. Invoked with no argument on a real drain (resume the
+ * pending write) or with an Error on stream close (reject the pending
+ * write callback so callers don't hang). See {@link rejectDrainCallbacks}.
+ */
+export type DrainCallback = (err?: Error) => void;
+
 export interface BackpressureState {
   pendingReads: Array<Buffer | null>;
   readBackpressure: boolean;
-  drainCallbacks: Array<() => void>;
+  drainCallbacks: Array<DrainCallback>;
+}
+
+export type NativeWriteCallback = (error?: Error | null) => void;
+
+export interface NativeWriteWindow {
+  highWaterMark: number;
+  admittedBytes: number;
+  releaseScheduled: boolean;
+  delayedCallbacks: Array<NativeWriteCallback>;
 }
 
 export function createBackpressureState(): BackpressureState | null {
   return null;
+}
+
+/**
+ * Local Node -> native admission window for write callbacks.
+ *
+ * This is intentionally not tied to peer ACKs or QUIC delivery. It keeps
+ * Writable's normal highWaterMark meaningful by allowing at most one local
+ * window of bytes to complete synchronously per stream per event-loop turn.
+ */
+export function createNativeWriteWindow(highWaterMark: number): NativeWriteWindow {
+  const hwm = Number.isFinite(highWaterMark) && highWaterMark > 0
+    ? Math.floor(highWaterMark)
+    : 64 * 1024;
+  return {
+    highWaterMark: hwm,
+    admittedBytes: 0,
+    releaseScheduled: false,
+    delayedCallbacks: [],
+  };
+}
+
+function scheduleNativeWindowRelease(state: NativeWriteWindow): void {
+  if (state.releaseScheduled) return;
+  state.releaseScheduled = true;
+  setImmediate(() => {
+    state.releaseScheduled = false;
+    state.admittedBytes = 0;
+    const callbacks = state.delayedCallbacks.splice(0);
+    for (const cb of callbacks) {
+      cb();
+    }
+  });
+}
+
+/**
+ * Complete a write after native admission while preserving a bounded local
+ * write window. Small bursts up to highWaterMark complete synchronously;
+ * anything beyond that waits for the next event-loop turn, so Node's own
+ * Writable buffering can apply backpressure.
+ */
+export function completeNativeWrite(
+  state: NativeWriteWindow,
+  admittedBytes: number,
+  callback: NativeWriteCallback,
+): void {
+  const size = Math.max(1, admittedBytes);
+  state.admittedBytes += size;
+  scheduleNativeWindowRelease(state);
+
+  if (state.admittedBytes <= state.highWaterMark) {
+    callback();
+    return;
+  }
+
+  state.delayedCallbacks.push(callback);
+}
+
+/** Reject callbacks delayed by the local native-write window. */
+export function rejectNativeWriteWindow(state: NativeWriteWindow, err: Error): void {
+  state.admittedBytes = 0;
+  const callbacks = state.delayedCallbacks.splice(0);
+  for (const cb of callbacks) {
+    cb(err);
+  }
 }
 
 /** Materialize state on first backpressure. */
@@ -78,12 +158,14 @@ export function drainPendingReads(stream: Duplex, state: BackpressureState | nul
   if (state === null) return;
   state.readBackpressure = false;
   while (state.pendingReads.length > 0) {
-    const chunk = state.pendingReads.shift()!;
+    // shift() within the length check always yields an element; cast to the
+    // declared element type rather than a non-null assertion.
+    const chunk = state.pendingReads.shift() as Buffer | null;
     if (!stream.push(chunk)) {
+      // push(null) returns false too, so the EOF case naturally exits here.
       state.readBackpressure = true;
       break;
     }
-    if (chunk === null) break; // EOF
   }
 }
 
@@ -118,4 +200,17 @@ export function flushDrainCallbacks(state: BackpressureState | null): void {
 export function cancelDrainCallbacks(state: BackpressureState | null): void {
   if (state === null) return;
   state.drainCallbacks.length = 0;
+}
+
+/**
+ * Invoke every queued drain callback with an error so the caller's pending
+ * `write(chunk, cb)` callback fires (with that error) instead of hanging.
+ * Used by `stream.close()`. Audit finding #13.
+ */
+export function rejectDrainCallbacks(state: BackpressureState | null, err: Error): void {
+  if (state === null) return;
+  const cbs = state.drainCallbacks.splice(0);
+  for (const cb of cbs) {
+    cb(err);
+  }
 }

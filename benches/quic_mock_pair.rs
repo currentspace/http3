@@ -3,8 +3,8 @@
 #![allow(clippy::unwrap_used)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -33,7 +33,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 // ── Pair helper ─────────────────────────────────────────────────────
@@ -231,9 +234,7 @@ fn quic_mock_echo_throughput(c: &mut Criterion) {
                     let mut pending: std::collections::HashMap<i64, Vec<u8>> =
                         std::collections::HashMap::new();
                     let deadline = std::time::Instant::now() + RECV_TIMEOUT;
-                    while streams_done.len() < count
-                        && std::time::Instant::now() < deadline
-                    {
+                    while streams_done.len() < count && std::time::Instant::now() < deadline {
                         let remaining =
                             deadline.saturating_duration_since(std::time::Instant::now());
                         match pair.server_rx.recv_timeout(remaining) {
@@ -262,9 +263,7 @@ fn quic_mock_echo_throughput(c: &mut Criterion) {
                     // Echo back
                     for i in 0..count {
                         let stream_id = i as u64 * 4;
-                        let data = pending
-                            .remove(&(stream_id as i64))
-                            .unwrap_or_default();
+                        let data = pending.remove(&(stream_id as i64)).unwrap_or_default();
                         pair.server.send_command(QuicServerCommand::StreamSend {
                             conn_handle: server_conn,
                             stream_id,
@@ -276,9 +275,7 @@ fn quic_mock_echo_throughput(c: &mut Criterion) {
                     // Client drains all echoed streams
                     let mut client_done = std::collections::HashSet::new();
                     let deadline = std::time::Instant::now() + RECV_TIMEOUT;
-                    while client_done.len() < count
-                        && std::time::Instant::now() < deadline
-                    {
+                    while client_done.len() < count && std::time::Instant::now() < deadline {
                         let remaining =
                             deadline.saturating_duration_since(std::time::Instant::now());
                         match pair.client_rx.recv_timeout(remaining) {

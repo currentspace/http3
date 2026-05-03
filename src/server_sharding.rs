@@ -7,6 +7,8 @@
 //! worker index in the upper bits so commands can be routed to the
 //! correct worker.
 
+#![deny(unsafe_code)]
+
 /// Bits reserved for the worker index in connection handles.
 /// `worker_index = conn_handle >> WORKER_SHIFT`
 /// `local_handle = conn_handle & WORKER_MASK`

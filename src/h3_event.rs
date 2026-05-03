@@ -5,9 +5,9 @@
 use napi_derive::napi;
 
 #[cfg(feature = "node-api")]
-use std::sync::Arc;
-#[cfg(feature = "node-api")]
 use crate::buffer_pool::BufferRecycler;
+#[cfg(feature = "node-api")]
+use std::sync::Arc;
 
 #[cfg(not(feature = "node-api"))]
 type ByteBuf = Vec<u8>;
@@ -29,7 +29,10 @@ impl RecyclableBuffer {
 
     /// Create a non-recyclable buffer (for rare events like session_ticket).
     pub fn owned(data: Vec<u8>) -> Self {
-        Self { data, recycler: None }
+        Self {
+            data,
+            recycler: None,
+        }
     }
 }
 
@@ -89,7 +92,10 @@ impl napi::bindgen_prelude::FromNapiValue for RecyclableBuffer {
         napi_val: napi::sys::napi_value,
     ) -> napi::Result<Self> {
         let buf = unsafe { napi::bindgen_prelude::Buffer::from_napi_value(env, napi_val)? };
-        Ok(Self { data: buf.to_vec(), recycler: None })
+        Ok(Self {
+            data: buf.to_vec(),
+            recycler: None,
+        })
     }
 }
 
@@ -100,82 +106,8 @@ impl napi::bindgen_prelude::ToNapiValue for RecyclableBuffer {
         env: napi::sys::napi_env,
         val: Self,
     ) -> napi::Result<napi::sys::napi_value> {
-        use std::ffi::c_void;
-
-        let mut data = val.data;
-        let len = data.len();
-
-        if len == 0 {
-            // Empty buffer — use standard NAPI path
-            let mut ret = std::ptr::null_mut();
-            let status = unsafe {
-                napi::sys::napi_create_buffer(env, 0, std::ptr::null_mut(), &mut ret)
-            };
-            if status != napi::sys::Status::napi_ok {
-                return Err(napi::Error::from_status(status.into()));
-            }
-            return Ok(ret);
-        }
-
-        let ptr = data.as_mut_ptr();
-        let cap = data.capacity();
-        std::mem::forget(data);
-
-        if let Some(recycler) = val.recycler {
-            // Recyclable — finalize callback returns to pool
-            let hint = Box::new(RecycleHint { ptr, cap, recycler });
-            let mut ret = std::ptr::null_mut();
-            let status = unsafe {
-                napi::sys::napi_create_external_buffer(
-                    env,
-                    len,
-                    ptr as *mut c_void,
-                    Some(finalize_recycle),
-                    Box::into_raw(hint) as *mut c_void,
-                    &mut ret,
-                )
-            };
-            if status == napi::sys::Status::napi_no_external_buffers_allowed {
-                // Fallback: reconstruct and use copy path
-                let data = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-                let buf = napi::bindgen_prelude::Buffer::from(data);
-                return unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) };
-            }
-            if status != napi::sys::Status::napi_ok {
-                return Err(napi::Error::from_status(status.into()));
-            }
-            Ok(ret)
-        } else {
-            // Non-recyclable — reconstruct Buffer and use its standard to_napi_value
-            let data = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-            let buf = napi::bindgen_prelude::Buffer::from(data);
-            unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, buf) }
-        }
+        crate::unsafe_boundary::ExternalVecLease::new(val.data, val.recycler).into_napi_value(env)
     }
-}
-
-#[cfg(feature = "node-api")]
-struct RecycleHint {
-    ptr: *mut u8,
-    cap: usize,
-    recycler: Arc<BufferRecycler>,
-}
-
-// SAFETY: The pointer is only accessed in the finalize callback, which runs
-// after V8 GC has confirmed no JS references remain.
-#[cfg(feature = "node-api")]
-unsafe impl Send for RecycleHint {}
-
-#[cfg(feature = "node-api")]
-unsafe extern "C" fn finalize_recycle(
-    _env: napi::sys::napi_env,
-    _data: *mut std::ffi::c_void,
-    hint: *mut std::ffi::c_void,
-) {
-    let hint = unsafe { Box::from_raw(hint as *mut RecycleHint) };
-    // Reconstruct Vec with len=0 (content was consumed by JS), preserve capacity
-    let buf = unsafe { Vec::from_raw_parts(hint.ptr, 0, hint.cap) };
-    hint.recycler.recycle(buf);
 }
 
 #[cfg(feature = "node-api")]
@@ -198,9 +130,13 @@ pub const NO_RECYCLER: EventRecycler = ();
 
 fn make_data_buf(data: Vec<u8>, _recycler: EventRecycler) -> ByteBuf {
     #[cfg(feature = "node-api")]
-    { RecyclableBuffer::new(data, _recycler) }
+    {
+        RecyclableBuffer::new(data, _recycler)
+    }
     #[cfg(not(feature = "node-api"))]
-    { data }
+    {
+        data
+    }
 }
 
 pub const EVENT_NEW_SESSION: u8 = 1;
@@ -218,6 +154,9 @@ pub const EVENT_SESSION_TICKET: u8 = 12;
 pub const EVENT_METRICS: u8 = 13;
 pub const EVENT_DATAGRAM: u8 = 14;
 pub const EVENT_SHUTDOWN_COMPLETE: u8 = 15;
+pub const EVENT_STREAM_BLOCKED: u8 = 16;
+pub const EVENT_PING_ACK: u8 = 17;
+pub const EVENT_WRITE_READY: u8 = 18;
 
 #[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Debug, Clone)]
@@ -245,6 +184,7 @@ pub struct JsEventMeta {
     pub syscall: Option<String>,
     pub peer_certificate_presented: Option<bool>,
     pub peer_certificate_chain: Option<Vec<ByteBuf>>,
+    pub duration_ms: Option<f64>,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]
@@ -270,6 +210,7 @@ pub struct JsSessionMetrics {
     pub rtt_ms: f64,
     pub cwnd: i64,
     pub pmtu: i64,
+    pub datagram_queue_depth: u32,
 }
 
 #[cfg_attr(feature = "node-api", napi(object))]
@@ -307,6 +248,7 @@ impl JsEventMeta {
             syscall: None,
             peer_certificate_presented: None,
             peer_certificate_chain: None,
+            duration_ms: None,
         }
     }
 }
@@ -323,6 +265,7 @@ impl JsSessionMetrics {
             rtt_ms: 0.0,
             cwnd: 0,
             pmtu: 0,
+            datagram_queue_depth: 0,
         }
     }
 }
@@ -338,7 +281,7 @@ impl JsH3Event {
             event_type: EVENT_NEW_SESSION,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -347,7 +290,7 @@ impl JsH3Event {
                 server_name: Some(server_name),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -356,11 +299,11 @@ impl JsH3Event {
             event_type: EVENT_NEW_STREAM,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -376,15 +319,15 @@ impl JsH3Event {
             event_type: EVENT_NEW_STREAM,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: if data.is_empty() {
                 None
             } else {
                 Some(make_data_buf(data, recycler))
             },
             fin: Some(fin),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -396,22 +339,53 @@ impl JsH3Event {
             headers: Some(headers),
             data: None,
             fin: Some(fin),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
-    pub fn data(conn_handle: u32, stream_id: u64, data: Vec<u8>, fin: bool, recycler: EventRecycler) -> Self {
+    pub fn data(
+        conn_handle: u32,
+        stream_id: u64,
+        data: Vec<u8>,
+        fin: bool,
+        recycler: EventRecycler,
+    ) -> Self {
         Self {
             event_type: EVENT_DATA,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: Some(make_data_buf(data, recycler)),
             fin: Some(fin),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
+    }
+
+    /// Try to fold a following DATA event into this HEADERS event.
+    ///
+    /// JS dispatch still emits the stream/response headers first, then pushes
+    /// the coalesced data into the stream, so the public event order remains
+    /// compatible while avoiding one native-to-JS event object for the common
+    /// HEADERS+small DATA case.
+    pub fn try_coalesce_following_data(
+        &mut self,
+        mut data_event: JsH3Event,
+    ) -> Result<(), JsH3Event> {
+        if self.event_type != EVENT_HEADERS
+            || data_event.event_type != EVENT_DATA
+            || self.conn_handle != data_event.conn_handle
+            || self.stream_id != data_event.stream_id
+            || self.data.is_some()
+            || self.fin == Some(true)
+            || data_event.fin != Some(false)
+        {
+            return Err(data_event);
+        }
+
+        self.data = data_event.data.take();
+        Ok(())
     }
 
     pub fn finished(conn_handle: u32, stream_id: u64) -> Self {
@@ -419,11 +393,11 @@ impl JsH3Event {
             event_type: EVENT_FINISHED,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -432,14 +406,14 @@ impl JsH3Event {
             event_type: EVENT_RESET,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
                 error_code: Some(error_code as u32),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -448,11 +422,28 @@ impl JsH3Event {
             event_type: EVENT_SESSION_CLOSE,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
+        }
+    }
+
+    pub fn session_close_with_error(conn_handle: u32, error_code: u64, reason: String) -> Self {
+        Self {
+            event_type: EVENT_SESSION_CLOSE,
+            conn_handle,
+            stream_id: -1,
+            headers: None,
+            data: None,
+            fin: Some(false),
+            meta: Some(JsEventMeta {
+                error_code: Some(u32::try_from(error_code).unwrap_or(u32::MAX)),
+                error_reason: Some(reason),
+                ..JsEventMeta::empty()
+            }),
+            metrics: None,
         }
     }
 
@@ -461,11 +452,42 @@ impl JsH3Event {
             event_type: EVENT_DRAIN,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
+        }
+    }
+
+    /// Audit findings #8/#16/#29: signal that the stream's send queue went
+    /// from empty → backed up at the native layer. JS uses this to gate
+    /// `streamSend` (return 0 → fall through to `_writeChunk`'s drain
+    /// branch) so `Duplex.write()` reports real backpressure instead of
+    /// the optimistic `data.length` placeholder.
+    pub fn stream_blocked(conn_handle: u32, stream_id: u64) -> Self {
+        Self {
+            event_type: EVENT_STREAM_BLOCKED,
+            conn_handle,
+            stream_id: stream_id as i64,
+            headers: None,
+            data: None,
+            fin: Some(false),
+            meta: None,
+            metrics: None,
+        }
+    }
+
+    pub fn write_ready(conn_handle: u32) -> Self {
+        Self {
+            event_type: EVENT_WRITE_READY,
+            conn_handle,
+            stream_id: -1,
+            headers: None,
+            data: None,
+            fin: Some(false),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -474,11 +496,11 @@ impl JsH3Event {
             event_type: EVENT_GOAWAY,
             conn_handle,
             stream_id: stream_id as i64,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -487,7 +509,7 @@ impl JsH3Event {
             event_type: EVENT_ERROR,
             conn_handle,
             stream_id,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -495,7 +517,7 @@ impl JsH3Event {
                 error_reason: Some(reason),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -510,7 +532,7 @@ impl JsH3Event {
             event_type: EVENT_ERROR,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -522,7 +544,7 @@ impl JsH3Event {
                 syscall: Some(syscall.into()),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -531,11 +553,11 @@ impl JsH3Event {
             event_type: EVENT_HANDSHAKE_COMPLETE,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -548,7 +570,7 @@ impl JsH3Event {
             event_type: EVENT_HANDSHAKE_COMPLETE,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
             meta: Some(JsEventMeta {
@@ -557,7 +579,7 @@ impl JsH3Event {
                     .map(|chain| chain.into_iter().map(Into::into).collect()),
                 ..JsEventMeta::empty()
             }),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            metrics: None,
         }
     }
 
@@ -566,11 +588,11 @@ impl JsH3Event {
             event_type: EVENT_SESSION_TICKET,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: Some(ticket.into()),
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 
@@ -579,10 +601,10 @@ impl JsH3Event {
             event_type: EVENT_METRICS,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
+            meta: None,
             metrics: Some(metrics.clone()),
         }
     }
@@ -592,11 +614,27 @@ impl JsH3Event {
             event_type: EVENT_DATAGRAM,
             conn_handle,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: Some(make_data_buf(data, recycler)),
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
+        }
+    }
+
+    pub fn ping_ack(conn_handle: u32, duration_ms: f64) -> Self {
+        Self {
+            event_type: EVENT_PING_ACK,
+            conn_handle,
+            stream_id: -1,
+            headers: None,
+            data: None,
+            fin: Some(false),
+            meta: Some(JsEventMeta {
+                duration_ms: Some(duration_ms),
+                ..JsEventMeta::empty()
+            }),
+            metrics: None,
         }
     }
 
@@ -607,11 +645,11 @@ impl JsH3Event {
             event_type: EVENT_SHUTDOWN_COMPLETE,
             conn_handle: 0,
             stream_id: -1,
-            headers: Some(vec![]),
+            headers: None,
             data: None,
             fin: Some(false),
-            meta: Some(JsEventMeta::empty()),
-            metrics: Some(JsSessionMetrics::zeroed()),
+            meta: None,
+            metrics: None,
         }
     }
 }
@@ -626,10 +664,10 @@ mod tests {
         assert_eq!(ev.event_type, EVENT_NEW_SESSION);
         assert_eq!(ev.conn_handle, 42);
         assert_eq!(ev.stream_id, -1);
-        assert_eq!(ev.headers.as_ref().unwrap().len(), 0);
+        assert!(ev.headers.is_none());
         assert!(ev.data.is_none());
         assert_eq!(ev.fin, Some(false));
-        assert!(ev.metrics.is_some());
+        assert!(ev.metrics.is_none());
         let meta = ev.meta.expect("meta must be Some");
         assert_eq!(meta.remote_addr.as_deref(), Some("127.0.0.1"));
         assert_eq!(meta.remote_port, Some(4433));
@@ -644,7 +682,7 @@ mod tests {
         assert_eq!(ev.stream_id, 12_i64);
         assert!(ev.data.is_none());
         assert_eq!(ev.fin, Some(false));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -676,6 +714,48 @@ mod tests {
     }
 
     #[test]
+    fn headers_can_coalesce_following_data_for_same_stream() {
+        let mut headers = JsH3Event::headers(
+            3,
+            8,
+            vec![JsHeader {
+                name: ":status".into(),
+                value: "200".into(),
+            }],
+            false,
+        );
+        let data = JsH3Event::data(3, 8, b"hello".to_vec(), false, NO_RECYCLER);
+
+        assert!(headers.try_coalesce_following_data(data).is_ok());
+        assert_eq!(headers.event_type, EVENT_HEADERS);
+        assert_eq!(headers.data.as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(headers.fin, Some(false));
+    }
+
+    #[test]
+    fn headers_refuse_incompatible_data_coalescing() {
+        let mut headers = JsH3Event::headers(3, 8, Vec::new(), false);
+        let wrong_stream = JsH3Event::data(3, 12, b"hello".to_vec(), false, NO_RECYCLER);
+        let Err(rejected) = headers.try_coalesce_following_data(wrong_stream) else {
+            panic!("wrong-stream data must not coalesce");
+        };
+        assert_eq!(rejected.stream_id, 12);
+        assert!(headers.data.is_none());
+
+        let mut final_headers = JsH3Event::headers(3, 8, Vec::new(), true);
+        let final_data = JsH3Event::data(3, 8, b"hello".to_vec(), false, NO_RECYCLER);
+        assert!(
+            final_headers
+                .try_coalesce_following_data(final_data)
+                .is_err()
+        );
+
+        let mut headers = JsH3Event::headers(3, 8, Vec::new(), false);
+        let data_with_fin = JsH3Event::data(3, 8, b"hello".to_vec(), true, NO_RECYCLER);
+        assert!(headers.try_coalesce_following_data(data_with_fin).is_err());
+    }
+
+    #[test]
     fn test_finished_fields() {
         let ev = JsH3Event::finished(5, 16);
         assert_eq!(ev.event_type, EVENT_FINISHED);
@@ -683,7 +763,7 @@ mod tests {
         assert_eq!(ev.stream_id, 16_i64);
         assert!(ev.data.is_none());
         assert_eq!(ev.fin, Some(false));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -703,7 +783,18 @@ mod tests {
         assert_eq!(ev.event_type, EVENT_SESSION_CLOSE);
         assert_eq!(ev.conn_handle, 11);
         assert_eq!(ev.stream_id, -1);
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_session_close_with_error_fields() {
+        let ev = JsH3Event::session_close_with_error(11, 42, "shutdown".into());
+        assert_eq!(ev.event_type, EVENT_SESSION_CLOSE);
+        assert_eq!(ev.conn_handle, 11);
+        assert_eq!(ev.stream_id, -1);
+        let meta = ev.meta.expect("meta must be Some");
+        assert_eq!(meta.error_code, Some(42));
+        assert_eq!(meta.error_reason.as_deref(), Some("shutdown"));
     }
 
     #[test]
@@ -713,7 +804,27 @@ mod tests {
         assert_eq!(ev.conn_handle, 2);
         assert_eq!(ev.stream_id, 32_i64);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_stream_blocked_fields() {
+        let ev = JsH3Event::stream_blocked(2, 32);
+        assert_eq!(ev.event_type, EVENT_STREAM_BLOCKED);
+        assert_eq!(ev.conn_handle, 2);
+        assert_eq!(ev.stream_id, 32_i64);
+        assert!(ev.data.is_none());
+        assert!(ev.meta.is_none());
+    }
+
+    #[test]
+    fn test_write_ready_fields() {
+        let ev = JsH3Event::write_ready(2);
+        assert_eq!(ev.event_type, EVENT_WRITE_READY);
+        assert_eq!(ev.conn_handle, 2);
+        assert_eq!(ev.stream_id, -1);
+        assert!(ev.data.is_none());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -723,7 +834,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 6);
         assert_eq!(ev.stream_id, 64_i64);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -736,7 +847,7 @@ mod tests {
         assert_eq!(meta.error_code, Some(0x0101));
         assert_eq!(meta.error_reason.as_deref(), Some("flow control"));
         assert!(meta.error_category.is_none());
-        assert!(ev.metrics.is_some());
+        assert!(ev.metrics.is_none());
     }
 
     #[test]
@@ -761,7 +872,7 @@ mod tests {
         assert_eq!(ev.event_type, EVENT_HANDSHAKE_COMPLETE);
         assert_eq!(ev.conn_handle, 15);
         assert_eq!(ev.stream_id, -1);
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -792,7 +903,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 25);
         assert_eq!(ev.stream_id, -1);
         assert_eq!(ev.data.as_deref(), Some(ticket.as_slice()));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -803,7 +914,7 @@ mod tests {
         assert_eq!(ev.conn_handle, 30);
         assert_eq!(ev.stream_id, -1);
         assert_eq!(ev.data.as_deref(), Some(payload.as_slice()));
-        assert!(ev.meta.is_some());
+        assert!(ev.meta.is_none());
     }
 
     #[test]
@@ -813,7 +924,29 @@ mod tests {
         assert_eq!(ev.conn_handle, 0);
         assert_eq!(ev.stream_id, -1);
         assert!(ev.data.is_none());
-        assert!(ev.meta.is_some());
-        assert!(ev.metrics.is_some());
+        assert!(ev.meta.is_none());
+        assert!(ev.metrics.is_none());
+    }
+
+    #[cfg(feature = "node-api")]
+    #[test]
+    fn recyclable_buffer_reclaims_vec_on_external_buffer_error() {
+        use napi::bindgen_prelude::ToNapiValue;
+
+        let (_pool, recycler, rx) = crate::buffer_pool::AdaptiveBufferPool::with_recycler(8, 1);
+        crate::unsafe_boundary::force_external_buffer_generic_failure(true);
+        let result = unsafe {
+            RecyclableBuffer::to_napi_value(
+                std::ptr::null_mut(),
+                RecyclableBuffer::new(vec![1, 2, 3, 4], Some(recycler)),
+            )
+        };
+        crate::unsafe_boundary::force_external_buffer_generic_failure(false);
+
+        assert!(result.is_err());
+        assert!(
+            rx.try_recv().is_err(),
+            "unexpected NAPI failure must reclaim the Vec directly, not hand it to recycler"
+        );
     }
 }

@@ -9,7 +9,8 @@ export declare class NativeMockQuicProfiler {
 export declare class NativeQuicClient {
   constructor(options: JsQuicClientOptions, callback: (err: Error | null, events: Array<JsH3Event>) => void)
   connect(serverAddr: string, serverName: string): JsAddressInfo
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean
+  openStream(): number
+  streamSend(streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   streamClose(streamId: number, errorCode: number): boolean
   close(errorCode: number, reason: string): boolean
   sendDatagram(data: Buffer): boolean
@@ -19,6 +20,8 @@ export declare class NativeQuicClient {
   getQlogPath(): string | null
   /** Send the Shutdown command without joining the worker thread. */
   requestShutdown(): boolean
+  /** Audit finding #14: see Http3SecureServer::ack_event_batch. */
+  ackEventBatch(count: number): void
   /**
    * Join the worker thread. Safe to call after `request_shutdown()`.
    * Also releases the TSFN reference held by this struct.
@@ -30,7 +33,7 @@ export declare class NativeQuicClient {
 export declare class NativeQuicServer {
   constructor(options: JsQuicServerOptions, callback: (err: Error | null, events: Array<JsH3Event>) => void)
   listen(port: number, host: string): JsAddressInfo
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean
   closeSession(connHandle: number, errorCode: number, reason: string): boolean
   sendDatagram(connHandle: number, data: Buffer): boolean
@@ -40,6 +43,8 @@ export declare class NativeQuicServer {
   getQlogPath(connHandle: number): string | null
   /** Send the Shutdown command without joining the worker threads. */
   requestShutdown(): boolean
+  /** Audit finding #14: see Http3SecureServer::ack_event_batch. */
+  ackEventBatch(count: number): void
   /**
    * Join all worker threads. Safe to call after `request_shutdown()`.
    * Also releases the TSFN reference held by this struct.
@@ -53,7 +58,7 @@ export declare class NativeWorkerClient {
   constructor(options: JsClientOptions, callback: (err: Error | null, events: Array<JsH3Event>) => void)
   connect(serverAddr: string, serverName: string): JsAddressInfo
   sendRequest(headers: Array<JsHeader>, fin: boolean): number
-  streamSend(streamId: number, data: Buffer, fin: boolean): boolean
+  streamSend(streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   streamClose(streamId: number, errorCode: number): boolean
   close(errorCode: number, reason: string): boolean
   sendDatagram(data: Buffer): boolean
@@ -64,6 +69,8 @@ export declare class NativeWorkerClient {
   getQlogPath(): string | null
   /** Send the Shutdown command without joining the worker thread. */
   requestShutdown(): boolean
+  /** Audit finding #14: see Http3SecureServer::ack_event_batch. */
+  ackEventBatch(count: number): void
   /** Join the worker thread. Safe to call after `request_shutdown()`. */
   joinWorker(): void
   shutdown(): void
@@ -83,7 +90,7 @@ export declare class NativeWorkerServer {
    * FFI boundary crossings for the common respond-then-end pattern.
    */
   sendResponse(connHandle: number, streamId: number, headers: Array<JsHeader>, data: Buffer, fin: boolean): boolean
-  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): boolean
+  streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   sendTrailers(connHandle: number, streamId: number, headers: Array<JsHeader>): boolean
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean
   closeSession(connHandle: number, errorCode: number, reason: string): boolean
@@ -95,6 +102,14 @@ export declare class NativeWorkerServer {
   getQlogPath(connHandle: number): string | null
   /** Send the Shutdown command without joining the worker threads. */
   requestShutdown(): boolean
+  /**
+   * Audit finding #14: JS calls this after dispatching a TSFN batch
+   * so the worker can quantify how far behind real-time JS is.
+   * Releases credit on the global outstanding-events gauge; the
+   * recv-pause threshold (step 5.2) reads that gauge to decide
+   * whether to skip RX processing for one poll iteration.
+   */
+  ackEventBatch(count: number): void
   /** Join all worker threads. Safe to call after `request_shutdown()`. */
   joinWorker(): void
   shutdown(): void
@@ -143,6 +158,7 @@ export interface JsEventMeta {
   syscall?: string
   peerCertificatePresented?: boolean
   peerCertificateChain?: Array<ByteBuf>
+  durationMs?: number
 }
 
 export interface JsH3Event {
@@ -264,6 +280,25 @@ export interface JsReactorTelemetrySnapshot {
   eventBatchDroppedEventsTotal: number
   eventBatchSinkErrorsTotal: number
   eventBatchMaxSizeHighWatermark: number
+  eventBatchAckedEventsTotal: number
+  eventBatchOutstanding: number
+  eventBatchOutstandingHighWatermark: number
+  eventBatchSelfHealedTotal: number
+  /**
+   * Audit #14, step 5.2: count of poll iterations where JS-facing
+   * protocol event production was paused because the outstanding-events
+   * gauge was over the high-water mark. Coarse backpressure signal — if
+   * this climbs without bound, JS dispatch is the bottleneck.
+   */
+  eventBatchRxPausesTotal: number
+  /**
+   * Audit #18: ECN observability — counts of inbound datagrams by
+   * code point. Telemetry only (quiche 0.28 doesn't expose ECN).
+   */
+  ecnRecvNotEctTotal: number
+  ecnRecvEct0Total: number
+  ecnRecvEct1Total: number
+  ecnRecvCeTotal: number
   rawQuicServerWorkerSpawns: number
   rawQuicClientDedicatedWorkerSpawns: number
   rawQuicClientSharedWorkersCreated: number
@@ -316,6 +351,17 @@ export interface JsReactorTelemetrySnapshot {
   kqueueUnsentHighWatermark: number
   kqueueWouldBlockSends: number
   kqueueWriteWakeups: number
+  kqueueMsgXProbeSuccesses: number
+  kqueueMsgXProbeFailures: number
+  kqueueSendmsgXEnabled: number
+  kqueueRecvmsgXEnabled: number
+  kqueueSendmsgXSubmitCalls: number
+  kqueueSendmsgXDatagramsSubmitted: number
+  kqueueSendmsgXPartialSends: number
+  kqueueSendmsgXFallbacks: number
+  kqueueRecvmsgXCalls: number
+  kqueueRecvmsgXDatagramsReceived: number
+  kqueueRecvmsgXFallbacks: number
   rxBufferReuses: number
   rxBufferAllocations: number
   rxBufferCheckins: number
@@ -333,6 +379,18 @@ export interface JsReactorTelemetrySnapshot {
   pendingWriteCopiedBytes: number
   pendingWriteTailAllocations: number
   pendingWriteGrowthReallocations: number
+  outboundIngressBufferReuses: number
+  outboundIngressBufferAllocations: number
+  outboundIngressCopiedBytes: number
+  outboundStreamJsAdmittedBytesTotal: number
+  outboundStreamJsAdmittedWritesTotal: number
+  outboundCommandQueuedBytes: number
+  outboundCommandQueuedBytesHighWatermark: number
+  outboundPendingWriteBytes: number
+  outboundPendingWriteBytesHighWatermark: number
+  outboundAdmissionBackpressureEventsTotal: number
+  outboundAdmissionReleasedUnitsTotal: number
+  outboundAdmissionWriteReadyEventsTotal: number
   txBuffersRecycled: number
 }
 
@@ -372,11 +430,17 @@ export interface JsSessionMetrics {
   rttMs: number
   cwnd: number
   pmtu: number
+  datagramQueueDepth: number
 }
 
 export interface JsSetting {
   id: number
   value: number
+}
+
+export interface JsStreamSendOutcome {
+  status: number
+  written: number
 }
 
 export declare function lifecycleTraceSnapshot(): JsLifecycleTraceSnapshot

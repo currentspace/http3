@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -33,7 +33,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 struct QuicPairWithLoss {
@@ -206,7 +209,10 @@ fn test_quic_handshake_completes_under_5pct_loss() {
     let (_server_conn, _client_conn) = wait_for_handshake(&pair);
     let (sent, dropped) = pair.loss.stats();
     eprintln!("  5% loss: handshake ok, {sent} sent, {dropped} dropped");
-    assert!(dropped > 0 || sent > 10, "expected some traffic: sent={sent}");
+    assert!(
+        dropped > 0 || sent > 10,
+        "expected some traffic: sent={sent}"
+    );
 }
 
 #[test]
@@ -313,8 +319,10 @@ fn test_quic_stream_echo_under_5pct_loss() {
     assert_eq!(echo_data.len(), 4096, "echo should be complete 4KB");
 
     let (sent, dropped) = pair.loss.stats();
-    eprintln!("  5% loss echo: {sent} sent, {dropped} dropped ({:.1}%)",
-        (dropped as f64 / sent as f64) * 100.0);
+    eprintln!(
+        "  5% loss echo: {sent} sent, {dropped} dropped ({:.1}%)",
+        (dropped as f64 / sent as f64) * 100.0
+    );
 }
 
 #[test]

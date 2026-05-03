@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_lines)]
+#![deny(unsafe_code)]
 
 //! Sustained MockDriver workload for profiling with `perf record`.
 //!
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::unbounded;
 use serde::Serialize;
 
+use crate::chunk_pool::Chunk;
 use crate::cid::CidEncoding;
 use crate::config::{
     ClientAuthMode, Http3Config, JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode,
@@ -23,7 +25,6 @@ use crate::h3_event::{
     EVENT_DATA, EVENT_ERROR, EVENT_FINISHED, EVENT_HANDSHAKE_COMPLETE, EVENT_NEW_SESSION,
     EVENT_NEW_STREAM, EVENT_SESSION_CLOSE, JsH3Event,
 };
-use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_batcher};
 use crate::quic_worker::{
     QuicServerCommand, QuicServerConfig, QuicServerHandle, spawn_dedicated_quic_client_on_driver,
@@ -75,7 +76,7 @@ fn parse_cli(args: Vec<String>) -> Result<CliArgs, String> {
                     other => {
                         return Err(format!(
                             "invalid --protocol value: {other:?} (expected quic or h3)"
-                        ))
+                        ));
                     }
                 };
             }
@@ -166,7 +167,10 @@ fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>), String> {
         rcgen::SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)),
     ];
     let cert = params.self_signed(&key_pair).map_err(|e| e.to_string())?;
-    Ok((cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes()))
+    Ok((
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    ))
 }
 
 // ── Server echo state (QUIC) ────────────────────────────────────────
@@ -786,7 +790,11 @@ fn open_h3_stream(
     let stream_id = client
         .send_request(headers, false)
         .map_err(|e| e.to_string())?;
-    client.stream_send(stream_id, crate::chunk_pool::Chunk::unpooled(payload.to_vec()), true);
+    client.stream_send(
+        stream_id,
+        crate::chunk_pool::Chunk::unpooled(payload.to_vec()),
+        true,
+    );
     Ok(stream_id)
 }
 

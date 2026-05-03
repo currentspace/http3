@@ -4,13 +4,39 @@ import type { IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from
 import type { ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
 import {
   type BackpressureState,
-  cancelDrainCallbacks,
   createBackpressureState,
   ensureBackpressureState,
+  createNativeWriteWindow,
+  completeNativeWrite,
   pushData,
   drainPendingReads,
   fireDrainCallbacks,
+  rejectDrainCallbacks,
+  rejectNativeWriteWindow,
 } from './stream-backpressure.js';
+
+const EMPTY_BUFFER = Buffer.alloc(0);
+type EndChunk = Buffer | Uint8Array | string;
+
+function resolveEndArgs(
+  chunk?: EndChunk | (() => void),
+  encoding?: BufferEncoding | (() => void),
+  callback?: () => void,
+): { finalChunk?: EndChunk; finalEncoding?: BufferEncoding; finalCallback?: () => void } {
+  if (typeof chunk === 'function') {
+    return { finalCallback: chunk };
+  }
+  if (typeof encoding === 'function') {
+    return { finalChunk: chunk, finalCallback: encoding };
+  }
+  return { finalChunk: chunk, finalEncoding: encoding, finalCallback: callback };
+}
+
+function bufferFromEndChunk(chunk: EndChunk, encoding?: BufferEncoding): Buffer {
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  return Buffer.from(chunk, encoding);
+}
 
 /** HTTP header map where each value is a string or string array. */
 export type IncomingHeaders = Record<string, string | string[]>;
@@ -29,6 +55,48 @@ export interface RespondOptions {
 
 function firstHeaderValue(value: string | string[]): string {
   return Array.isArray(value) ? value[0] : value;
+}
+
+/** @internal Append a header value while preserving duplicate field lines. */
+export function appendIncomingHeader(headers: IncomingHeaders, name: string, value: string): void {
+  if (!Object.prototype.hasOwnProperty.call(headers, name)) {
+    headers[name] = value;
+    return;
+  }
+  const current = headers[name];
+  if (Array.isArray(current)) {
+    current.push(value);
+    return;
+  }
+  headers[name] = [current, value];
+}
+
+/** @internal Convert native header pairs to an `IncomingHeaders` map. */
+export function nativeHeadersToIncomingHeaders(
+  headers: Array<{ name: string; value: string }>,
+): IncomingHeaders {
+  const out: IncomingHeaders = {};
+  for (const header of headers) {
+    appendIncomingHeader(out, header.name, header.value);
+  }
+  return out;
+}
+
+/** @internal Convert `IncomingHeaders` into native header pairs, preserving arrays. */
+export function incomingHeadersToNativeHeaders(
+  headers: IncomingHeaders,
+): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  for (const [name, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        out.push({ name, value: item });
+      }
+      continue;
+    }
+    out.push({ name, value });
+  }
+  return out;
 }
 
 /** @internal Convert node:http2 incoming headers to the flat `IncomingHeaders` map. */
@@ -55,7 +123,7 @@ export function toHttp2OutgoingHeaders(headers: IncomingHeaders): OutgoingHttpHe
       out[name] = Number.isFinite(status) ? status : 200;
       continue;
     }
-    out[name] = singleValue;
+    out[name] = value;
   }
   return out;
 }
@@ -93,9 +161,21 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal */ _eventLoop: ServerEventLoopLike | null = null;
   /** @internal */ _headersSent = false;
   /** @internal */ _finSent = false;
+  /**
+   * Set by EVENT_STREAM_BLOCKED (audit #8/#16/#29). Native worker emits
+   * this when a chunk could not be fully accepted by quiche flow control
+   * and was buffered into pending_writes. While true, `_writeChunk` and
+   * `_final` route directly to drainCallbacks instead of calling
+   * streamSend — surfacing real backpressure so `Duplex.write()` returns
+   * false. Cleared by EVENT_DRAIN.
+   * @internal
+   */
+  _blocked = false;
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
+  /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
+  private _finalChunk: Buffer | null = null;
 
   /** The HTTP/3 stream ID. */
   get id(): number { return this._streamId; }
@@ -112,10 +192,14 @@ export class ServerHttp3Stream extends Duplex {
     if (this._headersSent) return;
     this._headersSent = true;
 
-    const h = Object.entries(headers).map(([name, value]) => ({
-      name,
-      value: Array.isArray(value) ? value[0] : value,
-    }));
+    const h = incomingHeadersToNativeHeaders(headers);
+    // Audit finding #17: auto-inject :status: 200 when the caller didn't
+    // supply one. Brings H3 to parity with the H2 adapter (which already
+    // defaults to 200 in toHttp2OutgoingHeaders) and avoids a quiche-
+    // level rejection that surfaces only as a generic stream error.
+    if (!h.some((entry) => entry.name === ':status')) {
+      h.unshift({ name: ':status', value: '200' });
+    }
 
     this._eventLoop?.sendResponseHeaders(
       this._connHandle,
@@ -136,10 +220,10 @@ export class ServerHttp3Stream extends Duplex {
     this._headersSent = true;
     this._finSent = true;
 
-    const h = Object.entries(headers).map(([name, value]) => ({
-      name,
-      value: Array.isArray(value) ? value[0] : value,
-    }));
+    const h = incomingHeadersToNativeHeaders(headers);
+    if (!h.some((entry) => entry.name === ':status')) {
+      h.unshift({ name: ':status', value: '200' });
+    }
 
     const buf = typeof body === 'string' ? Buffer.from(body) : body;
 
@@ -157,10 +241,8 @@ export class ServerHttp3Stream extends Duplex {
 
   /** Send trailing headers after the response body is complete. */
   sendTrailers(trailers: IncomingHeaders): void {
-    const h = Object.entries(trailers).map(([name, value]) => ({
-      name,
-      value: Array.isArray(value) ? value[0] : value,
-    }));
+    this._finSent = true;
+    const h = incomingHeadersToNativeHeaders(trailers);
     this._eventLoop?.sendTrailers(this._connHandle, this._streamId, h);
   }
 
@@ -170,7 +252,7 @@ export class ServerHttp3Stream extends Duplex {
    */
   close(code?: number): void {
     this._eventLoop?.streamClose(this._connHandle, this._streamId, code ?? 0);
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this._clearTimeout();
     this.destroy();
   }
@@ -195,7 +277,23 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal — called by event dispatcher when flow control window opens */
   _onNativeDrain(): void {
     this._onActivity();
+    this._blocked = false;
     fireDrainCallbacks(this._bp);
+  }
+
+  /** @internal — native command queue has room; do not clear QUIC flow-control state. */
+  _onNativeWriteReady(): void {
+    this._onActivity();
+    fireDrainCallbacks(this._bp);
+  }
+
+  /**
+   * @internal — called by event dispatcher when the native worker has
+   * buffered a chunk into pending_writes (quiche flow control). Future
+   * writes route to drainCallbacks until EVENT_DRAIN clears the flag.
+   */
+  _onNativeBlocked(): void {
+    this._blocked = true;
   }
 
   _read(_size: number): void {
@@ -217,8 +315,30 @@ export class ServerHttp3Stream extends Duplex {
     this._writeChunk(chunk, callback);
   }
 
+  override end(
+    chunk?: EndChunk | (() => void),
+    encoding?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    const { finalChunk, finalEncoding, finalCallback } = resolveEndArgs(chunk, encoding, callback);
+    if (finalChunk != null) {
+      this._finalChunk = bufferFromEndChunk(finalChunk, finalEncoding);
+    }
+    return super.end(finalCallback);
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
+    if (this._blocked) {
+      // Native is backed up — skip streamSend (it would just queue more
+      // into pending_writes) and wait for EVENT_DRAIN.
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeChunk(chunk, callback);
+      });
+      return;
+    }
     const written = this._eventLoop?.streamSend(
       this._connHandle,
       this._streamId,
@@ -227,15 +347,50 @@ export class ServerHttp3Stream extends Duplex {
     ) ?? 0;
 
     if (written >= chunk.length) {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
-      // Partial write or fully blocked — retry remainder on drain
+      // Partial write or fully blocked — retry remainder on drain. If the
+      // stream closes before drain, the closure is invoked with an Error
+      // so the user's callback fires instead of hanging.
       const remaining = chunk.subarray(written);
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._writeChunk(remaining, callback);
       });
     }
+  }
+
+  private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    this._onActivity();
+    const written = this._blocked
+      ? 0
+      : this._eventLoop?.streamSend(this._connHandle, this._streamId, chunk, true) ?? 0;
+
+    if (chunk.length === 0) {
+      if (written > 0) {
+        completeNativeWrite(this._nativeWriteWindow, written, callback);
+        return;
+      }
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeFinalChunk(chunk, callback);
+      });
+      return;
+    }
+
+    if (written >= chunk.length) {
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
+      return;
+    }
+
+    const remaining = chunk.subarray(written);
+    this._bp = ensureBackpressureState(this._bp);
+    this._bp.drainCallbacks.push((err) => {
+      if (err) { callback(err); return; }
+      this._writeFinalChunk(remaining, callback);
+    });
   }
 
   _final(callback: (error?: Error | null) => void): void {
@@ -245,26 +400,15 @@ export class ServerHttp3Stream extends Duplex {
       return;
     }
     this._finSent = true;
-    const written = this._eventLoop.streamSend(
-      this._connHandle,
-      this._streamId,
-      Buffer.alloc(0),
-      true,
-    );
-    if (written === 0) {
-      this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
-        this._eventLoop?.streamSend(
-          this._connHandle,
-          this._streamId,
-          Buffer.alloc(0),
-          true,
-        );
-        callback();
-      });
-    } else {
-      callback();
-    }
+    const finalChunk = this._takeFinalChunk();
+    this._writeFinalChunk(finalChunk, callback);
+  }
+
+  /** @internal */
+  protected _takeFinalChunk(): Buffer {
+    const finalChunk = this._finalChunk ?? EMPTY_BUFFER;
+    this._finalChunk = null;
+    return finalChunk;
   }
 
   /** @internal */
@@ -288,7 +432,8 @@ export class ServerHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
+    rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     this._clearTimeout();
     callback(error);
   }
@@ -320,8 +465,18 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */ _streamId = -1;
   /** @internal */ _eventLoop: ClientEventLoop | null = null;
   /** @internal */ _bp: BackpressureState | null = createBackpressureState();
+  /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
+  /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
+  /** @internal */ _finSent = false;
+  private _finalChunk: Buffer | null = null;
+  /**
+   * @internal — set after the response HEADERS arrive. Subsequent
+   * HEADERS frames are treated as trailing headers and emitted as
+   * `'trailers'` instead of `'response'`, matching node:http2 semantics.
+   */
+  _responseSeen = false;
 
   /** The HTTP/3 stream ID. */
   get id(): number { return this._streamId; }
@@ -333,7 +488,7 @@ export class ClientHttp3Stream extends Duplex {
   close(code?: number): void {
     const closeCode = code ?? 0;
     this._eventLoop?.streamClose(this._streamId, closeCode);
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this._clearTimeout();
     this.destroy();
   }
@@ -358,7 +513,19 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */
   _onNativeDrain(): void {
     this._onActivity();
+    this._blocked = false;
     fireDrainCallbacks(this._bp);
+  }
+
+  /** @internal — native command queue has room; do not clear QUIC flow-control state. */
+  _onNativeWriteReady(): void {
+    this._onActivity();
+    fireDrainCallbacks(this._bp);
+  }
+
+  /** @internal — see ServerHttp3Stream._onNativeBlocked. */
+  _onNativeBlocked(): void {
+    this._blocked = true;
   }
 
   _read(_size: number): void {
@@ -380,36 +547,83 @@ export class ClientHttp3Stream extends Duplex {
     this._writeChunk(chunk, callback);
   }
 
+  override end(
+    chunk?: EndChunk | (() => void),
+    encoding?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    const { finalChunk, finalEncoding, finalCallback } = resolveEndArgs(chunk, encoding, callback);
+    if (finalChunk != null) {
+      this._finalChunk = bufferFromEndChunk(finalChunk, finalEncoding);
+    }
+    return super.end(finalCallback);
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
+    if (this._blocked) {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeChunk(chunk, callback);
+      });
+      return;
+    }
     const written = this._eventLoop?.streamSend(this._streamId, chunk, false) ?? 0;
     if (written >= chunk.length) {
-      callback();
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
       const remaining = chunk.subarray(written);
       this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
         this._writeChunk(remaining, callback);
       });
     }
   }
 
+  private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    this._onActivity();
+    const written = this._blocked
+      ? 0
+      : this._eventLoop?.streamSend(this._streamId, chunk, true) ?? 0;
+
+    if (chunk.length === 0) {
+      if (written > 0) {
+        completeNativeWrite(this._nativeWriteWindow, written, callback);
+        return;
+      }
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push((err) => {
+        if (err) { callback(err); return; }
+        this._writeFinalChunk(chunk, callback);
+      });
+      return;
+    }
+
+    if (written >= chunk.length) {
+      completeNativeWrite(this._nativeWriteWindow, written, callback);
+      return;
+    }
+
+    const remaining = chunk.subarray(written);
+    this._bp = ensureBackpressureState(this._bp);
+    this._bp.drainCallbacks.push((err) => {
+      if (err) { callback(err); return; }
+      this._writeFinalChunk(remaining, callback);
+    });
+  }
+
   _final(callback: (error?: Error | null) => void): void {
     this._onActivity();
-    if (!this._eventLoop) {
+    if (this._finSent || !this._eventLoop) {
       callback();
       return;
     }
-    const written = this._eventLoop.streamSend(this._streamId, Buffer.alloc(0), true);
-    if (written === 0) {
-      this._bp = ensureBackpressureState(this._bp);
-      this._bp.drainCallbacks.push(() => {
-        this._eventLoop?.streamSend(this._streamId, Buffer.alloc(0), true);
-        callback();
-      });
-    } else {
-      callback();
-    }
+    this._finSent = true;
+    const finalChunk = this._finalChunk ?? EMPTY_BUFFER;
+    this._finalChunk = null;
+    this._writeFinalChunk(finalChunk, callback);
   }
 
   /** @internal */
@@ -433,7 +647,8 @@ export class ClientHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
+    rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     this._clearTimeout();
     callback(error);
   }
@@ -515,7 +730,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
     } catch {
       // Ignore close errors while cleaning up.
     }
-    cancelDrainCallbacks(this._bp);
+    rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this.destroy();
   }
 
@@ -542,11 +757,34 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
   }
 
   override _final(callback: (error?: Error | null) => void): void {
+    if (this._finSent) {
+      callback();
+      return;
+    }
+    this._finSent = true;
     if (!this._headersSent) {
       this.respond({ ':status': '200' });
     }
-    this._h2Stream.end(() => {
-      callback();
-    });
+    const finalChunk = this._takeFinalChunk();
+    const finish = (): void => {
+      this._h2Stream.end(() => {
+        callback();
+      });
+    };
+
+    if (finalChunk.length === 0) {
+      finish();
+      return;
+    }
+
+    try {
+      if (this._h2Stream.write(finalChunk)) {
+        finish();
+        return;
+      }
+      this._h2Stream.once('drain', finish);
+    } catch (err: unknown) {
+      callback(err instanceof Error ? err : new Error(String(err)));
+    }
   }
 }

@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -47,7 +47,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -250,32 +253,57 @@ fn test_quic_idle_timeout_triggers_session_close() {
 
 #[test]
 fn test_quic_idle_timeout_reset_by_data() {
-    // 1000ms idle timeout — sending data at 400ms and 800ms should keep
-    // the connection alive past the 1.5s mark.
-    let pair = setup_quic_pair_with_timeout(1000);
-    let (_server_conn, _client_conn) = wait_for_handshake(&pair);
+    // 2000ms idle timeout. Wait long enough that the original handshake
+    // deadline would be visible, then prove bidirectional packet activity
+    // refreshes the timer by waiting past that original deadline.
+    let pair = setup_quic_pair_with_timeout(2000);
+    let (server_conn, _client_conn) = wait_for_handshake(&pair);
 
-    // Send data at ~400ms
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(1000));
     assert!(
         pair.client.stream_send(0, b"keepalive-1".to_vec(), false),
         "first keepalive send should succeed"
     );
 
-    // Send data at ~800ms
-    std::thread::sleep(Duration::from_millis(400));
+    let server_keepalive = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |event| {
+        (event.event_type == EVENT_NEW_STREAM || event.event_type == EVENT_DATA)
+            && event.stream_id == 0
+            && event
+                .data
+                .as_deref()
+                .is_some_and(|data| data == b"keepalive-1")
+    });
     assert!(
-        pair.client.stream_send(0, b"keepalive-2".to_vec(), false),
-        "second keepalive send should succeed"
+        server_keepalive.is_some(),
+        "server should receive the keepalive data before the idle timeout"
     );
 
-    // At 1.5s from handshake, check that NO SESSION_CLOSE has arrived
-    std::thread::sleep(Duration::from_millis(700));
-    let premature_close = recv_event_matching(
-        &pair.client_rx,
-        Duration::from_millis(200),
-        |e| e.event_type == EVENT_SESSION_CLOSE,
+    assert!(pair.server.send_command(QuicServerCommand::StreamSend {
+        conn_handle: server_conn,
+        stream_id: 0,
+        chunk: Chunk::unpooled(b"keepalive-reply".to_vec()),
+        fin: false,
+    }));
+
+    let client_reply = recv_event_matching(&pair.client_rx, RECV_TIMEOUT, |event| {
+        (event.event_type == EVENT_NEW_STREAM || event.event_type == EVENT_DATA)
+            && event.stream_id == 0
+            && event
+                .data
+                .as_deref()
+                .is_some_and(|data| data == b"keepalive-reply")
+    });
+    assert!(
+        client_reply.is_some(),
+        "client should receive reply data that refreshes its idle timer"
     );
+
+    // This lands after the original 2000ms-from-handshake deadline, but
+    // before the deadline refreshed by the server reply above.
+    std::thread::sleep(Duration::from_millis(1200));
+    let premature_close = recv_event_matching(&pair.client_rx, Duration::from_millis(200), |e| {
+        e.event_type == EVENT_SESSION_CLOSE
+    });
     assert!(
         premature_close.is_none(),
         "connection should NOT have timed out — data kept it alive"
@@ -289,7 +317,9 @@ fn test_quic_idle_timeout_reset_by_data() {
 
     // Server should receive data on stream 0
     let server_data = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |e| {
-        (e.event_type == EVENT_NEW_STREAM || e.event_type == EVENT_DATA) && e.stream_id == 0
+        (e.event_type == EVENT_NEW_STREAM || e.event_type == EVENT_DATA)
+            && e.stream_id == 0
+            && e.data.as_deref().is_some_and(|data| data == b"still-alive")
     });
     assert!(
         server_data.is_some(),
@@ -331,13 +361,11 @@ fn test_quic_connection_close_and_cleanup() {
     assert!(received, "server should receive data on stream 0");
 
     // Server issues CloseSession
-    assert!(
-        pair.server.send_command(QuicServerCommand::CloseSession {
-            conn_handle: server_conn,
-            error_code: 0,
-            reason: "test cleanup".to_string(),
-        })
-    );
+    assert!(pair.server.send_command(QuicServerCommand::CloseSession {
+        conn_handle: server_conn,
+        error_code: 0,
+        reason: "test cleanup".to_string(),
+    }));
 
     // Client should see SESSION_CLOSE
     let close_event = recv_event_matching(&pair.client_rx, RECV_TIMEOUT, |e| {

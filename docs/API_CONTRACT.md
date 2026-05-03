@@ -80,6 +80,9 @@ first production-ready release line.
 - `QuicClientSession#handshakeComplete` (read-only boolean)
 - `QuicClientSession` events: `'connect'`, `'stream'`, `'datagram'`, `'sessionTicket'`, `'close'`, `'error'`
 
+Raw QUIC sessions intentionally do not expose `getRemoteSettings()`: SETTINGS
+are an HTTP/3 framing concept, not a QUIC transport feature.
+
 ## Stable QUIC Stream
 
 - `QuicStream` (extends `Duplex`)

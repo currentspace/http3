@@ -7,6 +7,7 @@ use napi_derive::napi;
 
 use crate::config::{Http3Config, JsServerOptions};
 use crate::h3_event::{JsAddressInfo, JsHeader, JsSessionMetrics, JsSetting};
+use crate::write_outcome::JsStreamSendOutcome;
 
 use std::net::SocketAddr;
 
@@ -87,6 +88,7 @@ pub struct NativeWorkerServer {
     /// Retained for creating additional quiche configs for sharded workers.
     /// All napi Buffers are copied to Vec<u8> so they can be used across threads.
     server_options_snapshot: Option<StoredServerOptions>,
+    stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress,
 }
 
 #[napi]
@@ -109,6 +111,7 @@ impl NativeWorkerServer {
             http3_config: Some(http3_config),
             tsfn: Some(tsfn),
             server_options_snapshot: Some(stored),
+            stream_ingress_pool: crate::chunk_pool::ChunkPoolIngress::new(64),
         })
     }
 
@@ -195,27 +198,59 @@ impl NativeWorkerServer {
         let Some(handle) = &self.handle else {
             return false;
         };
+        let body_len = data.as_ref().len();
+        if !handle.try_admit_outbound(conn_handle, body_len, fin) {
+            return false;
+        }
         let h: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
-        handle.send_command(crate::worker::WorkerCommand::SendResponse {
+        let body = self.stream_ingress_pool.copy_napi_buffer(&data);
+        let accepted = handle.send_command(crate::worker::WorkerCommand::SendResponse {
             conn_handle,
             stream_id: stream_id as u64,
             headers: h,
-            body: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
+            body,
             fin,
-        })
+        });
+        if !accepted {
+            handle.release_outbound_admission(conn_handle, body_len, fin);
+        }
+        if accepted {
+            crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+        }
+        accepted
     }
 
     #[napi]
-    pub fn stream_send(&self, conn_handle: u32, stream_id: i64, data: Buffer, fin: bool) -> bool {
+    pub fn stream_send(
+        &self,
+        conn_handle: u32,
+        stream_id: i64,
+        data: Buffer,
+        fin: bool,
+    ) -> JsStreamSendOutcome {
         let Some(handle) = &self.handle else {
-            return false;
+            return JsStreamSendOutcome::backpressured();
         };
-        handle.send_command(crate::worker::WorkerCommand::StreamSend {
+        let body_len = data.as_ref().len();
+        if !handle.try_admit_outbound(conn_handle, body_len, fin) {
+            return JsStreamSendOutcome::backpressured();
+        }
+        let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
+        let accepted = handle.send_command(crate::worker::WorkerCommand::StreamSend {
             conn_handle,
             stream_id: stream_id as u64,
-            chunk: crate::chunk_pool::Chunk::unpooled(data.to_vec()),
+            chunk,
             fin,
-        })
+        });
+        if !accepted {
+            handle.release_outbound_admission(conn_handle, body_len, fin);
+        }
+        if accepted {
+            crate::reactor_metrics::record_outbound_stream_js_admitted(body_len);
+            JsStreamSendOutcome::accepted(body_len, fin)
+        } else {
+            JsStreamSendOutcome::backpressured()
+        }
     }
 
     #[napi]
@@ -260,9 +295,18 @@ impl NativeWorkerServer {
         let Some(handle) = &self.handle else {
             return false;
         };
-        handle
-            .send_datagram(conn_handle, data.to_vec())
-            .unwrap_or(false)
+        let body_len = data.as_ref().len();
+        if !handle.try_admit_outbound(conn_handle, body_len, false) {
+            return false;
+        }
+        let chunk = self.stream_ingress_pool.copy_napi_buffer(&data);
+        match handle.send_datagram(conn_handle, chunk) {
+            Ok(accepted) => accepted,
+            Err(_) => {
+                handle.release_outbound_admission(conn_handle, body_len, false);
+                false
+            }
+        }
     }
 
     #[napi]
@@ -341,6 +385,21 @@ impl NativeWorkerServer {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Audit finding #14: JS calls this after dispatching a TSFN batch
+    /// so the worker can quantify how far behind real-time JS is.
+    /// Releases credit on the global outstanding-events gauge; the
+    /// recv-pause threshold (step 5.2) reads that gauge to decide
+    /// whether to skip RX processing for one poll iteration.
+    #[napi]
+    pub fn ack_event_batch(&self, count: u32) {
+        crate::reactor_metrics::record_event_batch_ack(count as usize);
+        if count > 0 {
+            if let Some(handle) = &self.handle {
+                handle.wake_event_loop();
+            }
         }
     }
 
