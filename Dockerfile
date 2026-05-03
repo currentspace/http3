@@ -11,23 +11,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   git \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.85.0
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY package.json pnpm-lock.yaml ./
 
-RUN npm ci
+RUN pnpm install --frozen-lockfile --no-optional
 
 # Keep the native+TS build cache stable when only example app files change.
 COPY build.rs Cargo.toml ./
+COPY benches ./benches
 COPY src ./src
 COPY lib ./lib
 COPY index.js index.d.ts tsconfig.json ./
 
-RUN npm run build
-RUN npm prune --omit=dev
+RUN pnpm run build
+RUN pnpm prune --prod
 
 FROM node:24-bookworm AS hono-deps
 
@@ -49,7 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 ENV NODE_ENV=production
 
-COPY --from=native-builder /app/package.json /app/package-lock.json ./
+COPY --from=native-builder /app/package.json /app/pnpm-lock.yaml ./
 COPY --from=native-builder /app/index.js /app/index.d.ts ./
 COPY --from=native-builder /app/dist ./dist
 COPY --from=native-builder /app/*.node ./

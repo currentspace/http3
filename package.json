@@ -138,6 +138,7 @@
     "bench:h3:stress": "npm run build:test && node scripts/h3-benchmark.mjs --profile stress --allow-errors",
     "bench:h3:docker": "node scripts/docker-h3-benchmark.mjs",
     "bench:h3:docker:privileged": "node scripts/docker-h3-benchmark.mjs --include-privileged",
+    "bench:http-h3:matrix": "node scripts/cross-host-echo-benchmark.mjs --protocols http1,http2,h3 --directions loopback,mac-to-linux,linux-to-mac --local-host-for-remote local-host.local --results-dir perf-results/http1-http2-h3-matrix --label http1-http2-h3-matrix",
     "bench:quic": "npm run build:test && node scripts/quic-benchmark.mjs",
     "bench:quic:stress": "npm run build:test && node scripts/quic-benchmark.mjs --profile stress --allow-errors",
     "bench:quic:docker": "node scripts/docker-quic-benchmark.mjs",

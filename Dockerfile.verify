@@ -37,15 +37,12 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 WORKDIR /workspace
 
-# Pre-fetch deps in a separate layer so source-only changes hit cache.
+# Install deps in a separate layer so source-only changes hit cache.
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm fetch
+RUN pnpm install --frozen-lockfile --no-optional
 
 # Bake the source. .dockerignore excludes host build artifacts.
 COPY . .
-
-# Install offline from the fetch cache.
-RUN pnpm install --frozen-lockfile --offline
 
 # verify.sh is the canonical full-suite runner. No host artifacts inside,
 # so it must do its own napi + dist build.

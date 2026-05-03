@@ -63,8 +63,8 @@ rustc --version
 cargo --version
 mark_done
 
-step "pnpm install (frozen lockfile)"
-pnpm install --frozen-lockfile
+step "pnpm install (frozen lockfile, no optional prebuilds)"
+pnpm install --frozen-lockfile --no-optional
 mark_done
 
 step "lint (eslint lib/ test/)"

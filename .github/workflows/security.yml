@@ -23,20 +23,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile --no-optional
       - name: Audit dependencies
-        run: npm audit --audit-level=high
-      - name: Generate SBOM
-        run: npm run sbom
-      - name: Upload SBOM
+        run: pnpm audit --audit-level high
+      - name: Generate dependency inventory
+        run: pnpm licenses list --prod --json > dependency-inventory.json
+      - name: Upload dependency inventory
         uses: actions/upload-artifact@v7
         with:
-          name: sbom-spdx
-          path: sbom.spdx.json
+          name: dependency-inventory-json
+          path: dependency-inventory.json
 
   codeql:
     runs-on: ubuntu-latest
@@ -53,10 +57,13 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
       - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci
-      - run: npm run build
+      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm run build
       - uses: github/codeql-action/analyze@v4

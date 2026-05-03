@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,6 +9,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEFAULTS = {
   remoteHost: 'remote-host.local',
+  remoteTargetHost: null,
   remoteRoot: '/tmp/nodejs_http3-crossbench',
   localHostForRemote: null,
   durationMs: 5000,
@@ -18,6 +20,10 @@ const DEFAULTS = {
   timeoutMs: 30000,
   runtimeMode: 'fast',
   fallbackPolicy: 'warn-and-fallback',
+  protocols: ['quic', 'h3', 'http1', 'http2', 'tcp'],
+  directions: ['mac-to-linux', 'linux-to-mac'],
+  resultsDir: null,
+  label: 'cross-host-echo',
 };
 
 const HTTP_SERVER = String.raw`
@@ -148,7 +154,240 @@ async function worker(start) {
   const cpu = process.cpuUsage(cpuStart);
   const result = {
     type: 'result',
-    protocol: 'http',
+    protocol: 'http1',
+    totalStreams: measuredStreams,
+    totalBytes: measuredBytes,
+    errors,
+    throughputMbps: measuredMs > 0 ? Number(((measuredBytes * 8) / (measuredMs / 1000) / 1e6).toFixed(1)) : 0,
+    streamsPerSecond: measuredMs > 0 ? Number((measuredStreams / (measuredMs / 1000)).toFixed(0)) : 0,
+    streamLatency: {
+      count: latencies.length,
+      meanMs: latencies.length ? Number((latencies.reduce((a, b) => a + b, 0) / latencies.length).toFixed(2)) : 0,
+      p50Ms: Number(percentile(latencies, 50).toFixed(2)),
+      p95Ms: Number(percentile(latencies, 95).toFixed(2)),
+      p99Ms: Number(percentile(latencies, 99).toFixed(2)),
+    },
+    measurement: {
+      mode: 'steady-state',
+      warmupMs: cfg.warmupMs,
+      targetDurationMs: cfg.durationMs,
+      measuredMs: Math.round(measuredMs),
+      maxInflightPerConnection: cfg.maxInflightPerConnection,
+      warmupStreams,
+      warmupBytes,
+      cooldownStreams,
+      cooldownBytes,
+      overallStreams: measuredStreams + warmupStreams + cooldownStreams,
+      overallBytes: measuredBytes + warmupBytes + cooldownBytes,
+    },
+    cpu: {
+      userMs: Math.round(cpu.user / 1000),
+      systemMs: Math.round(cpu.system / 1000),
+    },
+  };
+  process.stdout.write(JSON.stringify(result) + '\n');
+})();
+`;
+
+const HTTP2_SERVER = String.raw`
+const http2 = require('node:http2');
+const { constants } = http2;
+const cfg = JSON.parse(process.argv[1]);
+let streams = 0;
+let bytesIn = 0;
+let bytesOut = 0;
+const server = http2.createServer({
+  settings: {
+    initialWindowSize: 16 * 1024 * 1024,
+    maxConcurrentStreams: 50000,
+  },
+});
+server.on('stream', (stream) => {
+  const chunks = [];
+  let len = 0;
+  stream.on('data', (chunk) => {
+    chunks.push(chunk);
+    len += chunk.length;
+  });
+  stream.on('end', () => {
+    streams += 1;
+    bytesIn += len;
+    const body = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, len);
+    bytesOut += body.length;
+    stream.respond({
+      [constants.HTTP2_HEADER_STATUS]: 200,
+      [constants.HTTP2_HEADER_CONTENT_LENGTH]: body.length,
+    });
+    stream.end(body);
+  });
+  stream.on('error', () => {});
+});
+function emit(type) {
+  const mem = process.memoryUsage();
+  const cpu = process.cpuUsage();
+  process.stdout.write(JSON.stringify({
+    type, timestamp: Date.now(), streams, bytesIn, bytesOut,
+    rss: mem.rss, heapUsed: mem.heapUsed, cpuUser: cpu.user, cpuSystem: cpu.system,
+  }) + '\n');
+}
+server.listen(cfg.port || 0, cfg.host || '0.0.0.0', () => {
+  const addr = server.address();
+  process.stdout.write(JSON.stringify({ type: 'ready', port: addr.port, address: addr.address }) + '\n');
+});
+const timer = setInterval(() => emit('stats'), cfg.statsIntervalMs || 1000);
+timer.unref();
+process.on('SIGTERM', () => {
+  clearInterval(timer);
+  server.close(() => {
+    emit('summary');
+    process.exit(0);
+  });
+});
+process.stdin.resume();
+`;
+
+const HTTP2_CLIENT = String.raw`
+const http2 = require('node:http2');
+const { constants } = http2;
+const { performance } = require('node:perf_hooks');
+const cfg = JSON.parse(process.argv[1]);
+const payload = Buffer.alloc(cfg.messageSize, 0xcc);
+const latencies = [];
+let measuredStreams = 0;
+let measuredBytes = 0;
+let warmupStreams = 0;
+let warmupBytes = 0;
+let cooldownStreams = 0;
+let cooldownBytes = 0;
+let errors = 0;
+function phaseAt(ms) {
+  if (ms < cfg.warmupMs) return 'warmup';
+  if (ms < cfg.warmupMs + cfg.durationMs) return 'measured';
+  return 'cooldown';
+}
+function record(phase, bytes, ms) {
+  if (phase === 'warmup') { warmupStreams += 1; warmupBytes += bytes; return; }
+  if (phase === 'cooldown') { cooldownStreams += 1; cooldownBytes += bytes; return; }
+  measuredStreams += 1;
+  measuredBytes += bytes;
+  latencies.push(ms);
+}
+function percentile(values, p) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(Math.floor(sorted.length * p / 100), sorted.length - 1)];
+}
+function connectSession() {
+  return new Promise((resolve, reject) => {
+    const session = http2.connect('http://' + cfg.host + ':' + cfg.port, {
+      settings: {
+        initialWindowSize: 16 * 1024 * 1024,
+        maxConcurrentStreams: 50000,
+      },
+    });
+    const cleanup = () => {
+      session.off('connect', onConnect);
+      session.off('error', onError);
+    };
+    const onConnect = () => {
+      cleanup();
+      resolve(session);
+    };
+    const onError = (err) => {
+      cleanup();
+      reject(err);
+    };
+    session.once('connect', onConnect);
+    session.once('error', onError);
+  });
+}
+function closeSession(session) {
+  return new Promise((resolve) => {
+    if (session.closed || session.destroyed) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      session.destroy();
+      resolve();
+    }, 2000);
+    session.close(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+function once(session) {
+  return new Promise((resolve, reject) => {
+    const req = session.request({
+      [constants.HTTP2_HEADER_METHOD]: 'POST',
+      [constants.HTTP2_HEADER_PATH]: '/echo',
+      [constants.HTTP2_HEADER_CONTENT_LENGTH]: payload.length,
+    });
+    let got = 0;
+    const timer = setTimeout(() => {
+      cleanup();
+      req.close(constants.NGHTTP2_CANCEL);
+      reject(new Error('http2 request timed out'));
+    }, cfg.timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+      req.off('aborted', onAborted);
+    };
+    const onData = (chunk) => {
+      got += chunk.length;
+    };
+    const onEnd = () => {
+      cleanup();
+      if (got !== payload.length) reject(new Error('response length mismatch'));
+      else resolve(got);
+    };
+    const onError = (err) => {
+      cleanup();
+      reject(err);
+    };
+    const onAborted = () => {
+      cleanup();
+      reject(new Error('http2 request aborted'));
+    };
+    req.on('data', onData);
+    req.once('end', onEnd);
+    req.once('error', onError);
+    req.once('aborted', onAborted);
+    req.end(payload);
+  });
+}
+async function worker(session, start) {
+  const stopAt = cfg.warmupMs + cfg.durationMs;
+  for (;;) {
+    const opStart = performance.now();
+    const elapsedAtStart = opStart - start;
+    if (elapsedAtStart >= stopAt) return;
+    const phase = phaseAt(elapsedAtStart);
+    try {
+      await once(session);
+      record(phase, payload.length * 2, performance.now() - opStart);
+    } catch {
+      errors += 1;
+    }
+  }
+}
+(async () => {
+  const cpuStart = process.cpuUsage();
+  const sessions = await Promise.all(Array.from({ length: cfg.connections }, () => connectSession()));
+  const start = performance.now();
+  await Promise.all(sessions.flatMap((session) =>
+    Array.from({ length: cfg.maxInflightPerConnection }, () => worker(session, start))
+  ));
+  await Promise.all(sessions.map((session) => closeSession(session)));
+  const measuredMs = Math.min(Math.max(performance.now() - start - cfg.warmupMs, 0), cfg.durationMs);
+  const cpu = process.cpuUsage(cpuStart);
+  const result = {
+    type: 'result',
+    protocol: 'http2',
     totalStreams: measuredStreams,
     totalBytes: measuredBytes,
     errors,
@@ -365,6 +604,7 @@ function parseArgs(argv) {
     const value = inline ?? argv[++i];
     switch (key) {
       case '--remote-host': out.remoteHost = value; break;
+      case '--remote-target-host': out.remoteTargetHost = value; break;
       case '--remote-root': out.remoteRoot = value; break;
       case '--local-host-for-remote': out.localHostForRemote = value; break;
       case '--duration-ms': out.durationMs = Number(value); break;
@@ -375,13 +615,60 @@ function parseArgs(argv) {
       case '--runtime-mode': out.runtimeMode = value; break;
       case '--fallback-policy': out.fallbackPolicy = value; break;
       case '--timeout-ms': out.timeoutMs = Number(value); break;
+      case '--protocols': out.protocols = parseList(value).map(normalizeProtocol); break;
+      case '--directions': out.directions = parseList(value).map(normalizeDirection); break;
+      case '--results-dir': out.resultsDir = value; break;
+      case '--label': out.label = value; break;
       default: throw new Error(`unknown option ${key}`);
     }
   }
-  if (!out.localHostForRemote) {
+  if (out.directions.some((direction) => direction === 'linux-to-mac') && !out.localHostForRemote) {
     throw new Error('--local-host-for-remote is required');
   }
   return out;
+}
+
+function parseList(value) {
+  return String(value).split(',').map((entry) => entry.trim()).filter(Boolean);
+}
+
+function normalizeProtocol(value) {
+  switch (value) {
+    case 'http':
+    case 'http1':
+    case 'http1.1':
+    case 'http/1.1':
+      return 'http1';
+    case 'h3':
+    case 'http3':
+    case 'http/3':
+      return 'h3';
+    case 'http2':
+    case 'h2':
+    case 'http/2':
+      return 'http2';
+    case 'quic':
+    case 'tcp':
+      return value;
+    default:
+      throw new Error(`unknown protocol ${value}`);
+  }
+}
+
+function normalizeDirection(value) {
+  switch (value) {
+    case 'loopback':
+    case 'local-loopback':
+      return 'loopback';
+    case 'mac-to-linux':
+    case 'local-to-remote':
+      return 'mac-to-linux';
+    case 'linux-to-mac':
+    case 'remote-to-local':
+      return 'linux-to-mac';
+    default:
+      throw new Error(`unknown direction ${value}`);
+  }
 }
 
 function parseByteSize(value) {
@@ -561,10 +848,11 @@ function benchmarkScript(protocol, role) {
   return base;
 }
 
-function summarizeResult(protocol, direction, result, server) {
+function summarizeResult(protocol, direction, result, server, hosts) {
   return {
     protocol,
     direction,
+    ...hosts,
     throughputMbps: result.throughputMbps,
     totalStreams: result.totalStreams,
     errors: result.errors,
@@ -577,16 +865,22 @@ function summarizeResult(protocol, direction, result, server) {
 }
 
 async function runProtocol(options, protocol, direction) {
+  const loopback = direction === 'loopback';
   const macToLinux = direction === 'mac-to-linux';
+  const serverIsRemote = macToLinux;
+  const clientIsRemote = direction === 'linux-to-mac';
+  const clientHost = loopback
+    ? '127.0.0.1'
+    : (macToLinux ? (options.remoteTargetHost ?? options.remoteHost) : options.localHostForRemote);
   const serverConfig = {
-    host: '0.0.0.0',
+    host: loopback ? '127.0.0.1' : '0.0.0.0',
     port: 0,
     statsIntervalMs: 1000,
     runtimeMode: options.runtimeMode,
     fallbackPolicy: options.fallbackPolicy,
   };
   const clientConfig = {
-    host: macToLinux ? options.remoteHost : options.localHostForRemote,
+    host: clientHost,
     port: 0,
     connections: options.connections,
     streamsPerConnection: 1,
@@ -602,40 +896,87 @@ async function runProtocol(options, protocol, direction) {
   let serverSpec;
   let clientSpec;
   if (protocol === 'quic' || protocol === 'h3') {
-    serverSpec = macToLinux
+    serverSpec = serverIsRemote
       ? remoteNodeScript(options, benchmarkScript(protocol, 'server'), serverConfig)
       : localNodeScript(join(ROOT, benchmarkScript(protocol, 'server')), serverConfig);
-    clientSpec = (port) => macToLinux
-      ? localNodeScript(join(ROOT, benchmarkScript(protocol, 'client')), { ...clientConfig, port })
-      : remoteNodeScript(options, benchmarkScript(protocol, 'client'), { ...clientConfig, port });
+    clientSpec = (port) => clientIsRemote
+      ? remoteNodeScript(options, benchmarkScript(protocol, 'client'), { ...clientConfig, port })
+      : localNodeScript(join(ROOT, benchmarkScript(protocol, 'client')), { ...clientConfig, port });
   } else {
-    const serverScript = protocol === 'http' ? HTTP_SERVER : TCP_SERVER;
-    const clientScript = protocol === 'http' ? HTTP_CLIENT : TCP_CLIENT;
-    serverSpec = macToLinux
+    let serverScript;
+    let clientScript;
+    switch (protocol) {
+      case 'http1':
+        serverScript = HTTP_SERVER;
+        clientScript = HTTP_CLIENT;
+        break;
+      case 'http2':
+        serverScript = HTTP2_SERVER;
+        clientScript = HTTP2_CLIENT;
+        break;
+      case 'tcp':
+        serverScript = TCP_SERVER;
+        clientScript = TCP_CLIENT;
+        break;
+      default:
+        throw new Error(`unknown protocol ${protocol}`);
+    }
+    serverSpec = serverIsRemote
       ? remoteEval(options, serverScript, serverConfig)
       : localEval(serverScript, serverConfig);
-    clientSpec = (port) => macToLinux
-      ? localEval(clientScript, { ...clientConfig, port })
-      : remoteEval(options, clientScript, { ...clientConfig, port });
+    clientSpec = (port) => clientIsRemote
+      ? remoteEval(options, clientScript, { ...clientConfig, port })
+      : localEval(clientScript, { ...clientConfig, port });
   }
 
   const label = `${protocol} ${direction}`;
   const server = await startServer(label, serverSpec);
   try {
     const result = await runClient(label, clientSpec(server.ready.port));
-    return summarizeResult(protocol, direction, result, server);
+    return summarizeResult(protocol, direction, result, server, {
+      serverHost: serverIsRemote ? options.remoteHost : 'local',
+      clientHost: clientIsRemote ? options.remoteHost : 'local',
+      targetHost: clientHost,
+    });
   } finally {
     await server.stop();
   }
 }
 
+function formatMarkdown(summary) {
+  const rows = [
+    '| Direction | Protocol | Throughput Mbps | Streams/s | p50 ms | p95 ms | Errors | Runtime |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+  ];
+  for (const result of summary.results) {
+    const runtime = result.runtimeSelections
+      ? JSON.stringify(result.runtimeSelections)
+      : '';
+    rows.push(
+      `| ${result.direction} | ${result.protocol} | ${result.throughputMbps} | ${result.streamsPerSecond} | ${result.p50Ms} | ${result.p95Ms} | ${result.errors} | ${runtime} |`,
+    );
+  }
+  return `${rows.join('\n')}\n`;
+}
+
+function persistSummary(options, summary) {
+  if (!options.resultsDir) return null;
+  const dir = resolve(ROOT, options.resultsDir);
+  mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replaceAll(':', '').replace(/\.\d{3}Z$/u, 'Z');
+  const base = `${options.label}-${stamp}`;
+  const jsonPath = join(dir, `${base}.json`);
+  const mdPath = join(dir, `${base}.md`);
+  writeFileSync(jsonPath, `${JSON.stringify(summary, null, 2)}\n`);
+  writeFileSync(mdPath, formatMarkdown(summary));
+  return { jsonPath, mdPath };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const protocols = ['quic', 'h3', 'http', 'tcp'];
-  const directions = ['mac-to-linux', 'linux-to-mac'];
   const results = [];
-  for (const direction of directions) {
-    for (const protocol of protocols) {
+  for (const direction of options.directions) {
+    for (const protocol of options.protocols) {
       process.stderr.write(`Running ${protocol} ${direction}...\n`);
       results.push(await runProtocol(options, protocol, direction));
     }
@@ -644,6 +985,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     options: {
       remoteHost: options.remoteHost,
+      remoteTargetHost: options.remoteTargetHost,
       localHostForRemote: options.localHostForRemote,
       durationMs: options.durationMs,
       warmupMs: options.warmupMs,
@@ -651,9 +993,18 @@ async function main() {
       inflight: options.inflight,
       messageSize: options.messageSize,
       runtimeMode: options.runtimeMode,
+      fallbackPolicy: options.fallbackPolicy,
+      protocols: options.protocols,
+      directions: options.directions,
     },
     results,
   };
+  const artifacts = persistSummary(options, summary);
+  if (artifacts) {
+    summary.artifacts = artifacts;
+    process.stderr.write(`Wrote ${artifacts.jsonPath}\n`);
+    process.stderr.write(`Wrote ${artifacts.mdPath}\n`);
+  }
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
