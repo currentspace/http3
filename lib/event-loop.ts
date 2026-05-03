@@ -23,7 +23,7 @@ export const SHUTDOWN_TIMEOUT_MS = 5000;
  * @internal
  */
 export async function waitForShutdownOrTimeout(sentinel: Promise<void>): Promise<void> {
-  let timeout: NodeJS.Timeout | null = null;
+  let timeout: NodeJS.Timeout | undefined;
   const timer = new Promise<void>((resolve) => {
     timeout = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
   });
@@ -31,7 +31,7 @@ export async function waitForShutdownOrTimeout(sentinel: Promise<void>): Promise
   try {
     await Promise.race([sentinel, timer]);
   } finally {
-    if (timeout !== null) {
+    if (timeout !== undefined) {
       clearTimeout(timeout);
     }
   }

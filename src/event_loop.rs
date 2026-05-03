@@ -156,6 +156,10 @@ pub(crate) trait ProtocolHandler {
     /// Call `on_timeout()` for expired timers, poll events, reschedule.
     fn process_timers(&mut self, now: Instant, app_event_budget: usize, batch: &mut Vec<JsH3Event>);
 
+    /// Poll protocol/application events that may already be buffered inside
+    /// quiche without depending on a new packet or timer expiry.
+    fn poll_app_events(&mut self, _app_event_budget: usize, _batch: &mut Vec<JsH3Event>) {}
+
     /// Call `conn.send()` for every connection.  Pushes outbound packets.
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>);
 
@@ -530,6 +534,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     }
 
     let mut poll_now = false;
+    let mut last_allocator_maintenance = Instant::now();
     loop {
         // 1. Compute deadline from protocol timers
         let deadline = if poll_now {
@@ -737,7 +742,17 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             return;
         }
 
-        // 6. Poll drain events + flush pending writes
+        // 6. Resume app/protocol events that may have been deferred by
+        // JS-side event backpressure. A JS ack wakes the driver; this pass
+        // keeps already-received stream data from waiting for an unrelated
+        // packet or idle timeout.
+        let app_budget = app_event_budget(batcher.len());
+        if !batcher.collect_atomic(|batch| handler.poll_app_events(app_budget, batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
+
+        // 7. Poll drain events + flush pending writes
         let app_budget = app_event_budget(batcher.len());
         if !batcher.collect_atomic(|batch| handler.poll_drain_events(app_budget, batch)) {
             record_sink_close_exit(driver);
@@ -754,7 +769,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             return;
         }
 
-        // 7. Flush outbound from all connections
+        // 8. Flush outbound from all connections
         handler.flush_sends(&mut outbound);
         if !outbound.is_empty() {
             if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
@@ -770,22 +785,29 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             }
         }
 
-        // 7b. Recycle TX buffers accumulated during this iteration
+        // 8b. Recycle TX buffers accumulated during this iteration
         let recycled = driver.drain_recycled_tx();
         if !recycled.is_empty() {
             handler.recycle_tx_buffers(recycled);
         }
 
-        // 8. Cleanup closed connections
+        // 9. Cleanup closed connections
         if !batcher.collect_atomic(|batch| handler.cleanup_closed(batch)) {
             record_sink_close_exit(driver);
             return;
         }
 
-        // 8b. Drain returned data buffers from V8 GC back into connection pools.
+        // 9b. Drain returned data buffers from V8 GC back into connection pools.
         handler.drain_recycled_buffers();
 
-        // 9. Flush events to JS
+        // 9c. On platforms without jemalloc background purge support, keep
+        // allocator maintenance on the native worker rather than the JS loop.
+        if last_allocator_maintenance.elapsed() >= crate::allocator::maintenance_interval() {
+            crate::allocator::maintenance_tick();
+            last_allocator_maintenance = Instant::now();
+        }
+
+        // 10. Flush events to JS
         if !batcher.flush() {
             record_sink_close_exit(driver);
             push_shutdown_complete(&mut batcher);
@@ -793,7 +815,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             return;
         }
 
-        // 10. Client exit: handler done and all packets drained
+        // 11. Client exit: handler done and all packets drained
         if handler.is_done() && driver.pending_tx_count() == 0 {
             reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::HandlerDone);
             reactor_metrics::record_lifecycle_trace(

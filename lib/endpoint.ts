@@ -159,19 +159,18 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return promise;
   throwIfAborted(signal);
-  let handler: (() => void) | null = null;
+  let rejectAbort: ((error: Error) => void) | undefined;
+  const handler = (): void => {
+    rejectAbort?.(abortSignalError(signal));
+  };
   const aborted = new Promise<never>((_, reject) => {
-    handler = (): void => {
-      reject(abortSignalError(signal));
-    };
+    rejectAbort = reject;
     signal.addEventListener('abort', handler, { once: true });
   });
   try {
     return await Promise.race([promise, aborted]);
   } finally {
-    if (handler !== null) {
-      signal.removeEventListener('abort', handler);
-    }
+    signal.removeEventListener('abort', handler);
   }
 }
 

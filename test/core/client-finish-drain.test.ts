@@ -77,4 +77,27 @@ describe('client EVENT_FINISHED', () => {
 
     stream.destroy();
   });
+
+  it('closes endStream request streams after response FIN', async () => {
+    const session = new Http3ClientSession('example.test:443');
+    const sessionAny = session as unknown as {
+      _eventLoop: ClientLoopStub | null;
+      _handshakeComplete: boolean;
+      _dispatchEvents: (events: Array<Record<string, unknown>>) => void;
+      _streams: Map<number, unknown>;
+    };
+    sessionAny._eventLoop = makeStubLoop();
+    sessionAny._handshakeComplete = true;
+
+    const stream = session.request({ ':method': 'GET', ':path': '/' }, { endStream: true });
+    const streamId = (stream as unknown as { _streamId: number })._streamId;
+    const closed = new Promise<void>((resolve) => {
+      stream.once('close', resolve);
+    });
+
+    sessionAny._dispatchEvents([{ eventType: EVENT_FINISHED, streamId }]);
+    await closed;
+
+    assert.equal(sessionAny._streams.has(streamId), false, 'stream map should release completed GET streams');
+  });
 });

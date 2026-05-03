@@ -9,8 +9,10 @@
 
 use quiche::h3::NameValue;
 use std::net::UdpSocket;
+use std::time::{Duration, Instant};
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
 
 fn generate_test_certs() -> (std::path::PathBuf, std::path::PathBuf) {
     use rcgen::{CertificateParams, KeyPair};
@@ -78,65 +80,107 @@ fn exchange_udp(
 ) {
     let mut buf = vec![0u8; 65535];
     let mut out = vec![0u8; MAX_DATAGRAM_SIZE];
+    let deadline = Instant::now() + HANDSHAKE_DEADLINE;
 
-    for _ in 0..50 {
-        // Client -> Server
-        loop {
-            match client_conn.send(&mut out) {
-                Ok((len, info)) => {
-                    client_sock.send_to(&out[..len], info.to).unwrap();
-                }
-                Err(quiche::Error::Done) => break,
-                Err(e) => panic!("client send: {e}"),
-            }
-        }
+    while Instant::now() < deadline {
+        let mut made_progress = false;
 
-        // Drain server socket
-        server_sock.set_nonblocking(true).unwrap();
-        loop {
-            match server_sock.recv_from(&mut buf) {
-                Ok((len, from)) => {
-                    let recv_info = quiche::RecvInfo {
-                        from,
-                        to: server_sock.local_addr().unwrap(),
-                    };
-                    server_conn.recv(&mut buf[..len], recv_info).ok();
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => panic!("server recv: {e}"),
-            }
-        }
-
-        // Server -> Client
-        loop {
-            match server_conn.send(&mut out) {
-                Ok((len, info)) => {
-                    server_sock.send_to(&out[..len], info.to).unwrap();
-                }
-                Err(quiche::Error::Done) => break,
-                Err(e) => panic!("server send: {e}"),
-            }
-        }
-
-        // Drain client socket
-        client_sock.set_nonblocking(true).unwrap();
-        loop {
-            match client_sock.recv_from(&mut buf) {
-                Ok((len, from)) => {
-                    let recv_info = quiche::RecvInfo {
-                        from,
-                        to: client_sock.local_addr().unwrap(),
-                    };
-                    client_conn.recv(&mut buf[..len], recv_info).ok();
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) => panic!("client recv: {e}"),
-            }
-        }
+        made_progress |= flush_udp_send(client_sock, client_conn, &mut out, "client");
+        made_progress |= drain_udp_recv(server_sock, server_conn, &mut buf, "server");
+        made_progress |= flush_udp_send(server_sock, server_conn, &mut out, "server");
+        made_progress |= drain_udp_recv(client_sock, client_conn, &mut buf, "client");
 
         if client_conn.is_established() && server_conn.is_established() {
-            break;
+            return;
         }
+
+        made_progress |= fire_expired_timeout(client_conn);
+        made_progress |= fire_expired_timeout(server_conn);
+
+        if !made_progress {
+            sleep_until_next_quic_timer(client_conn, server_conn, deadline);
+        }
+    }
+}
+
+fn flush_udp_send(
+    sock: &UdpSocket,
+    conn: &mut quiche::Connection,
+    out: &mut [u8],
+    side: &str,
+) -> bool {
+    let mut made_progress = false;
+
+    loop {
+        match conn.send(out) {
+            Ok((len, info)) => {
+                sock.send_to(&out[..len], info.to).unwrap();
+                made_progress = true;
+            }
+            Err(quiche::Error::Done) => return made_progress,
+            Err(e) => panic!("{side} send: {e}"),
+        }
+    }
+}
+
+fn drain_udp_recv(
+    sock: &UdpSocket,
+    conn: &mut quiche::Connection,
+    buf: &mut [u8],
+    side: &str,
+) -> bool {
+    let mut made_progress = false;
+
+    sock.set_nonblocking(true).unwrap();
+    loop {
+        match sock.recv_from(buf) {
+            Ok((len, from)) => {
+                let recv_info = quiche::RecvInfo {
+                    from,
+                    to: sock.local_addr().unwrap(),
+                };
+                match conn.recv(&mut buf[..len], recv_info) {
+                    Ok(_) | Err(quiche::Error::Done) => {
+                        made_progress = true;
+                    }
+                    Err(e) => panic!("{side} conn recv: {e}"),
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return made_progress,
+            Err(e) => panic!("{side} recv: {e}"),
+        }
+    }
+}
+
+fn fire_expired_timeout(conn: &mut quiche::Connection) -> bool {
+    if conn.timeout().is_some_and(|timeout| timeout.is_zero()) {
+        conn.on_timeout();
+        return true;
+    }
+    false
+}
+
+fn sleep_until_next_quic_timer(
+    client_conn: &quiche::Connection,
+    server_conn: &quiche::Connection,
+    deadline: Instant,
+) {
+    let now = Instant::now();
+    if now >= deadline {
+        return;
+    }
+
+    let wait = client_conn
+        .timeout()
+        .into_iter()
+        .chain(server_conn.timeout())
+        .min()
+        .unwrap_or_else(|| Duration::from_millis(1))
+        .min(Duration::from_millis(1))
+        .min(deadline - now);
+
+    if !wait.is_zero() {
+        std::thread::sleep(wait);
     }
 }
 

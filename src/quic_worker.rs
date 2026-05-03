@@ -151,6 +151,12 @@ impl QuicServerHandle {
         self.local_addr
     }
 
+    pub fn wake_event_loop(&self) {
+        for worker in &self.workers {
+            let _ = worker.waker.wake();
+        }
+    }
+
     pub fn get_session_metrics(
         &self,
         conn_handle: u32,
@@ -480,6 +486,18 @@ impl QuicClientHandle {
         let _ = self
             .outbound_admission
             .release(outbound_payload_units(payload_len, fin));
+    }
+
+    pub fn wake_event_loop(&self) {
+        match &self.kind {
+            Some(QuicClientHandleKind::Dedicated { waker, .. }) => {
+                let _ = waker.wake();
+            }
+            Some(QuicClientHandleKind::Shared { worker, .. }) => {
+                worker.wake();
+            }
+            None => {}
+        }
     }
 
     pub fn open_stream(&self) -> Result<u64, Http3NativeError> {
@@ -2111,11 +2129,24 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
         for handle in handles_buf.iter().copied() {
             if let Some(session) = sessions.get_mut(handle) {
                 let app_budget = event_loop::app_event_budget(session.batcher.len());
-                let drain_ok = session.batcher.collect_atomic(|batch| {
+                let app_ok = session.batcher.collect_atomic(|batch| {
                     session
                         .handler
-                        .poll_drain_events_for_handle(app_budget, batch, handle as u32);
+                        .poll_app_events_for_handle(app_budget, batch, handle as u32);
                 });
+                if app_ok {
+                    refresh_shared_quic_client_dcid(&mut route_by_dcid, handle, session);
+                    sync_shared_quic_client_timer(&mut timer_heap, handle, session);
+                }
+                let app_budget = event_loop::app_event_budget(session.batcher.len());
+                let drain_ok = app_ok
+                    && session.batcher.collect_atomic(|batch| {
+                        session.handler.poll_drain_events_for_handle(
+                            app_budget,
+                            batch,
+                            handle as u32,
+                        );
+                    });
                 let flush_ok = drain_ok
                     && session.batcher.collect_atomic(|batch| {
                         session
@@ -2671,6 +2702,30 @@ impl ProtocolHandler for QuicServerHandler {
         }
     }
 
+    fn poll_app_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
+        if app_event_budget == 0 {
+            return;
+        }
+
+        let offset = self.handle_offset;
+        let mut remaining = app_event_budget;
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        for i in 0..self.handles_buf.len() {
+            if remaining == 0 {
+                break;
+            }
+
+            let handle = self.handles_buf[i];
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                conn.poll_quic_events(offset | (handle as u32), remaining, batch);
+                for duration_ms in conn.poll_ping_acks() {
+                    batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
+                }
+                remaining = app_event_budget.saturating_sub(batch.len());
+            }
+        }
+    }
+
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>) {
         self.conn_map.fill_handles(&mut self.handles_buf);
         if self.handles_buf.is_empty() {
@@ -3164,6 +3219,26 @@ impl QuicClientHandler {
         }
     }
 
+    fn poll_app_events_for_handle(
+        &mut self,
+        app_event_budget: usize,
+        batch: &mut Vec<JsH3Event>,
+        conn_handle: u32,
+    ) {
+        if app_event_budget == 0 {
+            return;
+        }
+
+        self.conn
+            .poll_quic_events(conn_handle, app_event_budget, batch);
+        for duration_ms in self.conn.poll_ping_acks() {
+            batch.push(JsH3Event::ping_ack(conn_handle, duration_ms));
+        }
+        if let Some(ticket) = self.conn.update_session_ticket() {
+            batch.push(JsH3Event::session_ticket(conn_handle, ticket));
+        }
+    }
+
     fn try_send_next(&mut self) -> Option<TxDatagram> {
         Self::try_send_next_with_pool_parts(
             &mut self.conn,
@@ -3311,6 +3386,10 @@ impl ProtocolHandler for QuicClientHandler {
         batch: &mut Vec<JsH3Event>,
     ) {
         self.process_timers_for_handle(now, app_event_budget, batch, 0);
+    }
+
+    fn poll_app_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
+        self.poll_app_events_for_handle(app_event_budget, batch, 0);
     }
 
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>) {

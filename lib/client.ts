@@ -299,12 +299,12 @@ export class Http3ClientSession extends Http3ClientSessionBase {
         );
       }
     }
-    if (!this._eventLoop) {
-      throw new Http3Error('not connected', ERR_HTTP3_INVALID_STATE);
-    }
     if (this._goawayReceived) {
       const suffix = this._goawayLastStreamId === null ? '' : ` (last stream ID ${this._goawayLastStreamId})`;
       throw new Http3Error(`session received GOAWAY${suffix}`, ERR_HTTP3_GOAWAY);
+    }
+    if (!this._eventLoop) {
+      throw new Http3Error('not connected', ERR_HTTP3_INVALID_STATE);
     }
 
     const h = incomingHeadersToNativeHeaders(headers);
@@ -322,6 +322,10 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     stream._streamId = streamId;
     stream._eventLoop = this._eventLoop;
     this._streams.set(streamId, stream);
+    if (options?.endStream ?? false) {
+      stream._finSent = true;
+      stream.end();
+    }
     return stream;
   }
 
@@ -585,8 +589,8 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     }
   }
 
-  private _waitForRequestRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  private async _waitForRequestRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
       if (signal?.aborted) {
         reject(abortSignalError(signal));
         return;

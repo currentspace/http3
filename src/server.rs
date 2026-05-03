@@ -396,6 +396,11 @@ impl NativeWorkerServer {
     #[napi]
     pub fn ack_event_batch(&self, count: u32) {
         crate::reactor_metrics::record_event_batch_ack(count as usize);
+        if count > 0 {
+            if let Some(handle) = &self.handle {
+                handle.wake_event_loop();
+            }
+        }
     }
 
     /// Join all worker threads. Safe to call after `request_shutdown()`.

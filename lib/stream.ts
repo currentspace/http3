@@ -400,9 +400,15 @@ export class ServerHttp3Stream extends Duplex {
       return;
     }
     this._finSent = true;
+    const finalChunk = this._takeFinalChunk();
+    this._writeFinalChunk(finalChunk, callback);
+  }
+
+  /** @internal */
+  protected _takeFinalChunk(): Buffer {
     const finalChunk = this._finalChunk ?? EMPTY_BUFFER;
     this._finalChunk = null;
-    this._writeFinalChunk(finalChunk, callback);
+    return finalChunk;
   }
 
   /** @internal */
@@ -751,11 +757,34 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
   }
 
   override _final(callback: (error?: Error | null) => void): void {
+    if (this._finSent) {
+      callback();
+      return;
+    }
+    this._finSent = true;
     if (!this._headersSent) {
       this.respond({ ':status': '200' });
     }
-    this._h2Stream.end(() => {
-      callback();
-    });
+    const finalChunk = this._takeFinalChunk();
+    const finish = (): void => {
+      this._h2Stream.end(() => {
+        callback();
+      });
+    };
+
+    if (finalChunk.length === 0) {
+      finish();
+      return;
+    }
+
+    try {
+      if (this._h2Stream.write(finalChunk)) {
+        finish();
+        return;
+      }
+      this._h2Stream.once('drain', finish);
+    } catch (err: unknown) {
+      callback(err instanceof Error ? err : new Error(String(err)));
+    }
   }
 }

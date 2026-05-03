@@ -86,6 +86,7 @@ pub struct H3Connection {
     /// worker thread to pull returned buffers back into `data_pool`.
     pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
     pending_body_data: HashMap<u64, PendingRecvBody>,
+    trailer_fin_streams: HashSet<u64>,
     ping_state: PingState,
 }
 
@@ -167,6 +168,7 @@ impl H3Connection {
             data_recycler,
             data_recycle_rx,
             pending_body_data: HashMap::new(),
+            trailer_fin_streams: HashSet::new(),
             ping_state: PingState::default(),
         }
     }
@@ -586,6 +588,14 @@ impl H3Connection {
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
         let data_len = buf.remaining_len();
+        if data_len == 0 && fin && self.trailer_fin_streams.contains(&stream_id) {
+            return Ok(SendBodyOutcome {
+                written: 0,
+                fin_accepted: true,
+                remainder: None,
+            });
+        }
+
         if data_len == 0 {
             if !fin {
                 return Ok(SendBodyOutcome {
@@ -670,6 +680,7 @@ impl H3Connection {
         if let Some(pending) = self.pending_body_data.remove(&stream_id) {
             self.data_pool.checkin(pending.buf);
         }
+        self.trailer_fin_streams.remove(&stream_id);
         Ok(())
     }
 
@@ -695,7 +706,9 @@ impl H3Connection {
             /* is_trailer_section */ true,
             /* fin */ true,
         )
-        .map_err(Http3NativeError::H3)
+        .map_err(Http3NativeError::H3)?;
+        self.trailer_fin_streams.insert(stream_id);
+        Ok(())
     }
 
     /// Pull returned buffers from the recycler channel back into the data pool.

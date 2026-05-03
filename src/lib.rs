@@ -2,6 +2,7 @@
 //! cloudflare/quiche. Exposes worker-thread servers/clients for both HTTP/3
 //! and raw QUIC to the TypeScript layer via napi-rs.
 
+mod allocator;
 mod arc_buf;
 mod buffer_pool;
 pub mod chunk_pool;

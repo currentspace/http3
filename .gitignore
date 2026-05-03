@@ -4,6 +4,7 @@ target/
 *.node
 node_modules/
 perf-results/
+artifacts/
 examples/certs/server.key
 examples/certs/server.crt
 package-lock.json

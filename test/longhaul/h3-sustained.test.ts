@@ -6,7 +6,10 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
-import { assertMemoryDriftWithinLimit, snapshotMemory } from '../support/native-test-helpers.js';
+import {
+  assertMemoryDriftWithinLimit,
+  snapshotMemory,
+} from '../support/native-test-helpers.js';
 import type { MemorySnapshot } from '../support/native-test-helpers.js';
 import { createSecureServer, connectAsync } from '../../lib/index.js';
 import type { Http3SecureServer, Http3ClientSession, ServerHttp3Stream, IncomingHeaders, StreamFlags } from '../../lib/index.js';
@@ -131,6 +134,7 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
     const DURATION_S = 300;
     const BATCH_SIZE = 10;
     const CHECKPOINT_INTERVAL_S = 30;
+    const MEMORY_BASELINE_AFTER_S = 120;
     let totalRequests = 0;
     let errors = 0;
     const start = Date.now();
@@ -153,8 +157,10 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       const now = Date.now();
       if ((now - lastCheckpoint) / 1000 >= CHECKPOINT_INTERVAL_S) {
         const mem = snapshotMemory();
-        baselineMem ??= mem;
         const elapsedS = (now - start) / 1000;
+        if (elapsedS >= MEMORY_BASELINE_AFTER_S) {
+          baselineMem ??= mem;
+        }
         console.log(
           `  [longhaul] ${elapsedS.toFixed(0)}s: ` +
           `${totalRequests} reqs (${(totalRequests / elapsedS).toFixed(1)} req/s), ` +
@@ -184,7 +190,11 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       finalMem.heapUsed < 100 * 1024 * 1024,
       `heap grew too much: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
     );
-    assertMemoryDriftWithinLimit('h3 sustained post-warmup', baselineMem ?? finalMem, finalMem);
+    assertMemoryDriftWithinLimit(
+      'h3 sustained post-warmup',
+      baselineMem ?? finalMem,
+      finalMem,
+    );
 
     await session.close();
   });

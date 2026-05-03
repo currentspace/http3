@@ -7,8 +7,9 @@ rust-version = "1.94"
 autobins = false
 
 [features]
-default = ["node-api"]
+default = ["node-api", "native-jemalloc"]
 node-api = []
+native-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 profile-binary = ["rcgen"]
 bench-internals = []
 driver-tracing = []
@@ -52,12 +53,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 env_logger = "0.11"
 rcgen = { version = "0.14", optional = true }
+tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nix = { version = "0.31", features = ["event"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+
+[patch.crates-io]
+quiche = { path = "vendor/quiche-0.28.0" }
 
 [build-dependencies]
 napi-build = "2"
