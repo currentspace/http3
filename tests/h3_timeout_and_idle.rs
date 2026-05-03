@@ -218,6 +218,17 @@ fn recv_event_matching(
     }
 }
 
+fn append_event_data(event: &JsH3Event, out: &mut Vec<u8>) -> bool {
+    let Some(data) = event.data.as_ref() else {
+        return false;
+    };
+    if data.is_empty() {
+        return false;
+    }
+    out.extend_from_slice(data);
+    true
+}
+
 /// Wait for the H3 handshake to complete.  Returns (server_conn_handle,
 /// client_conn_handle).
 fn wait_for_h3_handshake(pair: &H3Pair) -> (u32, u32) {
@@ -377,13 +388,11 @@ fn test_h3_request_after_long_idle() {
             Ok(batch) => {
                 for event in batch.events {
                     if event.stream_id == stream_id as i64 {
+                        append_event_data(&event, &mut client_data);
                         if event.event_type == EVENT_HEADERS {
                             got_response_headers = true;
                         }
                         if event.event_type == EVENT_DATA {
-                            if let Some(data) = event.data.as_ref() {
-                                client_data.extend_from_slice(data);
-                            }
                             if event.fin == Some(true) {
                                 got_fin = true;
                             }

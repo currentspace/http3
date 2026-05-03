@@ -189,6 +189,17 @@ fn recv_event_matching(
     }
 }
 
+fn append_event_data(event: &JsH3Event, out: &mut Vec<u8>) -> bool {
+    let Some(data) = event.data.as_ref() else {
+        return false;
+    };
+    if data.is_empty() {
+        return false;
+    }
+    out.extend_from_slice(data);
+    true
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -208,7 +219,7 @@ fn test_h3_request_response_under_5pct_loss() {
     .expect("client HANDSHAKE_COMPLETE under 5% loss");
 
     // Client sends GET
-    let _ = pair.client.send_request(
+    let stream_id = pair.client.send_request(
         vec![
             (":method".into(), "GET".into()),
             (":path".into(), "/lossy".into()),
@@ -216,7 +227,8 @@ fn test_h3_request_response_under_5pct_loss() {
             (":scheme".into(), "https".into()),
         ],
         true,
-    );
+    )
+    .expect("send_request under 5% loss should succeed");
 
     // Server sees HEADERS
     let headers_event = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |e| {
@@ -258,10 +270,11 @@ fn test_h3_request_response_under_5pct_loss() {
         match pair.client_rx.recv_timeout(remaining) {
             Ok(batch) => {
                 for event in batch.events {
+                    if event.stream_id != stream_id as i64 {
+                        continue;
+                    }
+                    append_event_data(&event, &mut client_data);
                     if event.event_type == EVENT_DATA {
-                        if let Some(data) = event.data.as_ref() {
-                            client_data.extend_from_slice(data);
-                        }
                         if event.fin == Some(true) {
                             got_fin = true;
                         }
@@ -302,7 +315,7 @@ fn test_h3_large_body_under_10pct_loss() {
     })
     .expect("client HANDSHAKE_COMPLETE under 10% loss");
 
-    let _ = pair.client.send_request(
+    let stream_id = pair.client.send_request(
         vec![
             (":method".into(), "GET".into()),
             (":path".into(), "/large-lossy".into()),
@@ -310,7 +323,8 @@ fn test_h3_large_body_under_10pct_loss() {
             (":scheme".into(), "https".into()),
         ],
         true,
-    );
+    )
+    .expect("send_request under 10% loss should succeed");
 
     let headers_event = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |e| {
         e.event_type == EVENT_HEADERS
@@ -350,10 +364,11 @@ fn test_h3_large_body_under_10pct_loss() {
         match pair.client_rx.recv_timeout(remaining) {
             Ok(batch) => {
                 for event in batch.events {
+                    if event.stream_id != stream_id as i64 {
+                        continue;
+                    }
+                    append_event_data(&event, &mut client_data);
                     if event.event_type == EVENT_DATA {
-                        if let Some(data) = event.data.as_ref() {
-                            client_data.extend_from_slice(data);
-                        }
                         if event.fin == Some(true) {
                             got_fin = true;
                         }
