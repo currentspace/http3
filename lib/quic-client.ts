@@ -213,6 +213,10 @@ export class QuicClientSession extends EventEmitter {
   get runtimeInfo(): RuntimeInfo | null {
     return this._runtimeInfo;
   }
+  /** Whether the session has reached a terminal close state. */
+  get closed(): boolean {
+    return this._closeEmitted;
+  }
 
   /** Resolves when the QUIC handshake completes. Rejects on connection failure. */
   async ready(): Promise<void> {
@@ -221,6 +225,11 @@ export class QuicClientSession extends EventEmitter {
 
   /** Open a new client-initiated bidirectional stream. */
   openStream(): QuicStream {
+    if (this._closeEmitted || this._closeRequested) {
+      throw new Http3Error(this._closeInfo?.reason || 'QUIC session closed', ERR_HTTP3_SESSION_ERROR, {
+        quicCode: this._closeInfo?.errorCode,
+      });
+    }
     if (!this._handshakeComplete) {
       throw new Error('QUIC handshake not complete — await session.ready() first');
     }

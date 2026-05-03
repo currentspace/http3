@@ -622,6 +622,7 @@ function aggregateProcessResults(results, wallElapsedMs) {
   const streamP99s = results.map((result) => result.streamLatency.p99Ms);
   const runtimeSelections = {};
   const reactorTelemetry = {};
+  const errorCounts = {};
   const steadyState = results.some((result) => result.measurement?.mode === 'steady-state');
   const measuredWallElapsedMs = steadyState
     ? maxDefinedNumber(results.map((result) => result.measurement?.measuredMs ?? null), 0)
@@ -652,12 +653,14 @@ function aggregateProcessResults(results, wallElapsedMs) {
   for (const result of results) {
     mergeCountObjects(runtimeSelections, result.runtimeSelections);
     mergeNumericTelemetry(reactorTelemetry, result.reactorTelemetry);
+    mergeCountObjects(errorCounts, result.errorCounts);
   }
 
   return {
     totalStreams,
     totalBytes,
     errors,
+    errorCounts,
     wallElapsedMs: measuredWallElapsedMs,
     processWallElapsedMs: wallElapsedMs,
     throughputMbps: measuredWallElapsedMs > 0 ? (totalBytes * 8) / (measuredWallElapsedMs / 1000) / 1_000_000 : 0,
@@ -837,6 +840,9 @@ function printSummary(summary) {
   console.log(`  Requested streams: ${requestedStreams ?? 'steady-state window'}`);
   console.log(`  Completed streams: ${totalStreams}`);
   console.log(`  Errors: ${errors}`);
+  if (errors > 0) {
+    console.log(`  Error classes: ${formatCountSummary(clientStats.errorCounts)}`);
+  }
   if (measurement.mode === 'steady-state') {
     console.log(`  Process wall time: ${wallElapsedMs}ms`);
     console.log(`  Measured window: ${measurement.measuredWallElapsedMs}ms (load phase ${measurement.loadElapsedMs}ms)`);

@@ -6,6 +6,7 @@
 import { connectAsync } from '../../../lib/index.js';
 import { binding } from '../../../lib/event-loop.js';
 import type { Http3ClientSession } from '../../../lib/index.js';
+import type { SessionCloseInfo } from '../../../lib/session.js';
 
 interface BenchConfig {
   host?: string;
@@ -172,9 +173,44 @@ function writeJson(message: Record<string, unknown>): void {
 
 function classifyError(error: unknown): string {
   if (error instanceof Error) {
-    return error.message || error.name;
+    const code = typeof (error as Error & { code?: unknown }).code === 'string'
+      ? (error as Error & { code: string }).code
+      : null;
+    const message = error.message || error.name;
+    if (code && message && message !== error.name) {
+      return `${code}: ${message}`;
+    }
+    return code ?? message;
   }
   return String(error);
+}
+
+interface ClientState {
+  session: Http3ClientSession;
+  closed: boolean;
+  closeInfo: SessionCloseInfo | null;
+}
+
+function attachClientState(session: Http3ClientSession): ClientState {
+  const state: ClientState = {
+    session,
+    closed: session.closed,
+    closeInfo: null,
+  };
+  session.once('close', (info) => {
+    state.closed = true;
+    state.closeInfo = info;
+  });
+  return state;
+}
+
+function isTerminalSessionError(error: unknown, state: ClientState): boolean {
+  if (state.closed) {
+    return true;
+  }
+  return error instanceof Error
+    && typeof (error as Error & { code?: unknown }).code === 'string'
+    && (error as Error & { code: string }).code === 'ERR_HTTP3_SESSION_ERROR';
 }
 
 function incrementCount(counts: Record<string, number>, key: string): void {
@@ -291,7 +327,7 @@ async function main(): Promise<void> {
   const connectTimeoutMs = config.connectTimeoutMs ?? config.timeoutMs;
 
   // Phase 1: Open connections
-  const clients: Http3ClientSession[] = [];
+  const clients: ClientState[] = [];
   for (let c = 0; c < config.connections; c++) {
     diag.connectionsStarted++;
     const connStart = process.hrtime.bigint();
@@ -305,7 +341,7 @@ async function main(): Promise<void> {
       });
       const connMs = Number(process.hrtime.bigint() - connStart) / 1e6;
       connLatency.add(connMs);
-      clients.push(client);
+      clients.push(attachClientState(client));
       diag.connectionsOpened++;
       const runtimeKey = formatRuntimeSelection(client.runtimeInfo);
       runtimeSelections.set(runtimeKey, (runtimeSelections.get(runtimeKey) ?? 0) + 1);
@@ -354,8 +390,11 @@ async function main(): Promise<void> {
       streamLatency.add(streamMs);
     };
 
-    async function runSteadyStateWorker(client: Http3ClientSession): Promise<void> {
+    async function runSteadyStateWorker(client: ClientState): Promise<void> {
       for (;;) {
+        if (client.closed) {
+          return;
+        }
         const streamStart = process.hrtime.bigint();
         const loadElapsedAtStartMs = Number(streamStart - loadStart) / 1e6;
         if (loadElapsedAtStartMs >= stopAfterMs) {
@@ -364,7 +403,7 @@ async function main(): Promise<void> {
         const phase = classifyMeasurementPhase(loadElapsedAtStartMs, warmupMs, durationMs);
 
         try {
-          const echoedBytes = await doRequest(client, payload, config.timeoutMs, diag);
+          const echoedBytes = await doRequest(client.session, payload, config.timeoutMs, diag);
           const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
           if (echoedBytes === payload.length) {
             recordCompletion(phase, echoedBytes * 2, streamMs);
@@ -375,6 +414,9 @@ async function main(): Promise<void> {
         } catch (err) {
           incrementCount(errorCounts, classifyError(err));
           errors++;
+          if (isTerminalSessionError(err, client)) {
+            return;
+          }
         }
       }
     }
@@ -394,10 +436,13 @@ async function main(): Promise<void> {
       Math.min(config.streamsPerConnection, config.maxInflightPerConnection ?? config.streamsPerConnection),
     );
 
-    async function runFixedRequest(client: Http3ClientSession): Promise<void> {
+    async function runFixedRequest(client: ClientState): Promise<void> {
+      if (client.closed) {
+        return;
+      }
       const streamStart = process.hrtime.bigint();
       try {
-        const echoedBytes = await doRequest(client, payload, config.timeoutMs, diag);
+        const echoedBytes = await doRequest(client.session, payload, config.timeoutMs, diag);
         const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
         if (echoedBytes === payload.length) {
           totalStreams++;
@@ -413,10 +458,13 @@ async function main(): Promise<void> {
       }
     }
 
-    async function runFixedConnection(client: Http3ClientSession): Promise<void> {
+    async function runFixedConnection(client: ClientState): Promise<void> {
       let nextStream = 0;
       async function worker(): Promise<void> {
         for (;;) {
+          if (client.closed) {
+            return;
+          }
           const streamIndex = nextStream;
           nextStream++;
           if (streamIndex >= config.streamsPerConnection) {
@@ -437,7 +485,7 @@ async function main(): Promise<void> {
   // Phase 3: Close
   await Promise.all(clients.map(async (c) => {
     diag.closeStarted++;
-    await c.close();
+    await c.session.close();
     diag.closeCompleted++;
   }));
   stopDiag(diag);

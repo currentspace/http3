@@ -29,6 +29,29 @@ function runtimeOptionsFromEvent(event: NativeEvent): ConstructorParameters<type
   };
 }
 
+function quicErrorMessage(errorCode: number | undefined, fallback: string): string {
+  switch (errorCode) {
+    case 0x0: return 'connection closed';
+    case 0x1: return 'internal error';
+    case 0x2: return 'connection refused';
+    case 0x3: return 'flow control error';
+    case 0x4: return 'stream limit error';
+    case 0x5: return 'stream state error';
+    case 0x6: return 'final size error';
+    case 0x7: return 'frame encoding error';
+    case 0x8: return 'transport parameter error';
+    case 0x9: return 'connection ID limit error';
+    case 0xa: return 'protocol violation';
+    case 0xb: return 'invalid token';
+    case 0xc: return 'application error';
+    case 0xd: return 'crypto buffer exceeded';
+    case 0xe: return 'key update error';
+    case 0xf: return 'AEAD limit reached';
+    case 0x10: return 'no viable path';
+    default: return fallback;
+  }
+}
+
 /**
  * Convert a native stream-error event into an {@link Http3Error}.
  * @internal
@@ -48,7 +71,8 @@ export function toStreamError(event: NativeEvent, fallback = 'stream error'): Ht
  * @internal
  */
 export function toSessionError(event: NativeEvent, fallback = 'session error'): Http3Error {
-  const message = event.meta?.errorReason ?? fallback;
+  const message = event.meta?.errorReason
+    || quicErrorMessage(event.meta?.errorCode, fallback);
   if (event.meta?.errorCategory === 'runtime') {
     return new Http3Error(message, runtimeCodeForEvent(event), runtimeOptionsFromEvent(event));
   }

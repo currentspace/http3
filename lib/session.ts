@@ -129,6 +129,8 @@ export class Http3Session extends EventEmitter {
   get handshakeComplete(): boolean { return this._handshakeComplete; }
   /** Runtime mode/driver information for this session, when available. */
   get runtimeInfo(): RuntimeInfo | null { return this._runtimeInfo; }
+  /** Whether the session has reached a terminal close state. */
+  get closed(): boolean { return this._closeEmitted; }
 
   /** @internal */
   _startMetricsEmitter(

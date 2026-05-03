@@ -218,6 +218,13 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     return this._readyPromise;
   }
 
+  private _sessionClosedError(fallback = 'session closed'): Http3Error {
+    const reason = this._closeInfo?.reason || fallback;
+    return new Http3Error(reason, ERR_HTTP3_SESSION_ERROR, {
+      quicCode: this._closeInfo?.errorCode,
+    });
+  }
+
   override async close(code?: number, reason?: string): Promise<void> {
     this._closeRequested = true;
     this._clearConnectTimer();
@@ -285,6 +292,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
    * @returns A {@link ClientHttp3Stream} duplex for reading the response.
    */
   request(headers: IncomingHeaders, options?: RequestOptions): ClientHttp3Stream {
+    if (this.closed || this._closeRequested) {
+      throw this._sessionClosedError();
+    }
     if (!this._handshakeComplete) {
       if (!this._allow0RTT) {
         throw new Http3Error('handshake not complete — wait for "connect" event', ERR_HTTP3_INVALID_STATE);
@@ -350,6 +360,9 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     for (;;) {
       if (options?.signal?.aborted) {
         throw abortSignalError(options.signal);
+      }
+      if (this.closed || this._closeRequested) {
+        throw this._sessionClosedError();
       }
 
       try {
