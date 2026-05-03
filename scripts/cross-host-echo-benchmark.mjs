@@ -20,19 +20,60 @@ const DEFAULTS = {
   timeoutMs: 30000,
   runtimeMode: 'fast',
   fallbackPolicy: 'warn-and-fallback',
-  protocols: ['quic', 'h3', 'http1', 'http2', 'tcp'],
+  protocols: ['quic', 'h3', 'h1', 'h2', 'tcp'],
   directions: ['mac-to-linux', 'linux-to-mac'],
   resultsDir: null,
   label: 'cross-host-echo',
 };
 
+const BENCH_TLS_KEY = String.raw`TEST_PRIVATE_KEY_REMOVED`;
+
+const BENCH_TLS_CERT = String.raw`-----BEGIN CERTIFICATE-----
+MIIBfTCCASOgAwIBAgIUIYJVmHvqGOHg+0ZFCtpYXMKcPoYwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMwNDIxNTEzMloXDTI3MDMwNDIx
+NTEzMlowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAEGKIky2tl/NkHrUT5quS2Oed1i91W/63+6eMz9XfJxblz269uKnb6ViV6
+L5U7I3o0NnyvgmG3AdahB9lPIlvZEKNTMFEwHQYDVR0OBBYEFFFx2izVzrz6Uglr
+s6VValN31xL7MB8GA1UdIwQYMBaAFFFx2izVzrz6Uglrs6VValN31xL7MA8GA1Ud
+EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIhAO7pfRc/CAApNrSuyPZ+ont5
+ZkIn91V8xuPHheC36vC5AiBXKObo45wgXGCil4QWfojm4yPzbZbATfqJuPh1uwvi
+Jg==
+-----END CERTIFICATE-----`;
+
 const HTTP_SERVER = String.raw`
-const http = require('node:http');
+const https = require('node:https');
 const cfg = JSON.parse(process.argv[1]);
+const TLS_KEY = ${JSON.stringify(BENCH_TLS_KEY)};
+const TLS_CERT = ${JSON.stringify(BENCH_TLS_CERT)};
 let requests = 0;
 let bytesIn = 0;
 let bytesOut = 0;
-const server = http.createServer((req, res) => {
+function waitForDrain(stream) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      stream.off('drain', onDrain);
+      stream.off('error', onError);
+      stream.off('close', onClose);
+    };
+    const onDrain = () => { cleanup(); resolve(); };
+    const onError = (err) => { cleanup(); reject(err); };
+    const onClose = () => { cleanup(); reject(new Error('stream closed before drain')); };
+    stream.once('drain', onDrain);
+    stream.once('error', onError);
+    stream.once('close', onClose);
+  });
+}
+async function writeChunks(stream, chunks) {
+  if (chunks.length === 0) {
+    stream.end();
+    return;
+  }
+  for (let i = 0; i < chunks.length - 1; i += 1) {
+    if (!stream.write(chunks[i])) await waitForDrain(stream);
+  }
+  stream.end(chunks[chunks.length - 1]);
+}
+const server = https.createServer({ key: TLS_KEY, cert: TLS_CERT }, (req, res) => {
   const chunks = [];
   let len = 0;
   req.on('data', (chunk) => {
@@ -42,13 +83,14 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     requests += 1;
     bytesIn += len;
-    const body = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, len);
-    bytesOut += body.length;
+    bytesOut += len;
     res.writeHead(200, {
-      'content-length': body.length,
+      'content-length': len,
       'connection': 'keep-alive',
     });
-    res.end(body);
+    void writeChunks(res, chunks).catch((error) => {
+      res.destroy(error);
+    });
   });
 });
 function emit(type) {
@@ -76,12 +118,12 @@ process.stdin.resume();
 `;
 
 const HTTP_CLIENT = String.raw`
-const http = require('node:http');
+const https = require('node:https');
 const { performance } = require('node:perf_hooks');
 const cfg = JSON.parse(process.argv[1]);
 const payload = Buffer.alloc(cfg.messageSize, 0xcc);
 const totalWorkers = cfg.connections * cfg.maxInflightPerConnection;
-const agent = new http.Agent({ keepAlive: true, maxSockets: totalWorkers });
+const agent = new https.Agent({ keepAlive: true, maxSockets: totalWorkers, rejectUnauthorized: false });
 const latencies = [];
 let measuredStreams = 0;
 let measuredBytes = 0;
@@ -109,9 +151,11 @@ function percentile(values, p) {
 }
 function once() {
   return new Promise((resolve, reject) => {
-    const req = http.request({
+    const req = https.request({
       host: cfg.host,
       port: cfg.port,
+      servername: 'localhost',
+      rejectUnauthorized: false,
       method: 'POST',
       path: '/echo',
       agent,
@@ -154,7 +198,7 @@ async function worker(start) {
   const cpu = process.cpuUsage(cpuStart);
   const result = {
     type: 'result',
-    protocol: 'http1',
+    protocol: 'h1',
     totalStreams: measuredStreams,
     totalBytes: measuredBytes,
     errors,
@@ -193,10 +237,39 @@ const HTTP2_SERVER = String.raw`
 const http2 = require('node:http2');
 const { constants } = http2;
 const cfg = JSON.parse(process.argv[1]);
+const TLS_KEY = ${JSON.stringify(BENCH_TLS_KEY)};
+const TLS_CERT = ${JSON.stringify(BENCH_TLS_CERT)};
 let streams = 0;
 let bytesIn = 0;
 let bytesOut = 0;
-const server = http2.createServer({
+function waitForDrain(stream) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      stream.off('drain', onDrain);
+      stream.off('error', onError);
+      stream.off('close', onClose);
+    };
+    const onDrain = () => { cleanup(); resolve(); };
+    const onError = (err) => { cleanup(); reject(err); };
+    const onClose = () => { cleanup(); reject(new Error('stream closed before drain')); };
+    stream.once('drain', onDrain);
+    stream.once('error', onError);
+    stream.once('close', onClose);
+  });
+}
+async function writeChunks(stream, chunks) {
+  if (chunks.length === 0) {
+    stream.end();
+    return;
+  }
+  for (let i = 0; i < chunks.length - 1; i += 1) {
+    if (!stream.write(chunks[i])) await waitForDrain(stream);
+  }
+  stream.end(chunks[chunks.length - 1]);
+}
+const server = http2.createSecureServer({
+  key: TLS_KEY,
+  cert: TLS_CERT,
   settings: {
     initialWindowSize: 16 * 1024 * 1024,
     maxConcurrentStreams: 50000,
@@ -212,13 +285,14 @@ server.on('stream', (stream) => {
   stream.on('end', () => {
     streams += 1;
     bytesIn += len;
-    const body = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, len);
-    bytesOut += body.length;
+    bytesOut += len;
     stream.respond({
       [constants.HTTP2_HEADER_STATUS]: 200,
-      [constants.HTTP2_HEADER_CONTENT_LENGTH]: body.length,
+      [constants.HTTP2_HEADER_CONTENT_LENGTH]: len,
     });
-    stream.end(body);
+    void writeChunks(stream, chunks).catch((error) => {
+      stream.destroy(error);
+    });
   });
   stream.on('error', () => {});
 });
@@ -279,7 +353,9 @@ function percentile(values, p) {
 }
 function connectSession() {
   return new Promise((resolve, reject) => {
-    const session = http2.connect('http://' + cfg.host + ':' + cfg.port, {
+    const session = http2.connect('https://' + cfg.host + ':' + cfg.port, {
+      rejectUnauthorized: false,
+      servername: 'localhost',
       settings: {
         initialWindowSize: 16 * 1024 * 1024,
         maxConcurrentStreams: 50000,
@@ -387,7 +463,7 @@ async function worker(session, start) {
   const cpu = process.cpuUsage(cpuStart);
   const result = {
     type: 'result',
-    protocol: 'http2',
+    protocol: 'h2',
     totalStreams: measuredStreams,
     totalBytes: measuredBytes,
     errors,
@@ -635,18 +711,25 @@ function parseList(value) {
 function normalizeProtocol(value) {
   switch (value) {
     case 'http':
+    case 'https':
     case 'http1':
+    case 'https1':
+    case 'h1':
     case 'http1.1':
+    case 'https1.1':
     case 'http/1.1':
-      return 'http1';
+    case 'https/1.1':
+      return 'h1';
     case 'h3':
     case 'http3':
     case 'http/3':
       return 'h3';
     case 'http2':
+    case 'https2':
     case 'h2':
     case 'http/2':
-      return 'http2';
+    case 'https/2':
+      return 'h2';
     case 'quic':
     case 'tcp':
       return value;
@@ -906,11 +989,11 @@ async function runProtocol(options, protocol, direction) {
     let serverScript;
     let clientScript;
     switch (protocol) {
-      case 'http1':
+      case 'h1':
         serverScript = HTTP_SERVER;
         clientScript = HTTP_CLIENT;
         break;
-      case 'http2':
+      case 'h2':
         serverScript = HTTP2_SERVER;
         clientScript = HTTP2_CLIENT;
         break;
