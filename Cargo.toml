@@ -1,6 +1,6 @@
 [package]
 name = "http3"
-version = "0.6.0"
+version = "0.8.0"
 edition = "2024"
 resolver = "3"
 rust-version = "1.94"

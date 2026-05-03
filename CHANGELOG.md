@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.0
+
+- Optimized receive-buffer handling and event delivery for higher H3 and raw QUIC loopback throughput with zero benchmark errors.
+- Defaulted macOS benchmark profiling to Instruments Time Profiler via `xctrace`.
+
 ## 0.7.1
 
 - Fixed `optionalDependencies` in the root package to reference the matching `0.7.1` native sidecar versions instead of the stale `0.6.0` references shipped in 0.7.0.
