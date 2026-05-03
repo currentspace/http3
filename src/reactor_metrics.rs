@@ -132,6 +132,9 @@ pub struct JsReactorTelemetrySnapshot {
     pub outboundCommandQueuedBytesHighWatermark: i64,
     pub outboundPendingWriteBytes: i64,
     pub outboundPendingWriteBytesHighWatermark: i64,
+    pub outboundAdmissionBackpressureEventsTotal: i64,
+    pub outboundAdmissionReleasedUnitsTotal: i64,
+    pub outboundAdmissionWriteReadyEventsTotal: i64,
     pub txBuffersRecycled: i64,
 }
 
@@ -331,6 +334,9 @@ static OUTBOUND_COMMAND_QUEUED_BYTES: AtomicU64 = AtomicU64::new(0);
 static OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
 static OUTBOUND_PENDING_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
 static OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 static TX_BUFFERS_RECYCLED: AtomicU64 = AtomicU64::new(0);
 
@@ -918,6 +924,19 @@ pub(crate) fn record_outbound_pending_write_change(before: usize, after: usize) 
     }
 }
 
+pub(crate) fn record_outbound_admission_backpressure() {
+    bump(&OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL);
+}
+
+pub(crate) fn record_outbound_admission_release(units: usize, emitted_write_ready: bool) {
+    if units > 0 {
+        OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL.fetch_add(units as u64, Ordering::Relaxed);
+    }
+    if emitted_write_ready {
+        bump(&OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL);
+    }
+}
+
 pub(crate) fn record_tx_buffers_recycled(count: usize) {
     TX_BUFFERS_RECYCLED.fetch_add(count as u64, Ordering::Relaxed);
 }
@@ -1041,6 +1060,11 @@ pub fn snapshot() -> JsReactorTelemetrySnapshot {
         ),
         outboundPendingWriteBytes: load(&OUTBOUND_PENDING_WRITE_BYTES),
         outboundPendingWriteBytesHighWatermark: load(&OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK),
+        outboundAdmissionBackpressureEventsTotal: load(
+            &OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL,
+        ),
+        outboundAdmissionReleasedUnitsTotal: load(&OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL),
+        outboundAdmissionWriteReadyEventsTotal: load(&OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL),
         txBuffersRecycled: load(&TX_BUFFERS_RECYCLED),
     }
 }
@@ -1159,6 +1183,9 @@ pub fn reset() {
         &OUTBOUND_COMMAND_QUEUED_BYTES_HIGH_WATERMARK,
         &OUTBOUND_PENDING_WRITE_BYTES,
         &OUTBOUND_PENDING_WRITE_BYTES_HIGH_WATERMARK,
+        &OUTBOUND_ADMISSION_BACKPRESSURE_EVENTS_TOTAL,
+        &OUTBOUND_ADMISSION_RELEASED_UNITS_TOTAL,
+        &OUTBOUND_ADMISSION_WRITE_READY_EVENTS_TOTAL,
         &TX_BUFFERS_RECYCLED,
     ] {
         reset_counter(counter);
@@ -1338,6 +1365,9 @@ mod tests {
         record_outbound_pending_write_added(1024);
         record_outbound_pending_write_change(4096, 1024);
         record_outbound_pending_write_removed(10_000);
+        record_outbound_admission_backpressure();
+        record_outbound_admission_release(4096, false);
+        record_outbound_admission_release(1024, true);
 
         let snap = snapshot();
         assert_eq!(snap.outboundIngressBufferAllocations, 1);
@@ -1349,6 +1379,9 @@ mod tests {
         assert_eq!(snap.outboundCommandQueuedBytesHighWatermark, 5120);
         assert_eq!(snap.outboundPendingWriteBytes, 0);
         assert_eq!(snap.outboundPendingWriteBytesHighWatermark, 9216);
+        assert_eq!(snap.outboundAdmissionBackpressureEventsTotal, 1);
+        assert_eq!(snap.outboundAdmissionReleasedUnitsTotal, 5120);
+        assert_eq!(snap.outboundAdmissionWriteReadyEventsTotal, 1);
     }
 
     #[test]

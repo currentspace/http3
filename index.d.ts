@@ -377,6 +377,9 @@ export interface JsReactorTelemetrySnapshot {
   outboundCommandQueuedBytesHighWatermark: number
   outboundPendingWriteBytes: number
   outboundPendingWriteBytesHighWatermark: number
+  outboundAdmissionBackpressureEventsTotal: number
+  outboundAdmissionReleasedUnitsTotal: number
+  outboundAdmissionWriteReadyEventsTotal: number
   txBuffersRecycled: number
 }
 

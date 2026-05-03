@@ -10,6 +10,13 @@
  */
 import { createSecureServer, type AddressInfo, type ServerOptions, type StreamListener, type TlsOptions } from './server.js';
 import { connect, connectAsync, type ConnectOptions, type RequestOptions } from './client.js';
+export {
+  constants,
+  getDefaultSettings,
+  getPackedSettings,
+  getUnpackedSettings,
+  sensitiveHeaders,
+} from 'node:http2';
 import type { SessionMetrics } from './session.js';
 import type { IncomingHeaders, RespondOptions, StreamFlags } from './stream.js';
 
@@ -31,4 +38,3 @@ export type IncomingStreamFlags = StreamFlags;
 export type SessionSnapshotMetrics = SessionMetrics;
 export type ServerStreamHandler = StreamListener;
 export type ServerAddressInfo = AddressInfo;
-

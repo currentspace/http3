@@ -317,7 +317,10 @@ impl H3Connection {
                                     self.data_pool.checkin(pending.buf);
                                 }
                             }
-                            if pending_is_full {
+                            // A DATA frame smaller than H3_RECV_CHUNK still needs to
+                            // reach JS before FIN; `Done` marks the current frame
+                            // drained, not a reason to keep buffering indefinitely.
+                            if pending_is_full || drained_current_event {
                                 if let Some(event) = take_pending_body_event(
                                     &mut self.pending_body_data,
                                     &mut self.data_pool,

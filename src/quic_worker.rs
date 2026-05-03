@@ -32,8 +32,13 @@ use crate::error::Http3NativeError;
 use crate::event_loop::EventTsfn;
 use crate::event_loop::{self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, SEND_BUF_SIZE};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
-use crate::outbound_admission::{OutboundAdmission, outbound_payload_units};
-use crate::pending_write::{PendingWrite, PendingWriteSendOutcome, flush_pending_write};
+use crate::outbound_admission::{
+    OutboundAdmission, accepted_outbound_payload_units, outbound_payload_units,
+};
+use crate::pending_write::{
+    PendingWrite, PendingWriteFlushOutcome, PendingWriteSendOutcome,
+    flush_pending_write_with_progress,
+};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{self, RawQuicClientCloseCause, SessionKind, WorkerSpawnKind};
 use crate::shared_client_reactor;
@@ -182,9 +187,9 @@ impl QuicServerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("quic worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx
+        Ok(resp_rx
             .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| Http3NativeError::InvalidState("timed out waiting for datagram".into()))
+            .unwrap_or(false))
     }
 
     pub fn ping_session(&self, conn_handle: u32) -> Result<bool, Http3NativeError> {
@@ -644,9 +649,9 @@ impl QuicClientHandle {
                 ));
             }
         }
-        resp_rx
+        Ok(resp_rx
             .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| Http3NativeError::InvalidState("timed out waiting for datagram".into()))
+            .unwrap_or(false))
     }
 
     pub fn get_session_metrics(&self) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
@@ -1090,15 +1095,17 @@ where
     reactor_metrics::record_outbound_pending_write_added(queued);
 }
 
-fn remove_pending_write<K>(pending: &mut HashMap<K, PendingWrite>, key: &K) -> bool
+fn remove_pending_write<K>(pending: &mut HashMap<K, PendingWrite>, key: &K) -> usize
 where
     K: Eq + std::hash::Hash,
 {
     if let Some(write) = pending.remove(key) {
-        reactor_metrics::record_outbound_pending_write_removed(write.queued_bytes());
-        true
+        let queued_bytes = write.queued_bytes();
+        let queued_units = write.queued_units();
+        reactor_metrics::record_outbound_pending_write_removed(queued_bytes);
+        queued_units
     } else {
-        false
+        0
     }
 }
 
@@ -1684,7 +1691,14 @@ fn remove_shared_quic_client_session(
         }
     }
     timer_heap.remove_connection(handle);
-    let _ = sessions.remove(handle);
+    let session = sessions.remove(handle);
+    let released_units = session
+        .handler
+        .pending_writes
+        .values()
+        .map(PendingWrite::queued_units)
+        .sum();
+    let _ = session.handler.outbound_admission.release(released_units);
     route_by_dcid.retain(|_, mapped_handle| *mapped_handle != handle);
 }
 
@@ -1791,9 +1805,6 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
             commands_drained += 1;
             let outbound_units = shared_quic_client_command_outbound_bytes(&cmd);
             reactor_metrics::record_outbound_command_dequeued(outbound_units);
-            if outbound_admission.release(outbound_units) {
-                emit_shared_quic_client_write_ready(&mut sessions, &mut pending_release);
-            }
             match cmd {
                 SharedQuicClientCommand::OpenSession {
                     mut quiche_config,
@@ -1857,10 +1868,11 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     chunk,
                     fin,
                 } => {
+                    let mut released_units = outbound_units;
                     let should_release =
                         if let Some(session) = sessions.get_mut(session_handle as usize) {
                             !session.batcher.collect_atomic(|batch| {
-                                session.handler.queue_stream_send(
+                                released_units = session.handler.queue_stream_send(
                                     stream_id,
                                     chunk,
                                     fin,
@@ -1871,6 +1883,9 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                         } else {
                             false
                         };
+                    if outbound_admission.release(released_units) {
+                        emit_shared_quic_client_write_ready(&mut sessions, &mut pending_release);
+                    }
                     if should_release {
                         pending_release.push(session_handle);
                     }
@@ -1881,7 +1896,13 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     error_code,
                 } => {
                     if let Some(session) = sessions.get_mut(session_handle as usize) {
-                        session.handler.close_stream(stream_id, error_code);
+                        let released = session.handler.close_stream(stream_id, error_code);
+                        if outbound_admission.release(released) {
+                            emit_shared_quic_client_write_ready(
+                                &mut sessions,
+                                &mut pending_release,
+                            );
+                        }
                     }
                 }
                 SharedQuicClientCommand::SendDatagram {
@@ -1892,6 +1913,9 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                     let ok = sessions
                         .get_mut(session_handle as usize)
                         .is_some_and(|session| session.handler.send_datagram(data));
+                    if outbound_admission.release(outbound_units) {
+                        emit_shared_quic_client_write_ready(&mut sessions, &mut pending_release);
+                    }
                     let _ = resp_tx.send(ok);
                 }
                 SharedQuicClientCommand::GetSessionMetrics {
@@ -2249,7 +2273,6 @@ impl ProtocolHandler for QuicServerHandler {
     fn dispatch_command(&mut self, cmd: QuicServerCommand, batch: &mut Vec<JsH3Event>) -> bool {
         let outbound_units = quic_server_command_outbound_bytes(&cmd);
         reactor_metrics::record_outbound_command_dequeued(outbound_units);
-        self.release_outbound_admission(outbound_units, batch);
         match cmd {
             QuicServerCommand::Shutdown => {
                 // Audit finding #11: close every live connection with an
@@ -2280,8 +2303,18 @@ impl ProtocolHandler for QuicServerHandler {
                     }
                     // chunk backing allocation stays queued via ArcBuf.
                 } else if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+                    let payload_len = chunk.remaining_len();
                     match conn.stream_send_chunk(stream_id, chunk, fin) {
                         Ok(outcome) => {
+                            self.release_outbound_admission(
+                                accepted_outbound_payload_units(
+                                    payload_len,
+                                    fin,
+                                    outcome.written,
+                                    outcome.fin_accepted,
+                                ),
+                                batch,
+                            );
                             if let Some(remainder) = outcome.remainder {
                                 insert_pending_write(
                                     &mut self.pending_writes,
@@ -2292,6 +2325,7 @@ impl ProtocolHandler for QuicServerHandler {
                             }
                         }
                         Err(e) => {
+                            self.release_outbound_admission(outbound_units, batch);
                             batch.push(JsH3Event::error(
                                 conn_handle,
                                 stream_id as i64,
@@ -2300,6 +2334,8 @@ impl ProtocolHandler for QuicServerHandler {
                             ));
                         }
                     }
+                } else {
+                    self.release_outbound_admission(outbound_units, batch);
                 }
             }
             QuicServerCommand::StreamClose {
@@ -2310,10 +2346,12 @@ impl ProtocolHandler for QuicServerHandler {
                 if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
                     match conn.stream_close(stream_id, u64::from(error_code)) {
                         Ok(()) => {
-                            if remove_pending_write(
+                            let released = remove_pending_write(
                                 &mut self.pending_writes,
                                 &(conn_handle, stream_id),
-                            ) {
+                            );
+                            self.release_outbound_admission(released, batch);
+                            if released > 0 {
                                 batch.push(JsH3Event::reset(
                                     conn_handle,
                                     stream_id,
@@ -2362,6 +2400,7 @@ impl ProtocolHandler for QuicServerHandler {
                     .conn_map
                     .get_mut(conn_handle as usize)
                     .is_some_and(|conn| conn.queue_datagram(data).unwrap_or(false));
+                self.release_outbound_admission(outbound_units, batch);
                 let _ = resp_tx.send(ok);
             }
             QuicServerCommand::GetSessionMetrics {
@@ -2683,6 +2722,7 @@ impl ProtocolHandler for QuicServerHandler {
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
         let flushed = flush_quic_pending_writes(&mut self.conn_map, &mut self.pending_writes);
+        self.release_outbound_admission(flushed.released_units, batch);
         for (local_handle, stream_id) in flushed {
             reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(
@@ -2756,14 +2796,17 @@ impl ProtocolHandler for QuicServerHandler {
                 ));
             }
             let mut removed_bytes = 0;
+            let mut removed_units = 0;
             self.pending_writes.retain(|&(ch, _), write| {
                 let keep = ch as usize != handle;
                 if !keep {
                     removed_bytes += write.queued_bytes();
+                    removed_units += write.queued_units();
                 }
                 keep
             });
             reactor_metrics::record_outbound_pending_write_removed(removed_bytes);
+            self.release_outbound_admission(removed_units, batch);
             if !self.last_expired.contains(&handle) {
                 reactor_metrics::record_lifecycle_trace(
                     "quic-server",
@@ -2922,17 +2965,25 @@ impl QuicClientHandler {
         fin: bool,
         batch: &mut Vec<JsH3Event>,
         conn_handle: u32,
-    ) {
+    ) -> usize {
         if let Some(pw) = self.pending_writes.get_mut(&stream_id) {
             reactor_metrics::record_outbound_pending_write_added(pw.push_chunk(chunk));
             if fin {
                 pw.set_fin();
             }
-            return;
+            return 0;
         }
 
+        let outbound_units = outbound_payload_units(chunk.remaining_len(), fin);
+        let payload_len = chunk.remaining_len();
         match self.conn.stream_send_chunk(stream_id, chunk, fin) {
             Ok(outcome) => {
+                let released_units = accepted_outbound_payload_units(
+                    payload_len,
+                    fin,
+                    outcome.written,
+                    outcome.fin_accepted,
+                );
                 if let Some(remainder) = outcome.remainder {
                     insert_pending_write(
                         &mut self.pending_writes,
@@ -2944,6 +2995,7 @@ impl QuicClientHandler {
                     );
                     batch.push(JsH3Event::stream_blocked(conn_handle, stream_id));
                 }
+                released_units
             }
             Err(e) => {
                 batch.push(JsH3Event::error(
@@ -2952,20 +3004,23 @@ impl QuicClientHandler {
                     0,
                     format!("stream send failed: {e}"),
                 ));
+                outbound_units
             }
         }
     }
 
-    fn close_stream(&mut self, stream_id: u64, error_code: u32) {
+    fn close_stream(&mut self, stream_id: u64, error_code: u32) -> usize {
         match self.conn.stream_close(stream_id, u64::from(error_code)) {
             Ok(()) => {
-                remove_pending_write(&mut self.pending_writes, &stream_id);
+                let released = remove_pending_write(&mut self.pending_writes, &stream_id);
                 reactor_metrics::record_raw_quic_client_pending_writes(self.pending_writes.len());
+                released
             }
             Err(e) => {
                 log::debug!(
                     "quic client stream_close failed stream_id={stream_id} error_code={error_code}: {e}"
                 );
+                0
             }
         }
     }
@@ -3025,6 +3080,19 @@ impl QuicClientHandler {
         );
         reactor_metrics::record_raw_quic_client_close_cause(cause);
         reactor_metrics::record_session_close(SessionKind::RawQuicClient);
+        for stream_id in self.pending_writes.keys().copied().collect::<Vec<_>>() {
+            batch.push(JsH3Event::reset(conn_handle, stream_id, 0));
+        }
+        let (removed_bytes, removed_units): (usize, usize) = self
+            .pending_writes
+            .values()
+            .fold((0, 0), |(bytes, units), write| {
+                (bytes + write.queued_bytes(), units + write.queued_units())
+            });
+        self.pending_writes.clear();
+        reactor_metrics::record_outbound_pending_write_removed(removed_bytes);
+        reactor_metrics::record_raw_quic_client_pending_writes(0);
+        self.release_outbound_admission(removed_units, batch);
         batch.push(self.conn.session_close_event(conn_handle));
         self.session_closed_emitted = true;
     }
@@ -3122,6 +3190,7 @@ impl QuicClientHandler {
 
     fn flush_pending_writes_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
         let flushed = flush_quic_client_pending_writes(&mut self.conn, &mut self.pending_writes);
+        self.release_outbound_admission(flushed.released_units, batch);
         for stream_id in flushed {
             reactor_metrics::record_raw_quic_drain_event();
             batch.push(JsH3Event::drain(conn_handle, stream_id));
@@ -3161,7 +3230,6 @@ impl ProtocolHandler for QuicClientHandler {
     fn dispatch_command(&mut self, cmd: QuicClientCommand, batch: &mut Vec<JsH3Event>) -> bool {
         let outbound_units = quic_client_command_outbound_bytes(&cmd);
         reactor_metrics::record_outbound_command_dequeued(outbound_units);
-        self.release_outbound_admission(outbound_units, batch);
         match cmd {
             QuicClientCommand::Shutdown => {
                 if !self.session_closed_emitted {
@@ -3197,16 +3265,19 @@ impl ProtocolHandler for QuicClientHandler {
                 chunk,
                 fin,
             } => {
-                self.queue_stream_send(stream_id, chunk, fin, batch, 0);
+                let released = self.queue_stream_send(stream_id, chunk, fin, batch, 0);
+                self.release_outbound_admission(released, batch);
             }
             QuicClientCommand::StreamClose {
                 stream_id,
                 error_code,
             } => {
-                self.close_stream(stream_id, error_code);
+                let released = self.close_stream(stream_id, error_code);
+                self.release_outbound_admission(released, batch);
             }
             QuicClientCommand::SendDatagram { data, resp_tx } => {
                 let _ = resp_tx.send(self.send_datagram(data));
+                self.release_outbound_admission(outbound_units, batch);
             }
             QuicClientCommand::GetSessionMetrics { resp_tx } => {
                 let _ = resp_tx.send(Some(self.metrics_snapshot()));
@@ -3343,72 +3414,104 @@ fn snapshot_quic_metrics(conn: &QuicConnection) -> JsSessionMetrics {
     }
 }
 
+struct PendingWriteFlushEvents<T> {
+    drained: Vec<T>,
+    released_units: usize,
+}
+
+impl<T> IntoIterator for PendingWriteFlushEvents<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.drained.into_iter()
+    }
+}
+
 fn flush_quic_pending_writes(
     conn_map: &mut QuicConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
-) -> Vec<(u32, u64)> {
+) -> PendingWriteFlushEvents<(u32, u64)> {
     let mut flushed = Vec::new();
+    let mut released_units = 0usize;
     pending.retain(|&(conn_handle, stream_id), pw| {
         let before = pw.queued_bytes();
+        let before_units = pw.queued_units();
         let Some(conn) = conn_map.get_mut(conn_handle as usize) else {
             reactor_metrics::record_outbound_pending_write_removed(before);
+            released_units += before_units;
             return false;
         };
         match flush_one_quic_pending_write(conn, stream_id, pw) {
-            Ok(true) => {
+            Ok(outcome) if outcome.done => {
                 flushed.push((conn_handle, stream_id));
+                released_units += outcome.released_units;
                 reactor_metrics::record_outbound_pending_write_removed(before);
                 false
             }
-            Ok(false) => {
+            Ok(outcome) => {
+                released_units += outcome.released_units;
                 reactor_metrics::record_outbound_pending_write_change(before, pw.queued_bytes());
                 true
             }
             Err(e) => {
                 log::warn!("flush pending write failed for stream {stream_id}: {e}");
                 reactor_metrics::record_outbound_pending_write_removed(before);
+                released_units += before_units;
                 false
             }
         }
     });
-    flushed
+    PendingWriteFlushEvents {
+        drained: flushed,
+        released_units,
+    }
 }
 
 fn flush_quic_client_pending_writes(
     conn: &mut QuicConnection,
     pending: &mut HashMap<u64, PendingWrite>,
-) -> Vec<u64> {
+) -> PendingWriteFlushEvents<u64> {
     let mut flushed = Vec::new();
+    let mut released_units = 0usize;
     pending.retain(|&stream_id, pw| {
         let before = pw.queued_bytes();
+        let before_units = pw.queued_units();
         match flush_one_quic_pending_write(conn, stream_id, pw) {
-            Ok(true) => {
+            Ok(outcome) if outcome.done => {
                 flushed.push(stream_id);
+                released_units += outcome.released_units;
                 reactor_metrics::record_outbound_pending_write_removed(before);
                 false
             }
-            Ok(false) => {
+            Ok(outcome) => {
+                released_units += outcome.released_units;
                 reactor_metrics::record_outbound_pending_write_change(before, pw.queued_bytes());
                 true
             }
             Err(e) => {
                 log::warn!("flush pending write failed for stream {stream_id}: {e}");
                 reactor_metrics::record_outbound_pending_write_removed(before);
+                released_units += before_units;
                 false
             }
         }
     });
-    flushed
+    PendingWriteFlushEvents {
+        drained: flushed,
+        released_units,
+    }
 }
 
 fn flush_one_quic_pending_write(
     conn: &mut QuicConnection,
     stream_id: u64,
     pw: &mut PendingWrite,
-) -> Result<bool, Http3NativeError> {
-    flush_pending_write(pw, |buf, send_fin| {
+) -> Result<PendingWriteFlushOutcome, Http3NativeError> {
+    flush_pending_write_with_progress(pw, |buf, send_fin| {
         let outcome = conn.stream_send_arcbuf(stream_id, buf, send_fin)?;
         Ok(PendingWriteSendOutcome {
+            written: outcome.written,
             fin_accepted: outcome.fin_accepted,
             remainder: outcome.remainder,
         })
@@ -3449,7 +3552,7 @@ mod tests {
         assert_eq!(snap.outboundPendingWriteBytes, 11);
         assert_eq!(snap.outboundPendingWriteBytesHighWatermark, 11);
 
-        assert!(remove_pending_write(&mut pending, &11));
+        assert_eq!(remove_pending_write(&mut pending, &11), 11);
         let snap = reactor_metrics::snapshot();
         assert_eq!(snap.outboundPendingWriteBytes, 0);
         assert_eq!(snap.outboundPendingWriteBytesHighWatermark, 11);

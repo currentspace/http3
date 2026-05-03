@@ -45,6 +45,9 @@ describe('FFI module functions', () => {
         'outboundStreamJsAdmittedBytesTotal',
         'outboundCommandQueuedBytes',
         'outboundPendingWriteBytes',
+        'outboundAdmissionBackpressureEventsTotal',
+        'outboundAdmissionReleasedUnitsTotal',
+        'outboundAdmissionWriteReadyEventsTotal',
       ]) {
         assert.ok(key in snap, `telemetry should contain "${key}"`);
         assert.strictEqual(typeof snap[key], 'number', `"${key}" should be a number`);
@@ -61,6 +64,9 @@ describe('FFI module functions', () => {
       assert.strictEqual(snap.outboundStreamJsAdmittedBytesTotal, 0);
       assert.strictEqual(snap.outboundCommandQueuedBytes, 0);
       assert.strictEqual(snap.outboundPendingWriteBytes, 0);
+      assert.strictEqual(snap.outboundAdmissionBackpressureEventsTotal, 0);
+      assert.strictEqual(snap.outboundAdmissionReleasedUnitsTotal, 0);
+      assert.strictEqual(snap.outboundAdmissionWriteReadyEventsTotal, 0);
     });
 
     it('counters increment after server creation', () => {

@@ -9,6 +9,7 @@ use quiche::BufSplit;
 
 use crate::arc_buf::ArcBuf;
 use crate::chunk_pool::Chunk;
+use crate::outbound_admission::{accepted_outbound_payload_units, outbound_payload_units};
 
 /// Buffered partial write for a stream blocked by local/quiche flow control.
 pub(crate) struct PendingWrite {
@@ -38,42 +39,92 @@ impl PendingWrite {
     pub(crate) fn queued_bytes(&self) -> usize {
         self.chunks.iter().map(ArcBuf::remaining_len).sum()
     }
+
+    pub(crate) fn queued_units(&self) -> usize {
+        outbound_payload_units(self.queued_bytes(), self.fin)
+    }
 }
 
 pub(crate) struct PendingWriteSendOutcome {
+    pub(crate) written: usize,
     pub(crate) fin_accepted: bool,
     pub(crate) remainder: Option<ArcBuf>,
 }
 
-pub(crate) fn flush_pending_write<E, F>(pw: &mut PendingWrite, mut send: F) -> Result<bool, E>
+pub(crate) struct PendingWriteFlushOutcome {
+    pub(crate) done: bool,
+    pub(crate) released_units: usize,
+}
+
+pub(crate) fn flush_pending_write_with_progress<E, F>(
+    pw: &mut PendingWrite,
+    mut send: F,
+) -> Result<PendingWriteFlushOutcome, E>
 where
     F: FnMut(ArcBuf, bool) -> Result<PendingWriteSendOutcome, E>,
 {
+    let mut released_units = 0usize;
     loop {
         if let Some(buf) = pw.chunks.pop_front() {
+            let payload_len = buf.remaining_len();
             let send_fin = pw.fin && pw.chunks.is_empty();
             let outcome = send(buf, send_fin)?;
+            released_units += accepted_outbound_payload_units(
+                payload_len,
+                send_fin,
+                outcome.written,
+                outcome.fin_accepted,
+            );
             if let Some(remainder) = outcome.remainder {
                 pw.chunks.push_front(remainder);
-                return Ok(false);
+                return Ok(PendingWriteFlushOutcome {
+                    done: false,
+                    released_units,
+                });
             }
             if send_fin {
-                return Ok(outcome.fin_accepted);
+                return Ok(PendingWriteFlushOutcome {
+                    done: outcome.fin_accepted,
+                    released_units,
+                });
             }
             continue;
         }
 
         if pw.fin {
+            let payload_len = 0;
             let outcome = send(ArcBuf::from_vec(Vec::new()), true)?;
+            released_units += accepted_outbound_payload_units(
+                payload_len,
+                true,
+                outcome.written,
+                outcome.fin_accepted,
+            );
             if let Some(remainder) = outcome.remainder {
                 pw.chunks.push_front(remainder);
-                return Ok(false);
+                return Ok(PendingWriteFlushOutcome {
+                    done: false,
+                    released_units,
+                });
             }
-            return Ok(outcome.fin_accepted);
+            return Ok(PendingWriteFlushOutcome {
+                done: outcome.fin_accepted,
+                released_units,
+            });
         }
 
-        return Ok(true);
+        return Ok(PendingWriteFlushOutcome {
+            done: true,
+            released_units,
+        });
     }
+}
+
+pub(crate) fn flush_pending_write<E, F>(pw: &mut PendingWrite, send: F) -> Result<bool, E>
+where
+    F: FnMut(ArcBuf, bool) -> Result<PendingWriteSendOutcome, E>,
+{
+    Ok(flush_pending_write_with_progress(pw, send)?.done)
 }
 
 #[cfg(feature = "fuzzing")]
@@ -140,6 +191,7 @@ pub(crate) fn fuzz_pending_write_state(data: &[u8]) {
                         if sender.done || sender.accepted >= sender.max_accept {
                             sender.done = true;
                             return Ok::<PendingWriteSendOutcome, ()>(PendingWriteSendOutcome {
+                                written: 0,
                                 fin_accepted: false,
                                 remainder: Some(buf),
                             });
@@ -156,6 +208,7 @@ pub(crate) fn fuzz_pending_write_state(data: &[u8]) {
                         let accepted_fin = send_fin && remainder.is_none();
                         sender.fin_accepted |= accepted_fin;
                         Ok(PendingWriteSendOutcome {
+                            written: accepted,
                             fin_accepted: accepted_fin,
                             remainder,
                         })
@@ -210,26 +263,29 @@ mod tests {
     #[test]
     fn flush_fin_only_pending_write_accepts_fin() {
         let mut pending = PendingWrite::new(ArcBuf::from_vec(Vec::new()), true);
-        let done = flush_pending_write(&mut pending, |buf, send_fin| {
+        let outcome = flush_pending_write_with_progress(&mut pending, |buf, send_fin| {
             assert_eq!(buf.remaining_len(), 0);
             assert!(send_fin);
             Ok::<_, ()>(PendingWriteSendOutcome {
+                written: 0,
                 fin_accepted: true,
                 remainder: None,
             })
         })
         .unwrap();
 
-        assert!(done);
+        assert!(outcome.done);
+        assert_eq!(outcome.released_units, 1);
         assert_eq!(pending.queued_bytes(), 0);
     }
 
     #[test]
     fn flush_partial_accept_preserves_remainder() {
         let mut pending = PendingWrite::new(ArcBuf::from_vec(vec![1; 8]), true);
-        let done = flush_pending_write(&mut pending, |buf, send_fin| {
+        let outcome = flush_pending_write_with_progress(&mut pending, |buf, send_fin| {
             assert!(send_fin);
             Ok::<_, ()>(PendingWriteSendOutcome {
+                written: 3,
                 fin_accepted: false,
                 remainder: {
                     let mut head = buf;
@@ -239,7 +295,8 @@ mod tests {
         })
         .unwrap();
 
-        assert!(!done);
+        assert!(!outcome.done);
+        assert_eq!(outcome.released_units, 3);
         assert_eq!(pending.queued_bytes(), 5);
     }
 }

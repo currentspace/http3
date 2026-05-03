@@ -1,13 +1,20 @@
 import { before, describe, it } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
-import { createServer, connect } from '../../lib/http2-parity.js';
+import { createServer, connect, constants, getDefaultSettings, sensitiveHeaders } from '../../lib/http2-parity.js';
 
 describe('http2 parity surface', () => {
   let certs: { key: Buffer; cert: Buffer };
 
   before(() => {
     certs = generateTestCerts();
+  });
+
+  it('re-exports node:http2 utility constants', () => {
+    assert.strictEqual(typeof constants.HTTP2_HEADER_METHOD, 'string');
+    assert.strictEqual(constants.HTTP2_HEADER_METHOD, ':method');
+    assert.strictEqual(typeof getDefaultSettings(), 'object');
+    assert.strictEqual(typeof sensitiveHeaders, 'symbol');
   });
 
   it('supports createServer alias and connect request flow', async () => {
@@ -54,4 +61,3 @@ describe('http2 parity surface', () => {
     await server.close();
   });
 });
-
