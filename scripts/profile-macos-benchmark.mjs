@@ -56,7 +56,7 @@ Usage:
   node scripts/profile-macos-benchmark.mjs [options forwarded to the benchmark]
 
 Examples:
-  npm run perf:macos:quic -- --sample --profile throughput
+  npm run perf:macos:quic -- --profile throughput
   npm run perf:macos:h3 -- --xctrace --profile stress --rounds 2
   npm run perf:macos:h3 -- --sample --xctrace --profile stress
 
@@ -72,7 +72,7 @@ Options:
 
 Notes:
   Remaining arguments are forwarded to the host benchmark runner.
-  If no profiler flag is provided, the wrapper defaults to --sample.
+  If no profiler flag is provided, the wrapper defaults to --xctrace.
 `);
 }
 
@@ -113,8 +113,8 @@ function resolveSettings(argv) {
     profilerModes.push('xctrace');
   }
   if (profilerModes.length === 0) {
-    requireBinary('sample');
-    profilerModes.push('sample');
+    requireBinary('xcrun');
+    profilerModes.push('xctrace');
   }
 
   const sampleSeconds = Number.parseInt(options.get('--sample-seconds') ?? '10', 10);

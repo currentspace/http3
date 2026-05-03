@@ -94,15 +94,16 @@ Notes:
 ### macOS profiler wrappers
 
 ```bash
-npm run perf:macos:quic -- --sample --profile throughput --results-dir perf-results --label quic-macos
+npm run perf:macos:quic -- --profile throughput --results-dir perf-results --label quic-macos
 npm run perf:macos:h3 -- --xctrace --profile stress --results-dir perf-results --label h3-macos
 ```
 
 Notes:
 
-- Prefer `sample` for quick local captures.
-- Prefer `xctrace` / Instruments Time Profiler for deeper captures you plan to
-  inspect in Instruments.
+- The macOS wrapper defaults to `xctrace` / Instruments Time Profiler when no
+  profiler flag is supplied.
+- Use `--sample` only when you explicitly want a quick low-overhead local
+  capture.
 - Use longer workloads than `smoke` when you need the profiler to capture enough
   activity to be useful.
 
