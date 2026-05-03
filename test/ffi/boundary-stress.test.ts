@@ -13,7 +13,10 @@ import assert from 'node:assert/strict';
 import {
   loadBinding,
   createEventCollector,
+  concatH3BodyData,
   generateTestCerts,
+  h3BodyDataEvents,
+  waitForH3BodyData,
   EVENT_HANDSHAKE_COMPLETE,
   EVENT_NEW_SESSION,
   EVENT_NEW_STREAM,
@@ -163,7 +166,7 @@ describe('FFI boundary stress', () => {
           const hasFin = serverEvents.allEvents.some(
             (e: any) => (e.eventType === 4 && e.fin) || e.eventType === 5,
           );
-          const hasData = serverEvents.allEvents.some((e: any) => e.eventType === 4 && e.data);
+          const hasData = h3BodyDataEvents(serverEvents.allEvents).length > 0;
           if (hasFin && hasData) {
             clearTimeout(timeout);
             resolve();
@@ -177,11 +180,7 @@ describe('FFI boundary stress', () => {
     await collectData();
 
     // Collect cleanly from all DATA events.
-    const allServerData = Buffer.concat(
-      serverEvents.allEvents
-        .filter((e: any) => e.eventType === 4 && e.data)
-        .map((e: any) => Buffer.from(e.data)),
-    );
+    const allServerData = concatH3BodyData(serverEvents.allEvents);
     assert.ok(
       allServerData.length >= largeBody.length,
       `server should receive at least 256KB, got ${allServerData.length}`,
@@ -215,7 +214,7 @@ describe('FFI boundary stress', () => {
           const hasFin = clientEvents.allEvents.some(
             (e: any) => (e.eventType === 4 && e.fin) || e.eventType === 5,
           );
-          const hasData = clientEvents.allEvents.some((e: any) => e.eventType === 4 && e.data);
+          const hasData = h3BodyDataEvents(clientEvents.allEvents).length > 0;
           if (hasFin && hasData) {
             clearTimeout(timeout);
             resolve();
@@ -228,11 +227,7 @@ describe('FFI boundary stress', () => {
     };
     await collectClientData();
 
-    const allClientData = Buffer.concat(
-      clientEvents.allEvents
-        .filter((e: any) => e.eventType === 4 && e.data)
-        .map((e: any) => Buffer.from(e.data)),
-    );
+    const allClientData = concatH3BodyData(clientEvents.allEvents);
     assert.ok(
       allClientData.length >= largeBody.length,
       `client should receive at least 256KB, got ${allClientData.length}`,
@@ -441,11 +436,9 @@ describe('FFI boundary stress', () => {
 
       // Wait for response headers + data.
       await clientEvents.waitForEvent(EVENT_HEADERS, 10000);
-      await clientEvents.waitForEvent(EVENT_DATA, 10000);
+      await waitForH3BodyData(clientEvents, 10000);
 
-      const dataEvents = clientEvents.allEvents.filter(
-        (e: any) => e.eventType === 4 && e.data,
-      );
+      const dataEvents = h3BodyDataEvents(clientEvents.allEvents);
       assert.ok(dataEvents.length > 0, `session ${index}: should receive response data`);
 
       try { client.close(0, 'done'); } catch { /* ok */ }

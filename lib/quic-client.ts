@@ -404,6 +404,12 @@ export class QuicClientSession extends EventEmitter {
     if (!event.data) return;
     const stream = this._getOrCreateStream(event.streamId);
     stream._pushData(event.data);
+    if (event.fin) {
+      stream._pushData(null);
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
+    }
   }
 
   private _onFinished(event: NativeEvent): void {

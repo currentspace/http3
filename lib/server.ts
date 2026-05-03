@@ -711,6 +711,10 @@ export class Http3SecureServer extends EventEmitter {
 
     const flags: StreamFlags = { endStream: event.fin ?? false };
     this.emit('stream', stream, headers, flags);
+    if (event.data) {
+      stream._onActivity();
+      stream._pushData(event.data);
+    }
   }
 
   private _onData(event: NativeEvent): void {

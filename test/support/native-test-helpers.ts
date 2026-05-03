@@ -33,6 +33,44 @@ export const EVENT_METRICS = 13;
 export const EVENT_DATAGRAM = 14;
 export const EVENT_SHUTDOWN_COMPLETE = 15;
 
+export function isH3BodyDataEvent(evt: any): boolean {
+  return (evt?.eventType === EVENT_DATA || evt?.eventType === EVENT_HEADERS) && !!evt.data;
+}
+
+export function h3BodyDataEvents(events: any[]): any[] {
+  return events.filter(isH3BodyDataEvent);
+}
+
+export function concatH3BodyData(events: any[]): Buffer {
+  return Buffer.concat(h3BodyDataEvents(events).map((evt: any) => Buffer.from(evt.data)));
+}
+
+export function waitForH3BodyData(
+  source: any[] | { allEvents: any[] },
+  timeoutMs = 5000,
+): Promise<any> {
+  const events = Array.isArray(source) ? source : source.allEvents;
+  const existing = events.find(isH3BodyDataEvent);
+  if (existing) return Promise.resolve(existing);
+
+  return new Promise<any>((resolve, reject) => {
+    const startedAt = Date.now();
+    const check = (): void => {
+      const evt = events.find(isH3BodyDataEvent);
+      if (evt) {
+        resolve(evt);
+        return;
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        reject(new Error(`Timed out waiting for H3 body data after ${timeoutMs}ms`));
+        return;
+      }
+      setTimeout(check, 10);
+    };
+    check();
+  });
+}
+
 // ---- Binding loader ----
 
 /**

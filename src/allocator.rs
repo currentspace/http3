@@ -70,8 +70,8 @@ pub(crate) fn maintenance_tick() {
 ///
 /// Linux jemalloc builds use `background_thread:true` in static config, so this
 /// interval is only a low-cost safety net. macOS accepts decay settings but not
-/// background purge threads in this build; sustained H3 traffic needs explicit
-/// arena purges often enough that post-warmup RSS does not drift while active.
+/// background purge threads in this build; keep explicit arena purges infrequent
+/// so they nudge RSS down over time without creating hot-path mmap/munmap churn.
 pub(crate) fn maintenance_interval() -> Duration {
     maintenance_interval_impl()
 }
@@ -82,7 +82,7 @@ pub(crate) fn maintenance_interval() -> Duration {
     target_os = "macos"
 ))]
 fn maintenance_interval_impl() -> Duration {
-    Duration::from_secs(1)
+    Duration::from_secs(10)
 }
 
 #[cfg(not(all(

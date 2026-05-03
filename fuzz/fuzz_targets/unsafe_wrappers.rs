@@ -1,6 +1,6 @@
 #![no_main]
 
-use http3::unsafe_boundary::{InitializedPacketBuf, ProvidedBufferId};
+use http3::unsafe_boundary::{InitializedPacketBuf, ProvidedBufferId, QuicheRecvBuf};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -25,4 +25,19 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(validated.get(), bid);
         }
     }
+
+    let mut recv_buf = QuicheRecvBuf::with_capacity(data.len());
+    let first_len = data
+        .first()
+        .map(|byte| (*byte as usize) % (data.len() + 1))
+        .unwrap_or(0);
+    let second_len = data.len() - first_len;
+    assert_eq!(recv_buf.append_initialized(&data[..first_len]), first_len);
+    assert_eq!(
+        recv_buf.append_initialized(&data[first_len..]),
+        second_len
+    );
+
+    assert_eq!(recv_buf.initialized_len(), data.len());
+    assert_eq!(recv_buf.into_initialized_vec(), data);
 });

@@ -363,6 +363,31 @@ impl JsH3Event {
         }
     }
 
+    /// Try to fold a following DATA event into this HEADERS event.
+    ///
+    /// JS dispatch still emits the stream/response headers first, then pushes
+    /// the coalesced data into the stream, so the public event order remains
+    /// compatible while avoiding one native-to-JS event object for the common
+    /// HEADERS+small DATA case.
+    pub fn try_coalesce_following_data(
+        &mut self,
+        mut data_event: JsH3Event,
+    ) -> Result<(), JsH3Event> {
+        if self.event_type != EVENT_HEADERS
+            || data_event.event_type != EVENT_DATA
+            || self.conn_handle != data_event.conn_handle
+            || self.stream_id != data_event.stream_id
+            || self.data.is_some()
+            || self.fin == Some(true)
+            || data_event.fin != Some(false)
+        {
+            return Err(data_event);
+        }
+
+        self.data = data_event.data.take();
+        Ok(())
+    }
+
     pub fn finished(conn_handle: u32, stream_id: u64) -> Self {
         Self {
             event_type: EVENT_FINISHED,
@@ -686,6 +711,48 @@ mod tests {
 
         let ev_fin = JsH3Event::data(3, 8, vec![4], true, NO_RECYCLER);
         assert_eq!(ev_fin.fin, Some(true));
+    }
+
+    #[test]
+    fn headers_can_coalesce_following_data_for_same_stream() {
+        let mut headers = JsH3Event::headers(
+            3,
+            8,
+            vec![JsHeader {
+                name: ":status".into(),
+                value: "200".into(),
+            }],
+            false,
+        );
+        let data = JsH3Event::data(3, 8, b"hello".to_vec(), false, NO_RECYCLER);
+
+        assert!(headers.try_coalesce_following_data(data).is_ok());
+        assert_eq!(headers.event_type, EVENT_HEADERS);
+        assert_eq!(headers.data.as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(headers.fin, Some(false));
+    }
+
+    #[test]
+    fn headers_refuse_incompatible_data_coalescing() {
+        let mut headers = JsH3Event::headers(3, 8, Vec::new(), false);
+        let wrong_stream = JsH3Event::data(3, 12, b"hello".to_vec(), false, NO_RECYCLER);
+        let Err(rejected) = headers.try_coalesce_following_data(wrong_stream) else {
+            panic!("wrong-stream data must not coalesce");
+        };
+        assert_eq!(rejected.stream_id, 12);
+        assert!(headers.data.is_none());
+
+        let mut final_headers = JsH3Event::headers(3, 8, Vec::new(), true);
+        let final_data = JsH3Event::data(3, 8, b"hello".to_vec(), false, NO_RECYCLER);
+        assert!(
+            final_headers
+                .try_coalesce_following_data(final_data)
+                .is_err()
+        );
+
+        let mut headers = JsH3Event::headers(3, 8, Vec::new(), false);
+        let data_with_fin = JsH3Event::data(3, 8, b"hello".to_vec(), true, NO_RECYCLER);
+        assert!(headers.try_coalesce_following_data(data_with_fin).is_err());
     }
 
     #[test]

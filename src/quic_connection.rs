@@ -92,9 +92,10 @@ impl QuicConnection {
             init.qlog_level,
         );
         let (data_pool, data_recycler, data_recycle_rx) =
-            // Audit finding #27: align min_capacity with the dominant
-            // checkout size (RECV_CHUNK = 16 KB) so the pool is uniform.
-            AdaptiveBufferPool::with_recycler(64, 16_384);
+            // Raw QUIC stream receive buffers are normally 64 KiB. Keep the
+            // pool right-sized so V8 finalizers recycle buffers without
+            // retaining unrelated large allocations.
+            AdaptiveBufferPool::with_recycler(64, Self::RECV_CHUNK);
         Self {
             quiche_conn,
             conn_id,
@@ -216,14 +217,14 @@ impl QuicConnection {
                 // Checkout a pool buffer as the direct recv target — quiche copies
                 // into it, then we truncate and move ownership to the event (no
                 // intermediate copy).
-                let (mut buf, _) = self.data_pool.checkout(Self::RECV_CHUNK);
-                match self.quiche_conn.stream_recv(stream_id, &mut buf) {
-                    Ok((len, fin)) => {
-                        buf.truncate(len);
+                let (mut buf, _) = self.data_pool.checkout_recv(Self::RECV_CHUNK);
+                match buf.recv_quic_stream(&mut self.quiche_conn, stream_id) {
+                    Ok(fin) => {
+                        let data = buf.into_initialized_vec();
                         events.push(JsH3Event::new_stream_with_data(
                             conn_handle,
                             stream_id,
-                            buf,
+                            data,
                             fin,
                             self.event_recycler(),
                         ));
@@ -239,13 +240,13 @@ impl QuicConnection {
                         // Fall through to drain remaining data on this stream.
                     }
                     Err(quiche::Error::Done) => {
-                        self.data_pool.checkin(buf);
+                        self.data_pool.checkin(buf.into_recycle_vec());
                         events.push(JsH3Event::new_stream(conn_handle, stream_id));
                         app_events_remaining = app_events_remaining.saturating_sub(1);
                         continue;
                     }
                     Err(e) => {
-                        self.data_pool.checkin(buf);
+                        self.data_pool.checkin(buf.into_recycle_vec());
                         events.push(JsH3Event::new_stream(conn_handle, stream_id));
                         app_events_remaining = app_events_remaining.saturating_sub(1);
                         if app_events_remaining == 0 {
@@ -269,25 +270,32 @@ impl QuicConnection {
                 if app_events_remaining == 0 {
                     break;
                 }
-                let (mut buf, _) = self.data_pool.checkout(Self::RECV_CHUNK);
-                match self.quiche_conn.stream_recv(stream_id, &mut buf) {
-                    Ok((len, fin)) => {
+                let (mut buf, _) = self.data_pool.checkout_recv(Self::RECV_CHUNK);
+                match buf.recv_quic_stream(&mut self.quiche_conn, stream_id) {
+                    Ok(fin) => {
+                        let len = buf.initialized_len();
+                        let delivered_data = len > 0;
                         if len > 0 {
-                            buf.truncate(len);
                             events.push(JsH3Event::data(
                                 conn_handle,
                                 stream_id,
-                                buf,
+                                buf.into_initialized_vec(),
                                 fin,
                                 self.event_recycler(),
                             ));
                             app_events_remaining = app_events_remaining.saturating_sub(1);
                         } else {
-                            self.data_pool.checkin(buf);
+                            self.data_pool.checkin(buf.into_recycle_vec());
                         }
                         if fin {
-                            if app_events_remaining > 0 {
-                                reactor_metrics::record_raw_quic_fin_observed();
+                            reactor_metrics::record_raw_quic_fin_observed();
+                            if delivered_data {
+                                reactor_metrics::record_raw_quic_finished_event();
+                                self.known_streams.remove(&stream_id);
+                                self.quiche_conn
+                                    .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                    .ok();
+                            } else if app_events_remaining > 0 {
                                 reactor_metrics::record_raw_quic_finished_event();
                                 events.push(JsH3Event::finished(conn_handle, stream_id));
                                 app_events_remaining = app_events_remaining.saturating_sub(1);
@@ -305,7 +313,7 @@ impl QuicConnection {
                         }
                     }
                     Err(quiche::Error::Done) => {
-                        self.data_pool.checkin(buf);
+                        self.data_pool.checkin(buf.into_recycle_vec());
                         if self.quiche_conn.stream_finished(stream_id) && app_events_remaining > 0 {
                             reactor_metrics::record_raw_quic_fin_observed();
                             reactor_metrics::record_raw_quic_finished_event();
@@ -322,7 +330,7 @@ impl QuicConnection {
                         break;
                     }
                     Err(e) => {
-                        self.data_pool.checkin(buf);
+                        self.data_pool.checkin(buf.into_recycle_vec());
                         events.push(JsH3Event::error(
                             conn_handle,
                             stream_id as i64,

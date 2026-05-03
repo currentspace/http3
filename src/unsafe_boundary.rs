@@ -1,5 +1,7 @@
 //! Narrow wrappers for invariants that otherwise tend to leak unsafe code.
 
+use bytes::BufMut;
+
 /// A packet buffer whose bytes are initialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitializedPacketBuf(Vec<u8>);
@@ -27,6 +29,108 @@ impl InitializedPacketBuf {
 
     pub fn into_vec(self) -> Vec<u8> {
         self.0
+    }
+}
+
+/// Owned receive output buffer for quiche APIs that write into `&mut [u8]`.
+///
+/// The vector length stays at zero while bytes are being filled, so safe Rust
+/// code cannot accidentally observe stale bytes from a previous Buffer lease.
+/// Receive calls use quiche's `*_buf` APIs over `bytes::BufMut`, avoiding an
+/// uninitialized `&mut [u8]` escape hatch at the crate boundary.
+#[derive(Debug)]
+pub struct QuicheRecvBuf {
+    buf: Vec<u8>,
+    target_len: usize,
+}
+
+impl QuicheRecvBuf {
+    pub fn with_capacity(target_len: usize) -> Self {
+        Self::from_vec(Vec::with_capacity(target_len), target_len)
+    }
+
+    pub fn from_vec(mut buf: Vec<u8>, target_len: usize) -> Self {
+        buf.clear();
+        if buf.capacity() < target_len {
+            buf.reserve_exact(target_len);
+        }
+        Self { buf, target_len }
+    }
+
+    pub fn initialized_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.buf.len() >= self.target_len
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.target_len.saturating_sub(self.buf.len())
+    }
+
+    pub fn recv_h3_body<F>(
+        &mut self,
+        h3_conn: &mut quiche::h3::Connection,
+        quiche_conn: &mut quiche::Connection<F>,
+        stream_id: u64,
+    ) -> quiche::h3::Result<usize>
+    where
+        F: quiche::BufFactory,
+    {
+        let before = self.buf.len();
+        let remaining = self.remaining();
+        let mut out = (&mut self.buf).limit(remaining);
+        let written = h3_conn.recv_body_buf(quiche_conn, stream_id, &mut out)?;
+        self.validate_reported_write(before, remaining, written);
+        Ok(written)
+    }
+
+    pub fn recv_quic_stream<F>(
+        &mut self,
+        quiche_conn: &mut quiche::Connection<F>,
+        stream_id: u64,
+    ) -> quiche::Result<bool>
+    where
+        F: quiche::BufFactory,
+    {
+        let before = self.buf.len();
+        let remaining = self.remaining();
+        let mut out = (&mut self.buf).limit(remaining);
+        let (written, fin) = quiche_conn.stream_recv_buf(stream_id, &mut out)?;
+        self.validate_reported_write(before, remaining, written);
+        Ok(fin)
+    }
+
+    pub fn append_initialized(&mut self, data: &[u8]) -> usize {
+        let len = data.len().min(self.remaining());
+        self.buf.extend_from_slice(&data[..len]);
+        len
+    }
+
+    fn validate_reported_write(&self, before: usize, remaining: usize, written: usize) {
+        assert!(
+            written <= remaining,
+            "quiche receive API reported {written} bytes for {remaining}-byte buffer"
+        );
+        assert_eq!(
+            self.buf.len().saturating_sub(before),
+            written,
+            "quiche receive API wrote a different number of bytes than it reported"
+        );
+    }
+
+    pub fn into_initialized_vec(self) -> Vec<u8> {
+        self.buf
+    }
+
+    pub fn into_recycle_vec(mut self) -> Vec<u8> {
+        self.buf.clear();
+        self.buf
     }
 }
 
@@ -322,5 +426,43 @@ mod tests {
             Some(3)
         );
         assert!(ProvidedBufferId::new(4, 4).is_none());
+    }
+
+    #[test]
+    fn quiche_recv_buf_exposes_only_appended_bytes() {
+        let mut buf = QuicheRecvBuf::with_capacity(8);
+        let written = buf.append_initialized(b"abc");
+
+        assert_eq!(written, 3);
+        assert_eq!(buf.initialized_len(), 3);
+        assert_eq!(buf.remaining(), 5);
+        assert_eq!(buf.into_initialized_vec(), b"abc");
+    }
+
+    #[test]
+    fn quiche_recv_buf_appends_multiple_initialized_writes() {
+        let mut buf = QuicheRecvBuf::with_capacity(5);
+        assert_eq!(buf.append_initialized(b"he"), 2);
+        assert_eq!(buf.append_initialized(b"llo"), 3);
+        assert!(buf.is_full());
+        assert_eq!(buf.into_initialized_vec(), b"hello");
+    }
+
+    #[test]
+    fn quiche_recv_buf_recycle_vec_hides_prior_length() {
+        let mut buf = QuicheRecvBuf::with_capacity(4);
+        assert_eq!(buf.append_initialized(b"data"), 4);
+
+        let recycled = buf.into_recycle_vec();
+        assert_eq!(recycled.len(), 0);
+        assert!(recycled.capacity() >= 4);
+    }
+
+    #[test]
+    fn quiche_recv_buf_caps_test_append_at_target_len() {
+        let mut buf = QuicheRecvBuf::with_capacity(4);
+        assert_eq!(buf.append_initialized(b"hello"), 4);
+        assert!(buf.is_full());
+        assert_eq!(buf.into_initialized_vec(), b"hell");
     }
 }

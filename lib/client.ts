@@ -494,6 +494,10 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     stream._responseSeen = true;
     const flags = { endStream: event.fin ?? false };
     stream.emit('response', headers, flags);
+    if (event.data) {
+      stream._onActivity();
+      stream._pushData(event.data);
+    }
   }
 
   private _onData(event: NativeEvent): void {

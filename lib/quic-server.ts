@@ -507,6 +507,12 @@ export class QuicServer extends EventEmitter {
     if (!session || !event.data) return;
     const stream = session._getOrCreateStream(event.streamId);
     stream._pushData(event.data);
+    if (event.fin) {
+      stream._pushData(null);
+      if (stream.readableFlowing === null) {
+        stream.resume();
+      }
+    }
   }
 
   private _onFinished(event: NativeEvent): void {

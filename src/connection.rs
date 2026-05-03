@@ -18,12 +18,12 @@ use crate::error::Http3NativeError;
 use crate::h3_event::{EventRecycler, JsH3Event, JsHeader};
 use crate::ping_state::PingState;
 use crate::reactor_metrics;
+use crate::unsafe_boundary::QuicheRecvBuf;
 
 const H3_RECV_CHUNK: usize = 64 * 1024;
 
 struct PendingRecvBody {
-    buf: Vec<u8>,
-    len: usize,
+    buf: QuicheRecvBuf,
 }
 
 fn take_pending_body_event(
@@ -33,20 +33,49 @@ fn take_pending_body_event(
     stream_id: u64,
     recycler: EventRecycler,
 ) -> Option<JsH3Event> {
-    let mut pending = pending_body_data.remove(&stream_id)?;
-    if pending.len == 0 {
-        data_pool.checkin(pending.buf);
+    let pending = pending_body_data.remove(&stream_id)?;
+    if pending.buf.is_empty() {
+        data_pool.checkin(pending.buf.into_recycle_vec());
         return None;
     }
 
-    pending.buf.truncate(pending.len);
+    let buf = pending.buf.into_initialized_vec();
     Some(JsH3Event::data(
         conn_handle,
         stream_id,
-        pending.buf,
+        buf,
         false,
         recycler,
     ))
+}
+
+fn push_pending_body_event(
+    pending_body_data: &mut HashMap<u64, PendingRecvBody>,
+    data_pool: &mut AdaptiveBufferPool,
+    conn_handle: u32,
+    stream_id: u64,
+    recycler: EventRecycler,
+    events: &mut Vec<JsH3Event>,
+) -> bool {
+    let Some(event) = take_pending_body_event(
+        pending_body_data,
+        data_pool,
+        conn_handle,
+        stream_id,
+        recycler,
+    ) else {
+        return false;
+    };
+
+    if let Some(last) = events.last_mut() {
+        match last.try_coalesce_following_data(event) {
+            Ok(()) => return false,
+            Err(event) => events.push(event),
+        }
+    } else {
+        events.push(event);
+    }
+    true
 }
 
 pub struct H3Connection {
@@ -143,11 +172,10 @@ impl H3Connection {
             init.qlog_level,
         );
         let (data_pool, data_recycler, data_recycle_rx) =
-            // Audit finding #27: min_capacity matches the dominant
-            // checkout size (RECV_CHUNK = 16 KB). Datagram-recv checkouts
-            // (1500 bytes) still get 16 KB Vecs, which is fine — the pool
-            // is then uniform and a recycled buffer can serve any path.
-            AdaptiveBufferPool::with_recycler(64, 16_384);
+            // H3 DATA receive buffers are normally 64 KiB. Keep the pool
+            // right-sized so V8 finalizers recycle buffers without retaining
+            // unrelated large allocations.
+            AdaptiveBufferPool::with_recycler(64, H3_RECV_CHUNK);
         Self {
             quiche_conn,
             h3_conn: None,
@@ -229,14 +257,14 @@ impl H3Connection {
                     }
                     match h3_conn.poll(&mut self.quiche_conn) {
                         Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
-                            if let Some(event) = take_pending_body_event(
+                            if push_pending_body_event(
                                 &mut self.pending_body_data,
                                 &mut self.data_pool,
                                 conn_handle,
                                 stream_id,
                                 recycler.clone(),
+                                events,
                             ) {
-                                events.push(event);
                                 app_events_remaining = app_events_remaining.saturating_sub(1);
                             }
                             // Track the largest accepted request ID for our own
@@ -270,30 +298,28 @@ impl H3Connection {
 
                             loop {
                                 if !self.pending_body_data.contains_key(&stream_id) {
-                                    let (buf, _) = self.data_pool.checkout(H3_RECV_CHUNK);
+                                    let (buf, _) = self.data_pool.checkout_recv(H3_RECV_CHUNK);
                                     self.pending_body_data
-                                        .insert(stream_id, PendingRecvBody { buf, len: 0 });
+                                        .insert(stream_id, PendingRecvBody { buf });
                                 }
 
                                 let Some(pending) = self.pending_body_data.get_mut(&stream_id)
                                 else {
                                     break;
                                 };
-                                if pending.len == pending.buf.len() {
+                                if pending.buf.is_full() {
                                     break;
                                 }
-                                let start = pending.len;
 
-                                match h3_conn.recv_body(
+                                match pending.buf.recv_h3_body(
+                                    h3_conn,
                                     &mut self.quiche_conn,
                                     stream_id,
-                                    &mut pending.buf[start..],
                                 ) {
                                     Ok(len) => {
                                         if len == 0 {
                                             break;
                                         }
-                                        pending.len = start + len;
                                     }
                                     Err(quiche::h3::Error::Done) => {
                                         drained_current_event = true;
@@ -309,41 +335,41 @@ impl H3Connection {
                             let pending_is_full = self
                                 .pending_body_data
                                 .get(&stream_id)
-                                .is_some_and(|pending| pending.len == pending.buf.len());
+                                .is_some_and(|pending| pending.buf.is_full());
                             if self
                                 .pending_body_data
                                 .get(&stream_id)
-                                .is_some_and(|pending| pending.len == 0)
+                                .is_some_and(|pending| pending.buf.is_empty())
                             {
                                 if let Some(pending) = self.pending_body_data.remove(&stream_id) {
-                                    self.data_pool.checkin(pending.buf);
+                                    self.data_pool.checkin(pending.buf.into_recycle_vec());
                                 }
                             }
                             // A DATA frame smaller than H3_RECV_CHUNK still needs to
                             // reach JS before FIN; `Done` marks the current frame
                             // drained, not a reason to keep buffering indefinitely.
                             if pending_is_full || drained_current_event {
-                                if let Some(event) = take_pending_body_event(
+                                if push_pending_body_event(
                                     &mut self.pending_body_data,
                                     &mut self.data_pool,
                                     conn_handle,
                                     stream_id,
                                     recycler.clone(),
+                                    events,
                                 ) {
-                                    events.push(event);
                                     app_events_remaining = app_events_remaining.saturating_sub(1);
                                 }
                             }
 
                             if let Some(message) = error {
-                                if let Some(event) = take_pending_body_event(
+                                if push_pending_body_event(
                                     &mut self.pending_body_data,
                                     &mut self.data_pool,
                                     conn_handle,
                                     stream_id,
                                     recycler.clone(),
+                                    events,
                                 ) {
-                                    events.push(event);
                                     app_events_remaining = app_events_remaining.saturating_sub(1);
                                 }
                                 if app_events_remaining > 0 {
@@ -363,28 +389,28 @@ impl H3Connection {
                             }
                         },
                         Ok((stream_id, quiche::h3::Event::Finished)) => {
-                            if let Some(event) = take_pending_body_event(
+                            if push_pending_body_event(
                                 &mut self.pending_body_data,
                                 &mut self.data_pool,
                                 conn_handle,
                                 stream_id,
                                 recycler.clone(),
+                                events,
                             ) {
-                                events.push(event);
                                 app_events_remaining = app_events_remaining.saturating_sub(1);
                             }
                             events.push(JsH3Event::finished(conn_handle, stream_id));
                             app_events_remaining = app_events_remaining.saturating_sub(1);
                         }
                         Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
-                            if let Some(event) = take_pending_body_event(
+                            if push_pending_body_event(
                                 &mut self.pending_body_data,
                                 &mut self.data_pool,
                                 conn_handle,
                                 stream_id,
                                 recycler.clone(),
+                                events,
                             ) {
-                                events.push(event);
                                 app_events_remaining = app_events_remaining.saturating_sub(1);
                             }
                             events.push(JsH3Event::reset(conn_handle, stream_id, error_code));
@@ -678,7 +704,7 @@ impl H3Connection {
             self.blocked_queue.retain(|&id| id != stream_id);
         }
         if let Some(pending) = self.pending_body_data.remove(&stream_id) {
-            self.data_pool.checkin(pending.buf);
+            self.data_pool.checkin(pending.buf.into_recycle_vec());
         }
         self.trailer_fin_streams.remove(&stream_id);
         Ok(())
