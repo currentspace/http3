@@ -14,8 +14,8 @@ mod inner {
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::socket::{
-        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_gro_cmsg, parse_pktinfo_cmsg,
-        probe_gso, set_pktinfo,
+        CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso, set_pktinfo,
+        sockaddr_to_socketaddr,
     };
     use crate::transport::{
         Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, group_for_gso,
@@ -23,6 +23,28 @@ mod inner {
 
     const MAX_RX_PER_POLL: usize = 256;
     const RX_BUF_SIZE: usize = 65535;
+
+    fn should_requeue_gso_send_error(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == Some(libc::EMSGSIZE)
+    }
+
+    fn requeue_gso_batch(
+        unsent: &mut VecDeque<TxDatagram>,
+        data: Vec<u8>,
+        payload_len: usize,
+        to: SocketAddr,
+        segment_size: u16,
+    ) {
+        let seg = segment_size as usize;
+        if seg == 0 || payload_len <= seg {
+            unsent.push_back(TxDatagram::new(data, payload_len, to, None));
+            return;
+        }
+
+        for chunk in data[..payload_len].chunks(seg) {
+            unsent.push_back(TxDatagram::from_payload(chunk.to_vec(), to, None));
+        }
+    }
 
     /// Pre-allocated state for a single recvmmsg slot.
     struct RxMmsgSlot {
@@ -125,6 +147,10 @@ mod inner {
             let local_addr = socket.local_addr()?;
             let gso_supported = probe_gso(&socket);
             set_pktinfo(&socket);
+            // Audit finding #18: enable IP_RECVTOS / IPV6_RECVTCLASS so the
+            // recvmmsg cmsg carries the per-datagram ECN code point.
+            // Telemetry only — quiche 0.28 doesn't expose ECN.
+            crate::transport::socket::set_recv_ecn(&socket);
             enable_gro(&socket);
             log::info!(
                 "PollDriver::new fd={socket_fd} local={local_addr} gso={gso_supported} tid={:?}",
@@ -170,6 +196,51 @@ mod inner {
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll_inner(deadline, true)
+        }
+
+        fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll_inner(deadline, false)
+        }
+
+        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            if packets.is_empty() {
+                return Ok(());
+            }
+            self.send_batch(packets);
+            Ok(())
+        }
+
+        fn pending_tx_count(&self) -> usize {
+            self.unsent.len()
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.socket.local_addr()
+        }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::Poll
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            for buf in buffers {
+                let retained = self.rx_pool.checkin(buf);
+                reactor_metrics::record_rx_buffer_checkin(retained);
+            }
+        }
+    }
+
+    impl PollDriver {
+        fn poll_inner(
+            &mut self,
+            deadline: Option<Instant>,
+            receive_enabled: bool,
+        ) -> io::Result<PollOutcome> {
             let timeout_ms = deadline.map_or(100i32, |d| {
                 let dur = d.saturating_duration_since(Instant::now());
                 let millis = dur.as_millis().min(i32::MAX as u128);
@@ -223,46 +294,12 @@ mod inner {
                 self.drain_unsent();
             }
 
-            if (fds[0].revents & libc::POLLIN) != 0 {
+            if receive_enabled && (fds[0].revents & libc::POLLIN) != 0 {
                 self.recv_batch(&mut outcome);
             }
 
             Ok(outcome)
         }
-
-        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
-            if packets.is_empty() {
-                return Ok(());
-            }
-            self.send_batch(packets);
-            Ok(())
-        }
-
-        fn pending_tx_count(&self) -> usize {
-            self.unsent.len()
-        }
-
-        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
-            std::mem::take(&mut self.recycled_tx)
-        }
-
-        fn local_addr(&self) -> io::Result<SocketAddr> {
-            self.socket.local_addr()
-        }
-
-        fn driver_kind(&self) -> RuntimeDriverKind {
-            RuntimeDriverKind::Poll
-        }
-
-        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
-            for buf in buffers {
-                let retained = self.rx_pool.checkin(buf);
-                reactor_metrics::record_rx_buffer_checkin(retained);
-            }
-        }
-    }
-
-    impl PollDriver {
         /// Receive datagrams using recvmmsg(2).
         fn recv_batch(&mut self, outcome: &mut PollOutcome) {
             self.rx_batch.reset();
@@ -296,11 +333,18 @@ mod inner {
                 if let Some(peer) = peer {
                     let cmsg_data = &self.rx_batch.slots[i].cmsg_buf
                         [..self.rx_batch.hdrs[i].msg_hdr.msg_controllen];
-                    let local_ip = parse_pktinfo_cmsg(cmsg_data);
-                    let local = local_ip
+                    let parsed = parse_recv_cmsgs(cmsg_data);
+                    let local = parsed
+                        .local_ip
                         .map(|ip| SocketAddr::new(ip, self.local_addr.port()))
                         .unwrap_or(self.local_addr);
-                    let segment_size = parse_gro_cmsg(cmsg_data);
+                    let segment_size = parsed.segment_size;
+                    // Audit #18: ECN observability.
+                    if let Some(tos) = parsed.tos {
+                        reactor_metrics::record_ecn_recv(
+                            crate::transport::socket::EcnCodePoint::from_tos(tos),
+                        );
+                    }
                     let (data, reused) = self
                         .rx_pool
                         .copy_from_slice(&self.rx_batch.slots[i].buf[..len]);
@@ -346,16 +390,18 @@ mod inner {
 
             // Stash packets so data pointers remain valid during sendmmsg.
             let mut pkt_data: Vec<Vec<u8>> = Vec::with_capacity(count);
+            let mut pkt_lens: Vec<usize> = Vec::with_capacity(count);
             let mut pkt_addrs: Vec<SocketAddr> = Vec::with_capacity(count);
             for pkt in packets {
                 pkt_addrs.push(pkt.to);
+                pkt_lens.push(pkt.payload_len());
                 pkt_data.push(pkt.data);
             }
 
             for i in 0..count {
                 let addrlen = socketaddr_to_sockaddr(pkt_addrs[i], &mut self.tx_addrs[i]);
                 self.tx_iovs[i].iov_base = pkt_data[i].as_ptr() as *mut libc::c_void;
-                self.tx_iovs[i].iov_len = pkt_data[i].len();
+                self.tx_iovs[i].iov_len = pkt_lens[i];
                 self.tx_hdrs[i].msg_hdr.msg_name =
                     (&mut self.tx_addrs[i] as *mut libc::sockaddr_storage).cast();
                 self.tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
@@ -374,34 +420,43 @@ mod inner {
                 )
             };
 
-            let sent_count = if sent < 0 {
+            // Audit finding #7: distinguish WouldBlock (transient → queue
+            // for drain_unsent) from permanent errors (EINVAL/ENETUNREACH/…
+            // → log + drop, since requeueing would just retry forever).
+            // quiche handles loss recovery via retransmission, so the layer
+            // above doesn't need every datagram to actually go out.
+            let (sent_count, requeue_remainder) = if sent < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::WouldBlock {
-                    0usize
+                    (0usize, true)
                 } else {
-                    // On other errors, treat as 0 sent and queue all.
-                    0
+                    log::warn!(
+                        "poll driver: sendmmsg failed with permanent error {err}; dropping {} datagrams",
+                        pkt_data.len()
+                    );
+                    (0usize, false)
                 }
             } else {
-                sent as usize
+                (sent as usize, true)
             };
 
-            // Recycle sent buffers, queue unsent as pending.
+            // Recycle sent buffers; remainder is either re-queued (transient)
+            // or dropped (permanent).
             for (i, data) in pkt_data.into_iter().enumerate() {
-                if i < sent_count {
+                if i < sent_count || !requeue_remainder {
                     self.recycled_tx.push(data);
                 } else {
-                    self.unsent.push_back(TxDatagram {
-                        data,
-                        to: pkt_addrs[i],
-                    });
+                    self.unsent
+                        .push_back(TxDatagram::new(data, pkt_lens[i], pkt_addrs[i], None));
                 }
             }
         }
 
         /// GSO-accelerated send: group packets by (dest, size) and use UDP_SEGMENT cmsg.
         fn send_batch_gso(&mut self, packets: Vec<TxDatagram>) {
-            let batches = group_for_gso(packets);
+            let batching = group_for_gso(packets);
+            self.recycled_tx.extend(batching.recycled);
+            let batches = batching.batches;
             let count = batches.len();
 
             // Allocate fresh each time to avoid stale pointer issues from
@@ -422,18 +477,20 @@ mod inner {
 
             // Stash batch data so pointers remain valid during sendmmsg.
             let mut batch_data: Vec<Vec<u8>> = Vec::with_capacity(count);
+            let mut batch_lens: Vec<usize> = Vec::with_capacity(count);
             let mut batch_addrs: Vec<SocketAddr> = Vec::with_capacity(count);
             let mut batch_seg_sizes: Vec<u16> = Vec::with_capacity(count);
             for batch in batches {
                 batch_addrs.push(batch.to);
                 batch_seg_sizes.push(batch.segment_size);
+                batch_lens.push(batch.payload_len);
                 batch_data.push(batch.data);
             }
 
             for i in 0..count {
                 let addrlen = socketaddr_to_sockaddr(batch_addrs[i], &mut tx_addrs[i]);
                 tx_iovs[i].iov_base = batch_data[i].as_ptr() as *mut libc::c_void;
-                tx_iovs[i].iov_len = batch_data[i].len();
+                tx_iovs[i].iov_len = batch_lens[i];
                 tx_hdrs[i].msg_hdr.msg_name =
                     (&mut tx_addrs[i] as *mut libc::sockaddr_storage).cast();
                 tx_hdrs[i].msg_hdr.msg_namelen = addrlen;
@@ -441,7 +498,7 @@ mod inner {
                 tx_hdrs[i].msg_hdr.msg_iovlen = 1;
 
                 // Attach UDP_SEGMENT cmsg when the batch holds >1 segment.
-                if batch_data[i].len() > batch_seg_sizes[i] as usize {
+                if batch_seg_sizes[i] > 0 && batch_lens[i] > batch_seg_sizes[i] as usize {
                     let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[i], batch_seg_sizes[i]);
                     tx_hdrs[i].msg_hdr.msg_control = tx_cmsg_bufs[i].as_mut_ptr().cast();
                     tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
@@ -459,47 +516,64 @@ mod inner {
                 )
             };
 
-            let sent_count = if sent < 0 {
-                if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
-                    0usize
+            // Same WouldBlock-vs-permanent distinction as the non-GSO path,
+            // except EMSGSIZE falls back by splitting each GSO batch into
+            // individual datagrams below.
+            let (sent_count, requeue_remainder) = if sent < 0 {
+                let err = io::Error::last_os_error();
+                if should_requeue_gso_send_error(&err) {
+                    if err.raw_os_error() == Some(libc::EMSGSIZE) {
+                        log::debug!(
+                            "poll driver: GSO sendmmsg hit EMSGSIZE; splitting {} batches for retry",
+                            batch_data.len()
+                        );
+                    }
+                    (0usize, true)
                 } else {
-                    0
+                    log::warn!(
+                        "poll driver: GSO sendmmsg failed with permanent error {err}; dropping {} batches",
+                        batch_data.len()
+                    );
+                    (0usize, false)
                 }
             } else {
-                sent as usize
+                (sent as usize, true)
             };
 
-            // Recycle sent batch buffers, split unsent batches back to individual packets.
             for (i, data) in batch_data.into_iter().enumerate() {
-                if i < sent_count {
+                if i < sent_count || !requeue_remainder {
                     self.recycled_tx.push(data);
                 } else {
-                    let seg = batch_seg_sizes[i] as usize;
-                    if data.len() > seg {
-                        for chunk in data.chunks(seg) {
-                            self.unsent.push_back(TxDatagram {
-                                data: chunk.to_vec(),
-                                to: batch_addrs[i],
-                            });
-                        }
-                    } else {
-                        self.unsent.push_back(TxDatagram {
-                            data,
-                            to: batch_addrs[i],
-                        });
-                    }
+                    requeue_gso_batch(
+                        &mut self.unsent,
+                        data,
+                        batch_lens[i],
+                        batch_addrs[i],
+                        batch_seg_sizes[i],
+                    );
                 }
             }
         }
 
         fn drain_unsent(&mut self) {
-            // Drain unsent one at a time (backpressure recovery).
+            // Drain unsent one at a time (backpressure recovery). Audit
+            // finding #7: log permanent errors at warn so a steady stream of
+            // dropped packets doesn't disappear silently. Both Ok and
+            // permanent-error pop the packet; only WouldBlock keeps it.
             while let Some(front) = self.unsent.front() {
-                match self.socket.send_to(&front.data, front.to) {
+                match self.socket.send_to(front.payload(), front.to) {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
-                    Ok(_) | Err(_) => {
+                    Ok(_) => {
                         if let Some(pkt) = self.unsent.pop_front() {
-                            self.recycled_tx.push(pkt.data);
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "poll driver: drain_unsent send_to failed: {e}; dropping datagram"
+                        );
+                        if let Some(pkt) = self.unsent.pop_front() {
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
                         }
                     }
                 }
@@ -549,31 +623,6 @@ mod inner {
         }
     }
 
-    fn sockaddr_to_socketaddr(
-        addr: &libc::sockaddr_storage,
-        len: libc::socklen_t,
-    ) -> Option<SocketAddr> {
-        if len as usize >= std::mem::size_of::<libc::sockaddr_in>()
-            && i32::from(addr.ss_family) == libc::AF_INET
-        {
-            // SAFETY: ss_family is AF_INET and len is sufficient.
-            let sin: &libc::sockaddr_in = unsafe { &*(addr as *const _ as *const _) };
-            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-            let port = u16::from_be(sin.sin_port);
-            Some(SocketAddr::from((ip, port)))
-        } else if len as usize >= std::mem::size_of::<libc::sockaddr_in6>()
-            && i32::from(addr.ss_family) == libc::AF_INET6
-        {
-            // SAFETY: ss_family is AF_INET6 and len is sufficient.
-            let sin6: &libc::sockaddr_in6 = unsafe { &*(addr as *const _ as *const _) };
-            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-            let port = u16::from_be(sin6.sin6_port);
-            Some(SocketAddr::from((ip, port)))
-        } else {
-            None
-        }
-    }
-
     fn socketaddr_to_sockaddr(
         addr: SocketAddr,
         storage: &mut libc::sockaddr_storage,
@@ -610,6 +659,48 @@ mod inner {
                 }
                 std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn gso_error_classifier_requeues_emsgsize() {
+            assert!(should_requeue_gso_send_error(
+                &io::Error::from_raw_os_error(libc::EMSGSIZE)
+            ));
+            assert!(should_requeue_gso_send_error(
+                &io::Error::from_raw_os_error(libc::EAGAIN)
+            ));
+            assert!(!should_requeue_gso_send_error(
+                &io::Error::from_raw_os_error(libc::EINVAL)
+            ));
+        }
+
+        #[test]
+        fn requeue_gso_batch_splits_multisegment_data() {
+            let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let mut unsent = VecDeque::new();
+
+            requeue_gso_batch(&mut unsent, vec![1, 2, 3, 4, 5], 5, peer, 2);
+
+            assert_eq!(unsent.len(), 3);
+            assert_eq!(unsent.pop_front().unwrap().data, vec![1, 2]);
+            assert_eq!(unsent.pop_front().unwrap().data, vec![3, 4]);
+            assert_eq!(unsent.pop_front().unwrap().data, vec![5]);
+        }
+
+        #[test]
+        fn requeue_gso_batch_accepts_zero_segment_size() {
+            let peer: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let mut unsent = VecDeque::new();
+
+            requeue_gso_batch(&mut unsent, Vec::new(), 0, peer, 0);
+
+            assert_eq!(unsent.len(), 1);
+            assert!(unsent.pop_front().unwrap().data.is_empty());
         }
     }
 }

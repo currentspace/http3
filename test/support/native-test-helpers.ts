@@ -33,6 +33,44 @@ export const EVENT_METRICS = 13;
 export const EVENT_DATAGRAM = 14;
 export const EVENT_SHUTDOWN_COMPLETE = 15;
 
+export function isH3BodyDataEvent(evt: any): boolean {
+  return (evt?.eventType === EVENT_DATA || evt?.eventType === EVENT_HEADERS) && !!evt.data;
+}
+
+export function h3BodyDataEvents(events: any[]): any[] {
+  return events.filter(isH3BodyDataEvent);
+}
+
+export function concatH3BodyData(events: any[]): Buffer {
+  return Buffer.concat(h3BodyDataEvents(events).map((evt: any) => Buffer.from(evt.data)));
+}
+
+export function waitForH3BodyData(
+  source: any[] | { allEvents: any[] },
+  timeoutMs = 5000,
+): Promise<any> {
+  const events = Array.isArray(source) ? source : source.allEvents;
+  const existing = events.find(isH3BodyDataEvent);
+  if (existing) return Promise.resolve(existing);
+
+  return new Promise<any>((resolve, reject) => {
+    const startedAt = Date.now();
+    const check = (): void => {
+      const evt = events.find(isH3BodyDataEvent);
+      if (evt) {
+        resolve(evt);
+        return;
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        reject(new Error(`Timed out waiting for H3 body data after ${timeoutMs}ms`));
+        return;
+      }
+      setTimeout(check, 10);
+    };
+    check();
+  });
+}
+
 // ---- Binding loader ----
 
 /**
@@ -52,7 +90,6 @@ export function loadBinding(): any {
     searched.push(candidate);
     if (existsSync(candidate) && existsSync(join(dir, 'package.json'))) {
       const require_ = createRequire(join(dir, 'package.json'));
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
       return require_(candidate);
     }
     dir = resolve(dir, '..');
@@ -71,6 +108,8 @@ export interface EventCollector {
   allEvents: any[];
   /** Wait until an event with the given `eventType` appears. */
   waitForEvent(eventType: number, timeoutMs?: number): Promise<any>;
+  /** Wait until any one of the given event types appears. */
+  waitForAnyEvent(eventTypes: number[], timeoutMs?: number): Promise<any>;
   /** Wait until N events of the given `eventType` have been collected. */
   waitForNEvents(eventType: number, count: number, timeoutMs?: number): Promise<any[]>;
   /** Wait until a SHUTDOWN_COMPLETE (15) event is observed. */
@@ -91,8 +130,9 @@ export function createEventCollector(): EventCollector {
     for (const evt of events) {
       allEvents.push(evt);
       for (let i = waiters.length - 1; i >= 0; i--) {
-        if (waiters[i].eventType === evt.eventType) {
-          const waiter = waiters[i];
+        const waiter = waiters[i];
+        if (!waiter) continue;
+        if (waiter.eventType === evt.eventType) {
           waiters.splice(i, 1);
           waiter.resolve(evt);
         }
@@ -119,6 +159,38 @@ export function createEventCollector(): EventCollector {
           resolve(evt);
         },
       });
+    });
+  }
+
+  function waitForAnyEvent(eventTypes: number[], timeoutMs = 5000): Promise<any> {
+    const wanted = new Set(eventTypes);
+    const existing = allEvents.find((e) => wanted.has(e.eventType));
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise<any>((resolve, reject) => {
+      let settled = false;
+      const group = Symbol('waitForAnyEvent');
+      const timer = setTimeout(() => {
+        settled = true;
+        for (let i = waiters.length - 1; i >= 0; i--) {
+          if ((waiters[i] as any).__anyEventGroup === group) waiters.splice(i, 1);
+        }
+        reject(new Error(`Timed out waiting for eventTypes=${eventTypes.join(',')} after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const complete = (evt: any): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        for (let i = waiters.length - 1; i >= 0; i--) {
+          if ((waiters[i] as any).__anyEventGroup === group) waiters.splice(i, 1);
+        }
+        resolve(evt);
+      };
+
+      for (const eventType of eventTypes) {
+        waiters.push({ eventType, resolve: complete, __anyEventGroup: group } as any);
+      }
     });
   }
 
@@ -177,7 +249,7 @@ export function createEventCollector(): EventCollector {
     });
   }
 
-  return { callback, allEvents, waitForEvent, waitForNEvents, waitForShutdown, reset };
+  return { callback, allEvents, waitForEvent, waitForAnyEvent, waitForNEvents, waitForShutdown, reset };
 }
 
 // ---- QUIC pair ----
@@ -341,10 +413,42 @@ export interface MemorySnapshot {
   heapTotal: number;
 }
 
+export type MemoryDriftSnapshot = Pick<MemorySnapshot, 'rss' | 'heapUsed'>;
+
+export const MEMORY_DRIFT_LIMIT_BYTES = 50 * 1024 * 1024;
+
 /**
  * Capture a point-in-time memory snapshot for leak detection in long-haul tests.
  */
 export function snapshotMemory(): MemorySnapshot {
   const m = process.memoryUsage();
   return { rss: m.rss, heapUsed: m.heapUsed, heapTotal: m.heapTotal };
+}
+
+/**
+ * Assert that post-warmup memory drift stays bounded. Long-haul tests use a
+ * post-warmup baseline so startup and native allocator ramp do not look like
+ * steady-state leaks.
+ */
+export function assertMemoryDriftWithinLimit(
+  label: string,
+  baseline: MemoryDriftSnapshot,
+  final: MemoryDriftSnapshot,
+  limitBytes = MEMORY_DRIFT_LIMIT_BYTES,
+): void {
+  const limitMB = (limitBytes / 1024 / 1024).toFixed(1);
+  const rssDrift = final.rss - baseline.rss;
+  const heapDrift = final.heapUsed - baseline.heapUsed;
+  if (rssDrift > limitBytes) {
+    throw new Error(
+      `${label} RSS drift ${(rssDrift / 1024 / 1024).toFixed(1)}MB exceeds ${limitMB}MB ` +
+      `(${(baseline.rss / 1024 / 1024).toFixed(1)}MB -> ${(final.rss / 1024 / 1024).toFixed(1)}MB)`,
+    );
+  }
+  if (heapDrift > limitBytes) {
+    throw new Error(
+      `${label} heap drift ${(heapDrift / 1024 / 1024).toFixed(1)}MB exceeds ${limitMB}MB ` +
+      `(${(baseline.heapUsed / 1024 / 1024).toFixed(1)}MB -> ${(final.heapUsed / 1024 / 1024).toFixed(1)}MB)`,
+    );
+  }
 }

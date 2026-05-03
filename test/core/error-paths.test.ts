@@ -161,7 +161,12 @@ describe('Error Paths', () => {
         ':authority': 'localhost',
         ':scheme': 'https',
       });
-    }, /handshake not complete/);
+    }, (error: unknown) => {
+      return error instanceof Error
+        && /handshake not complete/.test(error.message)
+        && 'code' in error
+        && (error as { code?: string }).code === 'ERR_HTTP3_INVALID_STATE';
+    });
 
     // Wait for connection to settle then clean up
     let connected = false;

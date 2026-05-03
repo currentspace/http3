@@ -9,6 +9,7 @@ import { connectQuicAsync } from '../../../lib/index.js';
 import { binding } from '../../../lib/event-loop.js';
 import type { QuicClientSession } from '../../../lib/index.js';
 import type { QuicStream } from '../../../lib/quic-stream.js';
+import type { SessionCloseInfo } from '../../../lib/session.js';
 
 interface BenchConfig {
   host?: string;
@@ -165,6 +166,52 @@ function computeMeasuredWindowMs(loadElapsedMs: number, warmupMs: number, durati
   return Math.max(0, measurementEndMs - warmupMs);
 }
 
+function classifyError(error: unknown): string {
+  if (error instanceof Error) {
+    const code = typeof (error as Error & { code?: unknown }).code === 'string'
+      ? (error as Error & { code: string }).code
+      : null;
+    const message = error.message || error.name;
+    if (code && message && message !== error.name) {
+      return `${code}: ${message}`;
+    }
+    return code ?? message;
+  }
+  return String(error);
+}
+
+function incrementCount(counts: Record<string, number>, key: string): void {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+
+interface ClientState {
+  session: QuicClientSession;
+  closed: boolean;
+  closeInfo: SessionCloseInfo | null;
+}
+
+function attachClientState(session: QuicClientSession): ClientState {
+  const state: ClientState = {
+    session,
+    closed: session.closed,
+    closeInfo: null,
+  };
+  session.once('close', (info) => {
+    state.closed = true;
+    state.closeInfo = info;
+  });
+  return state;
+}
+
+function isTerminalSessionError(error: unknown, state: ClientState): boolean {
+  if (state.closed) {
+    return true;
+  }
+  return error instanceof Error
+    && typeof (error as Error & { code?: unknown }).code === 'string'
+    && (error as Error & { code: string }).code === 'ERR_HTTP3_SESSION_ERROR';
+}
+
 async function main(): Promise<void> {
   const configStr = process.argv[2];
   if (!configStr) {
@@ -189,12 +236,13 @@ async function main(): Promise<void> {
   let cooldownStreams = 0;
   let cooldownBytes = 0;
   let errors = 0;
+  const errorCounts: Record<string, number> = {};
 
   const payload = Buffer.alloc(config.messageSize, 0xcc);
   const host = config.host ?? '127.0.0.1';
 
   // Phase 1: Open connections
-  const clients: QuicClientSession[] = [];
+  const clients: ClientState[] = [];
   for (let c = 0; c < config.connections; c++) {
     const connStart = process.hrtime.bigint();
     try {
@@ -206,7 +254,7 @@ async function main(): Promise<void> {
       });
       const connMs = Number(process.hrtime.bigint() - connStart) / 1e6;
       connLatency.add(connMs);
-      clients.push(client);
+      clients.push(attachClientState(client));
       const runtimeKey = formatRuntimeSelection(client.runtimeInfo);
       runtimeSelections.set(runtimeKey, (runtimeSelections.get(runtimeKey) ?? 0) + 1);
     } catch (err) {
@@ -241,8 +289,11 @@ async function main(): Promise<void> {
       streamLatency.add(streamMs);
     };
 
-    async function runSteadyStateWorker(client: QuicClientSession, clientIndex: number, workerIndex: number): Promise<void> {
+    async function runSteadyStateWorker(client: ClientState, clientIndex: number, workerIndex: number): Promise<void> {
       for (;;) {
+        if (client.closed) {
+          return;
+        }
         const streamStart = process.hrtime.bigint();
         const loadElapsedAtStartMs = Number(streamStart - loadStart) / 1e6;
         if (loadElapsedAtStartMs >= stopAfterMs) {
@@ -251,7 +302,7 @@ async function main(): Promise<void> {
         const phase = classifyMeasurementPhase(loadElapsedAtStartMs, warmupMs, durationMs);
 
         try {
-          const stream = client.openStream();
+          const stream = client.session.openStream();
           stream.end(payload);
           const echoedLength = await collectStreamLength(stream, config.timeoutMs);
           const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
@@ -263,7 +314,11 @@ async function main(): Promise<void> {
           }
         } catch (err) {
           errors++;
+          incrementCount(errorCounts, classifyError(err));
           const msg = err instanceof Error ? err.message : String(err);
+          if (isTerminalSessionError(err, client)) {
+            return;
+          }
           process.stderr.write(`Steady-state stream error (conn ${clientIndex}, worker ${workerIndex}): ${msg}\n`);
         }
       }
@@ -284,9 +339,12 @@ async function main(): Promise<void> {
       for (let s = 0; s < config.streamsPerConnection; s++) {
         allStreams.push(
           (async () => {
+            if (client.closed) {
+              return;
+            }
             const streamStart = process.hrtime.bigint();
             try {
-              const stream = client.openStream();
+              const stream = client.session.openStream();
               stream.end(payload);
               const echoedLength = await collectStreamLength(stream, config.timeoutMs);
               const streamMs = Number(process.hrtime.bigint() - streamStart) / 1e6;
@@ -300,6 +358,7 @@ async function main(): Promise<void> {
               }
             } catch (err) {
               errors++;
+              incrementCount(errorCounts, classifyError(err));
               const msg = err instanceof Error ? err.message : String(err);
               process.stderr.write(`Stream error (conn ${clientIndex}, stream ${s}): ${msg}\n`);
             }
@@ -313,7 +372,7 @@ async function main(): Promise<void> {
   }
 
   // Phase 3: Close
-  await Promise.all(clients.map((c) => c.close()));
+  await Promise.all(clients.map((c) => c.session.close()));
 
   const hrEnd = process.hrtime.bigint();
   const elapsedMs = Number(hrEnd - hrStart) / 1e6;
@@ -336,6 +395,7 @@ async function main(): Promise<void> {
     totalStreams,
     totalBytes,
     errors,
+    errorCounts,
     elapsedMs: Math.round(elapsedMs),
     throughputMbps: Number((measuredElapsedMs > 0 ? ((totalBytes * 8) / (measuredElapsedMs / 1000) / 1e6) : 0).toFixed(1)),
     streamsPerSecond: Number((measuredElapsedMs > 0 ? (totalStreams / (measuredElapsedMs / 1000)) : 0).toFixed(0)),

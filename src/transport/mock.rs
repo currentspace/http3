@@ -272,10 +272,42 @@ impl Driver for MockDriver {
         Ok(outcome)
     }
 
+    fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+        let timeout = deadline.map_or(Duration::from_millis(100), |value| {
+            value.saturating_duration_since(Instant::now())
+        });
+
+        let mut outcome = PollOutcome {
+            rx: Vec::new(),
+            woken: false,
+            timer_expired: false,
+        };
+
+        match self.wake_rx.try_recv() {
+            Ok(()) => {
+                outcome.woken = true;
+                return Ok(outcome);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {}
+        }
+
+        crossbeam_channel::select! {
+            recv(self.wake_rx) -> _ => {
+                outcome.woken = true;
+            }
+            recv(after(timeout)) -> _ => {
+                outcome.timer_expired = true;
+            }
+        }
+
+        Ok(outcome)
+    }
+
     fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
         for packet in packets {
             if let Some(trace) = &self.trace {
-                trace.record_datagram(self.local_addr, packet.to, &packet.data);
+                trace.record_datagram(self.local_addr, packet.to, packet.payload());
             }
             // Simulate packet loss if configured.
             let dropped = self
@@ -289,11 +321,11 @@ impl Driver for MockDriver {
                 self.outbound_tx
                     .send(MockInboundDatagram {
                         from: self.local_addr,
-                        bytes: packet.data.clone(),
+                        bytes: packet.payload().to_vec(),
                     })
                     .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mock peer closed"))?;
             }
-            self.recycled_tx.push(packet.data);
+            self.recycled_tx.push(packet.into_recycle_buffer());
         }
         Ok(())
     }

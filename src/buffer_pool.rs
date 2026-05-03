@@ -1,10 +1,111 @@
 //! Reusable buffer pool to reduce allocation pressure in the hot
 //! packet-receive and send loops.
 
-use std::sync::Arc;
+#![deny(unsafe_code)]
+
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::unsafe_boundary::{InitializedPacketBuf, QuicheRecvBuf};
 
 const DEFAULT_BUF_SIZE: usize = 65535;
 const DEFAULT_POOL_SIZE: usize = 256;
+const RIGHT_SIZED_CLASSES: [usize; 5] = [
+    16 * 1024,
+    64 * 1024,
+    256 * 1024,
+    1024 * 1024,
+    4 * 1024 * 1024,
+];
+const RIGHT_SIZED_MAX_PER_CLASS: usize = 256;
+
+static RIGHT_SIZED_POOL: OnceLock<Mutex<RightSizedPool>> = OnceLock::new();
+
+#[derive(Debug)]
+struct RightSizedPool {
+    buckets: Vec<Vec<Vec<u8>>>,
+}
+
+impl RightSizedPool {
+    fn new() -> Self {
+        Self {
+            buckets: (0..RIGHT_SIZED_CLASSES.len()).map(|_| Vec::new()).collect(),
+        }
+    }
+
+    fn class_for_capacity(capacity: usize) -> Option<usize> {
+        RIGHT_SIZED_CLASSES
+            .iter()
+            .position(|class_capacity| capacity <= *class_capacity)
+    }
+
+    fn class_for_request(len: usize) -> Option<usize> {
+        RIGHT_SIZED_CLASSES
+            .iter()
+            .position(|class_capacity| len <= *class_capacity)
+    }
+
+    fn take(&mut self, len: usize) -> Option<Vec<u8>> {
+        let start = Self::class_for_request(len)?;
+        for bucket in &mut self.buckets[start..] {
+            if let Some(mut buf) = bucket.pop() {
+                buf.clear();
+                if buf.capacity() >= len {
+                    return Some(buf);
+                }
+            }
+        }
+        None
+    }
+
+    fn recycle(&mut self, mut buf: Vec<u8>) -> bool {
+        let Some(index) = Self::class_for_capacity(buf.capacity()) else {
+            return false;
+        };
+        let bucket = &mut self.buckets[index];
+        if bucket.len() >= RIGHT_SIZED_MAX_PER_CLASS {
+            return false;
+        }
+        buf.clear();
+        bucket.push(buf);
+        true
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        for bucket in &mut self.buckets {
+            bucket.clear();
+        }
+    }
+}
+
+fn right_sized_pool() -> &'static Mutex<RightSizedPool> {
+    RIGHT_SIZED_POOL.get_or_init(|| Mutex::new(RightSizedPool::new()))
+}
+
+pub(crate) fn recycle_right_sized_buffer(buf: Vec<u8>) -> bool {
+    let mut pool = match right_sized_pool().lock() {
+        Ok(pool) => pool,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    pool.recycle(buf)
+}
+
+fn take_right_sized_buffer(len: usize) -> Option<Vec<u8>> {
+    let mut pool = match right_sized_pool().lock() {
+        Ok(pool) => pool,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    pool.take(len)
+}
+
+#[cfg(test)]
+fn clear_right_sized_pool_for_test() {
+    let mut pool = match right_sized_pool().lock() {
+        Ok(pool) => pool,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    pool.clear();
+}
 
 pub struct BufferPool {
     buffers: Vec<Vec<u8>>,
@@ -21,29 +122,24 @@ impl BufferPool {
     }
 
     /// Take a buffer from the pool (or allocate a new one).
-    /// The returned buffer has length == buf_size but content is uninitialized.
-    /// Callers must write before reading.
-    #[allow(unsafe_code)]
+    /// The returned buffer has length == buf_size and is initialized.
     pub fn checkout(&mut self) -> Vec<u8> {
-        self.buffers.pop().unwrap_or_else(|| {
-            let mut buf = Vec::with_capacity(self.buf_size);
-            // SAFETY: callers always write before reading (documented contract).
-            unsafe { buf.set_len(self.buf_size); }
-            buf
-        })
+        self.buffers
+            .pop()
+            .unwrap_or_else(|| InitializedPacketBuf::zeroed(self.buf_size).into_vec())
     }
 
-    /// Return a buffer to the pool. Only keeps it if capacity is sufficient.
-    #[allow(unsafe_code)]
-    pub fn checkin(&mut self, mut buf: Vec<u8>) {
-        if buf.capacity() >= self.buf_size {
-            buf.clear();
-            // SAFETY: checkout() contract requires callers write before reading.
-            // Matches AdaptiveBufferPool::checkout() which uses the same pattern.
-            unsafe { buf.set_len(self.buf_size); }
+    /// Return a buffer to the pool.
+    ///
+    /// Fixed packet buffers are recycled only when their initialized length is
+    /// still `buf_size`. The transport layer carries an explicit payload length
+    /// for sends, so recycled buffers do not need to be cleared or resized here.
+    pub fn checkin(&mut self, buf: Vec<u8>) {
+        if buf.len() == self.buf_size && buf.capacity() >= self.buf_size {
             self.buffers.push(buf);
         }
-        // Undersized buffers are dropped
+        // Truncated or undersized buffers are dropped. Retaining them would
+        // require a resize, which is the hot-path memset this pool avoids.
     }
 }
 
@@ -60,6 +156,7 @@ pub struct AdaptiveBufferPool {
     buffers: Vec<Vec<u8>>,
     max_buffers: usize,
     min_capacity: usize,
+    max_retain_capacity: usize,
 }
 
 impl AdaptiveBufferPool {
@@ -68,38 +165,58 @@ impl AdaptiveBufferPool {
             buffers: Vec::with_capacity(max_buffers),
             max_buffers,
             min_capacity,
+            max_retain_capacity: min_capacity.saturating_mul(4).max(min_capacity),
         }
+    }
+
+    fn checkout_empty_vec(&mut self, len: usize) -> (Vec<u8>, bool) {
+        if let Some(index) = self.buffers.iter().rposition(|buf| buf.capacity() >= len) {
+            let mut buf = self.buffers.swap_remove(index);
+            buf.clear();
+            return (buf, true);
+        }
+
+        if let Some(buf) = take_right_sized_buffer(len) {
+            return (buf, true);
+        }
+
+        (Vec::with_capacity(len.max(self.min_capacity)), false)
+    }
+
+    /// Take an empty buffer with enough capacity for an OS receive call.
+    ///
+    /// The returned vector has length 0, so safe Rust cannot read stale or
+    /// uninitialized bytes. Platform receive wrappers may pass its spare
+    /// capacity to the kernel and set the initialized length after the syscall
+    /// reports how many bytes were written.
+    pub(crate) fn checkout_empty_for_os_recv(&mut self, len: usize) -> (Vec<u8>, bool) {
+        self.checkout_empty_vec(len)
     }
 
     /// Take a buffer with at least `len` bytes of capacity.
     /// Returns `(buffer, reused_from_pool)`.
-    #[allow(unsafe_code)]
     pub fn checkout(&mut self, len: usize) -> (Vec<u8>, bool) {
-        if let Some(index) = self.buffers.iter().rposition(|buf| buf.capacity() >= len) {
-            let mut buf = self.buffers.swap_remove(index);
-            buf.clear();
-            // SAFETY: callers write every byte before reading. The buffer already
-            // has enough capacity for `len`.
-            unsafe {
-                buf.set_len(len);
-            }
-            return (buf, true);
-        }
+        // Audit finding #23: zero-init both reuse and fresh-alloc paths so
+        // a caller that reads before writing can't see uninitialized
+        // memory or stale bytes from a prior connection.
+        let (mut buf, reused) = self.checkout_empty_vec(len);
+        buf.resize(len, 0);
+        (buf, reused)
+    }
 
-        let mut buf = Vec::with_capacity(len.max(self.min_capacity));
-        // SAFETY: callers write every byte before reading.
-        unsafe {
-            buf.set_len(len);
-        }
-        (buf, false)
+    /// Take a receive buffer for quiche output APIs without zero-filling.
+    ///
+    /// The returned wrapper hides uninitialized capacity until quiche reports
+    /// how many bytes it wrote.
+    pub fn checkout_recv(&mut self, len: usize) -> (QuicheRecvBuf, bool) {
+        let (buf, reused) = self.checkout_empty_vec(len);
+        (QuicheRecvBuf::from_vec(buf, len), reused)
     }
 
     /// Copy `data` into a pooled or freshly allocated owned buffer.
     pub fn copy_from_slice(&mut self, data: &[u8]) -> (Vec<u8>, bool) {
-        let (mut buf, reused) = self.checkout(data.len());
-        if !data.is_empty() {
-            buf[..data.len()].copy_from_slice(data);
-        }
+        let (mut buf, reused) = self.checkout_empty_vec(data.len());
+        buf.extend_from_slice(data);
         (buf, reused)
     }
 
@@ -109,12 +226,17 @@ impl AdaptiveBufferPool {
     pub fn with_recycler(
         max_buffers: usize,
         min_capacity: usize,
-    ) -> (Self, Arc<BufferRecycler>, crossbeam_channel::Receiver<Vec<u8>>) {
+    ) -> (
+        Self,
+        Arc<BufferRecycler>,
+        crossbeam_channel::Receiver<Vec<u8>>,
+    ) {
         let (tx, rx) = crossbeam_channel::bounded(max_buffers * 2);
         let pool = Self {
             buffers: Vec::with_capacity(max_buffers),
             max_buffers,
             min_capacity,
+            max_retain_capacity: min_capacity.saturating_mul(4).max(min_capacity),
         };
         (pool, Arc::new(BufferRecycler(tx)), rx)
     }
@@ -130,8 +252,11 @@ impl AdaptiveBufferPool {
     /// Return a buffer to the pool.
     /// Returns `true` when the buffer was retained for reuse.
     pub fn checkin(&mut self, mut buf: Vec<u8>) -> bool {
-        if self.buffers.len() >= self.max_buffers || buf.capacity() < self.min_capacity {
-            return false;
+        if buf.capacity() < self.min_capacity || buf.capacity() > self.max_retain_capacity {
+            return recycle_right_sized_buffer(buf);
+        }
+        if self.buffers.len() >= self.max_buffers {
+            return recycle_right_sized_buffer(buf);
         }
 
         buf.clear();
@@ -145,15 +270,30 @@ impl AdaptiveBufferPool {
 pub struct BufferRecycler(crossbeam_channel::Sender<Vec<u8>>);
 
 impl BufferRecycler {
-    /// Return a buffer to the pool. If the channel is full, the buffer is dropped.
+    /// Return a buffer to the pool. If the channel is full or the
+    /// receiver has been dropped (connection cleanup, worker exit), the
+    /// buffer falls back to a small right-sized global pool before being
+    /// dropped. This keeps V8 finalizers from degenerating into
+    /// mmap/munmap churn when a per-connection recycler cannot accept more
+    /// returned buffers. Audit finding #31.
     pub fn recycle(&self, buf: Vec<u8>) {
-        let _ = self.0.try_send(buf);
+        match self.0.try_send(buf) {
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Full(buf))
+            | Err(crossbeam_channel::TrySendError::Disconnected(buf)) => {
+                if !recycle_right_sized_buffer(buf) {
+                    crate::reactor_metrics::record_recycler_drop();
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static RIGHT_SIZED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_checkout_checkin() {
@@ -201,10 +341,20 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_pool_drops_when_full() {
+    fn adaptive_pool_overflow_uses_right_sized_fallback() {
+        let _guard = RIGHT_SIZED_TEST_LOCK.lock().expect("test lock poisoned");
+        clear_right_sized_pool_for_test();
+
         let mut pool = AdaptiveBufferPool::new(1, 16);
         assert!(pool.checkin(vec![0u8; 16]));
-        assert!(!pool.checkin(vec![0u8; 16]));
+        assert!(pool.checkin(vec![0u8; 16]));
+
+        let mut next_pool = AdaptiveBufferPool::new(1, 16);
+        let (buf, reused) = next_pool.checkout(16);
+        assert!(reused);
+        assert_eq!(buf, vec![0u8; 16]);
+
+        clear_right_sized_pool_for_test();
     }
 
     #[test]
@@ -235,6 +385,17 @@ mod tests {
     }
 
     #[test]
+    fn test_checkin_truncated_large_buffer_is_dropped() {
+        let mut pool = BufferPool::new(1, 1500);
+        let mut buf = pool.checkout();
+        buf.truncate(1200);
+
+        pool.checkin(buf);
+
+        assert_eq!(pool.buffers.len(), 0);
+    }
+
+    #[test]
     fn test_checkout_checkin_cycle_stability() {
         let mut pool = BufferPool::new(2, 100);
         for _ in 0..1000 {
@@ -254,8 +415,8 @@ mod tests {
     #[test]
     fn adaptive_pool_checkout_picks_best_fit() {
         let mut pool = AdaptiveBufferPool::new(4, 64);
-        let small = Vec::with_capacity(256);
-        let large = Vec::with_capacity(4096);
+        let small = Vec::with_capacity(128);
+        let large = Vec::with_capacity(256);
         pool.checkin(small);
         pool.checkin(large);
 
@@ -296,5 +457,67 @@ mod tests {
         let (buf2, reused2) = pool.checkout(64);
         assert!(reused2);
         assert!(buf2.capacity() >= cap);
+    }
+
+    #[test]
+    fn adaptive_pool_checkout_recv_commits_only_written_bytes() {
+        let mut pool = AdaptiveBufferPool::new(1, 64);
+        let (mut buf, reused) = pool.checkout_recv(8);
+        assert!(!reused);
+
+        assert_eq!(buf.append_initialized(b"ping"), 4);
+
+        assert_eq!(buf.initialized_len(), 4);
+        assert_eq!(buf.into_initialized_vec(), b"ping");
+    }
+
+    #[test]
+    fn adaptive_pool_oversized_checkin_uses_right_sized_fallback() {
+        let _guard = RIGHT_SIZED_TEST_LOCK.lock().expect("test lock poisoned");
+        clear_right_sized_pool_for_test();
+
+        let mut source_pool = AdaptiveBufferPool::new(1, 16);
+        let oversized = Vec::with_capacity(64 * 1024);
+        assert!(source_pool.checkin(oversized));
+
+        let mut next_pool = AdaptiveBufferPool::new(1, 64 * 1024);
+        let (buf, reused) = next_pool.checkout_recv(64 * 1024);
+        assert!(reused);
+        assert_eq!(buf.remaining(), 64 * 1024);
+
+        clear_right_sized_pool_for_test();
+    }
+
+    #[test]
+    fn buffer_recycler_disconnected_channel_uses_right_sized_fallback() {
+        let _guard = RIGHT_SIZED_TEST_LOCK.lock().expect("test lock poisoned");
+        clear_right_sized_pool_for_test();
+
+        let (_pool, recycler, rx) = AdaptiveBufferPool::with_recycler(1, 64 * 1024);
+        drop(rx);
+        recycler.recycle(Vec::with_capacity(64 * 1024));
+
+        let mut next_pool = AdaptiveBufferPool::new(1, 64 * 1024);
+        let (_buf, reused) = next_pool.checkout_recv(64 * 1024);
+        assert!(reused);
+
+        clear_right_sized_pool_for_test();
+    }
+
+    #[test]
+    fn buffer_recycler_full_channel_uses_right_sized_fallback() {
+        let _guard = RIGHT_SIZED_TEST_LOCK.lock().expect("test lock poisoned");
+        clear_right_sized_pool_for_test();
+
+        let (_pool, recycler, _rx) = AdaptiveBufferPool::with_recycler(1, 64 * 1024);
+        recycler.recycle(Vec::with_capacity(64 * 1024));
+        recycler.recycle(Vec::with_capacity(64 * 1024));
+        recycler.recycle(Vec::with_capacity(64 * 1024));
+
+        let mut next_pool = AdaptiveBufferPool::new(1, 64 * 1024);
+        let (_buf, reused) = next_pool.checkout_recv(64 * 1024);
+        assert!(reused);
+
+        clear_right_sized_pool_for_test();
     }
 }

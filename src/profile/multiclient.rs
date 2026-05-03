@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_lines)]
+#![deny(unsafe_code)]
 
 //! In-process multi-client benchmark: one io_uring server + N io_uring
 //! clients, all sharing the same process.  No subprocess orchestration.
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::unbounded;
 use serde::Serialize;
 
+use crate::chunk_pool::Chunk;
 use crate::cid::CidEncoding;
 use crate::config::{
     ClientAuthMode, JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode,
@@ -23,7 +25,6 @@ use crate::h3_event::{
     EVENT_DATA, EVENT_ERROR, EVENT_FINISHED, EVENT_HANDSHAKE_COMPLETE, EVENT_NEW_SESSION,
     EVENT_NEW_STREAM, EVENT_SESSION_CLOSE, JsH3Event,
 };
-use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_batcher};
 use crate::quic_worker::{
     QuicClientHandle, QuicServerCommand, QuicServerConfig, spawn_quic_client_with_batcher,

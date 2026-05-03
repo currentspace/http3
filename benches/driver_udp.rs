@@ -38,6 +38,7 @@ fn make_packets(count: usize, to: SocketAddr) -> Vec<TxDatagram> {
         .map(|_| TxDatagram {
             data: payload.clone(),
             to,
+            max_segment_size: None,
         })
         .collect()
 }

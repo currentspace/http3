@@ -1,17 +1,19 @@
 [package]
 name = "http3"
-version = "0.6.0"
+version = "0.8.0"
 edition = "2024"
 resolver = "3"
 rust-version = "1.94"
 autobins = false
 
 [features]
-default = ["node-api"]
+default = ["node-api", "native-jemalloc"]
 node-api = []
+native-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 profile-binary = ["rcgen"]
 bench-internals = []
 driver-tracing = []
+fuzzing = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -39,7 +41,7 @@ required-features = ["profile-binary"]
 [dependencies]
 napi = { version = "3", features = ["napi4", "napi6", "napi8"] }
 napi-derive = "3"
-quiche = { version = "0.26", features = ["qlog"] }
+quiche = { version = "0.28", features = ["qlog"] }
 ring = "0.17"
 log = "0.4"
 slab = "0.4"
@@ -54,9 +56,13 @@ rcgen = { version = "0.14", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nix = { version = "0.31", features = ["event"] }
+tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["disable_initial_exec_tls"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["disable_initial_exec_tls"], optional = true }
 
 [build-dependencies]
 napi-build = "2"
@@ -66,6 +72,7 @@ mio = { version = "1", features = ["os-poll", "net"] }
 rcgen = "0.14"
 criterion = { version = "0.8", features = ["html_reports"] }
 env_logger = "0.11"
+loom = "0.7"
 
 [[bench]]
 name = "driver_udp"
@@ -100,4 +107,3 @@ unnecessary_wraps = "allow"        # napi requires Result return types on all me
 unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
-

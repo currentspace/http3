@@ -17,7 +17,7 @@ import {
 
 const EVENT_NEW_SESSION = 1;
 const EVENT_HEADERS = 3;
-const EVENT_DATA = 4;
+const EVENT_FINISHED = 5;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_SHUTDOWN_COMPLETE = 15;
 
@@ -173,7 +173,7 @@ describe('Worker Event Loops', () => {
 
       await waitFor(() => clientEvents.some(e => e.eventType === EVENT_HANDSHAKE_COMPLETE), 2000);
 
-      clientLoop.sendRequest(
+      const streamId = clientLoop.sendRequest(
         [
           { name: ':method', value: 'GET' },
           { name: ':path', value: '/hello' },
@@ -194,10 +194,10 @@ describe('Worker Event Loops', () => {
       const status = responseHeaders.headers?.find(h => h.name === ':status');
       assert.strictEqual(status?.value, '200');
 
-      await waitFor(() => clientEvents.some(e => e.eventType === EVENT_DATA), 1000);
-      const dataEvent = clientEvents.find(e => e.eventType === EVENT_DATA);
-      assert.ok(dataEvent?.data);
-      assert.strictEqual(Buffer.from(dataEvent.data).toString(), 'Hello, HTTP/3!');
+      await waitFor(() =>
+        streamHasData(clientEvents, streamId) && streamIsFinished(clientEvents, streamId),
+      1000);
+      assert.strictEqual(streamData(clientEvents, streamId).toString(), 'Hello, HTTP/3!');
 
       await withLifecycleTimeout(clientLoop.close(), 3000, 'event-loop-request-response/client-close');
       await withLifecycleTimeout(serverLoop.close(), 3000, 'event-loop-request-response/server-close');
@@ -346,4 +346,22 @@ async function waitFor(condition: () => boolean, timeoutMs: number): Promise<voi
     }
     await new Promise<void>((resolve) => { setTimeout(resolve, 10); });
   }
+}
+
+function streamHasData(events: NativeEvent[], streamId: number): boolean {
+  return events.some(event => event.streamId === streamId && event.data);
+}
+
+function streamData(events: NativeEvent[], streamId: number): Buffer {
+  return Buffer.concat(
+    events
+      .filter(event => event.streamId === streamId && event.data)
+      .map(event => Buffer.from(event.data as Buffer)),
+  );
+}
+
+function streamIsFinished(events: NativeEvent[], streamId: number): boolean {
+  return events.some(event =>
+    event.streamId === streamId && (event.eventType === EVENT_FINISHED || event.fin === true),
+  );
 }

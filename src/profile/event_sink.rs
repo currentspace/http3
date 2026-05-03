@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 use crossbeam_channel::Sender;
 
 use crate::event_loop::{EventBatcher, EventBatcherStatsHandle, EventSink};
@@ -183,5 +185,6 @@ fn clone_event_meta(meta: &JsEventMeta) -> JsEventMeta {
                 .map(|certificate| certificate.to_vec().into())
                 .collect()
         }),
+        duration_ms: meta.duration_ms,
     }
 }

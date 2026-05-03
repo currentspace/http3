@@ -111,7 +111,10 @@ export class Http3EventSource extends EventEmitter {
     if (this._closed) return;
     this.readyState = CONNECTING;
     await this._closeSession();
-    if (this._closed) return;
+    // _closeSession is async; close() may have flipped _closed during the
+    // await. The cast tells TS to re-read, since narrowing from line above
+    // is still in effect for it.
+    if (this._closed as boolean) return;
 
     const authority = `${this._url.hostname}:${this._url.port || '443'}`;
     this._session = connect(authority, {

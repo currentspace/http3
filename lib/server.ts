@@ -6,8 +6,17 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Http2ServerSessionAdapter, Http3ServerSession } from './session.js';
-import { ServerHttp2StreamAdapter, ServerHttp3Stream, normalizeIncomingHeaders } from './stream.js';
+import {
+  Http2ServerSessionAdapter,
+  Http3ServerSession,
+  sessionCloseInfoFromEvent,
+} from './session.js';
+import {
+  ServerHttp2StreamAdapter,
+  ServerHttp3Stream,
+  nativeHeadersToIncomingHeaders,
+  normalizeIncomingHeaders,
+} from './stream.js';
 import type { IncomingHeaders, StreamFlags } from './stream.js';
 import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
 import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from './event-loop.js';
@@ -34,6 +43,9 @@ const EVENT_GOAWAY = 9;
 const EVENT_ERROR = 10;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_DATAGRAM = 14;
+const EVENT_STREAM_BLOCKED = 16;
+const EVENT_PING_ACK = 17;
+const EVENT_WRITE_READY = 18;
 
 /** TLS credential options accepted by the server. */
 export interface TlsOptions {
@@ -223,17 +235,23 @@ export class Http3SecureServer extends EventEmitter {
           disableRetry: this._options.disableRetry,
           reusePort: this._options.reusePort,
         }, (_err: Error | null, events: NativeEvent[]) => {
-          let hasShutdown = false;
-          for (const event of events) {
-            if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-              hasShutdown = true;
+          try {
+            let hasShutdown = false;
+            for (const event of events) {
+              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                hasShutdown = true;
+              }
             }
-          }
-          if (!hasShutdown) {
-            this._dispatchEvents(events);
-          } else {
-            this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-            eventLoop._onShutdownSentinel();
+            if (!hasShutdown) {
+              this._dispatchEvents(events);
+            } else {
+              this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+              eventLoop._onShutdownSentinel();
+            }
+          } finally {
+            // Audit finding #14: release credit on the native outstanding-events
+            // gauge so dispatch exceptions cannot wedge RX pause indefinitely.
+            workerServer.ackEventBatch(events.length);
           }
         });
 
@@ -338,6 +356,12 @@ export class Http3SecureServer extends EventEmitter {
         case EVENT_DRAIN:
           this._onDrain(event);
           break;
+        case EVENT_STREAM_BLOCKED:
+          this._onStreamBlocked(event);
+          break;
+        case EVENT_WRITE_READY:
+          this._onWriteReady(event);
+          break;
         case EVENT_GOAWAY:
           this._onGoaway(event);
           break;
@@ -346,6 +370,9 @@ export class Http3SecureServer extends EventEmitter {
           break;
         case EVENT_DATAGRAM:
           this._onDatagram(event);
+          break;
+        case EVENT_PING_ACK:
+          this._onPingAck(event);
           break;
         default:
           break;
@@ -552,7 +579,7 @@ export class Http3SecureServer extends EventEmitter {
     for (const [h2Session, session] of this._h2Sessions) {
       this._destroyH2SessionStreams(h2Session);
       h2Session.destroy();
-      session.emit('close');
+      session._emitClose();
     }
     this._h2Sessions.clear();
   }
@@ -581,7 +608,7 @@ export class Http3SecureServer extends EventEmitter {
     // process if Node keeps the TLS server referenced longer than expected.
     try { closeAllConnections?.call(h2Server); } catch { /* ignore */ }
     try { closeIdleConnections?.call(h2Server); } catch { /* ignore */ }
-    try { unref?.call(h2Server); } catch { /* ignore */ }
+    try { unref.call(h2Server); } catch { /* ignore */ }
     await new Promise<void>((resolve, reject) => {
       try {
         h2Server.close((err?: Error) => {
@@ -668,10 +695,7 @@ export class Http3SecureServer extends EventEmitter {
     const existing = this._streams.get(streamKey);
     if (existing) {
       // Duplicate headers on the same stream — these are trailers
-      const trailers: IncomingHeaders = {};
-      for (const h of event.headers) {
-        trailers[h.name] = h.value;
-      }
+      const trailers = nativeHeadersToIncomingHeaders(event.headers);
       existing.emit('trailers', trailers);
       return;
     }
@@ -683,13 +707,14 @@ export class Http3SecureServer extends EventEmitter {
     stream._eventLoop = this._eventLoop;
     this._streams.set(streamKey, stream);
 
-    const headers: IncomingHeaders = {};
-    for (const h of event.headers) {
-      headers[h.name] = h.value;
-    }
+    const headers = nativeHeadersToIncomingHeaders(event.headers);
 
     const flags: StreamFlags = { endStream: event.fin ?? false };
     this.emit('stream', stream, headers, flags);
+    if (event.data) {
+      stream._onActivity();
+      stream._pushData(event.data);
+    }
   }
 
   private _onData(event: NativeEvent): void {
@@ -738,7 +763,8 @@ export class Http3SecureServer extends EventEmitter {
     if (session) {
       session._stopMetricsEmitter();
       session._stopKeylogEmitter();
-      session.emit('close');
+      session._rejectPendingPings(new Error('session closed'));
+      session._emitClose(sessionCloseInfoFromEvent(event));
       this._sessions.delete(event.connHandle);
     }
     // Clean up any streams belonging to this session
@@ -763,10 +789,27 @@ export class Http3SecureServer extends EventEmitter {
     }
   }
 
+  private _onStreamBlocked(event: NativeEvent): void {
+    const streamKey = `${event.connHandle}:${event.streamId}`;
+    const stream = this._streams.get(streamKey);
+    if (stream) {
+      stream._onNativeBlocked();
+    }
+  }
+
+  private _onWriteReady(event: NativeEvent): void {
+    const prefix = event.connHandle === 0 ? null : `${event.connHandle}:`;
+    for (const [key, stream] of this._streams) {
+      if (prefix === null || key.startsWith(prefix)) {
+        stream._onNativeWriteReady();
+      }
+    }
+  }
+
   private _onGoaway(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
     if (session) {
-      session.emit('goaway');
+      session.emit('goaway', { lastStreamId: event.streamId });
     }
   }
 
@@ -792,6 +835,13 @@ export class Http3SecureServer extends EventEmitter {
     const session = this._sessions.get(event.connHandle);
     if (session) {
       session.emit('datagram', event.data);
+    }
+  }
+
+  private _onPingAck(event: NativeEvent): void {
+    const session = this._sessions.get(event.connHandle);
+    if (session) {
+      session._onPingAck(event.meta?.durationMs ?? 0);
     }
   }
 }

@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_lines)]
+#![deny(unsafe_code)]
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::unbounded;
 use serde::Serialize;
 
+use crate::chunk_pool::Chunk;
 use crate::cid::CidEncoding;
 use crate::config::{
     ClientAuthMode, JsQuicClientOptions, JsQuicServerOptions, TransportRuntimeMode,
@@ -19,7 +21,6 @@ use crate::h3_event::{
     EVENT_DATA, EVENT_ERROR, EVENT_FINISHED, EVENT_HANDSHAKE_COMPLETE, EVENT_NEW_SESSION,
     EVENT_NEW_STREAM, EVENT_SESSION_CLOSE, JsH3Event,
 };
-use crate::chunk_pool::Chunk;
 use crate::profile::event_sink::{TaggedEventBatch, channel_batcher};
 use crate::profile::mock_trace::{MockReplayTrace, MockTraceCommand, MockTraceEventBatch};
 use crate::quic_worker::{

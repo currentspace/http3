@@ -15,19 +15,24 @@ type ByteBuf = napi::bindgen_prelude::Buffer;
 type ByteBuf = Vec<u8>;
 
 /// Fallback DPLPMTUD probe ceiling used when path MTU auto-detection is
-/// unavailable (non-Linux, unresolvable destination, etc.).
+/// unavailable (unresolvable destination, unsupported platform, etc.).
 ///
 /// 1472 = 1500 (Ethernet MTU) - 20 (IPv4) - 8 (UDP).  quiche probes from
 /// 1200 up to this ceiling; on standard Ethernet the first probe succeeds
 /// immediately.
 pub(crate) const FALLBACK_MAX_UDP_PAYLOAD: usize = 1472;
+const DEFAULT_INITIAL_MAX_DATA: u64 = 100_000_000;
+const DEFAULT_INITIAL_MAX_STREAM_DATA: u64 = 2_000_000;
+const DEFAULT_INITIAL_MAX_STREAMS_BIDI: u64 = 10_000;
+const DEFAULT_INITIAL_MAX_STREAMS_UNI: u64 = 1_000;
 
 /// Return the PMTUD probe ceiling for a connection to `peer`.
 ///
 /// Queries the kernel routing table for the interface MTU on the path to
 /// `peer` and caps at 16383 (quiche's max data packet size, limited by
 /// 2-byte QUIC varint encoding).  On loopback this returns 16383; on
-/// standard Ethernet it returns 1472; on jumbo frames ~8972.
+/// standard Ethernet it returns 1472; on jumbo frames ~8972. Loopback is
+/// platform-dependent but should land near quiche's 16 KB data-packet cap.
 ///
 /// Falls back to `FALLBACK_MAX_UDP_PAYLOAD` (1472) if the query fails.
 pub fn effective_pmtud_ceiling(peer: &std::net::SocketAddr) -> usize {
@@ -126,6 +131,23 @@ fn apply_congestion_tuning(config: &mut quiche::Config) {
     config.set_initial_congestion_window_packets(1000);
     config.discover_pmtu(true);
     config.set_pmtud_max_probes(1);
+}
+
+/// Keep quiche's receive-window autotuning aligned with the limits we
+/// advertise to peers.  Without this, sustained streams can reach the
+/// advertised connection credit before the default 24 MiB internal window has
+/// issued a replacement MAX_DATA frame, and the peer validly closes with
+/// FLOW_CONTROL_ERROR.
+fn apply_flow_control_window_tuning(
+    config: &mut quiche::Config,
+    initial_max_data: u64,
+    stream_windows: &[u64],
+) {
+    config.set_max_connection_window(initial_max_data);
+    if let Some(max_stream_window) = stream_windows.iter().copied().max() {
+        config.set_max_stream_window(max_stream_window);
+    }
+    config.set_use_initial_max_data_as_flow_control_win(true);
 }
 
 /// Write bytes to a temp file and return the path.
@@ -260,18 +282,28 @@ impl Http3Config {
                 .max_udp_payload_size
                 .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
-        config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
-        config.set_initial_max_stream_data_bidi_local(u64::from(
+        let initial_max_data = u64::from(
+            options
+                .initial_max_data
+                .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+        );
+        let initial_stream_data_bidi_local = u64::from(
             options
                 .initial_max_stream_data_bidi_local
-                .unwrap_or(2_000_000),
-        ));
-        config.set_initial_max_stream_data_bidi_remote(2_000_000);
-        config.set_initial_max_stream_data_uni(2_000_000);
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+        );
+        let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        config.set_initial_max_data(initial_max_data);
+        config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+        config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+        config.set_initial_max_stream_data_uni(initial_stream_data_uni);
         config.set_initial_max_streams_bidi(u64::from(
-            options.initial_max_streams_bidi.unwrap_or(10_000),
+            options
+                .initial_max_streams_bidi
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
         ));
-        config.set_initial_max_streams_uni(1_000);
+        config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
         config.set_disable_active_migration(options.disable_active_migration.unwrap_or(true));
 
         if let Some(keys) = options.session_ticket_keys.as_ref() {
@@ -280,6 +312,15 @@ impl Http3Config {
                 .map_err(Http3NativeError::Quiche)?;
         }
 
+        apply_flow_control_window_tuning(
+            &mut config,
+            initial_max_data,
+            &[
+                initial_stream_data_bidi_local,
+                initial_stream_data_bidi_remote,
+                initial_stream_data_uni,
+            ],
+        );
         apply_congestion_tuning(&mut config);
 
         if options.enable_datagrams.unwrap_or(false) {
@@ -330,19 +371,38 @@ impl Http3Config {
                 .max_udp_payload_size
                 .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
         );
-        config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
-        config.set_initial_max_stream_data_bidi_local(u64::from(
+        let initial_max_data = u64::from(
+            options
+                .initial_max_data
+                .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+        );
+        let initial_stream_data_bidi_local = u64::from(
             options
                 .initial_max_stream_data_bidi_local
-                .unwrap_or(2_000_000),
-        ));
-        config.set_initial_max_stream_data_bidi_remote(2_000_000);
-        config.set_initial_max_stream_data_uni(2_000_000);
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+        );
+        let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        config.set_initial_max_data(initial_max_data);
+        config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+        config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+        config.set_initial_max_stream_data_uni(initial_stream_data_uni);
         config.set_initial_max_streams_bidi(u64::from(
-            options.initial_max_streams_bidi.unwrap_or(10_000),
+            options
+                .initial_max_streams_bidi
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
         ));
-        config.set_initial_max_streams_uni(1_000);
+        config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
 
+        apply_flow_control_window_tuning(
+            &mut config,
+            initial_max_data,
+            &[
+                initial_stream_data_bidi_local,
+                initial_stream_data_bidi_remote,
+                initial_stream_data_uni,
+            ],
+        );
         apply_congestion_tuning(&mut config);
 
         if options.allow_0rtt.unwrap_or(false) {
@@ -488,18 +548,28 @@ pub fn new_quic_server_config(
             .max_udp_payload_size
             .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
-    config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
-    config.set_initial_max_stream_data_bidi_local(u64::from(
+    let initial_max_data = u64::from(
+        options
+            .initial_max_data
+            .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+    );
+    let initial_stream_data_bidi_local = u64::from(
         options
             .initial_max_stream_data_bidi_local
-            .unwrap_or(2_000_000),
-    ));
-    config.set_initial_max_stream_data_bidi_remote(2_000_000);
-    config.set_initial_max_stream_data_uni(2_000_000);
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+    );
+    let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    config.set_initial_max_data(initial_max_data);
+    config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+    config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+    config.set_initial_max_stream_data_uni(initial_stream_data_uni);
     config.set_initial_max_streams_bidi(u64::from(
-        options.initial_max_streams_bidi.unwrap_or(10_000),
+        options
+            .initial_max_streams_bidi
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
     ));
-    config.set_initial_max_streams_uni(1_000);
+    config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
     config.set_disable_active_migration(options.disable_active_migration.unwrap_or(true));
 
     if let Some(keys) = options.session_ticket_keys.as_ref() {
@@ -508,6 +578,15 @@ pub fn new_quic_server_config(
             .map_err(Http3NativeError::Quiche)?;
     }
 
+    apply_flow_control_window_tuning(
+        &mut config,
+        initial_max_data,
+        &[
+            initial_stream_data_bidi_local,
+            initial_stream_data_bidi_remote,
+            initial_stream_data_uni,
+        ],
+    );
     apply_congestion_tuning(&mut config);
 
     if options.enable_datagrams.unwrap_or(false) {
@@ -588,19 +667,38 @@ pub fn new_quic_client_config(
             .max_udp_payload_size
             .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
     );
-    config.set_initial_max_data(u64::from(options.initial_max_data.unwrap_or(100_000_000)));
-    config.set_initial_max_stream_data_bidi_local(u64::from(
+    let initial_max_data = u64::from(
+        options
+            .initial_max_data
+            .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+    );
+    let initial_stream_data_bidi_local = u64::from(
         options
             .initial_max_stream_data_bidi_local
-            .unwrap_or(2_000_000),
-    ));
-    config.set_initial_max_stream_data_bidi_remote(2_000_000);
-    config.set_initial_max_stream_data_uni(2_000_000);
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+    );
+    let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    config.set_initial_max_data(initial_max_data);
+    config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+    config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+    config.set_initial_max_stream_data_uni(initial_stream_data_uni);
     config.set_initial_max_streams_bidi(u64::from(
-        options.initial_max_streams_bidi.unwrap_or(10_000),
+        options
+            .initial_max_streams_bidi
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
     ));
-    config.set_initial_max_streams_uni(1_000);
+    config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
 
+    apply_flow_control_window_tuning(
+        &mut config,
+        initial_max_data,
+        &[
+            initial_stream_data_bidi_local,
+            initial_stream_data_bidi_remote,
+            initial_stream_data_uni,
+        ],
+    );
     apply_congestion_tuning(&mut config);
 
     if options.allow_0rtt.unwrap_or(false) {

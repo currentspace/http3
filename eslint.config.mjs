@@ -49,13 +49,18 @@ export default tseslint.config(
     },
   },
   {
-    // Test files get relaxed rules
+    // Test files get relaxed rules. FFI tests legitimately drive native
+    // bindings with any-typed shims, hold imports for incremental work, and
+    // leave style nits (let/const) to be caught by reviewers, not lint.
     files: ['test/**/*.ts'],
     rules: {
       '@typescript-eslint/no-unsafe-assignment': 'off',
       '@typescript-eslint/no-unsafe-call': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',
       '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
       '@typescript-eslint/no-require-imports': 'off',
       // node:test describe/it/before handle async callbacks internally
       '@typescript-eslint/no-floating-promises': 'off',
@@ -70,9 +75,19 @@ export default tseslint.config(
       '@typescript-eslint/restrict-template-expressions': 'off',
       '@typescript-eslint/prefer-promise-reject-errors': 'off',
       '@typescript-eslint/use-unknown-in-catch-callback-variable': 'off',
+      'prefer-const': 'off',
+      'no-useless-assignment': 'off',
     },
   },
   {
-    ignores: ['dist/', 'dist-test/', 'index.js', 'index.d.ts', '*.node'],
+    ignores: [
+      'dist/',
+      'dist-test/',
+      'index.js',
+      'index.d.ts',
+      '*.node',
+      // Debug repros are .mjs scratch files outside the typed project.
+      'test/debug/**',
+    ],
   },
 );

@@ -13,6 +13,10 @@ import {
   createEventCollector,
   createQuicPair,
   createH3Pair,
+  concatH3BodyData,
+  h3BodyDataEvents,
+  isH3BodyDataEvent,
+  waitForH3BodyData,
   EVENT_NEW_SESSION,
   EVENT_NEW_STREAM,
   EVENT_HEADERS,
@@ -69,8 +73,9 @@ describe('Event ordering', () => {
         true,
       );
 
-      // Wait for client to receive DATA.
-      await pair.clientEvents.waitForEvent(EVENT_DATA);
+      // Wait for client to receive response body data. Small H3 bodies may
+      // be coalesced onto the preceding HEADERS event.
+      await waitForH3BodyData(pair.clientEvents);
 
       // Verify causal order on the SERVER side:
       //   NEW_SESSION < HEADERS  (H3 layer does not emit NEW_STREAM;
@@ -99,20 +104,20 @@ describe('Event ordering', () => {
       const idxClientHeaders = clientAll.findIndex(
         (e: any) => e.eventType === EVENT_HEADERS,
       );
-      const idxClientData = clientAll.findIndex(
-        (e: any) => e.eventType === EVENT_DATA,
+      const idxClientBody = clientAll.findIndex(
+        (e: any) => isH3BodyDataEvent(e),
       );
 
       assert.ok(idxHandshake !== -1, 'client should have HANDSHAKE_COMPLETE');
       assert.ok(idxClientHeaders !== -1, 'client should have HEADERS');
-      assert.ok(idxClientData !== -1, 'client should have DATA');
+      assert.ok(idxClientBody !== -1, 'client should have body data');
       assert.ok(
         idxHandshake < idxClientHeaders,
         `HANDSHAKE_COMPLETE (idx=${idxHandshake}) should precede HEADERS (idx=${idxClientHeaders})`,
       );
       assert.ok(
-        idxClientHeaders < idxClientData,
-        `HEADERS (idx=${idxClientHeaders}) should precede DATA (idx=${idxClientData})`,
+        idxClientHeaders <= idxClientBody,
+        `HEADERS (idx=${idxClientHeaders}) should precede or carry body data (idx=${idxClientBody})`,
       );
     } finally {
       await pair.cleanup();
@@ -222,18 +227,15 @@ describe('Event data integrity', () => {
       );
       pair.client.streamSend(streamId, sentBody, true);
 
-      // Wait for the server to receive DATA.
-      await pair.serverEvents.waitForEvent(EVENT_DATA);
+      // Wait for the server to receive body data. Small request bodies may be
+      // coalesced onto the request HEADERS event.
+      await waitForH3BodyData(pair.serverEvents);
 
-      // Collect all DATA event buffers on the server side.
-      const serverDataEvents = pair.serverEvents.allEvents.filter(
-        (e: any) => e.eventType === EVENT_DATA && e.data,
-      );
-      assert.ok(serverDataEvents.length > 0, 'server should receive DATA events');
+      // Collect all H3 body buffers on the server side.
+      const serverDataEvents = h3BodyDataEvents(pair.serverEvents.allEvents);
+      assert.ok(serverDataEvents.length > 0, 'server should receive body data events');
 
-      const receivedBody = Buffer.concat(
-        serverDataEvents.map((e: any) => Buffer.from(e.data)),
-      );
+      const receivedBody = concatH3BodyData(pair.serverEvents.allEvents);
       assert.ok(
         sentBody.equals(receivedBody),
         `received body should match sent body byte-by-byte.\n` +

@@ -2,6 +2,7 @@
 //! cloudflare/quiche. Exposes worker-thread servers/clients for both HTTP/3
 //! and raw QUIC to the TypeScript layer via napi-rs.
 
+mod allocator;
 mod arc_buf;
 mod buffer_pool;
 pub mod chunk_pool;
@@ -17,6 +18,9 @@ mod event_loop;
 mod h3_event;
 #[cfg(feature = "node-api")]
 mod mock_quic_profile;
+mod outbound_admission;
+mod pending_write;
+mod ping_state;
 pub mod profile;
 #[cfg(feature = "node-api")]
 mod quic_client;
@@ -31,7 +35,9 @@ mod server_sharding;
 mod shared_client_reactor;
 mod timer_heap;
 mod transport;
+pub mod unsafe_boundary;
 mod worker;
+mod write_outcome;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench_exports {
@@ -50,11 +56,11 @@ pub mod bench_exports {
     // ── Event system ────────────────────────────────────────────────
     pub use crate::event_loop::{EventBatcher, EventBatcherStatsHandle, EventSink, MAX_BATCH_SIZE};
     pub use crate::h3_event::{
-        JsH3Event, JsEventMeta, JsHeader, JsSessionMetrics,
         EVENT_DATA, EVENT_DATAGRAM, EVENT_DRAIN, EVENT_ERROR, EVENT_FINISHED, EVENT_GOAWAY,
         EVENT_HANDSHAKE_COMPLETE, EVENT_HEADERS, EVENT_METRICS, EVENT_NEW_SESSION,
-        EVENT_NEW_STREAM, EVENT_RESET, EVENT_SESSION_CLOSE, EVENT_SESSION_TICKET,
-        EVENT_SHUTDOWN_COMPLETE,
+        EVENT_NEW_STREAM, EVENT_PING_ACK, EVENT_RESET, EVENT_SESSION_CLOSE, EVENT_SESSION_TICKET,
+        EVENT_SHUTDOWN_COMPLETE, EVENT_STREAM_BLOCKED, EVENT_WRITE_READY, JsEventMeta, JsH3Event,
+        JsHeader, JsSessionMetrics,
     };
     pub use crate::profile::event_sink::{
         TaggedEventBatch, channel_batcher, counting_batcher, noop_batcher,
@@ -83,10 +89,26 @@ pub mod bench_exports {
     // ── QUIC connection + worker ────────────────────────────────────
     pub use crate::quic_connection::QuicConnection;
     pub use crate::quic_worker::{
-        QuicClientCommand, QuicClientHandle, QuicServerCommand, QuicServerConfig,
-        QuicServerHandle, QuicServerWorker, spawn_dedicated_quic_client_on_driver,
-        spawn_server_worker_on_driver,
+        QuicClientCommand, QuicClientHandle, QuicServerCommand, QuicServerConfig, QuicServerHandle,
+        QuicServerWorker, spawn_dedicated_quic_client_on_driver, spawn_server_worker_on_driver,
     };
+}
+
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_exports {
+    /// Exercise recvmsg control-buffer parsing without exposing transport
+    /// internals in normal builds.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn parse_recv_cmsgs(control: &[u8]) {
+        let _ = crate::transport::socket::parse_recv_cmsgs(control);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn parse_recv_cmsgs(_control: &[u8]) {}
+
+    pub fn pending_write_state(data: &[u8]) {
+        crate::pending_write::fuzz_pending_write_state(data);
+    }
 }
 
 #[cfg(feature = "node-api")]

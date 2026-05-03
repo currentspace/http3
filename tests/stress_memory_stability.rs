@@ -80,7 +80,11 @@ fn test_adaptive_pool_stable_under_churn() {
         let size = ((i.wrapping_mul(2654435761) >> 16) % 8185 + 8) as usize;
 
         let (buf, _reused) = pool.checkout(size);
-        assert_eq!(buf.len(), size, "checkout should return buffer of requested size");
+        assert_eq!(
+            buf.len(),
+            size,
+            "checkout should return buffer of requested size"
+        );
         assert!(
             buf.capacity() >= size,
             "buffer capacity should be >= requested size"

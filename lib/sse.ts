@@ -104,9 +104,13 @@ export class ServerSentEventStream {
   heartbeat(intervalMs = 15000, comment = 'keepalive'): void {
     this._clearHeartbeat();
     this._heartbeatTimer = setInterval(() => {
-      void this.comment(comment).catch(() => {
-        this.close();
-      });
+      void (async (): Promise<void> => {
+        try {
+          await this.comment(comment);
+        } catch {
+          this.close();
+        }
+      })();
     }, intervalMs);
     this._heartbeatTimer.unref();
   }

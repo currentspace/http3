@@ -5,10 +5,19 @@
 //! This eliminates glibc malloc fragmentation from repeated alloc/free
 //! cycles on the write path.
 
+#![deny(unsafe_code)]
+
 use std::sync::Arc;
 
+#[cfg(feature = "node-api")]
+use std::sync::Mutex;
+
 /// Size classes for pooled chunks.
-const CHUNK_CLASSES: [usize; 3] = [1024, 2048, 4096];
+///
+/// The top class matches Node's default binary stream high-water mark
+/// (64 KiB), so ordinary writes avoid malloc churn while still copying into
+/// Rust-owned memory before crossing worker-thread boundaries.
+const CHUNK_CLASSES: [usize; 7] = [1024, 2048, 4096, 8192, 16_384, 32_768, 65_536];
 
 /// Number of size-class bins.
 const NUM_BINS: usize = CHUNK_CLASSES.len();
@@ -26,7 +35,7 @@ pub struct ChunkPool {
 impl ChunkPool {
     pub fn new(max_per_bin: usize) -> Self {
         Self {
-            bins: [Vec::new(), Vec::new(), Vec::new()],
+            bins: std::array::from_fn(|_| Vec::new()),
             max_per_bin,
         }
     }
@@ -34,21 +43,59 @@ impl ChunkPool {
     /// Create a pool with a thread-safe return channel for cross-thread recycling.
     pub fn with_return_channel(
         max_per_bin: usize,
-    ) -> (Self, Arc<ChunkPoolReturn>, crossbeam_channel::Receiver<Vec<u8>>) {
+    ) -> (
+        Self,
+        Arc<ChunkPoolReturn>,
+        crossbeam_channel::Receiver<Vec<u8>>,
+    ) {
         let total_capacity = max_per_bin * NUM_BINS * 2;
         let (tx, rx) = crossbeam_channel::bounded(total_capacity);
         let pool = Self::new(max_per_bin);
         (pool, Arc::new(ChunkPoolReturn(tx)), rx)
     }
 
-    /// Find the bin index for a given length. Returns None if > largest class.
+    /// Find the bin a `len`-byte allocation should be served from on
+    /// checkout: the smallest class that can hold `len`. Returns `None`
+    /// if `len` exceeds every class.
     fn bin_for(len: usize) -> Option<usize> {
         CHUNK_CLASSES.iter().position(|&class| len <= class)
+    }
+
+    /// Find the bin a `cap`-capacity Vec should return to on checkin: the
+    /// largest class whose threshold the Vec fully covers. Audit finding
+    /// #28: previously checkin reused `bin_for(cap)` (smallest class >=
+    /// cap) and then required `cap >= CHUNK_CLASSES[bin_idx]`, which only
+    /// retained exact-class capacities. A 1500-byte Vec would map to bin
+    /// 2048 and be rejected. With `bin_for_cap`, that 1500-byte Vec maps
+    /// to the 1024 class and is correctly retained. Vecs larger than the
+    /// largest class are still rejected (avoids stuffing oversized
+    /// allocations into smaller bins, which would waste memory).
+    fn bin_for_cap(cap: usize) -> Option<usize> {
+        let max_class = *CHUNK_CLASSES.last()?;
+        if cap > max_class {
+            return None;
+        }
+        CHUNK_CLASSES.iter().rposition(|&class| class <= cap)
+    }
+
+    fn max_entries_for_bin(&self, bin_idx: usize) -> usize {
+        if CHUNK_CLASSES[bin_idx] <= 4096 {
+            return self.max_per_bin;
+        }
+
+        // Large buffers are retained for reuse, but at a lower per-bin count
+        // to keep per-session memory bounded when callers write 16-64 KiB
+        // chunks repeatedly.
+        (self.max_per_bin / 8).max(1)
     }
 
     /// Check out a buffer with capacity >= `len`.
     /// Returns `(buffer, reused)`.
     pub fn checkout(&mut self, len: usize) -> (Vec<u8>, bool) {
+        if len == 0 {
+            return (Vec::new(), false);
+        }
+
         if let Some(bin_idx) = Self::bin_for(len) {
             // Search this bin and larger bins for a reusable buffer.
             for idx in bin_idx..NUM_BINS {
@@ -71,24 +118,47 @@ impl ChunkPool {
         }
     }
 
+    /// Check out an empty buffer with capacity >= `len`.
+    ///
+    /// This is for copy-immediately call sites. Keeping the length at zero
+    /// avoids the zero-fill that `resize(len, 0)` would do before the caller
+    /// overwrites every byte with `extend_from_slice`.
+    fn checkout_for_copy(&mut self, len: usize) -> (Vec<u8>, bool) {
+        if len == 0 {
+            return (Vec::new(), false);
+        }
+
+        if let Some(bin_idx) = Self::bin_for(len) {
+            for idx in bin_idx..NUM_BINS {
+                if let Some(mut buf) = self.bins[idx].pop() {
+                    buf.clear();
+                    return (buf, true);
+                }
+            }
+            (Vec::with_capacity(CHUNK_CLASSES[bin_idx]), false)
+        } else {
+            (Vec::with_capacity(len), false)
+        }
+    }
+
     /// Check out a buffer and copy `data` into it.
     pub fn checkout_copy(&mut self, data: &[u8]) -> (Vec<u8>, bool) {
-        let (mut buf, reused) = self.checkout(data.len());
-        buf[..data.len()].copy_from_slice(data);
+        let (mut buf, reused) = self.checkout_for_copy(data.len());
+        buf.extend_from_slice(data);
         (buf, reused)
     }
 
-    /// Return a buffer to the pool. Dropped if wrong size class or bin full.
+    /// Return a buffer to the pool. Dropped if smaller than every class
+    /// or if the matching bin is full.
     pub fn checkin(&mut self, buf: Vec<u8>) -> bool {
         let cap = buf.capacity();
-        if let Some(bin_idx) = Self::bin_for(cap) {
-            // Only accept if capacity matches the class (not undersized).
-            if cap >= CHUNK_CLASSES[bin_idx] && self.bins[bin_idx].len() < self.max_per_bin {
+        if let Some(bin_idx) = Self::bin_for_cap(cap) {
+            if self.bins[bin_idx].len() < self.max_entries_for_bin(bin_idx) {
                 self.bins[bin_idx].push(buf);
                 return true;
             }
         }
-        false // Dropped — oversized or bin full.
+        false // Dropped — under smallest class or bin full.
     }
 
     /// Drain returned buffers from the recycler channel back into the pool.
@@ -115,6 +185,43 @@ impl ChunkPoolReturn {
     }
 }
 
+/// N-API ingress-side chunk pool.
+///
+/// The only unavoidable copy on outbound stream writes is from the V8-owned
+/// `Buffer` into Rust-owned memory. This type makes that copy land in a
+/// reusable `ChunkPool` allocation; the worker/quiche path then keeps the
+/// same allocation alive until it can be recycled back here.
+#[cfg(feature = "node-api")]
+pub struct ChunkPoolIngress {
+    pool: Mutex<ChunkPool>,
+    pool_return: Arc<ChunkPoolReturn>,
+    rx: crossbeam_channel::Receiver<Vec<u8>>,
+}
+
+#[cfg(feature = "node-api")]
+impl ChunkPoolIngress {
+    pub fn new(max_per_bin: usize) -> Self {
+        let (pool, pool_return, rx) = ChunkPool::with_return_channel(max_per_bin);
+        Self {
+            pool: Mutex::new(pool),
+            pool_return,
+            rx,
+        }
+    }
+
+    pub fn copy_napi_buffer(&self, buf: &napi::bindgen_prelude::Buffer) -> Chunk {
+        if buf.is_empty() {
+            return Chunk::empty();
+        }
+
+        let mut pool = self.pool.lock().unwrap_or_else(|err| err.into_inner());
+        pool.drain_returned(&self.rx);
+        let (data, reused) = pool.checkout_copy(buf.as_ref());
+        crate::reactor_metrics::record_outbound_ingress_buffer_checkout(reused, data.len());
+        Chunk::from_vec(data, Some(Arc::clone(&self.pool_return)))
+    }
+}
+
 /// An outbound payload chunk that auto-recycles its backing buffer to the
 /// pool when dropped.
 ///
@@ -126,15 +233,29 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    /// Create an empty chunk without touching a pool.
+    ///
+    /// FIN-only stream writes carry no payload bytes, so allocating a pooled
+    /// 1 KiB backing Vec for them just adds pressure at the N-API boundary.
+    pub fn empty() -> Self {
+        Self {
+            data: Vec::new(),
+            offset: 0,
+            pool_return: None,
+        }
+    }
+
     /// Create a chunk by copying from a NAPI Buffer (JS→Rust boundary).
     /// The resulting Vec will be recycled to the pool when dropped.
     #[cfg(feature = "node-api")]
     pub fn from_napi_buffer(
         buf: &napi::bindgen_prelude::Buffer,
+        pool: &mut ChunkPool,
         pool_return: &Arc<ChunkPoolReturn>,
     ) -> Self {
+        let (data, _reused) = pool.checkout_copy(buf.as_ref());
         Self {
-            data: buf.to_vec(),
+            data,
             offset: 0,
             pool_return: Some(Arc::clone(pool_return)),
         }
@@ -200,6 +321,25 @@ impl Chunk {
         std::mem::take(&mut self.data)
     }
 
+    /// Extract only the unwritten bytes, consuming the chunk.
+    /// The Vec is NOT returned to the pool — caller takes ownership.
+    pub fn into_remaining_vec(mut self) -> Vec<u8> {
+        self.pool_return = None; // Prevent Drop from recycling.
+        if self.offset == 0 {
+            return std::mem::take(&mut self.data);
+        }
+        self.data.split_off(self.offset)
+    }
+
+    /// Decompose this chunk without copying so another owner can manage
+    /// recycling. The returned offset points at the first unwritten byte.
+    pub fn into_raw_parts(mut self) -> (Vec<u8>, usize, Option<Arc<ChunkPoolReturn>>) {
+        let data = std::mem::take(&mut self.data);
+        let offset = self.offset;
+        let pool_return = self.pool_return.take();
+        (data, offset, pool_return)
+    }
+
     /// Append additional data to this chunk's unwritten region.
     /// Used when a stream is already blocked and more data arrives.
     pub fn append(&mut self, data: &[u8]) {
@@ -217,6 +357,12 @@ impl Chunk {
     /// Get the pool return handle (for cloning into sub-chunks).
     pub fn pool_return(&self) -> &Option<Arc<ChunkPoolReturn>> {
         &self.pool_return
+    }
+}
+
+impl From<Vec<u8>> for Chunk {
+    fn from(value: Vec<u8>) -> Self {
+        Self::unpooled(value)
     }
 }
 
@@ -268,6 +414,17 @@ mod tests {
     }
 
     #[test]
+    fn zero_length_checkout_does_not_consume_a_size_class() {
+        let mut pool = ChunkPool::new(4);
+        let (buf, reused) = pool.checkout(0);
+
+        assert!(!reused);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0);
+        assert_eq!(pool.total_pooled(), 0);
+    }
+
+    #[test]
     fn size_class_bucketing() {
         let mut pool = ChunkPool::new(4);
 
@@ -286,15 +443,45 @@ mod tests {
         assert!(buf4k.capacity() >= 4096);
         pool.checkin(buf4k);
 
-        assert_eq!(pool.total_pooled(), 3); // One in each bin.
+        // 64KB class, matching Node's default binary high-water mark.
+        let (buf64k, _) = pool.checkout(65_536);
+        assert!(buf64k.capacity() >= 65_536);
+        pool.checkin(buf64k);
+
+        assert_eq!(pool.total_pooled(), 4); // One in selected bins.
     }
 
     #[test]
     fn oversized_not_pooled() {
         let mut pool = ChunkPool::new(4);
-        let (buf, _) = pool.checkout(8000);
-        assert_eq!(buf.len(), 8000);
+        let (buf, _) = pool.checkout(128 * 1024);
+        assert_eq!(buf.len(), 128 * 1024);
         assert!(!pool.checkin(buf)); // Rejected — too large.
+    }
+
+    #[test]
+    fn large_bins_use_lower_retention_cap() {
+        let mut pool = ChunkPool::new(16);
+        assert!(pool.checkin(Vec::with_capacity(65_536)));
+        assert!(pool.checkin(Vec::with_capacity(65_536)));
+        assert!(!pool.checkin(Vec::with_capacity(65_536)));
+
+        assert_eq!(pool.bins[6].len(), 2);
+    }
+
+    /// Audit finding #28: a Vec smaller than its target class but >= the
+    /// next-smaller class should map to the smaller class and be retained.
+    /// Before the fix, only exact-class capacities were retained.
+    #[test]
+    fn between_classes_retained_at_smaller_class() {
+        let mut pool = ChunkPool::new(4);
+        // 1500 bytes — between 1024 and 2048 classes. Previously rejected.
+        let buf = Vec::with_capacity(1500);
+        assert!(pool.checkin(buf));
+        // Should land in the 1024-class bin (largest class <= 1500).
+        assert_eq!(pool.bins[0].len(), 1);
+        assert_eq!(pool.bins[1].len(), 0);
+        assert_eq!(pool.bins[2].len(), 0);
     }
 
     #[test]
@@ -321,6 +508,16 @@ mod tests {
         drop(chunk);
         pool.drain_returned(&rx);
         assert_eq!(pool.total_pooled(), 1);
+    }
+
+    #[test]
+    fn empty_chunk_is_unpooled() {
+        let chunk = Chunk::empty();
+
+        assert!(chunk.remaining().is_empty());
+        assert_eq!(chunk.remaining_len(), 0);
+        assert_eq!(chunk.data.capacity(), 0);
+        assert!(chunk.pool_return().is_none());
     }
 
     #[test]
@@ -391,5 +588,20 @@ mod tests {
         let data = [42u8; 100];
         let (buf, _) = pool.checkout_copy(&data);
         assert_eq!(&buf[..100], &data[..]);
+    }
+
+    #[test]
+    fn checkout_copy_reuses_without_stale_tail() {
+        let mut pool = ChunkPool::new(4);
+        let (mut buf, _) = pool.checkout(1024);
+        buf.fill(0xAA);
+        pool.checkin(buf);
+
+        let (copied, reused) = pool.checkout_copy(&[1, 2, 3]);
+
+        assert!(reused);
+        assert_eq!(copied, vec![1, 2, 3]);
+        assert_eq!(copied.len(), 3);
+        assert!(copied.capacity() >= 1024);
     }
 }

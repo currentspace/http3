@@ -9,8 +9,8 @@
 )]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, unbounded};
@@ -47,7 +47,10 @@ fn generate_test_certs() -> (Vec<u8>, Vec<u8>) {
     let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
     let cert = params.self_signed(&key_pair).unwrap();
-    (cert.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+    (
+        cert.pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +363,8 @@ fn test_quic_multiple_streams() {
 
     // Collect server-side data for all streams and echo them back
     let mut streams_received = std::collections::HashSet::new();
-    let mut pending_data: std::collections::HashMap<i64, Vec<u8>> = std::collections::HashMap::new();
+    let mut pending_data: std::collections::HashMap<i64, Vec<u8>> =
+        std::collections::HashMap::new();
     let deadline = std::time::Instant::now() + RECV_TIMEOUT;
     while streams_received.len() < stream_count as usize && std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -559,14 +563,11 @@ fn test_quic_close_session() {
     let (server_conn, _client_conn) = wait_for_handshake(&pair);
 
     // Server closes the session
-    assert!(
-        pair.server
-            .send_command(QuicServerCommand::CloseSession {
-                conn_handle: server_conn,
-                error_code: 0,
-                reason: "test close".to_string(),
-            })
-    );
+    assert!(pair.server.send_command(QuicServerCommand::CloseSession {
+        conn_handle: server_conn,
+        error_code: 0,
+        reason: "test close".to_string(),
+    }));
 
     // Client should receive SESSION_CLOSE
     let close_event = recv_event_matching(&pair.client_rx, RECV_TIMEOUT, |e| {
@@ -653,7 +654,11 @@ fn test_quic_datagram_send_recv() {
     // Client sends a datagram
     let dgram_payload = b"datagram-test-payload".to_vec();
     let result = pair.client.send_datagram(dgram_payload.clone());
-    assert!(result.is_ok(), "send_datagram should not error: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "send_datagram should not error: {:?}",
+        result.err()
+    );
 
     // Server should receive an EVENT_DATAGRAM
     let dgram_event = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |e| {

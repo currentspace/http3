@@ -34,6 +34,52 @@ after(() => {
   setTimeout(() => process.exit(0), 500).unref();
 });
 
+function isH3BodyDataEvent(evt: any): boolean {
+  return (evt.eventType === EVENT_DATA || evt.eventType === EVENT_HEADERS) && !!evt.data;
+}
+
+function h3BodyDataEvents(events: any[]): any[] {
+  return events.filter(isH3BodyDataEvent);
+}
+
+function concatBodyData(events: any[]): Buffer {
+  return Buffer.concat(h3BodyDataEvents(events).map((e: any) => Buffer.from(e.data)));
+}
+
+async function waitForH3BodyData(
+  collector: ReturnType<typeof createEventCollector>,
+  timeoutMs = 5000,
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const event = collector.allEvents.find(isH3BodyDataEvent);
+    if (event) return event;
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for H3 body data after ${timeoutMs}ms`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+async function waitForNH3BodyData(
+  collector: ReturnType<typeof createEventCollector>,
+  count: number,
+  timeoutMs = 5000,
+): Promise<any[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const events = h3BodyDataEvents(collector.allEvents);
+    if (events.length >= count) return events.slice(0, count);
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for ${count} H3 body data events ` +
+        `(got ${events.length}) after ${timeoutMs}ms`,
+      );
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 // ── Error recovery across streams ─────────────────────────────────
 
 describe('H3 event coverage', () => {
@@ -109,13 +155,12 @@ describe('H3 event coverage', () => {
           true,
         );
 
-        // Wait for client to receive DATA on stream 2.
-        await pair.clientEvents.waitForEvent(EVENT_DATA, 5000);
+        // Wait for client to receive body data on stream 2. Small response
+        // bodies may be coalesced into the HEADERS event.
+        await waitForH3BodyData(pair.clientEvents, 5000);
 
         // Verify client got DATA on stream 2.
-        const clientDataEvents = pair.clientEvents.allEvents.filter(
-          (e: any) => e.eventType === EVENT_DATA && e.data,
-        );
+        const clientDataEvents = h3BodyDataEvents(pair.clientEvents.allEvents);
         assert.ok(clientDataEvents.length > 0, 'client should receive DATA events on stream 2');
 
         // Verify client sees RESET or ERROR on stream 1.
@@ -263,8 +308,8 @@ describe('H3 event coverage', () => {
         );
 
         // Wait for both sides to receive their data.
-        const [h3Data, quicData] = await Promise.all([
-          h3Pair.clientEvents.waitForEvent(EVENT_DATA, 5000),
+        const [_h3Data, _quicData] = await Promise.all([
+          waitForH3BodyData(h3Pair.clientEvents, 5000),
           quicPair.serverEvents.waitForEvent(EVENT_DATA, 5000).catch(() =>
             // QUIC may deliver data via NEW_STREAM event; fall back.
             quicPair.serverEvents.allEvents.find(
@@ -274,9 +319,7 @@ describe('H3 event coverage', () => {
         ]);
 
         // Verify H3 client received response data.
-        const h3DataEvents = h3Pair.clientEvents.allEvents.filter(
-          (e: any) => e.eventType === EVENT_DATA && e.data,
-        );
+        const h3DataEvents = h3BodyDataEvents(h3Pair.clientEvents.allEvents);
         assert.ok(h3DataEvents.length > 0, 'H3 client should receive DATA');
 
         // Verify QUIC server received stream data.
@@ -340,18 +383,16 @@ describe('H3 event coverage', () => {
           // Wait for client to receive HEADERS + DATA for this cycle.
           // We need at least (i+1) client HEADERS events.
           await pair.clientEvents.waitForNEvents(EVENT_HEADERS, i + 1, 5000);
-          await pair.clientEvents.waitForNEvents(EVENT_DATA, i + 1, 5000);
+          await waitForNH3BodyData(pair.clientEvents, i + 1, 5000);
         }
 
         // Verify all 5 cycles completed: at least 5 HEADERS and 5 DATA on client.
         const clientHeaders = pair.clientEvents.allEvents.filter(
           (e: any) => e.eventType === EVENT_HEADERS,
         );
-        const clientData = pair.clientEvents.allEvents.filter(
-          (e: any) => e.eventType === EVENT_DATA && e.data,
-        );
+        const clientData = h3BodyDataEvents(pair.clientEvents.allEvents);
         assert.ok(clientHeaders.length >= 5, `client should have at least 5 HEADERS events, got ${clientHeaders.length}`);
-        assert.ok(clientData.length >= 5, `client should have at least 5 DATA events, got ${clientData.length}`);
+        assert.ok(clientData.length >= 5, `client should have at least 5 body data events, got ${clientData.length}`);
       } finally {
         await pair.cleanup();
       }
@@ -385,9 +426,7 @@ describe('H3 event coverage', () => {
             const hasFin = pair.serverEvents.allEvents.some(
               (e: any) => (e.eventType === EVENT_DATA && e.fin) || e.eventType === EVENT_FINISHED,
             );
-            const hasData = pair.serverEvents.allEvents.some(
-              (e: any) => e.eventType === EVENT_DATA && e.data,
-            );
+            const hasData = pair.serverEvents.allEvents.some(isH3BodyDataEvent);
             if (hasFin && hasData) {
               clearTimeout(timeout);
               resolve();
@@ -399,12 +438,7 @@ describe('H3 event coverage', () => {
         });
 
         // Collect all DATA events on the server.
-        const serverDataEvents = pair.serverEvents.allEvents.filter(
-          (e: any) => e.eventType === EVENT_DATA && e.data,
-        );
-        const receivedBody = Buffer.concat(
-          serverDataEvents.map((e: any) => Buffer.from(e.data)),
-        );
+        const receivedBody = concatBodyData(pair.serverEvents.allEvents);
 
         // Server echoes the body back.
         const headersEvt = pair.serverEvents.allEvents.find(
@@ -424,15 +458,10 @@ describe('H3 event coverage', () => {
         );
 
         // Wait for client to receive the echoed DATA.
-        await pair.clientEvents.waitForEvent(EVENT_DATA, 5000);
+        await waitForH3BodyData(pair.clientEvents, 5000);
 
         // Collect client DATA events.
-        const clientDataEvents = pair.clientEvents.allEvents.filter(
-          (e: any) => e.eventType === EVENT_DATA && e.data,
-        );
-        const echoedBody = Buffer.concat(
-          clientDataEvents.map((e: any) => Buffer.from(e.data)),
-        );
+        const echoedBody = concatBodyData(pair.clientEvents.allEvents);
 
         assert.ok(
           requestBody.equals(echoedBody),
@@ -538,9 +567,7 @@ describe('H3 event coverage', () => {
             const hasFin = pair.clientEvents.allEvents.some(
               (e: any) => (e.eventType === EVENT_DATA && e.fin) || e.eventType === EVENT_FINISHED,
             );
-            const hasData = pair.clientEvents.allEvents.some(
-              (e: any) => e.eventType === EVENT_DATA && e.data,
-            );
+            const hasData = pair.clientEvents.allEvents.some(isH3BodyDataEvent);
             if (hasFin && hasData) {
               clearTimeout(timeout);
               resolve();
@@ -552,11 +579,7 @@ describe('H3 event coverage', () => {
         });
 
         // Verify total bytes == 256KB.
-        const allClientData = Buffer.concat(
-          pair.clientEvents.allEvents
-            .filter((e: any) => e.eventType === EVENT_DATA && e.data)
-            .map((e: any) => Buffer.from(e.data)),
-        );
+        const allClientData = concatBodyData(pair.clientEvents.allEvents);
         assert.strictEqual(
           allClientData.length,
           256 * 1024,

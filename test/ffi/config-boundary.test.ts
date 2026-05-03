@@ -185,11 +185,13 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
 
     // Handshake should fail — expect an ERROR or SESSION_CLOSE event rather
     // than HANDSHAKE_COMPLETE.
-    const result = await Promise.race([
-      clientEvents.waitForEvent(EVENT_ERROR, 8000).then(() => 'error' as const),
-      clientEvents.waitForEvent(EVENT_SESSION_CLOSE, 8000).then(() => 'close' as const),
-      clientEvents.waitForEvent(EVENT_HANDSHAKE_COMPLETE, 8000).then(() => 'handshake' as const),
-    ]);
+    const event = await clientEvents.waitForAnyEvent(
+      [EVENT_ERROR, EVENT_SESSION_CLOSE, EVENT_HANDSHAKE_COMPLETE],
+      8000,
+    );
+    const result = event.eventType === EVENT_ERROR
+      ? 'error'
+      : event.eventType === EVENT_SESSION_CLOSE ? 'close' : 'handshake';
 
     assert.ok(
       result === 'error' || result === 'close',

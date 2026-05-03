@@ -472,14 +472,32 @@ function startServer(config) {
                   child.kill('SIGTERM');
                 }
 
-                await Promise.race([
-                  exitPromise,
-                  new Promise((_, rejectPromise) => {
-                    setTimeout(() => {
-                      rejectPromise(new Error('QUIC benchmark server shutdown timed out'));
-                    }, 10_000);
-                  }),
-                ]);
+                let shutdownTimer;
+                let timedOut = false;
+                try {
+                  timedOut = await Promise.race([
+                    exitPromise.then(() => false),
+                    new Promise((resolveTimeout) => {
+                      shutdownTimer = setTimeout(() => {
+                        resolveTimeout(true);
+                      }, 10_000);
+                    }),
+                  ]);
+                } finally {
+                  if (shutdownTimer) clearTimeout(shutdownTimer);
+                }
+                if (timedOut) {
+                  if (child.exitCode === null && child.signalCode === null) {
+                    child.kill('SIGKILL');
+                  }
+                  try {
+                    await exitPromise;
+                  } catch {
+                    // Preserve the shutdown timeout error; the forced exit only
+                    // confirms that the child was reaped.
+                  }
+                  throw new Error('QUIC benchmark server shutdown timed out');
+                }
               },
             });
           }
@@ -604,6 +622,7 @@ function aggregateProcessResults(results, wallElapsedMs) {
   const streamP99s = results.map((result) => result.streamLatency.p99Ms);
   const runtimeSelections = {};
   const reactorTelemetry = {};
+  const errorCounts = {};
   const steadyState = results.some((result) => result.measurement?.mode === 'steady-state');
   const measuredWallElapsedMs = steadyState
     ? maxDefinedNumber(results.map((result) => result.measurement?.measuredMs ?? null), 0)
@@ -634,12 +653,14 @@ function aggregateProcessResults(results, wallElapsedMs) {
   for (const result of results) {
     mergeCountObjects(runtimeSelections, result.runtimeSelections);
     mergeNumericTelemetry(reactorTelemetry, result.reactorTelemetry);
+    mergeCountObjects(errorCounts, result.errorCounts);
   }
 
   return {
     totalStreams,
     totalBytes,
     errors,
+    errorCounts,
     wallElapsedMs: measuredWallElapsedMs,
     processWallElapsedMs: wallElapsedMs,
     throughputMbps: measuredWallElapsedMs > 0 ? (totalBytes * 8) / (measuredWallElapsedMs / 1000) / 1_000_000 : 0,
@@ -710,6 +731,8 @@ function formatBufferReuseSummary(telemetry) {
     telemetry.pendingWriteBufferAllocations ?? 0,
     telemetry.pendingWriteTailAllocations ?? 0,
     telemetry.pendingWriteGrowthReallocations ?? 0,
+    telemetry.outboundIngressBufferReuses ?? 0,
+    telemetry.outboundIngressBufferAllocations ?? 0,
   ].some((value) => value > 0);
   if (!hasSignals) {
     return null;
@@ -726,6 +749,9 @@ function formatBufferReuseSummary(telemetry) {
       `/bytes:${telemetry.pendingWriteCopiedBytes ?? 0}` +
       `/tail:${telemetry.pendingWriteTailAllocations ?? 0}` +
       `/grow:${telemetry.pendingWriteGrowthReallocations ?? 0}`,
+    `ingress=reuse:${telemetry.outboundIngressBufferReuses ?? 0}` +
+      `/alloc:${telemetry.outboundIngressBufferAllocations ?? 0}` +
+      `/bytes:${telemetry.outboundIngressCopiedBytes ?? 0}`,
   ].join(', ');
 }
 
@@ -814,6 +840,9 @@ function printSummary(summary) {
   console.log(`  Requested streams: ${requestedStreams ?? 'steady-state window'}`);
   console.log(`  Completed streams: ${totalStreams}`);
   console.log(`  Errors: ${errors}`);
+  if (errors > 0) {
+    console.log(`  Error classes: ${formatCountSummary(clientStats.errorCounts)}`);
+  }
   if (measurement.mode === 'steady-state') {
     console.log(`  Process wall time: ${wallElapsedMs}ms`);
     console.log(`  Measured window: ${measurement.measuredWallElapsedMs}ms (load phase ${measurement.loadElapsedMs}ms)`);

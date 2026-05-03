@@ -1,0 +1,49 @@
+# Full-verification harness, debian latest (trixie). Mirrors what
+# scripts/verify.sh expects: rust >= 1.94, node 24, pnpm 10, build
+# essentials. Built and run via `pnpm verify:docker`.
+#
+# The source tree is baked into the image (no bind mounts) so the host's
+# macOS-built node_modules / target / *.node artifacts don't poison the
+# Linux build. .dockerignore keeps the layer small.
+FROM node:24-trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build deps for the napi addon (boringssl/quiche needs cmake + perl + clang).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      git \
+      build-essential \
+      pkg-config \
+      cmake \
+      clang \
+      perl \
+      openssl \
+      libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cargo.toml requires rust >= 1.94.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain 1.94.0 \
+    && ln -s /root/.cargo/bin/cargo /usr/local/bin/cargo \
+    && ln -s /root/.cargo/bin/rustc /usr/local/bin/rustc \
+    && ln -s /root/.cargo/bin/rustup /usr/local/bin/rustup
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN rustup component add clippy
+
+# pnpm via corepack — pinned for reproducibility, matches local toolchain.
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+WORKDIR /workspace
+
+# Install deps in a separate layer so source-only changes hit cache.
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --no-optional
+
+# Bake the source. .dockerignore excludes host build artifacts.
+COPY . .
+
+# verify.sh is the canonical full-suite runner. No host artifacts inside,
+# so it must do its own napi + dist build.
+ENTRYPOINT ["bash", "scripts/verify.sh"]

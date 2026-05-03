@@ -8,7 +8,8 @@ mod inner {
     use std::collections::VecDeque;
     use std::io;
     use std::net::SocketAddr;
-    use std::os::unix::io::{AsFd, AsRawFd, RawFd};
+    use std::os::unix::io::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
@@ -16,16 +17,34 @@ mod inner {
     use crate::buffer_pool::AdaptiveBufferPool;
     use crate::reactor_metrics;
     use crate::transport::{
-        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram, macos_msg_x,
     };
 
     const WAKER_IDENT: usize = 0xCAFE;
     const RX_BUF_SIZE: usize = 65535;
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum KqueueSendErrorClass {
+        RetryablePressure,
+        Permanent,
+    }
+
+    fn classify_kqueue_send_error(error: &io::Error) -> KqueueSendErrorClass {
+        if error.kind() == io::ErrorKind::WouldBlock
+            || error.kind() == io::ErrorKind::Interrupted
+            || error.raw_os_error() == Some(libc::ENOBUFS)
+        {
+            KqueueSendErrorClass::RetryablePressure
+        } else {
+            KqueueSendErrorClass::Permanent
+        }
+    }
+
     /// Max datagrams to recv per poll iteration.  Prevents the recv loop from
     /// starving the send path under fan-out: after this many packets the loop
-    /// yields so flush_sends() can push ACKs out, then the next poll() returns
-    /// immediately (EV_CLEAR edge-triggered re-arms after read).
+    /// yields so flush_sends() can push ACKs out. If the cap is reached, the
+    /// driver remembers read backlog and the next receive-enabled poll uses a
+    /// zero timeout instead of waiting for another kqueue edge.
     const MAX_RX_PER_POLL: usize = 256;
 
     pub struct KqueueDriver {
@@ -35,26 +54,24 @@ mod inner {
         local_addr: SocketAddr,
         unsent: VecDeque<TxDatagram>,
         write_interest_registered: bool,
+        read_backlog: bool,
         event_buf: Vec<KEvent>,
         recv_buf: Vec<u8>,
         rx_pool: AdaptiveBufferPool,
+        msg_x: macos_msg_x::MsgXSelection,
         /// Buffers from successfully sent packets, ready for pool recycling.
         recycled_tx: Vec<Vec<u8>>,
     }
 
+    /// Waker for the kqueue driver. Holds an `Arc<OwnedFd>` (a `dup`'d copy
+    /// of the kqueue fd) so the fd outlives the driver if a Waker clone is
+    /// still held — fixes audit finding #5 (UAF on driver drop). The kernel
+    /// serializes concurrent `kevent()` calls; we only trigger EVFILT_USER,
+    /// which is an atomic wakeup with no shared mutable state.
     #[derive(Clone)]
     pub struct KqueueWaker {
-        /// Raw fd of the kqueue for cross-thread kevent() calls.
-        kq_fd: RawFd,
+        kq_fd: Arc<OwnedFd>,
     }
-
-    // SAFETY: kqueue fds are safe to use from any thread via kevent(). The kernel
-    // serializes concurrent kevent() calls. KqueueWaker only triggers EVFILT_USER,
-    // which is an atomic wakeup — no shared mutable state between threads.
-    #[allow(unsafe_code)]
-    unsafe impl Send for KqueueWaker {}
-    #[allow(unsafe_code)]
-    unsafe impl Sync for KqueueWaker {}
 
     impl Driver for KqueueDriver {
         type Waker = KqueueWaker;
@@ -64,7 +81,33 @@ mod inner {
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
 
-            // Register EVFILT_READ permanently (EV_ADD | EV_CLEAR = edge-triggered, auto-rearm)
+            // Audit finding #20: enable IP_RECVDSTADDR / IPV6_RECVPKTINFO so
+            // recvmsg's cmsg carries the per-datagram destination IP. Servers
+            // bound to 0.0.0.0 need this to route by the actual local IP each
+            // datagram arrived on (matters for connection-ID DCID multiplexing
+            // on multi-homed hosts).
+            crate::transport::socket::set_pktinfo(&socket);
+            // Audit finding #18: enable IP_RECVTOS / IPV6_RECVTCLASS so
+            // recvmsg's cmsg carries the per-datagram ECN code point.
+            // quiche 0.28 doesn't expose ECN, so this is observability only;
+            // see reactor_metrics::record_ecn_recv.
+            crate::transport::socket::set_recv_ecn(&socket);
+            let msg_x = macos_msg_x::selection_from_env();
+            if msg_x.probe_attempted {
+                reactor_metrics::record_kqueue_msg_x_probe(msg_x.probe_ok);
+            }
+            reactor_metrics::record_kqueue_msg_x_enabled(msg_x.send_enabled, msg_x.recv_enabled);
+            if msg_x.send_enabled || msg_x.recv_enabled {
+                log::debug!(
+                    "kqueue driver: Darwin msg_x enabled send={} recv={}",
+                    msg_x.send_enabled,
+                    msg_x.recv_enabled
+                );
+            }
+
+            // Register EVFILT_READ permanently. The receive loop drains until
+            // EWOULDBLOCK or the fairness budget; budget hits are resumed via
+            // the read_backlog zero-timeout path.
             let read_ev = KEvent::new(
                 socket_fd as usize,
                 EventFilter::EVFILT_READ,
@@ -86,8 +129,19 @@ mod inner {
             kq.kevent(&[read_ev, waker_ev], empty, None)
                 .map_err(nix_to_io)?;
 
-            let kq_fd = kq.as_fd().as_raw_fd();
-            let waker = KqueueWaker { kq_fd };
+            // dup the kqueue fd into an OwnedFd shared with the waker, so a
+            // Waker clone outliving the driver doesn't dangle.
+            #[allow(unsafe_code)]
+            let waker_fd = unsafe { libc::dup(kq.as_fd().as_raw_fd()) };
+            if waker_fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: waker_fd is a valid fd from a successful dup().
+            #[allow(unsafe_code)]
+            let waker_owned = unsafe { OwnedFd::from_raw_fd(waker_fd) };
+            let waker = KqueueWaker {
+                kq_fd: Arc::new(waker_owned),
+            };
             Ok((
                 Self {
                     kq,
@@ -96,6 +150,7 @@ mod inner {
                     local_addr,
                     unsent: VecDeque::new(),
                     write_interest_registered: false,
+                    read_backlog: false,
                     recycled_tx: Vec::new(),
                     event_buf: vec![
                         KEvent::new(
@@ -110,24 +165,166 @@ mod inner {
                     ],
                     recv_buf: vec![0u8; RX_BUF_SIZE],
                     rx_pool: AdaptiveBufferPool::new(MAX_RX_PER_POLL, RX_BUF_SIZE),
+                    msg_x,
                 },
                 waker,
             ))
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
-            let timeout = deadline
-                .map(|d| {
-                    let dur = d.saturating_duration_since(Instant::now());
-                    libc::timespec {
-                        tv_sec: dur.as_secs() as libc::time_t,
-                        tv_nsec: dur.subsec_nanos() as libc::c_long,
+            self.poll_inner(deadline, true)
+        }
+
+        fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll_inner(deadline, false)
+        }
+
+        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            if self.msg_x.send_enabled {
+                self.submit_sends_msg_x(packets);
+                return Ok(());
+            }
+            self.submit_sends_send_to(packets);
+            Ok(())
+        }
+
+        fn pending_tx_count(&self) -> usize {
+            self.unsent.len()
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(self.local_addr)
+        }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::Kqueue
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            for buf in buffers {
+                let retained = self.rx_pool.checkin(buf);
+                reactor_metrics::record_rx_buffer_checkin(retained);
+            }
+        }
+    }
+
+    impl KqueueDriver {
+        fn submit_sends_send_to<I>(&mut self, packets: I)
+        where
+            I: IntoIterator<Item = TxDatagram>,
+        {
+            for pkt in packets {
+                match self.socket.send_to(pkt.payload(), pkt.to) {
+                    Ok(_) => {
+                        self.recycled_tx.push(pkt.into_recycle_buffer());
                     }
-                })
-                .unwrap_or(libc::timespec {
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryablePressure => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.unsent.push_back(pkt);
+                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            log::warn!(
+                                "kqueue driver: send_to failed with permanent error {error}; dropping datagram"
+                            );
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
+                        }
+                    },
+                }
+            }
+        }
+
+        fn submit_sends_msg_x(&mut self, packets: Vec<TxDatagram>) {
+            self.send_msg_x_queue(packets.into_iter().collect());
+        }
+
+        fn enqueue_unsent_queue(&mut self, mut queue: VecDeque<TxDatagram>) {
+            self.unsent.append(&mut queue);
+            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+        }
+
+        fn send_msg_x_queue(&mut self, mut queue: VecDeque<TxDatagram>) {
+            while !queue.is_empty() {
+                let batch_len = queue.len().min(macos_msg_x::MSG_X_BATCH_SIZE);
+                let result = {
+                    let slice = queue.make_contiguous();
+                    macos_msg_x::send_batch(self.socket_fd, &slice[..batch_len])
+                };
+
+                match result {
+                    Ok(sent) => {
+                        let sent = sent.min(batch_len);
+                        if sent > 0 {
+                            reactor_metrics::record_kqueue_sendmsg_x_submit(sent);
+                            for _ in 0..sent {
+                                if let Some(pkt) = queue.pop_front() {
+                                    self.recycled_tx.push(pkt.into_recycle_buffer());
+                                }
+                            }
+                        }
+                        if sent < batch_len {
+                            reactor_metrics::record_kqueue_sendmsg_x_partial();
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.enqueue_unsent_queue(queue);
+                            return;
+                        }
+                    }
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryablePressure => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            self.enqueue_unsent_queue(queue);
+                            return;
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            reactor_metrics::record_kqueue_sendmsg_x_fallback();
+                            if matches!(
+                                error.raw_os_error(),
+                                Some(libc::ENOSYS | libc::EOPNOTSUPP | libc::EINVAL)
+                            ) {
+                                self.msg_x.send_enabled = false;
+                            }
+                            log::warn!(
+                                "kqueue driver: sendmsg_x failed with permanent error {error}; falling back to send_to"
+                            );
+                            self.submit_sends_send_to(queue);
+                            return;
+                        }
+                    },
+                }
+            }
+
+            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+        }
+
+        fn poll_inner(
+            &mut self,
+            deadline: Option<Instant>,
+            receive_enabled: bool,
+        ) -> io::Result<PollOutcome> {
+            let timeout = if receive_enabled && self.read_backlog {
+                libc::timespec {
                     tv_sec: 0,
-                    tv_nsec: 100_000_000, // 100ms default
-                });
+                    tv_nsec: 0,
+                }
+            } else {
+                deadline
+                    .map(|d| {
+                        let dur = d.saturating_duration_since(Instant::now());
+                        libc::timespec {
+                            tv_sec: dur.as_secs() as libc::time_t,
+                            tv_nsec: dur.subsec_nanos() as libc::c_long,
+                        }
+                    })
+                    .unwrap_or(libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 100_000_000, // 100ms default
+                    })
+            };
 
             // Manage EVFILT_WRITE: register only when unsent queue is non-empty
             let mut changes: Vec<KEvent> = Vec::new();
@@ -192,85 +389,203 @@ mod inner {
                 self.drain_unsent();
             }
 
-            // Drain socket: recv_from loop, capped to avoid starving the send path.
-            // Under fan-out (many connections), an unbounded loop delays ACKs and
-            // causes congestion-window stalls.  The cap lets flush_sends() run
-            // between batches; the next poll() returns immediately because
-            // EV_CLEAR re-arms on any remaining data.
-            for _ in 0..MAX_RX_PER_POLL {
-                match self.socket.recv_from(&mut self.recv_buf) {
-                    Ok((len, peer)) => {
-                        let (data, reused) = self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
-                        reactor_metrics::record_rx_buffer_checkout(reused, len);
-                        outcome.rx.push(RxDatagram {
-                            data,
-                            peer,
-                            local: self.local_addr,
-                            segment_size: None,
-                        });
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
+            if receive_enabled {
+                self.read_backlog = if self.msg_x.recv_enabled {
+                    self.recvmsg_x_loop_into(&mut outcome)
+                } else {
+                    self.recvmsg_loop_into(&mut outcome)
+                };
             }
 
             Ok(outcome)
         }
 
-        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
-            for pkt in packets {
-                match self.socket.send_to(&pkt.data, pkt.to) {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        reactor_metrics::record_kqueue_would_block_send();
-                        self.unsent.push_back(pkt);
-                        reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+        fn recvmsg_loop_into(&mut self, outcome: &mut PollOutcome) -> bool {
+            // Drain socket via recvmsg (audit finding #20) so the cmsg
+            // delivers per-datagram destination IP. Cap iterations to
+            // avoid starving the send path. Under fan-out an unbounded
+            // loop delays ACKs and causes congestion-window stalls; the
+            // cap lets flush_sends() run between batches. If the cap is hit,
+            // poll_inner records read_backlog so the next receive-enabled
+            // poll continues with a zero-timeout kevent.
+            let bound_to_specific = !self.local_addr.ip().is_unspecified();
+            for _ in 0..MAX_RX_PER_POLL {
+                match self.recvmsg_once() {
+                    Ok((len, peer, parsed_local)) => {
+                        let (data, reused) = self.rx_pool.copy_from_slice(&self.recv_buf[..len]);
+                        reactor_metrics::record_rx_buffer_checkout(reused, len);
+                        // When bound to a concrete IP, use it directly — the
+                        // bind addr is authoritative and avoids picking up an
+                        // alternate-family pktinfo on dual-stack sockets.
+                        // When bound to 0.0.0.0 or [::], use the parsed cmsg
+                        // local so multi-homed servers can route by the actual
+                        // local IP each datagram arrived on.
+                        let local = if bound_to_specific {
+                            self.local_addr
+                        } else {
+                            parsed_local.map_or(self.local_addr, |ip| {
+                                SocketAddr::new(ip, self.local_addr.port())
+                            })
+                        };
+                        outcome.rx.push(RxDatagram {
+                            data,
+                            peer,
+                            local,
+                            segment_size: None,
+                        });
                     }
-                    _ => {
-                        self.recycled_tx.push(pkt.data);
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(_) => return false,
+                }
+            }
+            true
+        }
+
+        fn recvmsg_x_loop_into(&mut self, outcome: &mut PollOutcome) -> bool {
+            let bound_to_specific = !self.local_addr.ip().is_unspecified();
+            let mut remaining = MAX_RX_PER_POLL;
+            while remaining > 0 {
+                match macos_msg_x::recv_batch(
+                    self.socket_fd,
+                    &mut self.rx_pool,
+                    remaining,
+                    RX_BUF_SIZE,
+                ) {
+                    Ok(datagrams) if datagrams.is_empty() => return false,
+                    Ok(datagrams) => {
+                        reactor_metrics::record_kqueue_recvmsg_x_batch(datagrams.len());
+                        remaining = remaining.saturating_sub(datagrams.len());
+                        let mut saw_truncated = false;
+                        for datagram in datagrams {
+                            reactor_metrics::record_rx_buffer_checkout(datagram.reused, 0);
+                            if let Some(tos) = datagram.tos {
+                                reactor_metrics::record_ecn_recv(
+                                    crate::transport::socket::EcnCodePoint::from_tos(tos),
+                                );
+                            }
+                            let local = if bound_to_specific {
+                                self.local_addr
+                            } else {
+                                datagram.local_ip.map_or(self.local_addr, |ip| {
+                                    SocketAddr::new(ip, self.local_addr.port())
+                                })
+                            };
+                            if datagram.flags & libc::MSG_TRUNC != 0 {
+                                saw_truncated = true;
+                            }
+                            outcome.rx.push(RxDatagram {
+                                data: datagram.data,
+                                peer: datagram.peer,
+                                local,
+                                segment_size: None,
+                            });
+                        }
+                        if saw_truncated {
+                            return true;
+                        }
+                    }
+                    Err(ref error) if error.kind() == io::ErrorKind::WouldBlock => return false,
+                    Err(error) => {
+                        reactor_metrics::record_kqueue_recvmsg_x_fallback();
+                        self.msg_x.recv_enabled = false;
+                        log::warn!(
+                            "kqueue driver: recvmsg_x failed with permanent error {error}; disabling msg_x receive path"
+                        );
+                        return self.recvmsg_loop_into(outcome);
                     }
                 }
             }
-            Ok(())
+            true
         }
 
-        fn pending_tx_count(&self) -> usize {
-            self.unsent.len()
-        }
+        /// Receive a single datagram via `recvmsg`, returning the payload
+        /// length, peer address, and any per-packet local IP parsed from
+        /// the control message (`IP_RECVDSTADDR` / `IPV6_PKTINFO`).
+        ///
+        /// Used in place of `recv_from` so that servers bound to `0.0.0.0`
+        /// can recover the actual destination IP each datagram arrived on
+        /// (audit finding #20). The recv buffer is `self.recv_buf`; the
+        /// caller copies out before the next call.
+        fn recvmsg_once(&mut self) -> io::Result<(usize, SocketAddr, Option<std::net::IpAddr>)> {
+            // SAFETY: zeroed sockaddr_storage is a valid initial state.
+            #[allow(unsafe_code)]
+            let mut name: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut control = [0u8; crate::transport::socket::CMSG_CONTROL_LEN];
+            let mut iov = libc::iovec {
+                iov_base: self.recv_buf.as_mut_ptr().cast(),
+                iov_len: self.recv_buf.len(),
+            };
+            // SAFETY: zeroed msghdr is valid; we wire up name/iov/control below.
+            #[allow(unsafe_code)]
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_name = (&raw mut name).cast();
+            msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            msg.msg_iov = &raw mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr().cast();
+            msg.msg_controllen = control.len() as libc::socklen_t;
 
-        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
-            std::mem::take(&mut self.recycled_tx)
-        }
-
-        fn local_addr(&self) -> io::Result<SocketAddr> {
-            Ok(self.local_addr)
-        }
-
-        fn driver_kind(&self) -> RuntimeDriverKind {
-            RuntimeDriverKind::Kqueue
-        }
-
-        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
-            for buf in buffers {
-                let retained = self.rx_pool.checkin(buf);
-                reactor_metrics::record_rx_buffer_checkin(retained);
+            // SAFETY: msg points to a valid msghdr; name, iov.iov_base, and
+            // control all live for the duration of the recvmsg call.
+            #[allow(unsafe_code)]
+            let n = unsafe { libc::recvmsg(self.socket_fd, &raw mut msg, 0) };
+            if n < 0 {
+                return Err(io::Error::last_os_error());
             }
-        }
-    }
+            let len = n as usize;
 
-    impl KqueueDriver {
+            let peer = crate::transport::socket::sockaddr_to_socketaddr(&name, msg.msg_namelen)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "unrecognised peer address")
+                })?;
+            let parsed_local = if msg.msg_controllen > 0 {
+                let parsed = crate::transport::socket::parse_recv_cmsgs(
+                    &control[..msg.msg_controllen as usize],
+                );
+                if let Some(tos) = parsed.tos {
+                    reactor_metrics::record_ecn_recv(
+                        crate::transport::socket::EcnCodePoint::from_tos(tos),
+                    );
+                }
+                parsed.local_ip
+            } else {
+                None
+            };
+            Ok((len, peer, parsed_local))
+        }
+
         fn drain_unsent(&mut self) {
+            if self.msg_x.send_enabled {
+                let queue = std::mem::take(&mut self.unsent);
+                self.send_msg_x_queue(queue);
+                return;
+            }
+            self.drain_unsent_send_to();
+        }
+
+        fn drain_unsent_send_to(&mut self) {
             while let Some(front) = self.unsent.front() {
-                match self.socket.send_to(&front.data, front.to) {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        reactor_metrics::record_kqueue_would_block_send();
-                        reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
-                        return;
-                    }
-                    Ok(_) | Err(_) => {
+                match self.socket.send_to(front.payload(), front.to) {
+                    Ok(_) => {
                         if let Some(pkt) = self.unsent.pop_front() {
-                            self.recycled_tx.push(pkt.data);
+                            self.recycled_tx.push(pkt.into_recycle_buffer());
                         }
                     }
+                    Err(error) => match classify_kqueue_send_error(&error) {
+                        KqueueSendErrorClass::RetryablePressure => {
+                            reactor_metrics::record_kqueue_would_block_send();
+                            reactor_metrics::record_kqueue_unsent_depth(self.unsent.len());
+                            return;
+                        }
+                        KqueueSendErrorClass::Permanent => {
+                            log::warn!(
+                                "kqueue driver: drain_unsent send_to failed with permanent error {error}; dropping datagram"
+                            );
+                            if let Some(pkt) = self.unsent.pop_front() {
+                                self.recycled_tx.push(pkt.into_recycle_buffer());
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -278,9 +593,8 @@ mod inner {
 
     impl DriverWaker for KqueueWaker {
         fn wake(&self) -> io::Result<()> {
-            // Trigger EVFILT_USER on the kqueue fd.
-            // We must use raw libc kevent() here because Kqueue is !Sync and
-            // we only have the raw fd on the waker thread.
+            // Trigger EVFILT_USER on the kqueue fd. The Arc<OwnedFd> keeps
+            // the fd valid even if the driver has been dropped concurrently.
             let ev = KEvent::new(
                 WAKER_IDENT,
                 EventFilter::EVFILT_USER,
@@ -294,13 +608,13 @@ mod inner {
                 tv_sec: 0,
                 tv_nsec: 0,
             };
-            // SAFETY: kq_fd is a valid kqueue fd. changelist is stack-allocated and
-            // lives for the duration of the kevent() call. We pass 0 for nevents
-            // (no output), so the eventlist pointer is irrelevant.
+            // SAFETY: self.kq_fd points to a valid, owned kqueue fd.
+            // changelist is stack-allocated and lives for the kevent() call.
+            // We pass 0 for nevents, so the eventlist pointer is irrelevant.
             #[allow(unsafe_code)]
             let rc = unsafe {
                 libc::kevent(
-                    self.kq_fd,
+                    self.kq_fd.as_raw_fd(),
                     changelist.as_ptr().cast(),
                     1,
                     std::ptr::null_mut(),
@@ -319,7 +633,54 @@ mod inner {
     fn nix_to_io(e: nix::errno::Errno) -> io::Error {
         io::Error::from_raw_os_error(e as i32)
     }
+
+    #[cfg(test)]
+    mod send_error_tests {
+        use super::*;
+
+        #[test]
+        fn kqueue_send_error_classifier_retries_pressure() {
+            assert_eq!(
+                classify_kqueue_send_error(&io::Error::from(io::ErrorKind::WouldBlock)),
+                KqueueSendErrorClass::RetryablePressure
+            );
+            assert_eq!(
+                classify_kqueue_send_error(&io::Error::from_raw_os_error(libc::ENOBUFS)),
+                KqueueSendErrorClass::RetryablePressure
+            );
+            assert_eq!(
+                classify_kqueue_send_error(&io::Error::from_raw_os_error(libc::EINVAL)),
+                KqueueSendErrorClass::Permanent
+            );
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) use inner::{KqueueDriver, KqueueWaker};
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::inner::KqueueDriver;
+    use crate::transport::{Driver, DriverWaker};
+
+    /// Audit finding #5: a Waker clone must remain usable after the
+    /// driver has been dropped. Before the fix the waker held a bare
+    /// RawFd — calling wake() after driver drop hit kevent() on a closed
+    /// (and possibly recycled) fd. With Arc<OwnedFd>, the dup'd fd stays
+    /// alive as long as a clone is held.
+    #[test]
+    fn waker_outlives_driver() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        socket.set_nonblocking(true).expect("nonblocking");
+        let (driver, waker) = KqueueDriver::new(socket).expect("kqueue new");
+
+        let cloned = waker.clone();
+        drop(waker);
+        drop(driver);
+
+        // Must not panic, must not return EBADF — the dup'd fd is owned
+        // by the Arc inside the cloned waker.
+        cloned.wake().expect("wake after driver drop");
+    }
+}

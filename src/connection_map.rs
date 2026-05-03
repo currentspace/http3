@@ -1,6 +1,8 @@
 //! Connection routing by CID, retry-token validation, and session lifecycle
 //! management for both HTTP/3 and raw QUIC servers.
 
+#![deny(unsafe_code)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -178,8 +180,13 @@ impl ConnectionMap {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if now.saturating_sub(timestamp) > TOKEN_LIFETIME_SECS {
-            return None; // Token expired
+        // Audit finding #4: use a signed window so a backwards clock jump
+        // doesn't suddenly accept all in-flight tokens (saturating_sub
+        // would underflow to 0 there) and a forwards jump doesn't reject
+        // freshly minted tokens.
+        let skew = (now as i64).saturating_sub(timestamp as i64).abs();
+        if skew > TOKEN_LIFETIME_SECS as i64 {
+            return None; // Token expired or clock skew too large
         }
 
         // Extract original DCID
@@ -267,8 +274,8 @@ impl ConnectionMap {
         buf.extend(self.connections.iter().map(|(handle, _)| handle));
     }
 
-    /// Remove all closed connections, returning their handles.
-    pub fn drain_closed(&mut self) -> Vec<usize> {
+    /// Remove all closed connections, returning their handles and final state.
+    pub fn drain_closed(&mut self) -> Vec<(usize, H3Connection)> {
         let closed: Vec<usize> = self
             .connections
             .iter()
@@ -276,10 +283,10 @@ impl ConnectionMap {
             .map(|(handle, _)| handle)
             .collect();
 
-        for &handle in &closed {
-            self.remove(handle);
-        }
         closed
+            .into_iter()
+            .filter_map(|handle| self.remove(handle).map(|conn| (handle, conn)))
+            .collect()
     }
 }
 
@@ -415,5 +422,86 @@ mod tests {
     fn test_remove_nonexistent_handle_returns_none() {
         let mut map = ConnectionMap::new();
         assert!(map.remove(999).is_none());
+    }
+
+    /// Hand-craft a retry-token payload with a chosen timestamp so we can
+    /// exercise the clock-skew window without mocking SystemTime.
+    fn craft_token_with_ts(
+        map: &ConnectionMap,
+        peer: &SocketAddr,
+        odcid: &[u8],
+        ts: u64,
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        match peer {
+            SocketAddr::V4(v4) => {
+                payload.push(4);
+                payload.extend_from_slice(&v4.ip().octets());
+                payload.extend_from_slice(&v4.port().to_be_bytes());
+            }
+            SocketAddr::V6(v6) => {
+                payload.push(6);
+                payload.extend_from_slice(&v6.ip().octets());
+                payload.extend_from_slice(&v6.port().to_be_bytes());
+            }
+        }
+        payload.extend_from_slice(&ts.to_be_bytes());
+        payload.push(odcid.len() as u8);
+        payload.extend_from_slice(odcid);
+        let tag = hmac::sign(&map.token_key, &payload);
+        let mut token = tag.as_ref().to_vec();
+        token.extend_from_slice(&payload);
+        token
+    }
+
+    /// Audit finding #4: a token whose timestamp is far in the future
+    /// (clock-skew style) must be rejected, not silently accepted because
+    /// `now.saturating_sub(timestamp)` underflows to 0.
+    #[test]
+    fn test_token_future_timestamp_rejected() {
+        let map = ConnectionMap::new();
+        let peer: SocketAddr = "127.0.0.1:443".parse().expect("valid addr");
+        let odcid = vec![0xab; 16];
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Timestamp 1 hour ahead — well outside ±60s window.
+        let token = craft_token_with_ts(&map, &peer, &odcid, now + 3600);
+
+        assert!(map.validate_token(&token, &peer).is_none());
+    }
+
+    #[test]
+    fn test_token_past_timestamp_rejected() {
+        let map = ConnectionMap::new();
+        let peer: SocketAddr = "127.0.0.1:443".parse().expect("valid addr");
+        let odcid = vec![0xab; 16];
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Timestamp 1 hour behind.
+        let token = craft_token_with_ts(&map, &peer, &odcid, now - 3600);
+
+        assert!(map.validate_token(&token, &peer).is_none());
+    }
+
+    #[test]
+    fn test_token_within_window_accepted() {
+        let map = ConnectionMap::new();
+        let peer: SocketAddr = "127.0.0.1:443".parse().expect("valid addr");
+        let odcid = vec![0xab; 16];
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Timestamp 30s in the past — within the 60s window.
+        let token = craft_token_with_ts(&map, &peer, &odcid, now - 30);
+
+        assert_eq!(map.validate_token(&token, &peer), Some(odcid));
     }
 }

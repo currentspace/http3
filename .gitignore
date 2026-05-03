@@ -4,6 +4,10 @@ target/
 *.node
 node_modules/
 perf-results/
+artifacts/
 examples/certs/server.key
 examples/certs/server.crt
 package-lock.json
+results/
+# Node --report-on-fatalerror dumps from killed/crashed test processes.
+report.*.json

@@ -5,6 +5,8 @@
 //! lives in the [`ProtocolHandler`] implementations; platform I/O lives in the
 //! [`Driver`](crate::transport::Driver) implementations.
 
+#![deny(unsafe_code)]
+
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{
@@ -71,6 +73,8 @@ impl EventBatcherStatsHandle {
         self.inner
             .max_batch_size
             .fetch_max(count, Ordering::Relaxed);
+        #[cfg(test)]
+        let _metrics_guard = reactor_metrics::test_metrics_guard();
         reactor_metrics::record_event_batch_flush(count);
     }
 
@@ -78,11 +82,15 @@ impl EventBatcherStatsHandle {
         self.inner
             .dropped_events
             .fetch_add(count as u64, Ordering::Relaxed);
+        #[cfg(test)]
+        let _metrics_guard = reactor_metrics::test_metrics_guard();
         reactor_metrics::record_event_batch_drop(count);
     }
 
     pub(crate) fn record_sink_error(&self) {
         self.inner.sink_errors.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        let _metrics_guard = reactor_metrics::test_metrics_guard();
         reactor_metrics::record_event_batch_sink_error();
     }
 
@@ -106,6 +114,14 @@ impl EventBatcherStatsHandle {
 /// Larger batches amortize TSFN (Rust→JS thread boundary) overhead: at 10K
 /// streams, ~30K events per cycle ÷ 2048 ≈ 15 calls vs 60 at 512.
 pub const MAX_BATCH_SIZE: usize = 2048;
+pub(crate) const MAX_COMMANDS_PER_TICK: usize = 1024;
+
+/// Audit finding #14, step 5.2: when the JS-side outstanding-events gauge
+/// reaches this threshold, workers keep receiving QUIC packets but pause
+/// JS-facing stream/datagram event production. This lets ACKs, timers and
+/// outbound packets keep progressing while QUIC/H3 flow control throttles the
+/// peer at the protocol boundary.
+pub const APP_EVENT_PAUSE_HIGH_WATER: u64 = (MAX_BATCH_SIZE as u64) * 2;
 
 /// Per-connection QUIC packet scratch buffer size.
 pub(crate) const SEND_BUF_SIZE: usize = 65535;
@@ -125,19 +141,30 @@ pub(crate) trait ProtocolHandler {
     /// Process one command from the JS thread.  Returns `true` → shut down loop.
     fn dispatch_command(&mut self, cmd: Self::Command, batch: &mut Vec<JsH3Event>) -> bool;
 
-    /// Parse QUIC header, route to connection, `conn.recv()`, poll protocol events.
-    /// Pushes retry / version-negotiation packets to `pending_outbound`.
+    /// Parse QUIC header, route to connection, and feed the packet into quiche.
+    ///
+    /// `app_event_budget` is zero during RX-batch draining so quiche can
+    /// coalesce stream data across all packets observed in the poll cycle before
+    /// JS-facing events are emitted by `poll_app_events()`. Handlers may still
+    /// emit control/session events that are required to keep connection state
+    /// correct, and may push retry / version-negotiation packets to
+    /// `pending_outbound`.
     fn process_packet(
         &mut self,
         buf: &mut [u8],
         peer: SocketAddr,
         local: SocketAddr,
         pending_outbound: &mut Vec<TxDatagram>,
+        app_event_budget: usize,
         batch: &mut Vec<JsH3Event>,
     );
 
     /// Call `on_timeout()` for expired timers, poll events, reschedule.
-    fn process_timers(&mut self, now: Instant, batch: &mut Vec<JsH3Event>);
+    fn process_timers(&mut self, now: Instant, app_event_budget: usize, batch: &mut Vec<JsH3Event>);
+
+    /// Poll protocol/application events that may already be buffered inside
+    /// quiche without depending on a new packet or timer expiry.
+    fn poll_app_events(&mut self, _app_event_budget: usize, _batch: &mut Vec<JsH3Event>) {}
 
     /// Call `conn.send()` for every connection.  Pushes outbound packets.
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>);
@@ -146,7 +173,7 @@ pub(crate) trait ProtocolHandler {
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>);
 
     /// Check blocked_streams for writability.  Push drain events.
-    fn poll_drain_events(&mut self, batch: &mut Vec<JsH3Event>);
+    fn poll_drain_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>);
 
     /// Remove closed connections.  Push session_close events.
     fn cleanup_closed(&mut self, batch: &mut Vec<JsH3Event>);
@@ -156,6 +183,12 @@ pub(crate) trait ProtocolHandler {
 
     /// Drain returned buffers from V8 GC back into connection data pools.
     fn drain_recycled_buffers(&mut self) {}
+
+    /// Emit `session_close` events for every connection currently held by
+    /// the handler. Used by the runtime-error path so JS-side sessions
+    /// don't sit "open" forever after a driver poll error. Audit finding
+    /// #34. Default is no-op for handlers with no multi-connection state.
+    fn emit_session_close_for_all_active(&mut self, _batch: &mut Vec<JsH3Event>) {}
 
     /// Recycle TX buffers back into the handler's pool.
     fn recycle_tx_buffers(&mut self, _buffers: Vec<Vec<u8>>) {}
@@ -297,6 +330,26 @@ pub struct EventBatcher {
     stats: EventBatcherStatsHandle,
 }
 
+pub(crate) fn poll_with_event_backpressure<D: Driver>(
+    driver: &mut D,
+    deadline: Option<Instant>,
+) -> io::Result<crate::transport::PollOutcome> {
+    let outstanding =
+        reactor_metrics::self_heal_event_batch_if_stuck(APP_EVENT_PAUSE_HIGH_WATER, 5_000);
+    if outstanding >= APP_EVENT_PAUSE_HIGH_WATER {
+        reactor_metrics::record_event_batch_rx_pause();
+    }
+    driver.poll(deadline)
+}
+
+pub(crate) fn app_event_budget(pending_batch_len: usize) -> usize {
+    if reactor_metrics::event_batch_outstanding() >= APP_EVENT_PAUSE_HIGH_WATER {
+        return 0;
+    }
+
+    MAX_BATCH_SIZE.saturating_sub(pending_batch_len)
+}
+
 struct WorkerLoopStopGuard;
 
 impl Drop for WorkerLoopStopGuard {
@@ -318,9 +371,10 @@ fn push_shutdown_complete(batcher: &mut EventBatcher) {
     batcher.batch.push(JsH3Event::shutdown_complete());
 }
 
-fn flush_runtime_error<D: Driver>(
+fn flush_runtime_error<D: Driver, H: ProtocolHandler>(
     batcher: &mut EventBatcher,
     driver: &D,
+    handler: &mut H,
     syscall: &str,
     reason_code: &str,
     err: &io::Error,
@@ -334,6 +388,11 @@ fn flush_runtime_error<D: Driver>(
         Some(driver.pending_tx_count()),
         Some(format!("{syscall}:{reason_code}:{err}")),
     );
+    // Audit finding #34: emit a session_close per active connection so
+    // JS-side sessions don't sit "open" forever waiting on a close that
+    // would otherwise never come. Order: per-conn close → runtime_error
+    // → shutdown_complete.
+    handler.emit_session_close_for_all_active(&mut batcher.batch);
     batcher.batch.push(JsH3Event::runtime_error(
         0,
         driver.driver_kind().as_str(),
@@ -345,6 +404,18 @@ fn flush_runtime_error<D: Driver>(
     // Emit shutdown sentinel so JS close() can resolve.
     push_shutdown_complete(batcher);
     batcher.flush()
+}
+
+fn record_sink_close_exit<D: Driver>(driver: &D) {
+    reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "exit-sink-close",
+        Some(driver.driver_kind()),
+        None,
+        Some(driver.pending_tx_count()),
+        None,
+    );
 }
 
 impl EventBatcher {
@@ -373,6 +444,31 @@ impl EventBatcher {
 
     pub fn stats_handle(&self) -> EventBatcherStatsHandle {
         self.stats.clone()
+    }
+
+    /// Append a logically atomic event group. If the group would cross the
+    /// normal batch cap, flush the existing batch first so the group is not
+    /// split across TSFN deliveries.
+    pub fn append_atomic(&mut self, mut events: Vec<JsH3Event>) -> bool {
+        if events.is_empty() {
+            return true;
+        }
+        if !self.batch.is_empty() && self.batch.len() + events.len() > MAX_BATCH_SIZE {
+            if !self.flush() {
+                return false;
+            }
+        }
+        self.batch.append(&mut events);
+        true
+    }
+
+    pub fn collect_atomic<F>(&mut self, collect: F) -> bool
+    where
+        F: FnOnce(&mut Vec<JsH3Event>),
+    {
+        let mut events = Vec::new();
+        collect(&mut events);
+        self.append_atomic(events)
     }
 
     /// Flush events to the configured sink. Returns `false` when the sink asks
@@ -434,6 +530,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             let _ = flush_runtime_error(
                 &mut batcher,
                 driver,
+                handler,
                 "submit_sends",
                 "driver-submit-sends-failed",
                 &err,
@@ -442,23 +539,49 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         }
     }
 
+    let mut poll_now = false;
+    let mut last_allocator_maintenance = Instant::now();
     loop {
         // 1. Compute deadline from protocol timers
-        let deadline = handler.next_deadline();
+        let deadline = if poll_now {
+            poll_now = false;
+            Some(Instant::now())
+        } else {
+            handler.next_deadline()
+        };
 
         // 2. Block until events occur
-        let outcome = match driver.poll(deadline) {
+        let outcome = match poll_with_event_backpressure(driver, deadline) {
             Ok(o) => o,
             Err(err) => {
-                let _ =
-                    flush_runtime_error(&mut batcher, driver, "poll", "driver-poll-failed", &err);
+                let _ = flush_runtime_error(
+                    &mut batcher,
+                    driver,
+                    handler,
+                    "poll",
+                    "driver-poll-failed",
+                    &err,
+                );
                 return;
             }
         };
 
-        // 3. Drain command channel (unconditional — waker just makes poll return early)
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            if handler.dispatch_command(cmd, &mut batcher.batch) {
+        // 3. Drain command channel. Keep this bounded so a JS producer cannot
+        // starve RX, timers, and close processing inside the native reactor.
+        let mut commands_drained = 0;
+        while commands_drained < MAX_COMMANDS_PER_TICK {
+            let Ok(cmd) = cmd_rx.try_recv() else {
+                break;
+            };
+            commands_drained += 1;
+            let mut shutdown_requested = false;
+            if !batcher.collect_atomic(|batch| {
+                shutdown_requested = handler.dispatch_command(cmd, batch);
+            }) {
+                record_sink_close_exit(driver);
+                return;
+            }
+            if shutdown_requested {
                 // Shutdown requested: flush remaining sends before exiting
                 handler.flush_sends(&mut outbound);
                 if !outbound.is_empty() {
@@ -466,6 +589,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                         let _ = flush_runtime_error(
                             &mut batcher,
                             driver,
+                            handler,
                             "submit_sends",
                             "driver-submit-sends-failed",
                             &err,
@@ -490,6 +614,9 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 return;
             }
         }
+        if commands_drained == MAX_COMMANDS_PER_TICK && !cmd_rx.is_empty() {
+            poll_now = true;
+        }
 
         // 3b. Flush sends after commands (response data goes out immediately)
         handler.flush_sends(&mut outbound);
@@ -498,6 +625,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 let _ = flush_runtime_error(
                     &mut batcher,
                     driver,
+                    handler,
                     "submit_sends",
                     "driver-submit-sends-failed",
                     &err,
@@ -536,24 +664,36 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                 for chunk in pkt.data.chunks(seg) {
                     let (mut buf, reused) = gro_segment_pool.copy_from_slice(chunk);
                     reactor_metrics::record_gro_segment_buffer_checkout(reused, chunk.len());
-                    handler.process_packet(
-                        &mut buf,
-                        pkt.peer,
-                        pkt_local,
-                        &mut pending_outbound,
-                        &mut batcher.batch,
-                    );
+                    if !batcher.collect_atomic(|batch| {
+                        handler.process_packet(
+                            &mut buf,
+                            pkt.peer,
+                            pkt_local,
+                            &mut pending_outbound,
+                            0,
+                            batch,
+                        )
+                    }) {
+                        record_sink_close_exit(driver);
+                        return;
+                    }
                     let retained = gro_segment_pool.checkin(buf);
                     reactor_metrics::record_gro_segment_buffer_checkin(retained);
                 }
             } else {
-                handler.process_packet(
-                    &mut pkt.data,
-                    pkt.peer,
-                    pkt_local,
-                    &mut pending_outbound,
-                    &mut batcher.batch,
-                );
+                if !batcher.collect_atomic(|batch| {
+                    handler.process_packet(
+                        &mut pkt.data,
+                        pkt.peer,
+                        pkt_local,
+                        &mut pending_outbound,
+                        0,
+                        batch,
+                    )
+                }) {
+                    record_sink_close_exit(driver);
+                    return;
+                }
             }
             rx_recycled.push(pkt.data);
             // Submit retry / version-negotiation packets immediately
@@ -562,6 +702,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                     let _ = flush_runtime_error(
                         &mut batcher,
                         driver,
+                        handler,
                         "submit_sends",
                         "driver-submit-sends-failed",
                         &err,
@@ -577,6 +718,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
                         let _ = flush_runtime_error(
                             &mut batcher,
                             driver,
+                            handler,
                             "submit_sends",
                             "driver-submit-sends-failed",
                             &err,
@@ -587,15 +729,7 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             }
             // Mid-batch flush if needed
             if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
-                reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
-                reactor_metrics::record_lifecycle_trace(
-                    "event-loop",
-                    "exit-sink-close",
-                    Some(driver.driver_kind()),
-                    None,
-                    Some(driver.pending_tx_count()),
-                    None,
-                );
+                record_sink_close_exit(driver);
                 return;
             }
         }
@@ -604,33 +738,49 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
         }
 
         // 5. Process protocol timers (always — cheap when nothing is expired)
-        handler.process_timers(Instant::now(), &mut batcher.batch);
-
-        // 6. Poll drain events + flush pending writes
-        handler.poll_drain_events(&mut batcher.batch);
-        handler.flush_pending_writes(&mut batcher.batch);
-
-        // Mid-batch flush if timer/drain processing pushed us over the cap
-        if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
-            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
-            reactor_metrics::record_lifecycle_trace(
-                "event-loop",
-                "exit-sink-close",
-                Some(driver.driver_kind()),
-                None,
-                Some(driver.pending_tx_count()),
-                None,
-            );
+        let app_budget = app_event_budget(batcher.len());
+        if !batcher
+            .collect_atomic(|batch| handler.process_timers(Instant::now(), app_budget, batch))
+        {
+            record_sink_close_exit(driver);
             return;
         }
 
-        // 7. Flush outbound from all connections
+        // 6. Resume app/protocol events that may have been deferred by
+        // JS-side event backpressure. A JS ack wakes the driver; this pass
+        // keeps already-received stream data from waiting for an unrelated
+        // packet or idle timeout.
+        let app_budget = app_event_budget(batcher.len());
+        if !batcher.collect_atomic(|batch| handler.poll_app_events(app_budget, batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
+
+        // 7. Poll drain events + flush pending writes
+        let app_budget = app_event_budget(batcher.len());
+        if !batcher.collect_atomic(|batch| handler.poll_drain_events(app_budget, batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
+        if !batcher.collect_atomic(|batch| handler.flush_pending_writes(batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
+
+        // Mid-batch flush if timer/drain processing pushed us over the cap
+        if batcher.len() >= MAX_BATCH_SIZE && !batcher.flush() {
+            record_sink_close_exit(driver);
+            return;
+        }
+
+        // 8. Flush outbound from all connections
         handler.flush_sends(&mut outbound);
         if !outbound.is_empty() {
             if let Err(err) = driver.submit_sends(std::mem::take(&mut outbound)) {
                 let _ = flush_runtime_error(
                     &mut batcher,
                     driver,
+                    handler,
                     "submit_sends",
                     "driver-submit-sends-failed",
                     &err,
@@ -639,35 +789,37 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
             }
         }
 
-        // 7b. Recycle TX buffers accumulated during this iteration
+        // 8b. Recycle TX buffers accumulated during this iteration
         let recycled = driver.drain_recycled_tx();
         if !recycled.is_empty() {
             handler.recycle_tx_buffers(recycled);
         }
 
-        // 8. Cleanup closed connections
-        handler.cleanup_closed(&mut batcher.batch);
+        // 9. Cleanup closed connections
+        if !batcher.collect_atomic(|batch| handler.cleanup_closed(batch)) {
+            record_sink_close_exit(driver);
+            return;
+        }
 
-        // 8b. Drain returned data buffers from V8 GC back into connection pools.
+        // 9b. Drain returned data buffers from V8 GC back into connection pools.
         handler.drain_recycled_buffers();
 
-        // 9. Flush events to JS
+        // 9c. On platforms without jemalloc background purge support, keep
+        // allocator maintenance on the native worker rather than the JS loop.
+        if last_allocator_maintenance.elapsed() >= crate::allocator::maintenance_interval() {
+            crate::allocator::maintenance_tick();
+            last_allocator_maintenance = Instant::now();
+        }
+
+        // 10. Flush events to JS
         if !batcher.flush() {
-            reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
-            reactor_metrics::record_lifecycle_trace(
-                "event-loop",
-                "exit-sink-close",
-                Some(driver.driver_kind()),
-                None,
-                Some(driver.pending_tx_count()),
-                None,
-            );
+            record_sink_close_exit(driver);
             push_shutdown_complete(&mut batcher);
             let _ = batcher.flush();
             return;
         }
 
-        // 10. Client exit: handler done and all packets drained
+        // 11. Client exit: handler done and all packets drained
         if handler.is_done() && driver.pending_tx_count() == 0 {
             reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::HandlerDone);
             reactor_metrics::record_lifecycle_trace(
@@ -689,9 +841,15 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use crate::transport::{
+        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
+    };
 
     /// Tracks the sizes of each batch delivered via `emit()`.
     type DeliveryLog = Arc<Mutex<Vec<usize>>>;
+    type EventDeliveryLog = Arc<Mutex<Vec<Vec<(u8, u32, i64)>>>>;
 
     /// A test-only sink that captures every batch delivered via `emit()`.
     struct CaptureSink {
@@ -733,8 +891,299 @@ mod tests {
         }
     }
 
+    struct CaptureEventsSink {
+        delivered: EventDeliveryLog,
+    }
+
+    impl CaptureEventsSink {
+        fn new() -> (Self, EventDeliveryLog) {
+            let log: EventDeliveryLog = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    delivered: Arc::clone(&log),
+                },
+                log,
+            )
+        }
+    }
+
+    impl EventSink for CaptureEventsSink {
+        fn kind(&self) -> &'static str {
+            "capture-events"
+        }
+
+        fn emit(&mut self, events: Vec<JsH3Event>, _stats: &EventBatcherStatsHandle) -> bool {
+            self.delivered.lock().unwrap().push(
+                events
+                    .into_iter()
+                    .map(|event| (event.event_type, event.conn_handle, event.stream_id))
+                    .collect(),
+            );
+            true
+        }
+    }
+
     fn dummy_event() -> JsH3Event {
         JsH3Event::data(0, 0, vec![1, 2, 3], false, crate::h3_event::NO_RECYCLER)
+    }
+
+    fn typed_event(event_type: u8, conn_handle: u32, stream_id: u64) -> JsH3Event {
+        match event_type {
+            crate::h3_event::EVENT_HEADERS => {
+                JsH3Event::headers(conn_handle, stream_id, vec![], false)
+            }
+            crate::h3_event::EVENT_DATA => JsH3Event::data(
+                conn_handle,
+                stream_id,
+                vec![1],
+                false,
+                crate::h3_event::NO_RECYCLER,
+            ),
+            crate::h3_event::EVENT_FINISHED => JsH3Event::finished(conn_handle, stream_id),
+            _ => JsH3Event::data(
+                conn_handle,
+                stream_id,
+                vec![1],
+                false,
+                crate::h3_event::NO_RECYCLER,
+            ),
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopWaker;
+
+    impl DriverWaker for NoopWaker {
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct OneShotRxDriver {
+        local_addr: SocketAddr,
+        rx: Option<Vec<RxDatagram>>,
+        recycled_rx: usize,
+        recycled_tx: Vec<Vec<u8>>,
+    }
+
+    impl OneShotRxDriver {
+        fn new(local_addr: SocketAddr, rx: Vec<RxDatagram>) -> Self {
+            Self {
+                local_addr,
+                rx: Some(rx),
+                recycled_rx: 0,
+                recycled_tx: Vec::new(),
+            }
+        }
+    }
+
+    impl Driver for OneShotRxDriver {
+        type Waker = NoopWaker;
+
+        fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
+            Ok((Self::new(socket.local_addr()?, Vec::new()), NoopWaker))
+        }
+
+        fn poll(&mut self, _deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            let rx = self.rx.take().unwrap_or_default();
+            let timer_expired = rx.is_empty();
+            Ok(PollOutcome {
+                rx,
+                woken: false,
+                timer_expired,
+            })
+        }
+
+        fn poll_without_rx(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
+            self.poll(deadline)
+        }
+
+        fn submit_sends(&mut self, packets: Vec<TxDatagram>) -> io::Result<()> {
+            self.recycled_tx
+                .extend(packets.into_iter().map(TxDatagram::into_recycle_buffer));
+            Ok(())
+        }
+
+        fn pending_tx_count(&self) -> usize {
+            0
+        }
+
+        fn drain_recycled_tx(&mut self) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.recycled_tx)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(self.local_addr)
+        }
+
+        fn driver_kind(&self) -> RuntimeDriverKind {
+            RuntimeDriverKind::Mock
+        }
+
+        fn recycle_rx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
+            self.recycled_rx += buffers.len();
+        }
+    }
+
+    #[derive(Default)]
+    struct CoalescingProbeHandler {
+        process_budgets: Vec<usize>,
+        poll_app_budgets: Vec<usize>,
+        processed_packets: usize,
+        done: bool,
+    }
+
+    impl ProtocolHandler for CoalescingProbeHandler {
+        type Command = ();
+
+        fn dispatch_command(&mut self, _cmd: Self::Command, _batch: &mut Vec<JsH3Event>) -> bool {
+            false
+        }
+
+        fn process_packet(
+            &mut self,
+            _buf: &mut [u8],
+            _peer: SocketAddr,
+            _local: SocketAddr,
+            _pending_outbound: &mut Vec<TxDatagram>,
+            app_event_budget: usize,
+            _batch: &mut Vec<JsH3Event>,
+        ) {
+            self.processed_packets += 1;
+            self.process_budgets.push(app_event_budget);
+        }
+
+        fn process_timers(
+            &mut self,
+            _now: Instant,
+            _app_event_budget: usize,
+            _batch: &mut Vec<JsH3Event>,
+        ) {
+        }
+
+        fn poll_app_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
+            self.poll_app_budgets.push(app_event_budget);
+            if app_event_budget > 0 {
+                batch.push(typed_event(crate::h3_event::EVENT_DATA, 7, 11));
+                self.done = true;
+            }
+        }
+
+        fn flush_sends(&mut self, _outbound: &mut Vec<TxDatagram>) {}
+
+        fn flush_pending_writes(&mut self, _batch: &mut Vec<JsH3Event>) {}
+
+        fn poll_drain_events(&mut self, _app_event_budget: usize, _batch: &mut Vec<JsH3Event>) {}
+
+        fn cleanup_closed(&mut self, _batch: &mut Vec<JsH3Event>) {}
+
+        fn next_deadline(&mut self) -> Option<Instant> {
+            None
+        }
+
+        fn is_done(&self) -> bool {
+            self.done
+        }
+    }
+
+    #[test]
+    fn test_app_event_budget_counts_pending_batch_and_outstanding() {
+        crate::reactor_metrics::reset();
+
+        assert_eq!(app_event_budget(0), MAX_BATCH_SIZE);
+        assert_eq!(app_event_budget(64), MAX_BATCH_SIZE - 64);
+        assert_eq!(app_event_budget(MAX_BATCH_SIZE + 1), 0);
+
+        crate::reactor_metrics::record_event_batch_flush(APP_EVENT_PAUSE_HIGH_WATER as usize);
+        assert_eq!(app_event_budget(0), 0);
+
+        crate::reactor_metrics::record_event_batch_ack(APP_EVENT_PAUSE_HIGH_WATER as usize);
+        assert_eq!(app_event_budget(0), MAX_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_event_backpressure_keeps_receiving_packets() {
+        crate::reactor_metrics::reset();
+        crate::reactor_metrics::record_event_batch_flush(APP_EVENT_PAUSE_HIGH_WATER as usize);
+
+        let left_addr = "127.0.0.1:44330".parse().unwrap();
+        let right_addr = "127.0.0.1:44331".parse().unwrap();
+        let ((mut left, _), (mut right, _)) =
+            crate::transport::mock::MockDriver::pair(left_addr, right_addr);
+
+        right
+            .submit_sends(vec![TxDatagram::from_payload(
+                vec![1, 2, 3],
+                left_addr,
+                None,
+            )])
+            .unwrap();
+
+        let outcome = poll_with_event_backpressure(
+            &mut left,
+            Some(Instant::now() + Duration::from_millis(10)),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.rx.len(), 1);
+        assert_eq!(outcome.rx[0].data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_rx_batch_defers_app_events_until_after_all_packets() {
+        crate::reactor_metrics::reset();
+
+        let local_addr = "127.0.0.1:44340".parse().unwrap();
+        let peer_addr = "127.0.0.1:44341".parse().unwrap();
+        let rx = vec![
+            RxDatagram {
+                data: vec![1],
+                peer: peer_addr,
+                local: local_addr,
+                segment_size: None,
+            },
+            RxDatagram {
+                data: vec![2],
+                peer: peer_addr,
+                local: local_addr,
+                segment_size: None,
+            },
+        ];
+        let mut driver = OneShotRxDriver::new(local_addr, rx);
+        let (_cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<()>();
+        let (sink, delivered) = CaptureEventsSink::new();
+        let batcher = EventBatcher::with_sink(sink);
+        let mut handler = CoalescingProbeHandler::default();
+
+        run_event_loop(&mut driver, cmd_rx, &mut handler, batcher, local_addr);
+
+        assert_eq!(handler.processed_packets, 2);
+        assert_eq!(handler.process_budgets, vec![0, 0]);
+        assert!(
+            handler.poll_app_budgets.iter().any(|budget| *budget > 0),
+            "app events should be polled after the RX batch with real budget"
+        );
+        assert_eq!(driver.recycled_rx, 2);
+
+        let delivered = delivered.lock().unwrap();
+        assert!(
+            delivered
+                .iter()
+                .flatten()
+                .any(|(event_type, conn_handle, stream_id)| {
+                    *event_type == crate::h3_event::EVENT_DATA
+                        && *conn_handle == 7
+                        && *stream_id == 11
+                }),
+            "deferred poll_app_events should deliver the app data event"
+        );
+        assert!(
+            delivered
+                .iter()
+                .flatten()
+                .any(|(event_type, _, _)| *event_type == crate::h3_event::EVENT_SHUTDOWN_COMPLETE),
+            "handler completion should still emit shutdown sentinel"
+        );
     }
 
     #[test]
@@ -757,7 +1206,11 @@ mod tests {
         batcher.batch.push(dummy_event());
         let ok = batcher.flush();
         assert!(ok);
-        assert_eq!(log.lock().unwrap().len(), 1, "one batch should be delivered");
+        assert_eq!(
+            log.lock().unwrap().len(),
+            1,
+            "one batch should be delivered"
+        );
         assert_eq!(log.lock().unwrap()[0], 2, "batch should contain 2 events");
     }
 
@@ -767,7 +1220,10 @@ mod tests {
         let mut batcher = EventBatcher::with_sink(sink);
         batcher.batch.push(dummy_event());
         batcher.flush();
-        assert!(batcher.batch.is_empty(), "batch should be empty after flush");
+        assert!(
+            batcher.batch.is_empty(),
+            "batch should be empty after flush"
+        );
     }
 
     #[test]
@@ -882,7 +1338,7 @@ mod tests {
     #[test]
     fn test_batcher_stats_drop_recording() {
         let (sink, _log) = CaptureSink::new();
-        let mut batcher = EventBatcher::with_sink(sink);
+        let batcher = EventBatcher::with_sink(sink);
         let handle = batcher.stats_handle();
 
         handle.record_drop(3);
@@ -895,7 +1351,7 @@ mod tests {
     #[test]
     fn test_batcher_stats_sink_error_recording() {
         let (sink, _log) = CaptureSink::new();
-        let mut batcher = EventBatcher::with_sink(sink);
+        let batcher = EventBatcher::with_sink(sink);
         let handle = batcher.stats_handle();
 
         handle.record_sink_error();
@@ -932,6 +1388,72 @@ mod tests {
         let delivered = log.lock().unwrap();
         assert_eq!(delivered.len(), 1, "batcher does not split internally");
         assert_eq!(delivered[0], 2049);
+    }
+
+    #[test]
+    fn test_batcher_atomic_group_flushes_before_crossing_cap() {
+        let (sink, log) = CaptureEventsSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+
+        for _ in 0..MAX_BATCH_SIZE - 1 {
+            batcher.batch.push(dummy_event());
+        }
+
+        let ok = batcher.append_atomic(vec![
+            typed_event(crate::h3_event::EVENT_HEADERS, 7, 11),
+            typed_event(crate::h3_event::EVENT_DATA, 7, 11),
+            typed_event(crate::h3_event::EVENT_FINISHED, 7, 11),
+        ]);
+        assert!(ok);
+        assert!(batcher.flush());
+
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0].len(), MAX_BATCH_SIZE - 1);
+        assert_eq!(
+            delivered[1],
+            vec![
+                (crate::h3_event::EVENT_HEADERS, 7, 11),
+                (crate::h3_event::EVENT_DATA, 7, 11),
+                (crate::h3_event::EVENT_FINISHED, 7, 11),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_batcher_atomic_group_may_exceed_cap_when_group_is_large() {
+        let (sink, log) = CaptureSink::new();
+        let mut batcher = EventBatcher::with_sink(sink);
+
+        let group = (0..MAX_BATCH_SIZE + 1)
+            .map(|_| dummy_event())
+            .collect::<Vec<_>>();
+        assert!(batcher.append_atomic(group));
+        assert!(batcher.flush());
+
+        let delivered = log.lock().unwrap();
+        assert_eq!(delivered.as_slice(), &[MAX_BATCH_SIZE + 1]);
+    }
+
+    #[test]
+    fn test_collect_atomic_returns_false_when_preflush_closes() {
+        let sink = CaptureSink::closing();
+        let mut batcher = EventBatcher::with_sink(sink);
+
+        for _ in 0..MAX_BATCH_SIZE {
+            batcher.batch.push(dummy_event());
+        }
+
+        let ok = batcher.collect_atomic(|batch| {
+            batch.push(typed_event(crate::h3_event::EVENT_HEADERS, 7, 11));
+            batch.push(typed_event(crate::h3_event::EVENT_DATA, 7, 11));
+        });
+
+        assert!(!ok, "collect_atomic should surface sink closure");
+        assert!(
+            batcher.batch.is_empty(),
+            "pre-flush failure should not append the atomic group"
+        );
     }
 
     #[test]

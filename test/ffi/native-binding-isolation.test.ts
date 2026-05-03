@@ -10,7 +10,6 @@ import assert from 'node:assert/strict';
 import { generateTestCerts } from '../support/generate-certs.js';
 
 // Load the native binding directly (bypassing TS wrappers).
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
 const binding = require('../../../index.js');
 
 // Event type constants (mirrored from h3_event.rs).
@@ -39,6 +38,38 @@ function waitForEvent(
         reject(
           new Error(
             `Timed out waiting for eventType=${eventType} after ${timeoutMs}ms. ` +
+            `Received events: [${events.map((e: any) => e.eventType).join(', ')}]`,
+          ),
+        );
+        return;
+      }
+      setTimeout(check, 10);
+    };
+    check();
+  });
+}
+
+function isH3BodyDataEvent(evt: any): boolean {
+  return (evt?.eventType === EVENT_DATA || evt?.eventType === EVENT_HEADERS) && !!evt.data;
+}
+
+function h3BodyDataEvents(events: any[]): any[] {
+  return events.filter(isH3BodyDataEvent);
+}
+
+function waitForH3BodyData(events: any[], timeoutMs = 10000): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const check = (): void => {
+      const found = events.find(isH3BodyDataEvent);
+      if (found) {
+        resolve(found);
+        return;
+      }
+      if (Date.now() - start > timeoutMs) {
+        reject(
+          new Error(
+            `Timed out waiting for H3 body data after ${timeoutMs}ms. ` +
             `Received events: [${events.map((e: any) => e.eventType).join(', ')}]`,
           ),
         );
@@ -258,14 +289,13 @@ describe('Native binding isolation', () => {
       // Wait for client to see HEADERS from the server response.
       await waitForEvent(clientEvents, EVENT_HEADERS);
 
-      // Wait for client to see DATA.
-      await waitForEvent(clientEvents, EVENT_DATA);
+      // Wait for client to see body data. Small H3 bodies may be coalesced
+      // onto the response HEADERS event.
+      await waitForH3BodyData(clientEvents);
 
       // Verify the client received response data.
-      const dataEvents = clientEvents.filter(
-        (e: any) => e.eventType === EVENT_DATA && e.data,
-      );
-      assert.ok(dataEvents.length > 0, 'client should receive DATA events');
+      const dataEvents = h3BodyDataEvents(clientEvents);
+      assert.ok(dataEvents.length > 0, 'client should receive body data events');
       const receivedBody = Buffer.concat(
         dataEvents.map((e: any) => Buffer.from(e.data)),
       );
