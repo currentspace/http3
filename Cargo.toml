@@ -62,9 +62,6 @@ nix = { version = "0.31", features = ["event"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
 
-[patch.crates-io]
-quiche = { path = "vendor/quiche-0.28.0" }
-
 [build-dependencies]
 napi-build = "2"
 
