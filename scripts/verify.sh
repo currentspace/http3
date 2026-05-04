@@ -117,8 +117,8 @@ pnpm test
 mark_done
 
 if [[ "${VERIFY_SKIP_BROWSER_E2E:-0}" != "1" ]]; then
-  step "playwright browsers (chromium + firefox)"
-  npx playwright install --with-deps chromium firefox
+  step "playwright browsers (chromium + firefox + webkit)"
+  npx playwright install --with-deps chromium firefox webkit
   mark_done
 
   step "browser e2e"

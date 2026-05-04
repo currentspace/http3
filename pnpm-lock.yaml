@@ -34,14 +34,14 @@ importers:
         version: 8.59.1(eslint@10.3.0)(typescript@6.0.3)
     optionalDependencies:
       '@currentspace/http3-darwin-arm64':
-        specifier: 0.8.0
-        version: 0.8.0
+        specifier: 0.8.1
+        version: 0.8.1
       '@currentspace/http3-linux-arm64-gnu':
-        specifier: 0.8.0
-        version: 0.8.0
+        specifier: 0.8.1
+        version: 0.8.1
       '@currentspace/http3-linux-x64-gnu':
-        specifier: 0.8.0
-        version: 0.8.0
+        specifier: 0.8.1
+        version: 0.8.1
 
 packages:
 

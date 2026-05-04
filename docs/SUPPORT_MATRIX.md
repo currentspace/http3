@@ -4,7 +4,7 @@
 
 - Node.js: `>=24.0.0`
 - Module target: Node ESM/CJS-compatible package output
-- Browser compatibility smoke: Chromium + Firefox automated in CI over the HTTPS entrypoint, Safari validated manually via the release runbook
+- Browser compatibility smoke: Chromium, Firefox, and WebKit automated over the HTTPS entrypoint with H3 protocol assertions
 
 ## Protocol Support
 
