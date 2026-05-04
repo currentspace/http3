@@ -21,9 +21,42 @@ type WritableLike = {
   once(event: 'drain' | 'close' | 'error', listener: (...args: unknown[]) => void): unknown;
   off?(event: 'drain' | 'close' | 'error', listener: (...args: unknown[]) => void): unknown;
   removeListener?(event: 'drain' | 'close' | 'error', listener: (...args: unknown[]) => void): unknown;
+  closed?: boolean;
   destroyed?: boolean;
   writableEnded?: boolean;
 };
+
+function errorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function isWritableClosed(writable: WritableLike): boolean {
+  return Boolean(writable.closed || writable.destroyed || writable.writableEnded);
+}
+
+function isExpectedWritableCloseError(error: unknown): boolean {
+  const code = errorCode(error);
+  if (
+    code === 'ERR_STREAM_WRITE_AFTER_END' ||
+    code === 'ERR_STREAM_DESTROYED' ||
+    code === 'ERR_HTTP2_STREAM_CLOSED' ||
+    code === 'ERR_HTTP2_INVALID_STREAM' ||
+    code === 'ABORT_ERR'
+  ) {
+    return true;
+  }
+
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message.includes('write after end') ||
+    error.message.includes('writable is closed') ||
+    error.message.includes('writable closed before drain') ||
+    error.message.includes('request aborted before drain') ||
+    error.message.includes('stream closed') ||
+    error.message.includes('stream destroyed')
+  );
+}
 
 function removeWritableListener(
   writable: WritableLike,
@@ -40,7 +73,7 @@ function removeWritableListener(
 }
 
 async function waitForDrainOrAbort(writable: WritableLike, signal: AbortSignal): Promise<void> {
-  if (signal.aborted || writable.destroyed || writable.writableEnded) {
+  if (signal.aborted || isWritableClosed(writable)) {
     throw new Error('writable is closed');
   }
 
@@ -198,7 +231,7 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
         }
       }
     } catch (err: unknown) {
-      if (abortController.signal.aborted || res.destroyed || res.writableEnded) {
+      if (abortController.signal.aborted || isWritableClosed(res) || isExpectedWritableCloseError(err)) {
         await cancelReaderQuietly(reader, err);
         return;
       }
@@ -206,11 +239,11 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
     } finally {
       reader.releaseLock();
     }
-    if (!abortController.signal.aborted && !res.destroyed && !res.writableEnded) {
+    if (!abortController.signal.aborted && !isWritableClosed(res)) {
       res.end();
     }
   } catch (err: unknown) {
-    if (abortController.signal.aborted || res.destroyed || res.writableEnded) {
+    if (abortController.signal.aborted || isWritableClosed(res) || isExpectedWritableCloseError(err)) {
       return;
     }
     if (!res.headersSent) {
@@ -231,10 +264,12 @@ async function handleStream(
 ): Promise<void> {
   const abortController = new AbortController();
   const abort = (): void => abortController.abort();
+  stream.once('aborted', abort);
   stream.once('close', abort);
   stream.once('error', abort);
 
   const cleanupAbortHandlers = (): void => {
+    stream.removeListener('aborted', abort);
     stream.removeListener('close', abort);
     stream.removeListener('error', abort);
   };
@@ -303,12 +338,22 @@ async function handleStream(
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
-          if (!stream.write(Buffer.from(value))) {
+          let accepted = false;
+          try {
+            accepted = stream.write(Buffer.from(value));
+          } catch (err: unknown) {
+            if (abortController.signal.aborted || isWritableClosed(stream) || isExpectedWritableCloseError(err)) {
+              await cancelReaderQuietly(reader, err);
+              return;
+            }
+            throw err;
+          }
+          if (!accepted) {
             await waitForDrainOrAbort(stream, abortController.signal);
           }
         }
       } catch (err: unknown) {
-        if (abortController.signal.aborted || stream.destroyed || stream.writableEnded) {
+        if (abortController.signal.aborted || isWritableClosed(stream) || isExpectedWritableCloseError(err)) {
           await cancelReaderQuietly(reader, err);
           return;
         }
@@ -317,11 +362,11 @@ async function handleStream(
         reader.releaseLock();
       }
     }
-    if (!abortController.signal.aborted && !stream.destroyed && !stream.writableEnded) {
+    if (!abortController.signal.aborted && !isWritableClosed(stream)) {
       stream.end();
     }
   } catch (err: unknown) {
-    if (abortController.signal.aborted || stream.destroyed || stream.writableEnded) {
+    if (abortController.signal.aborted || isWritableClosed(stream) || isExpectedWritableCloseError(err)) {
       return;
     }
     stream.destroy(err instanceof Error ? err : new Error(String(err)));

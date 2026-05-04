@@ -54,12 +54,6 @@ jobs:
       - name: Run full test suite
         run: pnpm test
 
-      - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium firefox
-
-      - name: Run browser compatibility smoke
-        run: pnpm run test:browser:e2e
-
       - name: Run concurrency performance gate
         env:
           HTTP3_CONCURRENCY_MAX_MS: '12000'

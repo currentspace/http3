@@ -1,8 +1,9 @@
 name: Verify
 
 # Single-entry full-suite gate. Runs the canonical scripts/verify.sh
-# locally on ubuntu and inside Dockerfile.verify (debian latest). Both
-# must pass on every push and PR.
+# locally on ubuntu, on macOS, and inside Dockerfile.verify (debian latest).
+# Browser HTTP/3 validation runs in the macOS jobs because the three-browser
+# certificate trust path is platform-specific.
 #
 # kqueue-specific Rust integration tests are gated by #[cfg(target_os =
 # "macos")] in the Rust source — they don't compile or run on Linux, so
@@ -42,6 +43,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run full verify
+        env:
+          VERIFY_SKIP_BROWSER_E2E: '1'
         run: pnpm verify
 
   verify-macos:
@@ -94,4 +97,4 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Run verify inside container
-        run: docker run --rm http3-verify:latest
+        run: docker run --rm -e VERIFY_SKIP_BROWSER_E2E=1 http3-verify:latest

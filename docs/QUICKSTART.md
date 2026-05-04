@@ -23,7 +23,8 @@ npm run test:interop
 ## Run browser compatibility smoke
 
 ```bash
-npx playwright install --with-deps chromium firefox
+npx playwright install --with-deps chromium firefox webkit
+sudo -v
 npm run test:browser:e2e
 ```
 
@@ -43,4 +44,3 @@ Then test:
 curl --http3-only -k https://127.0.0.1:8443/
 curl --http2 -k https://127.0.0.1:8443/
 ```
-

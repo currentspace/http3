@@ -23,7 +23,7 @@
 - `npm run test:runtime`: runtime selection, fallback, and shared-worker ownership.
 - `npm run test:interop`: TypeScript raw QUIC and curl-facing interop coverage.
 - `npm run test:release`: packaging and prebuild guards.
-- `npm run test:browser:e2e`: Chromium + Firefox browser compatibility smoke over the HTTPS entrypoint; manual curl/Safari validation still covers explicit protocol confirmation.
+- `npm run test:browser:e2e`: Chromium, Firefox, and WebKit browser compatibility smoke over the HTTPS entrypoint with H3 protocol assertions for page navigation, Fetch, and SSE.
 - `npm run test:rust`: release-blocking Rust coverage (`cargo test --lib --no-default-features` plus UDP loopback and direct quiche H3 interop).
 - `npm run test:rust:diagnostics`: deeper Rust diagnostics that are useful before a publish but are not part of the default CI gate.
 - `npm run test:docker:runtime`: Linux Docker runtime matrix for `portable`, `auto`, and `fast` (host architecture locally, `linux/arm64` in CI).

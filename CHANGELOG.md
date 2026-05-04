@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.1
+
+### Browser H3 and fallback close-race fixes
+
+- Fixed H2 fallback response close races where a browser-side reset or early close could surface as an unhandled `ERR_STREAM_WRITE_AFTER_END` from `ServerHttp2StreamAdapter`.
+- Hardened Fetch/SSE response streaming so expected peer-close and abort paths cancel response readers quietly instead of crashing the server process.
+- Added a regression test for browser-like H2 response cancellation followed by a healthy follow-up request.
+- Expanded Playwright browser coverage to validate Chromium, Firefox, and WebKit page navigation, Fetch, and SSE traffic over `h3` with trusted localhost certificates.
+- Updated browser E2E certificate setup to use one sudo-backed macOS System keychain trust install/remove flow, avoiding repeated `security` credential prompts.
+
+### Release metadata
+
+- Bumped the package line to `0.8.1`, including Cargo metadata, native sidecar package manifests, and root optional sidecar pins.
+- Fixed the version bump helper so the Linux x64 native sidecar pin is updated with the rest of the release metadata.
+
 ## 0.8.0
 
 ### Correctness and overload behavior

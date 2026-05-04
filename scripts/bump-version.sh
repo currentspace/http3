@@ -21,6 +21,7 @@ rm -f "$ROOT/package.json.bak"
 # package.json — optionalDependencies
 sed -i.bak "s/\"@currentspace\/http3-linux-arm64-gnu\": \"$CURRENT_VERSION\"/\"@currentspace\/http3-linux-arm64-gnu\": \"$NEW_VERSION\"/" "$ROOT/package.json"
 sed -i.bak "s/\"@currentspace\/http3-darwin-arm64\": \"$CURRENT_VERSION\"/\"@currentspace\/http3-darwin-arm64\": \"$NEW_VERSION\"/" "$ROOT/package.json"
+sed -i.bak "s/\"@currentspace\/http3-linux-x64-gnu\": \"$CURRENT_VERSION\"/\"@currentspace\/http3-linux-x64-gnu\": \"$NEW_VERSION\"/" "$ROOT/package.json"
 rm -f "$ROOT/package.json.bak"
 
 # Cargo.toml

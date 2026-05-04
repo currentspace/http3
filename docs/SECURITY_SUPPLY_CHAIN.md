@@ -7,7 +7,7 @@
 - CodeQL static analysis
 - SBOM generation (`npm sbom`)
 - Lint + typecheck gate
-- Browser compatibility smoke (Chromium + Firefox)
+- Browser compatibility smoke (Chromium, Firefox, and WebKit)
 - Rust clippy gate
 
 ## Release Controls

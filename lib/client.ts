@@ -292,6 +292,10 @@ export class Http3ClientSession extends Http3ClientSessionBase {
    * @returns A {@link ClientHttp3Stream} duplex for reading the response.
    */
   request(headers: IncomingHeaders, options?: RequestOptions): ClientHttp3Stream {
+    if (this._goawayReceived) {
+      const suffix = this._goawayLastStreamId === null ? '' : ` (last stream ID ${this._goawayLastStreamId})`;
+      throw new Http3Error(`session received GOAWAY${suffix}`, ERR_HTTP3_GOAWAY);
+    }
     if (this.closed || this._closeRequested) {
       throw this._sessionClosedError();
     }
@@ -308,10 +312,6 @@ export class Http3ClientSession extends Http3ClientSessionBase {
           ERR_HTTP3_INVALID_STATE,
         );
       }
-    }
-    if (this._goawayReceived) {
-      const suffix = this._goawayLastStreamId === null ? '' : ` (last stream ID ${this._goawayLastStreamId})`;
-      throw new Http3Error(`session received GOAWAY${suffix}`, ERR_HTTP3_GOAWAY);
     }
     if (!this._eventLoop) {
       throw new Http3Error('not connected', ERR_HTTP3_INVALID_STATE);

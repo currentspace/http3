@@ -33,7 +33,7 @@ npm run build
 - **Runtime lane:** `npm run test:runtime`
 - **Interop lane:** `npm run test:interop`
 - **Release validation lane:** `npm run test:release`
-- **Browser compatibility smoke:** `npx playwright install --with-deps chromium firefox && npm run test:browser:e2e`
+- **Browser compatibility smoke:** `npx playwright install --with-deps chromium firefox webkit && sudo -v && npm run test:browser:e2e`
 - **Performance gates:** `npm run perf:concurrency-gate` and `npm run perf:load-smoke-gate`
 - **Rust release-blocking lanes:** `npm run test:rust`
 - **Rust diagnostic lanes:** `npm run test:rust:diagnostics`
