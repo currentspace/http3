@@ -13,7 +13,7 @@ import {
   pickWeighted,
 } from '../support/scenario-helpers.js';
 import {
-  assertMemoryDriftWithinLimit,
+  assertHeapDriftWithinLimit,
 } from '../support/native-test-helpers.js';
 
 function formatMB(bytes: number): string {
@@ -126,7 +126,7 @@ describe('H3 mixed workload (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
         finalMem.heapUsed < 100 * 1024 * 1024,
         `heap too large: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
       );
-      assertMemoryDriftWithinLimit(
+      assertHeapDriftWithinLimit(
         'h3-mix post-warmup',
         baselineMem ?? finalMem,
         finalMem,

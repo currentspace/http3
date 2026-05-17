@@ -19,7 +19,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.33.0
+          version: 11.1.2
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -84,7 +84,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.33.0
+          version: 11.1.2
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -99,6 +99,9 @@ jobs:
           tags: currentspace/http3-runtime-tests:dev
           cache-from: type=gha,scope=http3-runtime-tests-linux-arm64
           cache-to: type=gha,mode=max,scope=http3-runtime-tests-linux-arm64
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --no-optional
 
       - name: Run Linux arm64 Docker runtime matrix
         env:
@@ -116,7 +119,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.33.0
+          version: 11.1.2
 
       - name: Setup Node
         uses: actions/setup-node@v6

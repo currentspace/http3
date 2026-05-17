@@ -33,10 +33,7 @@ fuzz_target!(|data: &[u8]| {
         .unwrap_or(0);
     let second_len = data.len() - first_len;
     assert_eq!(recv_buf.append_initialized(&data[..first_len]), first_len);
-    assert_eq!(
-        recv_buf.append_initialized(&data[first_len..]),
-        second_len
-    );
+    assert_eq!(recv_buf.append_initialized(&data[first_len..]), second_len);
 
     assert_eq!(recv_buf.initialized_len(), data.len());
     assert_eq!(recv_buf.into_initialized_vec(), data);

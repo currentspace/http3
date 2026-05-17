@@ -219,16 +219,18 @@ fn test_h3_request_response_under_5pct_loss() {
     .expect("client HANDSHAKE_COMPLETE under 5% loss");
 
     // Client sends GET
-    let stream_id = pair.client.send_request(
-        vec![
-            (":method".into(), "GET".into()),
-            (":path".into(), "/lossy".into()),
-            (":authority".into(), "localhost".into()),
-            (":scheme".into(), "https".into()),
-        ],
-        true,
-    )
-    .expect("send_request under 5% loss should succeed");
+    let stream_id = pair
+        .client
+        .send_request(
+            vec![
+                (":method".into(), "GET".into()),
+                (":path".into(), "/lossy".into()),
+                (":authority".into(), "localhost".into()),
+                (":scheme".into(), "https".into()),
+            ],
+            true,
+        )
+        .expect("send_request under 5% loss should succeed");
 
     // Server sees HEADERS
     let headers_event = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |e| {
@@ -315,16 +317,18 @@ fn test_h3_large_body_under_10pct_loss() {
     })
     .expect("client HANDSHAKE_COMPLETE under 10% loss");
 
-    let stream_id = pair.client.send_request(
-        vec![
-            (":method".into(), "GET".into()),
-            (":path".into(), "/large-lossy".into()),
-            (":authority".into(), "localhost".into()),
-            (":scheme".into(), "https".into()),
-        ],
-        true,
-    )
-    .expect("send_request under 10% loss should succeed");
+    let stream_id = pair
+        .client
+        .send_request(
+            vec![
+                (":method".into(), "GET".into()),
+                (":path".into(), "/large-lossy".into()),
+                (":authority".into(), "localhost".into()),
+                (":scheme".into(), "https".into()),
+            ],
+            true,
+        )
+        .expect("send_request under 10% loss should succeed");
 
     let headers_event = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |e| {
         e.event_type == EVENT_HEADERS

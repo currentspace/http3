@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "hono": "^4"
+    "hono": "^4.12.18"
   }
 }

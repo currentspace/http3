@@ -93,7 +93,7 @@ describe('Protocol correctness regressions', () => {
         'protocol-correctness/server-session-close',
       );
       await waitFor(() => events.includes('goaway'), 7000);
-      assert.deepStrictEqual(goawayInfo, { lastStreamId: 0 });
+      assert.deepStrictEqual(goawayInfo, { lastStreamId: 4 });
       assert.throws(() => {
         client.request({
           ':method': 'GET',

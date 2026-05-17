@@ -350,7 +350,7 @@ pub(crate) fn app_event_budget(pending_batch_len: usize) -> usize {
     MAX_BATCH_SIZE.saturating_sub(pending_batch_len)
 }
 
-struct WorkerLoopStopGuard;
+pub(crate) struct WorkerLoopStopGuard;
 
 impl Drop for WorkerLoopStopGuard {
     fn drop(&mut self) {
@@ -358,7 +358,7 @@ impl Drop for WorkerLoopStopGuard {
     }
 }
 
-fn push_shutdown_complete(batcher: &mut EventBatcher) {
+pub(crate) fn push_shutdown_complete(batcher: &mut EventBatcher) {
     reactor_metrics::record_shutdown_complete_emitted();
     reactor_metrics::record_lifecycle_trace(
         "event-loop",

@@ -1,9 +1,10 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
+  "packageManager": "pnpm@11.1.2",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/currentspace/http3.git"
@@ -181,21 +182,18 @@
     "load:rust:h3": "cargo run --release --manifest-path tools/rust-h3-load/Cargo.toml -- --addr 127.0.0.1:8443 --host localhost --path / --clients 10 --requests-per-client 20"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@napi-rs/cli": "^3.0.0",
-    "@types/node": "^25.5.0",
-    "c8": "^11.0.0",
-    "eslint": "^10.0.3",
-    "playwright": "^1.55.1",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.57.1"
+    "@eslint/js": "catalog:",
+    "@napi-rs/cli": "catalog:",
+    "@types/node": "catalog:",
+    "c8": "catalog:",
+    "eslint": "catalog:",
+    "playwright": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.8.1",
-    "@currentspace/http3-linux-arm64-gnu": "0.8.1",
-    "@currentspace/http3-linux-x64-gnu": "0.8.1"
-  },
-  "overrides": {
-    "flatted": "^3.4.2"
+    "@currentspace/http3-darwin-arm64": "0.8.2",
+    "@currentspace/http3-linux-arm64-gnu": "0.8.2",
+    "@currentspace/http3-linux-x64-gnu": "0.8.2"
   }
 }

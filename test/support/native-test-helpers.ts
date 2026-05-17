@@ -421,8 +421,31 @@ export const MEMORY_DRIFT_LIMIT_BYTES = 50 * 1024 * 1024;
  * Capture a point-in-time memory snapshot for leak detection in long-haul tests.
  */
 export function snapshotMemory(): MemorySnapshot {
+  const maybeGc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
+  if (typeof maybeGc === 'function') maybeGc();
   const m = process.memoryUsage();
   return { rss: m.rss, heapUsed: m.heapUsed, heapTotal: m.heapTotal };
+}
+
+/**
+ * Assert that post-warmup JavaScript heap drift stays bounded. Active
+ * long-haul throughput tests use this instead of RSS because native allocator
+ * arenas can legitimately retain pages during hot churn and release them later.
+ */
+export function assertHeapDriftWithinLimit(
+  label: string,
+  baseline: MemoryDriftSnapshot,
+  final: MemoryDriftSnapshot,
+  limitBytes = MEMORY_DRIFT_LIMIT_BYTES,
+): void {
+  const heapDrift = final.heapUsed - baseline.heapUsed;
+  if (heapDrift > limitBytes) {
+    const limitMB = (limitBytes / 1024 / 1024).toFixed(1);
+    throw new Error(
+      `${label} heap drift ${(heapDrift / 1024 / 1024).toFixed(1)}MB exceeds ${limitMB}MB ` +
+      `(${(baseline.heapUsed / 1024 / 1024).toFixed(1)}MB -> ${(final.heapUsed / 1024 / 1024).toFixed(1)}MB)`,
+    );
+  }
 }
 
 /**

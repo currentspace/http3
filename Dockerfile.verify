@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       perl \
       openssl \
       libssl-dev \
+      libnss3-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Cargo.toml requires rust >= 1.94.
@@ -33,13 +34,16 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup component add clippy
 
 # pnpm via corepack — pinned for reproducibility, matches local toolchain.
-RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
 
 WORKDIR /workspace
 
 # Install deps in a separate layer so source-only changes hit cache.
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY examples/hono/package.json ./examples/hono/package.json
+COPY examples/express-adapter/package.json ./examples/express-adapter/package.json
 RUN pnpm install --frozen-lockfile --no-optional
+RUN npx playwright install --with-deps chromium firefox webkit
 
 # Bake the source. .dockerignore excludes host build artifacts.
 COPY . .

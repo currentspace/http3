@@ -40,7 +40,9 @@ use crate::pending_write::{
     flush_pending_write_with_progress,
 };
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
-use crate::reactor_metrics::{self, RawQuicClientCloseCause, SessionKind, WorkerSpawnKind};
+use crate::reactor_metrics::{
+    self, RawQuicClientCloseCause, SessionKind, WorkerLoopExitCause, WorkerSpawnKind,
+};
 use crate::shared_client_reactor;
 use crate::timer_heap::TimerHeap;
 use crate::transport::{self, ErasedWaker, TxDatagram};
@@ -1780,6 +1782,15 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
     local_addr: SocketAddr,
     outbound_admission: Arc<OutboundAdmission>,
 ) {
+    let _stop_guard = event_loop::WorkerLoopStopGuard;
+    reactor_metrics::record_lifecycle_trace(
+        "event-loop",
+        "worker-loop-start",
+        Some(driver.driver_kind()),
+        None,
+        Some(driver.pending_tx_count()),
+        None,
+    );
     let mut sessions: Slab<SharedQuicClientSession> = Slab::new();
     let mut route_by_dcid: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut timer_heap = TimerHeap::new();
@@ -1787,6 +1798,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
     let mut handles_buf = Vec::new();
     let mut outbound = Vec::new();
     let mut closed_sessions = Vec::new();
+    let mut release_requested = false;
     // Sessions queued by ReleaseSession; deferred until after the
     // per-iteration flush so the CONNECTION_CLOSE frame queued by a
     // preceding `Close` reaches the wire before the session is removed.
@@ -1975,6 +1987,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
                 SharedQuicClientCommand::ReleaseSession { session_handle } => {
                     // Defer until after flush so the CLOSE frame goes out
                     // before the session disappears.
+                    release_requested = true;
                     pending_release.push(session_handle);
                 }
             }
@@ -2012,7 +2025,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
         // frames have already gone out via the flush + submit above.
         for session_handle in pending_release.drain(..) {
             if let Some(session) = sessions.get_mut(session_handle as usize) {
-                session.batcher.batch.push(JsH3Event::shutdown_complete());
+                event_loop::push_shutdown_complete(&mut session.batcher);
                 let _ = session.batcher.flush();
             }
             remove_shared_quic_client_session(
@@ -2214,7 +2227,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
             // QuicClientEventLoop.close() await resolves on auto-reap
             // (peer CONNECTION_CLOSE etc.) just like on explicit release.
             if let Some(session) = sessions.get_mut(handle) {
-                session.batcher.batch.push(JsH3Event::shutdown_complete());
+                event_loop::push_shutdown_complete(&mut session.batcher);
                 let _ = session.batcher.flush();
             }
             remove_shared_quic_client_session(
@@ -2226,6 +2239,25 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
         }
 
         if sessions.is_empty() && driver.pending_tx_count() == 0 {
+            let cause = if release_requested {
+                WorkerLoopExitCause::Command
+            } else {
+                WorkerLoopExitCause::HandlerDone
+            };
+            let action = if release_requested {
+                "exit-command"
+            } else {
+                "exit-handler-done"
+            };
+            reactor_metrics::record_worker_loop_exit(cause);
+            reactor_metrics::record_lifecycle_trace(
+                "event-loop",
+                action,
+                Some(driver.driver_kind()),
+                None,
+                Some(driver.pending_tx_count()),
+                None,
+            );
             return;
         }
     }
