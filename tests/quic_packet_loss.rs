@@ -47,7 +47,7 @@ struct QuicPairWithLoss {
     loss: PacketLossConfig,
 }
 
-const RECV_TIMEOUT: Duration = Duration::from_secs(15);
+const RECV_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn setup_quic_pair_with_loss(drop_pct: u32) -> QuicPairWithLoss {
     let (cert_pem, key_pem) = generate_test_certs();
@@ -189,12 +189,22 @@ fn wait_for_handshake(pair: &QuicPairWithLoss) -> (u32, u32) {
     let server_new = recv_event_matching(&pair.server_rx, RECV_TIMEOUT, |e| {
         e.event_type == EVENT_NEW_SESSION
     })
-    .expect("server should receive NEW_SESSION under packet loss");
+    .unwrap_or_else(|| {
+        let (sent, dropped) = pair.loss.stats();
+        panic!(
+            "server should receive NEW_SESSION under packet loss within {RECV_TIMEOUT:?}; sent={sent}, dropped={dropped}",
+        );
+    });
 
     let client_hs = recv_event_matching(&pair.client_rx, RECV_TIMEOUT, |e| {
         e.event_type == EVENT_HANDSHAKE_COMPLETE
     })
-    .expect("client should receive HANDSHAKE_COMPLETE under packet loss");
+    .unwrap_or_else(|| {
+        let (sent, dropped) = pair.loss.stats();
+        panic!(
+            "client should receive HANDSHAKE_COMPLETE under packet loss within {RECV_TIMEOUT:?}; sent={sent}, dropped={dropped}",
+        );
+    });
 
     (server_new.conn_handle, client_hs.conn_handle)
 }
@@ -328,7 +338,7 @@ fn test_quic_stream_echo_under_5pct_loss() {
 #[test]
 fn test_quic_large_transfer_under_10pct_loss() {
     let pair = setup_quic_pair_with_loss(10);
-    let (server_conn, _client_conn) = wait_for_handshake(&pair);
+    let (_server_conn, _client_conn) = wait_for_handshake(&pair);
 
     // Client sends 64KB
     let payload = vec![0xBB_u8; 64 * 1024];

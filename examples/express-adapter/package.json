@@ -2,9 +2,9 @@
   "name": "http3-express-example",
   "private": true,
   "dependencies": {
-    "express": "^5"
+    "express": "^5.2.1"
   },
   "devDependencies": {
-    "@types/express": "^5"
+    "@types/express": "^5.0.6"
   }
 }

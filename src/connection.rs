@@ -103,9 +103,9 @@ pub struct H3Connection {
     /// same stream writable again.
     pub next_client_request_stream_id_hint: u64,
     /// Largest peer-initiated request stream ID we have accepted (i.e.
-    /// produced a Headers event for). Used as the value carried in the
-    /// server's outgoing GoAway frame per RFC 9114 §5.2. Audit finding #1.
-    pub largest_accepted_request_id: u64,
+    /// produced a Headers event for). The server's outgoing GOAWAY ID is the
+    /// exclusive rejection boundary, so it is derived as this ID + 4.
+    pub largest_accepted_request_id: Option<u64>,
     /// Pool for recv_body output — buffers become event data directly.
     pub data_pool: AdaptiveBufferPool,
     /// Thread-safe handle cloned into each data event so V8 GC can return
@@ -191,7 +191,7 @@ impl H3Connection {
             qpack_max_table_capacity: init.qpack_max_table_capacity,
             qpack_blocked_streams: init.qpack_blocked_streams,
             next_client_request_stream_id_hint: 0,
-            largest_accepted_request_id: 0,
+            largest_accepted_request_id: None,
             data_pool,
             data_recycler,
             data_recycle_rx,
@@ -270,9 +270,10 @@ impl H3Connection {
                             // Track the largest accepted request ID for our own
                             // outgoing GoAway. monotonic since quiche delivers
                             // events in order, but max() is defensive.
-                            if stream_id > self.largest_accepted_request_id {
-                                self.largest_accepted_request_id = stream_id;
-                            }
+                            self.largest_accepted_request_id = Some(
+                                self.largest_accepted_request_id
+                                    .map_or(stream_id, |id| id.max(stream_id)),
+                            );
                             let headers: Vec<JsHeader> = list
                                 .into_iter()
                                 .map(|h| JsHeader {
@@ -787,6 +788,11 @@ impl H3Connection {
             .h3_conn
             .as_mut()
             .ok_or_else(|| Http3NativeError::InvalidState("H3 not initialized".into()))?;
+        const MAX_SERVER_GOAWAY_REQUEST_ID: u64 = (1_u64 << 62) - 4;
+        let goaway_id = self
+            .largest_accepted_request_id
+            .map(|id| id.saturating_add(4).min(MAX_SERVER_GOAWAY_REQUEST_ID))
+            .unwrap_or(0);
         reactor_metrics::record_lifecycle_trace(
             "h3-connection",
             "send-goaway",
@@ -794,12 +800,13 @@ impl H3Connection {
             None,
             None,
             Some(format!(
-                "largest_accepted_request_id={} blocked_streams={}",
+                "largest_accepted_request_id={:?} goaway_id={} blocked_streams={}",
                 self.largest_accepted_request_id,
+                goaway_id,
                 self.blocked_set.len()
             )),
         );
-        h3.send_goaway(&mut self.quiche_conn, self.largest_accepted_request_id)
+        h3.send_goaway(&mut self.quiche_conn, goaway_id)
             .map_err(Http3NativeError::H3)
     }
 

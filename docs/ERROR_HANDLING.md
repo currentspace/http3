@@ -34,7 +34,7 @@ instances before they reach JS session and stream objects.
 | `ERR_HTTP3_SESSION_ERROR` | A connection-level failure occurred. | Native session close/error mapped through `toSessionError()`. |
 | `ERR_HTTP3_HEADERS_SENT` | Headers were already committed. | Reserved public code for response-state errors in compatibility layers. |
 | `ERR_HTTP3_INVALID_STATE` | API call was made in the wrong lifecycle state. | Requesting before connect, re-listening, invalid 0-RTT use. |
-| `ERR_HTTP3_GOAWAY` | Peer is draining and should not receive new requests. | Exported public constant; current session handling primarily surfaces GOAWAY as an event. |
+| `ERR_HTTP3_GOAWAY` | Peer is draining and should not receive new requests. | New request attempts and locally opened streams rejected by GOAWAY. |
 | `ERR_HTTP3_TLS_CONFIG_ERROR` | TLS inputs are invalid or missing. | Missing `key`/`cert`, bad `pfx`, bad passphrase. |
 | `ERR_HTTP3_KEYLOG_ERROR` | TLS key logging setup failed. | Exported public constant for keylog setup failures. |
 | `ERR_HTTP3_ENDPOINT_INVALID` | Endpoint string/object is malformed. | Invalid URL, missing host, invalid port, malformed endpoint object. |
@@ -142,7 +142,8 @@ Use when:
 Recovery:
 
 - Stop creating new streams on the existing session.
-- Allow in-flight work to finish if possible.
+- Allow in-flight work below the server's GOAWAY stream ID to finish.
+- Retry or fail locally opened request streams with IDs greater than or equal to the GOAWAY stream ID.
 - Open a new session for subsequent requests.
 
 ### TLS/configuration error

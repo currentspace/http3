@@ -7,6 +7,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
 import {
+  assertHeapDriftWithinLimit,
   assertMemoryDriftWithinLimit,
   snapshotMemory,
 } from '../support/native-test-helpers.js';
@@ -128,75 +129,77 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
   it('5-minute H3 request/response cycle with memory monitoring', { timeout: 330_000 }, async () => {
     const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
 
-    const initialMem = snapshotMemory();
-    console.log(`  [longhaul] initial RSS=${formatMB(initialMem.rss)}MB heap=${formatMB(initialMem.heapUsed)}MB`);
+    try {
+      const initialMem = snapshotMemory();
+      console.log(`  [longhaul] initial RSS=${formatMB(initialMem.rss)}MB heap=${formatMB(initialMem.heapUsed)}MB`);
 
-    const DURATION_S = 300;
-    const BATCH_SIZE = 10;
-    const CHECKPOINT_INTERVAL_S = 30;
-    const MEMORY_BASELINE_AFTER_S = 120;
-    let totalRequests = 0;
-    let errors = 0;
-    const start = Date.now();
-    let lastCheckpoint = start;
-    let baselineMem: MemorySnapshot | null = null;
+      const DURATION_S = 300;
+      const BATCH_SIZE = 10;
+      const CHECKPOINT_INTERVAL_S = 30;
+      const MEMORY_BASELINE_AFTER_S = 120;
+      let totalRequests = 0;
+      let errors = 0;
+      const start = Date.now();
+      let lastCheckpoint = start;
+      let baselineMem: MemorySnapshot | null = null;
 
-    while ((Date.now() - start) / 1000 < DURATION_S) {
-      // Send a batch of 10 concurrent GET requests
-      const batch = Array.from({ length: BATCH_SIZE }, (_, i) =>
-        doRequest(session, 'GET', `/longhaul/${totalRequests + i}`).then(() => {
-          totalRequests++;
-        }).catch(() => {
-          errors++;
-          totalRequests++;
-        }),
-      );
-      await Promise.all(batch);
-
-      // Log memory snapshot every 30s
-      const now = Date.now();
-      if ((now - lastCheckpoint) / 1000 >= CHECKPOINT_INTERVAL_S) {
-        const mem = snapshotMemory();
-        const elapsedS = (now - start) / 1000;
-        if (elapsedS >= MEMORY_BASELINE_AFTER_S) {
-          baselineMem ??= mem;
-        }
-        console.log(
-          `  [longhaul] ${elapsedS.toFixed(0)}s: ` +
-          `${totalRequests} reqs (${(totalRequests / elapsedS).toFixed(1)} req/s), ` +
-          `${errors} errors, ` +
-          `RSS=${formatMB(mem.rss)}MB heap=${formatMB(mem.heapUsed)}MB`,
+      while ((Date.now() - start) / 1000 < DURATION_S) {
+        // Send a batch of 10 concurrent GET requests
+        const batch = Array.from({ length: BATCH_SIZE }, (_, i) =>
+          doRequest(session, 'GET', `/longhaul/${totalRequests + i}`).then(() => {
+            totalRequests++;
+          }).catch(() => {
+            errors++;
+            totalRequests++;
+          }),
         );
-        lastCheckpoint = now;
+        await Promise.all(batch);
+
+        // Log memory snapshot every 30s
+        const now = Date.now();
+        if ((now - lastCheckpoint) / 1000 >= CHECKPOINT_INTERVAL_S) {
+          const mem = snapshotMemory();
+          const elapsedS = (now - start) / 1000;
+          if (elapsedS >= MEMORY_BASELINE_AFTER_S) {
+            baselineMem ??= mem;
+          }
+          console.log(
+            `  [longhaul] ${elapsedS.toFixed(0)}s: ` +
+            `${totalRequests} reqs (${(totalRequests / elapsedS).toFixed(1)} req/s), ` +
+            `${errors} errors, ` +
+            `RSS=${formatMB(mem.rss)}MB heap=${formatMB(mem.heapUsed)}MB`,
+          );
+          lastCheckpoint = now;
+        }
       }
+
+      const elapsedS = (Date.now() - start) / 1000;
+      const finalMem = snapshotMemory();
+
+      console.log(
+        `  [longhaul] DONE: ${totalRequests} total reqs in ${elapsedS.toFixed(1)}s ` +
+        `(${(totalRequests / elapsedS).toFixed(1)} req/s), ${errors} errors`,
+      );
+      console.log(
+        `  [longhaul] memory: initial RSS=${formatMB(initialMem.rss)}MB -> ` +
+        `final RSS=${formatMB(finalMem.rss)}MB (${(finalMem.rss / initialMem.rss).toFixed(2)}x)`,
+      );
+
+      assert.ok(totalRequests > 1000, `expected > 1000 total requests, got ${totalRequests}`);
+      // Check heap (not RSS) — RSS includes native allocator fragmentation and
+      // kernel page cache which we don't control. Heap is what we can leak.
+      assert.ok(
+        finalMem.heapUsed < 100 * 1024 * 1024,
+        `heap grew too much: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
+      );
+      assertHeapDriftWithinLimit(
+        'h3 sustained post-warmup',
+        baselineMem ?? finalMem,
+        finalMem,
+      );
+    } finally {
+      await session.close();
     }
-
-    const elapsedS = (Date.now() - start) / 1000;
-    const finalMem = snapshotMemory();
-
-    console.log(
-      `  [longhaul] DONE: ${totalRequests} total reqs in ${elapsedS.toFixed(1)}s ` +
-      `(${(totalRequests / elapsedS).toFixed(1)} req/s), ${errors} errors`,
-    );
-    console.log(
-      `  [longhaul] memory: initial RSS=${formatMB(initialMem.rss)}MB -> ` +
-      `final RSS=${formatMB(finalMem.rss)}MB (${(finalMem.rss / initialMem.rss).toFixed(2)}x)`,
-    );
-
-    assert.ok(totalRequests > 1000, `expected > 1000 total requests, got ${totalRequests}`);
-    // Check heap (not RSS) — RSS includes native allocator fragmentation and
-    // kernel page cache which we don't control. Heap is what we can leak.
-    assert.ok(
-      finalMem.heapUsed < 100 * 1024 * 1024,
-      `heap grew too much: ${formatMB(finalMem.heapUsed)}MB (limit 100MB)`,
-    );
-    assertMemoryDriftWithinLimit(
-      'h3 sustained post-warmup',
-      baselineMem ?? finalMem,
-      finalMem,
-    );
-
-    await session.close();
   });
 
   it('5-minute idle connection survives without resource leak', { timeout: 330_000 }, async () => {
@@ -205,54 +208,56 @@ describe('H3 sustained load (5 minutes)', { skip: !process.env.HTTP3_LONGHAUL },
       maxIdleTimeoutMs: 600_000, // 10 min — won't fire during test
     });
 
-    const initialMem = snapshotMemory();
-    console.log(`  [longhaul/idle] initial RSS=${formatMB(initialMem.rss)}MB`);
-    let baselineMem: MemorySnapshot | null = null;
+    try {
+      const initialMem = snapshotMemory();
+      console.log(`  [longhaul/idle] initial RSS=${formatMB(initialMem.rss)}MB`);
+      let baselineMem: MemorySnapshot | null = null;
 
-    // First idle phase: 150 seconds with 30s checkpoint logging
-    for (let checkpoint = 1; checkpoint <= 5; checkpoint++) {
-      await new Promise<void>((resolve) => { setTimeout(resolve, 30_000); });
-      const mem = snapshotMemory();
-      baselineMem ??= mem;
+      // First idle phase: 150 seconds with 30s checkpoint logging
+      for (let checkpoint = 1; checkpoint <= 5; checkpoint++) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 30_000); });
+        const mem = snapshotMemory();
+        baselineMem ??= mem;
+        console.log(
+          `  [longhaul/idle] ${checkpoint * 30}s: RSS=${formatMB(mem.rss)}MB ` +
+          `heap=${formatMB(mem.heapUsed)}MB`,
+        );
+      }
+
+      // Verify connection is still alive after 150s idle
+      const res1 = await doRequest(session, 'GET', '/alive-check-1');
+      assert.strictEqual(res1.status, '200', 'connection should be alive after 150s idle');
+      console.log('  [longhaul/idle] connection alive at 150s');
+
+      // Second idle phase: another 150 seconds
+      for (let checkpoint = 6; checkpoint <= 10; checkpoint++) {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 30_000); });
+        const mem = snapshotMemory();
+        console.log(
+          `  [longhaul/idle] ${checkpoint * 30}s: RSS=${formatMB(mem.rss)}MB ` +
+          `heap=${formatMB(mem.heapUsed)}MB`,
+        );
+      }
+
+      // Verify connection still alive after full 300s
+      const res2 = await doRequest(session, 'GET', '/alive-check-2');
+      assert.strictEqual(res2.status, '200', 'connection should be alive after 300s idle');
+      console.log('  [longhaul/idle] connection alive at 300s');
+
+      const finalMem = snapshotMemory();
+      const rssGrowthMB = (finalMem.rss - initialMem.rss) / 1024 / 1024;
       console.log(
-        `  [longhaul/idle] ${checkpoint * 30}s: RSS=${formatMB(mem.rss)}MB ` +
-        `heap=${formatMB(mem.heapUsed)}MB`,
+        `  [longhaul/idle] DONE: RSS growth=${rssGrowthMB.toFixed(1)}MB ` +
+        `(${formatMB(initialMem.rss)}MB -> ${formatMB(finalMem.rss)}MB)`,
       );
-    }
 
-    // Verify connection is still alive after 150s idle
-    const res1 = await doRequest(session, 'GET', '/alive-check-1');
-    assert.strictEqual(res1.status, '200', 'connection should be alive after 150s idle');
-    console.log('  [longhaul/idle] connection alive at 150s');
-
-    // Second idle phase: another 150 seconds
-    for (let checkpoint = 6; checkpoint <= 10; checkpoint++) {
-      await new Promise<void>((resolve) => { setTimeout(resolve, 30_000); });
-      const mem = snapshotMemory();
-      console.log(
-        `  [longhaul/idle] ${checkpoint * 30}s: RSS=${formatMB(mem.rss)}MB ` +
-        `heap=${formatMB(mem.heapUsed)}MB`,
+      assert.ok(
+        rssGrowthMB < 50,
+        `RSS grew by ${rssGrowthMB.toFixed(1)}MB during idle (limit 50MB)`,
       );
+      assertMemoryDriftWithinLimit('h3 idle post-warmup', baselineMem ?? finalMem, finalMem);
+    } finally {
+      await session.close();
     }
-
-    // Verify connection still alive after full 300s
-    const res2 = await doRequest(session, 'GET', '/alive-check-2');
-    assert.strictEqual(res2.status, '200', 'connection should be alive after 300s idle');
-    console.log('  [longhaul/idle] connection alive at 300s');
-
-    const finalMem = snapshotMemory();
-    const rssGrowthMB = (finalMem.rss - initialMem.rss) / 1024 / 1024;
-    console.log(
-      `  [longhaul/idle] DONE: RSS growth=${rssGrowthMB.toFixed(1)}MB ` +
-      `(${formatMB(initialMem.rss)}MB -> ${formatMB(finalMem.rss)}MB)`,
-    );
-
-    assert.ok(
-      rssGrowthMB < 50,
-      `RSS grew by ${rssGrowthMB.toFixed(1)}MB during idle (limit 50MB)`,
-    );
-    assertMemoryDriftWithinLimit('h3 idle post-warmup', baselineMem ?? finalMem, finalMem);
-
-    await session.close();
   });
 });

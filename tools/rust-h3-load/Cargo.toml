@@ -1,11 +1,11 @@
 [package]
 name = "rust-h3-load"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-quiche = "0.24"
+quiche.workspace = true
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

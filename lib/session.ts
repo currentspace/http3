@@ -55,6 +55,10 @@ export interface SessionCloseInfo {
 
 /** Details supplied with H3 GOAWAY events. */
 export interface GoawayInfo {
+  /**
+   * HTTP/3 GOAWAY identifier. For server-to-client GOAWAY, client request
+   * stream IDs greater than or equal to this value were not accepted.
+   */
   lastStreamId: number;
 }
 

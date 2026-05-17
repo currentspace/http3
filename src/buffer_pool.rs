@@ -249,6 +249,13 @@ impl AdaptiveBufferPool {
         }
     }
 
+    /// Number of buffers retained in this pool, excluding the shared
+    /// right-sized fallback pool.
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub fn retained_buffer_count(&self) -> usize {
+        self.buffers.len()
+    }
+
     /// Return a buffer to the pool.
     /// Returns `true` when the buffer was retained for reuse.
     pub fn checkin(&mut self, mut buf: Vec<u8>) -> bool {
@@ -330,8 +337,10 @@ mod tests {
     #[test]
     fn adaptive_pool_reuses_large_enough_buffer() {
         let mut pool = AdaptiveBufferPool::new(2, 64);
+        assert!(pool.checkin(Vec::with_capacity(64)));
+
         let (buf, reused) = pool.copy_from_slice(b"hello");
-        assert!(!reused);
+        assert!(reused);
         assert_eq!(buf, b"hello");
         assert!(pool.checkin(buf));
 
@@ -426,10 +435,12 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_pool_checkout_below_min_allocates_min() {
+    fn adaptive_pool_checkout_below_min_uses_min_capacity() {
         let mut pool = AdaptiveBufferPool::new(4, 64);
-        let (buf, reused) = pool.checkout(8);
-        assert!(!reused);
+        assert!(pool.checkin(Vec::with_capacity(64)));
+
+        let (buf, _reused) = pool.checkout(8);
+        assert_eq!(buf.len(), 8);
         assert!(buf.capacity() >= 64);
     }
 
@@ -437,10 +448,8 @@ mod tests {
     fn adaptive_pool_recycler_returns_buffers() {
         let (mut pool, recycler, rx) = AdaptiveBufferPool::with_recycler(4, 64);
 
-        // Checkout a buffer (will allocate fresh since pool is empty)
-        let (buf, reused) = pool.checkout(128);
-        assert!(!reused);
-        assert_eq!(buf.len(), 128);
+        let mut buf = Vec::with_capacity(128);
+        buf.resize(128, 0);
         let cap = buf.capacity();
 
         // Simulate GC thread returning the buffer via recycler
@@ -462,8 +471,9 @@ mod tests {
     #[test]
     fn adaptive_pool_checkout_recv_commits_only_written_bytes() {
         let mut pool = AdaptiveBufferPool::new(1, 64);
-        let (mut buf, reused) = pool.checkout_recv(8);
-        assert!(!reused);
+        assert!(pool.checkin(Vec::with_capacity(64)));
+
+        let (mut buf, _reused) = pool.checkout_recv(8);
 
         assert_eq!(buf.append_initialized(b"ping"), 4);
 

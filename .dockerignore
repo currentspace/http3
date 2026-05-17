@@ -9,6 +9,11 @@ target
 *.node
 coverage
 results
+artifacts
+perf-results
+fuzz/target
+fuzz/artifacts
+tools/*/target
 playwright-report
 test-results
 .DS_Store

@@ -1,8 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { Http3ClientSession, ERR_HTTP3_STREAM_BLOCKED, Http3Error } from '../../lib/index.js';
+import {
+  Http3ClientSession,
+  ERR_HTTP3_GOAWAY,
+  ERR_HTTP3_STREAM_BLOCKED,
+  Http3Error,
+} from '../../lib/index.js';
 
 const EVENT_DRAIN = 8;
+const EVENT_GOAWAY = 9;
 
 interface ClientLoopStub {
   sendRequest: (h: Array<{ name: string; value: string }>, fin: boolean) => number;
@@ -86,5 +92,39 @@ describe('client request backpressure', () => {
       session.requestAsync({ ':method': 'GET', ':path': '/' }, { timeoutMs: 1 }),
       (err: unknown) => err instanceof Http3Error && err.code === ERR_HTTP3_STREAM_BLOCKED,
     );
+  });
+
+  it('fails request streams rejected by GOAWAY while preserving accepted streams', async () => {
+    let nextStreamId = 0;
+    const session = makeReadySession(makeStubLoop(() => {
+      const id = nextStreamId;
+      nextStreamId += 4;
+      return id;
+    }));
+    const sessionAny = session as unknown as {
+      _dispatchEvents: (events: Array<Record<string, unknown>>) => void;
+      _streams: Map<number, unknown>;
+    };
+
+    const accepted = session.request({ ':method': 'GET', ':path': '/accepted' });
+    const rejected = session.request({ ':method': 'GET', ':path': '/rejected' });
+    let goawayInfo: { lastStreamId: number } | null = null;
+    let rejectedError: unknown;
+    const rejectedClosed = new Promise<void>((resolve) => {
+      rejected.once('error', (err) => { rejectedError = err; });
+      rejected.once('close', () => { resolve(); });
+    });
+    session.once('goaway', (info) => { goawayInfo = info; });
+
+    sessionAny._dispatchEvents([{ eventType: EVENT_GOAWAY, streamId: 4 }]);
+    await rejectedClosed;
+
+    assert.deepStrictEqual(goawayInfo, { lastStreamId: 4 });
+    assert.equal(sessionAny._streams.has(accepted.id), true);
+    assert.equal(sessionAny._streams.has(rejected.id), false);
+    assert.ok(rejectedError instanceof Http3Error);
+    assert.equal((rejectedError as Http3Error).code, ERR_HTTP3_GOAWAY);
+
+    accepted.destroy();
   });
 });

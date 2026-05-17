@@ -112,16 +112,23 @@ fn test_adaptive_pool_stable_under_churn() {
         buffers.push(buf);
     }
 
-    // Return them all — only max_buffers (32) should be retained
-    let mut final_retained = 0;
+    // Return them all. The per-pool cache must stop at max_buffers (32);
+    // checkin() may still return true for one overflow buffer retained by the
+    // shared right-sized fallback pool.
+    let mut retained_anywhere = 0;
     for buf in buffers {
         if pool.checkin(buf) {
-            final_retained += 1;
+            retained_anywhere += 1;
         }
     }
+    assert_eq!(
+        pool.retained_buffer_count(),
+        32,
+        "pool should retain exactly max_buffers entries locally"
+    );
     assert!(
-        final_retained <= 32,
-        "pool should not retain more than max_buffers (32), got {final_retained}"
+        retained_anywhere <= 33,
+        "pool plus fallback should retain at most the 33 returned buffers, got {retained_anywhere}"
     );
 
     // Pool should still be functional

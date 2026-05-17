@@ -496,7 +496,7 @@ impl QuicConnection {
         }
 
         let original = buf.clone();
-        match self.quiche_conn.stream_send_zc(stream_id, buf, None, fin) {
+        match self.quiche_conn.stream_send_zc(stream_id, buf, fin) {
             Ok((written, remaining)) => {
                 if written < data_len && self.blocked_set.insert(stream_id) {
                     self.blocked_queue.push_back(stream_id);

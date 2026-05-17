@@ -71,7 +71,8 @@ fn make_client_config() -> quiche::Config {
     config
 }
 
-/// Exchange packets between client and server sockets until handshake completes or no progress.
+/// Exchange packets between client and server sockets until all immediately
+/// available QUIC work has been flushed.
 fn exchange_udp(
     client_sock: &UdpSocket,
     server_sock: &UdpSocket,
@@ -90,14 +91,14 @@ fn exchange_udp(
         made_progress |= flush_udp_send(server_sock, server_conn, &mut out, "server");
         made_progress |= drain_udp_recv(client_sock, client_conn, &mut buf, "client");
 
-        if client_conn.is_established() && server_conn.is_established() {
-            return;
-        }
-
         made_progress |= fire_expired_timeout(client_conn);
         made_progress |= fire_expired_timeout(server_conn);
 
         if !made_progress {
+            if client_conn.is_established() && server_conn.is_established() {
+                return;
+            }
+
             sleep_until_next_quic_timer(client_conn, server_conn, deadline);
         }
     }

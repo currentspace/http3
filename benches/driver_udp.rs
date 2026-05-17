@@ -35,11 +35,7 @@ fn make_socket_pair() -> (UdpSocket, UdpSocket) {
 fn make_packets(count: usize, to: SocketAddr) -> Vec<TxDatagram> {
     let payload = vec![0xAB_u8; 1350];
     (0..count)
-        .map(|_| TxDatagram {
-            data: payload.clone(),
-            to,
-            max_segment_size: None,
-        })
+        .map(|_| TxDatagram::from_payload(payload.clone(), to, None))
         .collect()
 }
 
@@ -168,7 +164,7 @@ fn bench_poll_idle_wake<D: Driver>(c: &mut Criterion, driver_name: &str) {
             // Schedule a wake from another thread
             let w = waker.clone();
             let t = thread::spawn(move || {
-                w.wake().unwrap();
+                DriverWaker::wake(&w).unwrap();
             });
             // Poll should return quickly due to waker
             let outcome = driver

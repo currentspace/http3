@@ -178,7 +178,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   _closeRequested = false;
   private _readySettled = false;
   private _goawayReceived = false;
-  private _goawayLastStreamId: number | null = null;
+  private _goawayId: number | null = null;
   private readonly _readyPromise: Promise<void>;
   private _resolveReady: (() => void) | null = null;
   private _rejectReady: ((err: Error) => void) | null = null;
@@ -293,7 +293,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
    */
   request(headers: IncomingHeaders, options?: RequestOptions): ClientHttp3Stream {
     if (this._goawayReceived) {
-      const suffix = this._goawayLastStreamId === null ? '' : ` (last stream ID ${this._goawayLastStreamId})`;
+      const suffix = this._goawayId === null ? '' : ` (GOAWAY stream ID ${this._goawayId})`;
       throw new Http3Error(`session received GOAWAY${suffix}`, ERR_HTTP3_GOAWAY);
     }
     if (this.closed || this._closeRequested) {
@@ -429,10 +429,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
           this._onWriteReady();
           break;
         case EVENT_GOAWAY:
-          this._goawayReceived = true;
-          this._goawayLastStreamId = event.streamId;
-          this._notifyRequestDrain();
-          this.emit('goaway', { lastStreamId: event.streamId });
+          this._onGoaway(event);
           break;
         case EVENT_ERROR:
           this._onError(event);
@@ -556,6 +553,28 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   private _onWriteReady(): void {
     for (const stream of this._streams.values()) {
       stream._onNativeWriteReady();
+    }
+  }
+
+  private _onGoaway(event: NativeEvent): void {
+    this._goawayReceived = true;
+    this._goawayId = event.streamId;
+    this._notifyRequestDrain();
+    this.emit('goaway', { lastStreamId: event.streamId });
+
+    for (const [streamId, stream] of this._streams) {
+      if (streamId < event.streamId) continue;
+
+      this._streams.delete(streamId);
+      const err = new Http3Error(
+        `request stream ${streamId} rejected by GOAWAY (stream ID ${event.streamId})`,
+        ERR_HTTP3_GOAWAY,
+      );
+      if (stream.listenerCount('error') > 0) {
+        stream.destroy(err);
+      } else {
+        stream.destroy();
+      }
     }
   }
 

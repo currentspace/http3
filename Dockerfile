@@ -13,17 +13,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
 
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY examples/hono/package.json ./examples/hono/package.json
+COPY examples/express-adapter/package.json ./examples/express-adapter/package.json
 
 RUN pnpm install --frozen-lockfile --no-optional
 
 # Keep the native+TS build cache stable when only example app files change.
-COPY build.rs Cargo.toml ./
+COPY build.rs Cargo.toml Cargo.lock ./
 COPY benches ./benches
+COPY fuzz ./fuzz
+COPY tools ./tools
 COPY src ./src
 COPY lib ./lib
 COPY index.js index.d.ts tsconfig.json ./
@@ -33,9 +37,12 @@ RUN pnpm prune --prod
 
 FROM node:24-bookworm AS hono-deps
 
-WORKDIR /app/examples/hono
-COPY examples/hono/package.json examples/hono/package-lock.json ./
-RUN npm ci --omit=dev
+RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY examples/hono/package.json ./examples/hono/package.json
+RUN pnpm --filter http3-hono-example install --prod --frozen-lockfile
 
 FROM node:24-bookworm-slim AS runtime
 
