@@ -194,14 +194,32 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Configure npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error ::Repository secret NPM_TOKEN is required for npm dist-tag and unpublish maintenance."
+            exit 1
+          fi
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > "$HOME/.npmrc"
+          npm whoami
 
       - name: Move canary dist-tag to 0.8.3
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm dist-tag add @currentspace/http3@0.8.3 canary
 
       - name: Unpublish @currentspace/http3@0.2.0
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm unpublish @currentspace/http3@0.2.0 --force
 
       - name: Verify npm state
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           npm view @currentspace/http3 dist-tags --json --prefer-online
           if npm view @currentspace/http3@0.2.0 version --prefer-online; then
