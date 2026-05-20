@@ -12,6 +12,9 @@
 2. Run `npm run release:latest -- --validate-only --dist-tag <canary|rc|latest>` to execute the full local gate and a GitHub Actions dry-run publish on a candidate branch.
 3. Run `npm run release:latest -- --dist-tag <canary|rc|latest>` to push `main`, publish through `release.yml`, create the Git tag, and create the GitHub release from the matching versioned `CHANGELOG.md` section.
 4. Confirm npm dist-tags for the root package and each native sidecar package.
+   Stable `latest` releases require the `NPM_TOKEN` GitHub Actions secret so the
+   release workflow can also move each package's `canary` dist-tag to the same
+   version after publish.
 
 ## Local Gate
 

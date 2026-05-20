@@ -214,10 +214,40 @@ function publishPackage(directory, distTag, dryRun, provenance, ignoreScripts = 
   run('npm', args, { cwd: directory });
 }
 
+function shouldMirrorCanary(distTag) {
+  return distTag === 'latest' && process.env.HTTP3_MIRROR_CANARY_ON_LATEST !== '0';
+}
+
+function requireNpmTokenForCanaryMirror(dryRun) {
+  const npmToken = process.env.NPM_TOKEN;
+  if (typeof npmToken === 'string' && npmToken.length > 0) {
+    return;
+  }
+
+  const mode = dryRun ? 'dry-run' : 'publish';
+  throw new Error(
+    `NPM_TOKEN is required during ${mode} latest releases so the canary dist-tag can be moved to the new build.`,
+  );
+}
+
+function updateDistTag(name, version, distTag, dryRun) {
+  console.log(`${dryRun ? 'Dry-running' : 'Updating'} npm dist-tag ${name}: ${distTag} -> ${version}`);
+  if (dryRun) {
+    return;
+  }
+
+  run('npm', ['dist-tag', 'add', `${name}@${version}`, distTag], {
+    env: {
+      NODE_AUTH_TOKEN: process.env.NPM_TOKEN,
+    },
+  });
+}
+
 const { options, flags } = parseArgs(process.argv.slice(2));
 const distTag = options.get('--dist-tag') ?? process.env.HTTP3_DIST_TAG ?? 'latest';
 const dryRun = flags.has('--dry-run') || process.env.HTTP3_DRY_RUN === '1';
 const provenance = process.env.GITHUB_ACTIONS === 'true';
+const mirrorCanary = shouldMirrorCanary(distTag);
 
 const rootManifestPath = join(ROOT_DIR, 'package.json');
 const rootManifest = readJson(rootManifestPath);
@@ -227,6 +257,10 @@ if (typeof rootManifest.name !== 'string' || typeof rootManifest.version !== 'st
 
 console.log(`Publishing release packages for ${rootManifest.name}@${rootManifest.version}`);
 console.log(`Mode: ${dryRun ? 'dry-run' : 'publish'}; npm dist-tag: ${distTag}`);
+if (mirrorCanary) {
+  console.log('Latest release mode: canary dist-tags will be mirrored to this version.');
+  requireNpmTokenForCanaryMirror(dryRun);
+}
 
 run(process.execPath, [join(ROOT_DIR, 'scripts', 'verify-prebuilds.mjs')]);
 
@@ -277,6 +311,18 @@ publishPackage(ROOT_DIR, distTag, dryRun, provenance, true);
 if (!dryRun) {
   for (const pkg of packagesToPublish) {
     verifyDistTag(pkg.name, pkg.version, distTag);
+  }
+}
+
+if (mirrorCanary) {
+  for (const pkg of packagesToPublish) {
+    updateDistTag(pkg.name, pkg.version, 'canary', dryRun);
+  }
+
+  if (!dryRun) {
+    for (const pkg of packagesToPublish) {
+      verifyDistTag(pkg.name, pkg.version, 'canary');
+    }
   }
 }
 
