@@ -2,7 +2,10 @@
 
 ## Runtime
 
-- Node.js: `>=24.0.0`
+- Node.js support floor: `>=24.0.0`
+- CI-tested Node.js majors: `24`, `25`, and `26`
+- Node.js 26 status: Current as of 2026-05-20; scheduled to enter LTS in
+  October 2026 according to the Node.js release schedule.
 - Module target: Node ESM/CJS-compatible package output
 - Browser compatibility smoke: Chromium, Firefox, and WebKit automated over the HTTPS entrypoint with H3 protocol assertions
 
@@ -21,10 +24,12 @@
 - macOS: kqueue (`fast` and `portable`)
 - Linux `fast`: io_uring
 - Linux `portable`: readiness-based `poll(2)` + `eventfd`
-- QUIC engine: quiche 0.28
+- QUIC engine: quiche 0.29
 
 ## Platform Targets (N-API prebuild intent)
 
+- Prebuilds are shared across Node 24/25/26 through Node-API and are split by
+  supported OS/arch/libc, not by `NODE_MODULE_VERSION`.
 - Linux x64 (gnu)
 - Linux arm64 (gnu)
 - macOS arm64

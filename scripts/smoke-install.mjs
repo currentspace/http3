@@ -34,7 +34,7 @@ try {
 
   tarball = resolve(repoRoot, tarballName);
   run('npm', ['init', '-y']);
-  run('npm', ['install', tarball]);
+  run('npm', ['install', '--omit=optional', tarball]);
   const check = spawnSync(
     process.execPath,
     [
@@ -42,9 +42,11 @@ try {
       [
         "const pkg = require('@currentspace/http3');",
         "if (typeof pkg.createSecureServer !== 'function') throw new Error('createSecureServer missing');",
+        "if (typeof pkg.createQuicServer !== 'function') throw new Error('createQuicServer missing');",
+        "if (typeof pkg.connectQuic !== 'function') throw new Error('connectQuic missing');",
         "if (typeof pkg.createSseStream !== 'function') throw new Error('createSseStream missing');",
         "if (typeof pkg.loadTlsOptionsFromAwsEnv !== 'function') throw new Error('loadTlsOptionsFromAwsEnv missing');",
-        "console.log('smoke install passed');",
+        "console.log(`smoke install passed on Node ${process.versions.node} (N-API ${process.versions.napi ?? 'unavailable'})`);",
       ].join(''),
     ],
     { cwd: tempDir, stdio: 'inherit' },

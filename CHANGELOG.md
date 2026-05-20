@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.3
+
+### Node runtime support
+
+- Added release validation for the same N-API prebuilds on Node.js 24, 25, and 26.
+- Kept prebuild output split by supported OS/arch/libc instead of Node major ABI.
+- Added a Node-API boundary guard so release checks fail if direct Node, V8, NAN, or libuv addon APIs are introduced.
+
+### Release automation
+
+- Bumped the package line to `0.8.3`, including Cargo metadata, native sidecar package manifests, and root optional sidecar pins.
+- Updated the release workflow so npm publishing runs only after prebuild creation and Node 24/25/26 validation complete.
+- Preserved the publish order of native sidecar packages first and the root `@currentspace/http3` package last.
+
 ## 0.8.1
 
 ### Browser H3 and fallback close-race fixes

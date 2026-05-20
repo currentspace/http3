@@ -11,7 +11,12 @@ concurrency:
 
 jobs:
   curl-interop:
+    name: TypeScript interop (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24', '25', '26']
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -24,7 +29,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 

@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-bookworm
+ARG NODE_MAJOR=24
+FROM node:${NODE_MAJOR}-bookworm
 
 ARG TARGETPLATFORM
 
@@ -20,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.94.0
 ENV PNPM_HOME="/pnpm"
 ENV PATH="${PNPM_HOME}:/root/.cargo/bin:${PATH}"
-RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+RUN npm install -g pnpm@11.1.2
 
 WORKDIR /app
 

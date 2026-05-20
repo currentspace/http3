@@ -58,8 +58,80 @@ jobs:
           path: "*.node"
           if-no-files-found: error
 
-  publish:
+  validate-prebuilds:
+    name: validate (${{ matrix.target }}, node ${{ matrix.node-version }})
     needs: prebuilds
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            node-version: "24"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            node-version: "25"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            node-version: "26"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            node-version: "24"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            node-version: "25"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            node-version: "26"
+          - os: macos-26
+            target: aarch64-apple-darwin
+            node-version: "24"
+          - os: macos-26
+            target: aarch64-apple-darwin
+            node-version: "25"
+          - os: macos-26
+            target: aarch64-apple-darwin
+            node-version: "26"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile --no-optional
+
+      - name: Download prebuild artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: prebuild-*
+          merge-multiple: true
+
+      - name: Verify expected prebuilds
+        run: node scripts/verify-prebuilds.mjs
+
+      - name: Check Node-API boundary
+        run: pnpm run check:napi-boundary
+
+      - name: Build JavaScript artifacts
+        run: pnpm run patch:native-loader && pnpm run build:dist && pnpm run build:test
+
+      - name: Run release runtime tests
+        run: node --test --test-isolation=none --test-timeout=15000 dist-test/test/release/**/*.test.js
+
+      - name: Smoke install packed artifact
+        env:
+          NPM_CONFIG_OMIT: optional
+        run: node scripts/smoke-install.mjs
+
+  publish:
+    needs: [prebuilds, validate-prebuilds]
     runs-on: ubuntu-latest
     permissions:
       contents: read

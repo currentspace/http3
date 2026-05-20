@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 
 const composeArgs = ['compose', '-f', 'docker-compose.runtime-tests.yml'];
 const defaultRuntimePlatform = process.env.DOCKER_RUNTIME_PLATFORM ?? inferDockerRuntimePlatform();
+const nodeMajor = process.env.NODE_MAJOR ?? '24';
+const runtimeImage = process.env.HTTP3_RUNTIME_IMAGE ?? `currentspace/http3-runtime-tests:node${nodeMajor}-dev`;
 
 function inferDockerRuntimePlatform() {
   if (process.arch === 'arm64') {
@@ -19,6 +21,8 @@ function runDocker(args, env = {}) {
     env: {
       ...process.env,
       ...(defaultRuntimePlatform ? { DOCKER_RUNTIME_PLATFORM: defaultRuntimePlatform } : {}),
+      NODE_MAJOR: nodeMajor,
+      HTTP3_RUNTIME_IMAGE: runtimeImage,
       ...env,
     },
   });
@@ -45,6 +49,8 @@ function runLane(name, args, env = {}) {
 if (defaultRuntimePlatform) {
   console.log(`Using Docker runtime test platform: ${defaultRuntimePlatform}`);
 }
+console.log(`Using Docker runtime test Node major: ${nodeMajor}`);
+console.log(`Using Docker runtime test image: ${runtimeImage}`);
 
 if (process.env.HTTP3_RUNTIME_SKIP_BUILD === '1') {
   console.log('Using prebuilt Docker runtime test image');

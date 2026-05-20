@@ -11,7 +11,12 @@ concurrency:
 
 jobs:
   build-and-test:
+    name: build-and-test (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24', '25', '26']
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -24,7 +29,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -70,8 +75,13 @@ jobs:
         run: pnpm run smoke:install
 
   docker-runtime-matrix-arm64:
+    name: docker runtime arm64 (node ${{ matrix.node-version }})
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24', '25', '26']
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -79,7 +89,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -95,23 +105,32 @@ jobs:
           context: .
           file: Dockerfile.runtime-test
           platforms: linux/arm64
+          build-args: |
+            NODE_MAJOR=${{ matrix.node-version }}
           load: true
-          tags: currentspace/http3-runtime-tests:dev
-          cache-from: type=gha,scope=http3-runtime-tests-linux-arm64
-          cache-to: type=gha,mode=max,scope=http3-runtime-tests-linux-arm64
+          tags: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
+          cache-from: type=gha,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-arm64
+          cache-to: type=gha,mode=max,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-arm64
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --no-optional
 
       - name: Run Linux arm64 Docker runtime matrix
         env:
+          NODE_MAJOR: ${{ matrix.node-version }}
+          HTTP3_RUNTIME_IMAGE: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
           DOCKER_RUNTIME_PLATFORM: linux/arm64
           HTTP3_RUNTIME_SKIP_BUILD: '1'
         run: pnpm run test:docker:runtime
 
   runtime-io-uring:
+    name: docker runtime io_uring (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24', '25', '26']
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -124,7 +143,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -140,13 +159,17 @@ jobs:
           context: .
           file: Dockerfile.runtime-test
           platforms: linux/amd64
+          build-args: |
+            NODE_MAJOR=${{ matrix.node-version }}
           load: true
-          tags: currentspace/http3-runtime-tests:dev
-          cache-from: type=gha,scope=http3-runtime-tests-linux-amd64
-          cache-to: type=gha,mode=max,scope=http3-runtime-tests-linux-amd64
+          tags: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
+          cache-from: type=gha,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-amd64
+          cache-to: type=gha,mode=max,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-amd64
 
       - name: Run Linux io_uring Docker runtime matrix
         env:
+          NODE_MAJOR: ${{ matrix.node-version }}
+          HTTP3_RUNTIME_IMAGE: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
           DOCKER_RUNTIME_PLATFORM: linux/amd64
           HTTP3_RUNTIME_SKIP_BUILD: '1'
           HTTP3_RUNTIME_TEST_PRIVILEGED: '1'

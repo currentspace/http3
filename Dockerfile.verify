@@ -1,11 +1,12 @@
 # Full-verification harness, debian latest (trixie). Mirrors what
-# scripts/verify.sh expects: rust >= 1.94, node 24, pnpm 10, build
+# scripts/verify.sh expects: rust >= 1.94, Node 24/26, pnpm 11, build
 # essentials. Built and run via `pnpm verify:docker`.
 #
 # The source tree is baked into the image (no bind mounts) so the host's
 # macOS-built node_modules / target / *.node artifacts don't poison the
 # Linux build. .dockerignore keeps the layer small.
-FROM node:24-trixie-slim
+ARG NODE_MAJOR=24
+FROM node:${NODE_MAJOR}-trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -33,8 +34,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup component add clippy
 
-# pnpm via corepack — pinned for reproducibility, matches local toolchain.
-RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+# Pinned package manager. Node 26 container images do not ship corepack.
+RUN npm install -g pnpm@11.1.2
 
 WORKDIR /workspace
 

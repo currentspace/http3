@@ -20,20 +20,23 @@ concurrency:
 
 jobs:
   verify-local:
-    name: verify (ubuntu, native)
+    name: verify (ubuntu, native, node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24', '25', '26']
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
 
-      - name: Enable pnpm via corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.2 --activate
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,24 +54,24 @@ jobs:
         run: pnpm verify
 
   verify-macos:
-    name: verify (${{ matrix.os }}, kqueue)
+    name: verify (${{ matrix.os }}, kqueue, node ${{ matrix.node-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [macos-15-intel, macos-14]
+        node-version: ['24', '25', '26']
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
 
-      - name: Enable pnpm via corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.1.2 --activate
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,9 +87,13 @@ jobs:
         run: pnpm verify
 
   verify-docker:
-    name: verify (debian latest, docker)
+    name: verify (debian latest, docker, node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24', '25', '26']
     steps:
       - uses: actions/checkout@v6
 
@@ -97,10 +104,12 @@ jobs:
         with:
           context: .
           file: Dockerfile.verify
-          tags: http3-verify:latest
+          build-args: |
+            NODE_MAJOR=${{ matrix.node-version }}
+          tags: http3-verify:node${{ matrix.node-version }}
           load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=http3-verify-node${{ matrix.node-version }}
+          cache-to: type=gha,mode=max,scope=http3-verify-node${{ matrix.node-version }}
 
       - name: Run verify inside container
-        run: docker run --rm -e VERIFY_SKIP_BROWSER_E2E=1 http3-verify:latest
+        run: docker run --rm -e VERIFY_SKIP_BROWSER_E2E=1 http3-verify:node${{ matrix.node-version }}

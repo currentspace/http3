@@ -1,4 +1,5 @@
-FROM node:24-bookworm AS native-builder
+ARG NODE_MAJOR=24
+FROM node:${NODE_MAJOR}-bookworm AS native-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
@@ -13,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+RUN npm install -g pnpm@11.1.2
 
 WORKDIR /app
 
@@ -35,16 +36,16 @@ COPY index.js index.d.ts tsconfig.json ./
 RUN pnpm run build
 RUN pnpm prune --prod
 
-FROM node:24-bookworm AS hono-deps
+FROM node:${NODE_MAJOR}-bookworm AS hono-deps
 
-RUN corepack enable && corepack prepare pnpm@11.1.2 --activate
+RUN npm install -g pnpm@11.1.2
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY examples/hono/package.json ./examples/hono/package.json
 RUN pnpm --filter http3-hono-example install --prod --frozen-lockfile
 
-FROM node:24-bookworm-slim AS runtime
+FROM node:${NODE_MAJOR}-bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \

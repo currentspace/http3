@@ -75,6 +75,10 @@ step "typecheck (lib + tests)"
 pnpm run typecheck
 mark_done
 
+step "Node-API boundary check"
+pnpm run check:napi-boundary
+mark_done
+
 step "rust clippy (lib, default features)"
 # Lib lints with default features (node-api). Cargo.toml [lints.clippy] sets
 # pedantic to warn — we gate on errors only. Integration tests require the

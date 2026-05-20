@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -99,6 +99,7 @@
     "build:debug": "napi build --platform && npm run patch:native-loader && npm run build:dist",
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "check:napi-boundary": "node scripts/check-node-api-boundary.mjs",
     "lint": "eslint lib/ test/",
     "test:core": "npm run build:test && node --test --test-isolation=none --test-timeout=15000 dist-test/test/core/**/*.test.js",
     "test:runtime": "npm run build:test && node --test --test-isolation=none --test-timeout=15000 dist-test/test/runtime/**/*.test.js",
@@ -160,13 +161,13 @@
     "safari:checklist": "node scripts/safari-validation-checklist.mjs",
     "verify": "bash scripts/verify.sh",
     "verify:fast": "bash scripts/verify.sh --fast",
-    "verify:docker": "docker build -f Dockerfile.verify -t http3-verify . && docker run --rm http3-verify",
-    "verify:docker:io-uring": "docker build -f Dockerfile.verify -t http3-verify . && docker run --rm --security-opt seccomp=unconfined --cap-add=NET_ADMIN http3-verify",
-    "docker:interop:build": "docker build -f Dockerfile.verify -t http3-verify . && docker build -f Dockerfile.interop -t http3-interop .",
+    "verify:docker": "docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.verify -t http3-verify . && docker run --rm http3-verify",
+    "verify:docker:io-uring": "docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.verify -t http3-verify . && docker run --rm --security-opt seccomp=unconfined --cap-add=NET_ADMIN http3-verify",
+    "docker:interop:build": "docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.verify -t http3-verify . && docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.interop -t http3-interop .",
     "test:interop:cross-platform": "HTTP3_INTEROP_DOCKER=1 node --test --test-isolation=none --test-timeout=60000 dist-test/test/interop/cross-platform.test.js",
     "test:interop:cross-platform:io-uring": "HTTP3_INTEROP_DOCKER=1 HTTP3_INTEROP_DOCKER_IO_URING=1 node --test --test-isolation=none --test-timeout=60000 dist-test/test/interop/cross-platform.test.js",
     "sbom": "npm sbom --omit=dev > sbom.spdx.json",
-    "release:check": "npm run lint && npm run typecheck && npm test && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate && npm run test:rust",
+    "release:check": "npm run check:napi-boundary && npm run lint && npm run typecheck && npm test && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate && npm run test:rust",
     "release:local-gate": "npm run release:check && npm run smoke:install",
     "release:publish:npm": "node scripts/publish-npm-release.mjs",
     "release:bootstrap:native": "node scripts/bootstrap-native-package.mjs",
@@ -192,8 +193,8 @@
     "typescript-eslint": "catalog:"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.8.2",
-    "@currentspace/http3-linux-arm64-gnu": "0.8.2",
-    "@currentspace/http3-linux-x64-gnu": "0.8.2"
+    "@currentspace/http3-darwin-arm64": "0.8.3",
+    "@currentspace/http3-linux-arm64-gnu": "0.8.3",
+    "@currentspace/http3-linux-x64-gnu": "0.8.3"
   }
 }
