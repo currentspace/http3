@@ -194,7 +194,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Move canary dist-tag to 0.8.3
         run: npm dist-tag add @currentspace/http3@0.8.3 canary
