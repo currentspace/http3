@@ -3,6 +3,14 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Release workflow mode
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - npm-maintenance
       dist_tag:
         description: npm dist-tag to publish
         required: true
@@ -20,6 +28,7 @@ on:
 
 jobs:
   prebuilds:
+    if: ${{ inputs.mode == 'release' }}
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +68,7 @@ jobs:
           if-no-files-found: error
 
   validate-prebuilds:
+    if: ${{ inputs.mode == 'release' }}
     name: validate (${{ matrix.target }}, node ${{ matrix.node-version }})
     needs: prebuilds
     strategy:
@@ -131,6 +141,7 @@ jobs:
         run: node scripts/smoke-install.mjs
 
   publish:
+    if: ${{ inputs.mode == 'release' }}
     needs: [prebuilds, validate-prebuilds]
     runs-on: ubuntu-latest
     permissions:
@@ -172,3 +183,29 @@ jobs:
         env:
           HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
         run: node scripts/publish-npm-release.mjs
+
+  npm-maintenance:
+    if: ${{ inputs.mode == 'npm-maintenance' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Move canary dist-tag to 0.8.3
+        run: npm dist-tag add @currentspace/http3@0.8.3 canary
+
+      - name: Unpublish @currentspace/http3@0.2.0
+        run: npm unpublish @currentspace/http3@0.2.0 --force
+
+      - name: Verify npm state
+        run: |
+          npm view @currentspace/http3 dist-tags --json --prefer-online
+          if npm view @currentspace/http3@0.2.0 version --prefer-online; then
+            echo "::error ::@currentspace/http3@0.2.0 is still published"
+            exit 1
+          fi
