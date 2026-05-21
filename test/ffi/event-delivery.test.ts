@@ -6,7 +6,7 @@
  * SHUTDOWN_COMPLETE sentinel contract.
  */
 
-import { describe, it, after } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   loadBinding,
@@ -24,13 +24,12 @@ import {
   EVENT_HANDSHAKE_COMPLETE,
   EVENT_SHUTDOWN_COMPLETE,
 } from '../support/native-test-helpers.js';
+import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 const binding = loadBinding();
 
 // Force clean exit -- native TSFN prevent natural shutdown.
-after(() => {
-  setTimeout(() => process.exit(0), 200).unref();
-});
+forceNativeTestExit(200);
 
 // ── Event ordering ─────────────────────────────────────────────────
 

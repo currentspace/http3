@@ -385,18 +385,30 @@ describe('QUIC loopback', () => {
     });
 
     const addr = await server.listen(0, '127.0.0.1');
-    const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
+    const client = connectQuic(`127.0.0.1:${addr.port}`, {
       rejectUnauthorized: false,
     });
 
-    // Receive server-initiated stream
-    const serverData = await new Promise<Buffer>((resolve) => {
+    // Receive server-initiated stream. Attach this listener before awaiting
+    // ready(), because the server may open the stream as soon as it sees the
+    // session.
+    const serverDataPromise = new Promise<Buffer>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('server push timed out')), 10000);
       client.on('stream', (stream: QuicStream) => {
         const chunks: Buffer[] = [];
         stream.on('data', (c: Buffer) => chunks.push(c));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
+        stream.on('end', () => {
+          clearTimeout(timeout);
+          resolve(Buffer.concat(chunks));
+        });
+        stream.on('error', (err: Error) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
       });
     });
+    await client.ready();
+    const serverData = await serverDataPromise;
 
     // Also send from client
     const clientStream = client.openStream();

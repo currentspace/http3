@@ -8,7 +8,7 @@
  * exhaustion under rapid create/destroy cycles.
  */
 
-import { describe, it, after } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   loadBinding,
@@ -20,13 +20,12 @@ import {
 } from '../support/native-test-helpers.js';
 
 import type { H3Pair } from '../support/native-test-helpers.js';
+import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 const binding = loadBinding();
 
 // Force clean exit for lingering ThreadsafeFunction refs.
-after(() => {
-  setTimeout(() => process.exit(0), 500).unref();
-});
+forceNativeTestExit(500);
 
 // ── Auto-responder helper ───────────────────────────────────────
 

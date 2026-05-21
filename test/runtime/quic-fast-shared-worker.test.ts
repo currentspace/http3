@@ -16,6 +16,7 @@ import {
   beginLifecycleCapture,
   captureLifecycleFailureArtifacts,
   endLifecycleCapture,
+  waitForRuntimeTelemetry,
 } from '../support/failure-artifacts.js';
 
 function isFastPathUnavailable(error: unknown): boolean {
@@ -72,8 +73,16 @@ describe('QUIC client worker topology', () => {
 
       await Promise.all(clients.map((client) => client.close()));
       clients = [];
-      await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
-      const closedTelemetry = binding.runtimeTelemetry();
+      const closedTelemetry = await waitForRuntimeTelemetry(
+        (snapshot) => (
+          snapshot.rawQuicClientSessionsClosed >= 1
+          && snapshot.workerThreadStopsTotal >= 1
+          && snapshot.workerLoopExitByCommandTotal + snapshot.workerLoopExitByHandlerDoneTotal >= 1
+          && snapshot.shutdownCompleteEmittedTotal >= 1
+        ),
+        5_000,
+        'quic-fast-worker-close',
+      );
       assert.ok(closedTelemetry.rawQuicClientSessionsClosed >= 1);
       assert.ok(closedTelemetry.workerThreadStopsTotal >= 1);
       assert.ok(

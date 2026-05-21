@@ -5,7 +5,7 @@
  * datagram support, ALPN negotiation, and client certificate authentication.
  */
 
-import { describe, it, after } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   loadBinding,
@@ -20,15 +20,15 @@ import {
   EVENT_NEW_STREAM,
   EVENT_DATA,
 } from '../support/native-test-helpers.js';
+import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 const binding = loadBinding();
 
-describe('Config boundary — options cross JS-to-Rust FFI', () => {
-  // Native objects may retain ThreadsafeFunction references; force clean exit.
-  after(() => {
-    setTimeout(() => process.exit(0), 200).unref();
-  });
+// Native objects may retain ThreadsafeFunction references; force clean exit
+// while preserving failures.
+forceNativeTestExit(200);
 
+describe('Config boundary — options cross JS-to-Rust FFI', () => {
   // ── maxIdleTimeoutMs ──────────────────────────────────────────
 
   it('maxIdleTimeoutMs is respected', async () => {

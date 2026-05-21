@@ -6,7 +6,7 @@
  * events, and SESSION_TICKET delivery.
  */
 
-import { describe, it, after } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   loadBinding,
@@ -26,13 +26,12 @@ import {
   EVENT_SESSION_TICKET,
   EVENT_SHUTDOWN_COMPLETE,
 } from '../support/native-test-helpers.js';
+import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 const binding = loadBinding();
 
 // Force clean exit -- native TSFN prevent natural shutdown.
-after(() => {
-  setTimeout(() => process.exit(0), 500).unref();
-});
+forceNativeTestExit(500);
 
 function isH3BodyDataEvent(evt: any): boolean {
   return (evt.eventType === EVENT_DATA || evt.eventType === EVENT_HEADERS) && !!evt.data;

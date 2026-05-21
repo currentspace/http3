@@ -4,14 +4,19 @@
  * N-API boundary, with expected error messages intact.
  */
 
-import { describe, it, after, before } from 'node:test';
+import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateTestCerts } from '../support/generate-certs.js';
+import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 // Load the native binding directly (bypassing TS wrappers).
 const binding = require('../../../index.js');
 
 const EVENT_SHUTDOWN_COMPLETE = 15;
+
+// Error-path tests intentionally create native objects whose ThreadsafeFunctions
+// are never consumed. Force a clean exit after all tests while preserving failures.
+forceNativeTestExit(100);
 
 function waitForShutdown(events: any[], timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -36,13 +41,6 @@ describe('FFI error propagation', () => {
 
   before(() => {
     certs = generateTestCerts();
-  });
-
-  // Error-path tests intentionally create native objects whose
-  // ThreadsafeFunctions are never consumed (e.g. connect() throws
-  // before taking the TSFN). Force a clean exit after all tests.
-  after(() => {
-    setTimeout(() => process.exit(0), 100).unref();
   });
 
   // ── Constructor validation errors ──────────────────────────────

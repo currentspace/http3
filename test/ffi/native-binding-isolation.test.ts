@@ -5,9 +5,10 @@
  * correctly for both H3 (Worker) and raw QUIC classes.
  */
 
-import { describe, it, after, before } from 'node:test';
+import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateTestCerts } from '../support/generate-certs.js';
+import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 // Load the native binding directly (bypassing TS wrappers).
 const binding = require('../../../index.js');
@@ -20,6 +21,10 @@ const EVENT_DATA = 4;
 const EVENT_FINISHED = 5;
 const EVENT_HANDSHAKE_COMPLETE = 11;
 const EVENT_SHUTDOWN_COMPLETE = 15;
+
+// Native objects that are constructed but never fully started may retain a
+// ThreadsafeFunction reference. Force clean exit while preserving failures.
+forceNativeTestExit(100);
 
 function waitForEvent(
   events: any[],
@@ -90,12 +95,6 @@ describe('Native binding isolation', () => {
 
   before(() => {
     certs = generateTestCerts();
-  });
-
-  // Native objects that are constructed but never fully started may
-  // retain a ThreadsafeFunction reference. Force clean exit.
-  after(() => {
-    setTimeout(() => process.exit(0), 100).unref();
   });
 
   // ── H3 Server isolation ────────────────────────────────────────

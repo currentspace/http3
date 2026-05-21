@@ -38,6 +38,27 @@ export function appendLifecycleArtifacts(error: unknown, label: string): void {
   error.message = `${error.message}\nLifecycle artifacts:\n${formatLifecycleFailureArtifacts(artifacts)}`;
 }
 
+export async function waitForRuntimeTelemetry(
+  predicate: (snapshot: ReactorTelemetrySnapshot) => boolean,
+  timeoutMs: number,
+  label: string,
+): Promise<ReactorTelemetrySnapshot> {
+  const started = Date.now();
+  let snapshot = binding.runtimeTelemetry();
+
+  while (!predicate(snapshot)) {
+    if (Date.now() - started > timeoutMs) {
+      const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+      appendLifecycleArtifacts(error, label);
+      throw error;
+    }
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+    snapshot = binding.runtimeTelemetry();
+  }
+
+  return snapshot;
+}
+
 export async function withLifecycleTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
