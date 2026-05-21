@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 
 [workspace.dependencies]
 bytes = "1"
@@ -33,7 +33,7 @@ tikv-jemallocator = "0.6"
 
 [package]
 name = "http3"
-version = "0.8.3"
+version = "0.8.4"
 edition.workspace = true
 rust-version.workspace = true
 autobins = false
@@ -118,6 +118,7 @@ harness = false
 debug = 1  # line tables for perf/flamegraph symbol resolution
 
 [lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(kani_contracts)'] }
 unsafe_code = "warn"
 unused_must_use = "deny"
 

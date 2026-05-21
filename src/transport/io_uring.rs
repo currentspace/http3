@@ -19,6 +19,7 @@ mod inner {
     use std::time::{Duration, Instant};
 
     use crate::buffer_pool::AdaptiveBufferPool;
+    use crate::proof_core::ring_layout;
     use crate::reactor_metrics;
     use crate::transport::socket::{
         CMSG_CONTROL_LEN, build_gso_cmsg, enable_gro, parse_recv_cmsgs, probe_gso, set_pktinfo,
@@ -176,7 +177,9 @@ mod inner {
             let entries = ring_ptr.cast::<io_uring::types::BufRingEntry>();
             for i in 0..(RX_RING_SIZE as usize) {
                 let entry = unsafe { &mut *entries.add(i) };
-                let buf_addr = unsafe { buf_base.add(i * RX_BUF_SIZE) };
+                let offset = ring_layout::provided_buffer_offset(i as u16, RX_BUF_SIZE)
+                    .expect("RX provided-buffer offset overflow");
+                let buf_addr = unsafe { buf_base.add(offset) };
                 entry.set_addr(buf_addr as u64);
                 entry.set_len(RX_BUF_SIZE as u32);
                 entry.set_bid(i as u16);
@@ -219,7 +222,14 @@ mod inner {
             let slot = (self.tail % RX_RING_SIZE) as usize;
             let entry = unsafe { &mut *entries.add(slot) };
 
-            let buf_addr = unsafe { self.buf_base.add((bid as usize) * RX_BUF_SIZE) };
+            let offset = ring_layout::provided_buffer_offset(bid, RX_BUF_SIZE)
+                .expect("RX provided-buffer offset overflow");
+            debug_assert!(ring_layout::provided_buffer_range_in_layout(
+                bid,
+                RX_RING_SIZE,
+                RX_BUF_SIZE
+            ));
+            let buf_addr = unsafe { self.buf_base.add(offset) };
             entry.set_addr(buf_addr as u64);
             entry.set_len(RX_BUF_SIZE as u32);
             entry.set_bid(bid);
@@ -241,7 +251,13 @@ mod inner {
         /// Get a reference to the buffer data for a given buffer ID.
         fn buffer_data(&self, bid: ProvidedBufferId) -> &[u8] {
             let bid = bid.get();
-            let offset = (bid as usize) * RX_BUF_SIZE;
+            let offset = ring_layout::provided_buffer_offset(bid, RX_BUF_SIZE)
+                .expect("RX provided-buffer offset overflow");
+            debug_assert!(ring_layout::provided_buffer_range_in_layout(
+                bid,
+                RX_RING_SIZE,
+                RX_BUF_SIZE
+            ));
             // SAFETY: ProvidedBufferId proves bid < RX_RING_SIZE; buffer region is valid.
             unsafe { std::slice::from_raw_parts(self.buf_base.add(offset), RX_BUF_SIZE) }
         }

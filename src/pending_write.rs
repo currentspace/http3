@@ -9,7 +9,7 @@ use quiche::BufSplit;
 
 use crate::arc_buf::ArcBuf;
 use crate::chunk_pool::Chunk;
-use crate::outbound_admission::{accepted_outbound_payload_units, outbound_payload_units};
+use crate::proof_core::pending_write_model::{self, PendingWriteSnapshot};
 
 /// Buffered partial write for a stream blocked by local/quiche flow control.
 pub(crate) struct PendingWrite {
@@ -41,7 +41,11 @@ impl PendingWrite {
     }
 
     pub(crate) fn queued_units(&self) -> usize {
-        outbound_payload_units(self.queued_bytes(), self.fin)
+        self.snapshot().queued_units()
+    }
+
+    pub(crate) fn snapshot(&self) -> PendingWriteSnapshot {
+        PendingWriteSnapshot::new(self.queued_bytes(), self.fin)
     }
 }
 
@@ -69,7 +73,7 @@ where
             let payload_len = buf.remaining_len();
             let send_fin = pw.fin && pw.chunks.is_empty();
             let outcome = send(buf, send_fin)?;
-            released_units += accepted_outbound_payload_units(
+            released_units += pending_write_model::released_units_for_send(
                 payload_len,
                 send_fin,
                 outcome.written,
@@ -94,7 +98,7 @@ where
         if pw.fin {
             let payload_len = 0;
             let outcome = send(ArcBuf::from_vec(Vec::new()), true)?;
-            released_units += accepted_outbound_payload_units(
+            released_units += pending_write_model::released_units_for_send(
                 payload_len,
                 true,
                 outcome.written,
@@ -129,6 +133,21 @@ where
 
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_pending_write_state(data: &[u8]) {
+    let ops = data.chunks(3).map(|op| {
+        (
+            op.first().copied().unwrap_or(0),
+            op.get(1).copied().unwrap_or(0),
+            op.get(2).copied().unwrap_or(0),
+        )
+    });
+    fuzz_pending_write_state_ops(ops);
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_pending_write_state_ops<I>(ops: I)
+where
+    I: IntoIterator<Item = (u8, u8, u8)>,
+{
     struct FakeSender {
         max_accept: usize,
         accepted: usize,
@@ -142,10 +161,9 @@ pub(crate) fn fuzz_pending_write_state(data: &[u8]) {
     let mut fin_requested = false;
     let mut fin_accepted = false;
 
-    for op in data.chunks(3) {
-        let tag = op.first().copied().unwrap_or(0) % 5;
-        let len = op.get(1).copied().unwrap_or(0) as usize % 65;
-        let arg = op.get(2).copied().unwrap_or(0);
+    for (tag_byte, len_byte, arg) in ops {
+        let tag = tag_byte % 5;
+        let len = len_byte as usize % 65;
 
         match tag {
             // Append a data chunk, optionally carrying FIN.
@@ -298,5 +316,23 @@ mod tests {
         assert!(!outcome.done);
         assert_eq!(outcome.released_units, 3);
         assert_eq!(pending.queued_bytes(), 5);
+    }
+
+    #[test]
+    fn flush_full_payload_with_deferred_fin_keeps_one_unit() {
+        let mut pending = PendingWrite::new(ArcBuf::from_vec(vec![1; 8]), true);
+        let outcome = flush_pending_write_with_progress(&mut pending, |buf, send_fin| {
+            assert!(send_fin);
+            Ok::<_, ()>(PendingWriteSendOutcome {
+                written: buf.remaining_len(),
+                fin_accepted: false,
+                remainder: None,
+            })
+        })
+        .unwrap();
+
+        assert!(!outcome.done);
+        assert_eq!(outcome.released_units, 7);
+        assert_eq!(pending.queued_units(), 1);
     }
 }

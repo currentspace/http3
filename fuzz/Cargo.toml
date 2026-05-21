@@ -9,6 +9,8 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libc.workspace = true
 libfuzzer-sys.workspace = true
 
 [dependencies.http3]
@@ -24,6 +26,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "parse_recv_cmsgs_structured"
+path = "fuzz_targets/parse_recv_cmsgs_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "unsafe_wrappers"
 path = "fuzz_targets/unsafe_wrappers.rs"
 test = false
@@ -31,8 +40,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "unsafe_wrappers_structured"
+path = "fuzz_targets/unsafe_wrappers_structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pending_write_state"
 path = "fuzz_targets/pending_write_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pending_write_ops"
+path = "fuzz_targets/pending_write_ops.rs"
 test = false
 doc = false
 bench = false

@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::proof_core::admission::{self, AdmissionWatermarks, AdmitOutcome};
 use crate::reactor_metrics;
 
 pub(crate) const OUTBOUND_ADMISSION_HIGH_WATER: usize = 4 * 1024 * 1024;
@@ -29,12 +30,11 @@ impl Default for OutboundAdmission {
 
 impl OutboundAdmission {
     pub(crate) fn new(high_water: usize, low_water: usize) -> Self {
-        let high_water = high_water.max(1);
-        let low_water = low_water.min(high_water.saturating_sub(1));
+        let watermarks = AdmissionWatermarks::new(high_water, low_water);
         Self {
             queued: AtomicUsize::new(0),
-            high_water,
-            low_water,
+            high_water: watermarks.high,
+            low_water: watermarks.low,
             pressured: AtomicBool::new(false),
         }
     }
@@ -46,29 +46,28 @@ impl OutboundAdmission {
 
         loop {
             let current = self.queued.load(Ordering::Acquire);
-            let limit = self.high_water.max(units);
-            let Some(next) = current.checked_add(units) else {
-                self.pressured.store(true, Ordering::Release);
-                reactor_metrics::record_outbound_admission_backpressure();
-                return false;
-            };
-
-            if next > limit {
-                self.pressured.store(true, Ordering::Release);
-                let latest = self.queued.load(Ordering::Acquire);
-                if latest.checked_add(units).is_some_and(|n| n <= limit) {
-                    continue;
+            match admission::admit_next(current, units, self.high_water) {
+                AdmitOutcome::Admitted { next_queued } => {
+                    if self
+                        .queued
+                        .compare_exchange(current, next_queued, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return true;
+                    }
                 }
-                reactor_metrics::record_outbound_admission_backpressure();
-                return false;
-            }
-
-            if self
-                .queued
-                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return true;
+                AdmitOutcome::Backpressured => {
+                    self.pressured.store(true, Ordering::Release);
+                    let latest = self.queued.load(Ordering::Acquire);
+                    if matches!(
+                        admission::admit_next(latest, units, self.high_water),
+                        AdmitOutcome::Admitted { .. }
+                    ) {
+                        continue;
+                    }
+                    reactor_metrics::record_outbound_admission_backpressure();
+                    return false;
+                }
             }
         }
     }
@@ -85,7 +84,7 @@ impl OutboundAdmission {
 
         let next = loop {
             let current = self.queued.load(Ordering::Acquire);
-            let next = current.saturating_sub(units);
+            let next = admission::release_next(current, units);
             if self
                 .queued
                 .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
@@ -95,7 +94,12 @@ impl OutboundAdmission {
             }
         };
 
-        let write_ready = next <= self.low_water && self.pressured.swap(false, Ordering::AcqRel);
+        let was_pressured = if next <= self.low_water {
+            self.pressured.swap(false, Ordering::AcqRel)
+        } else {
+            false
+        };
+        let write_ready = admission::release_emits_write_ready(next, self.low_water, was_pressured);
         reactor_metrics::record_outbound_admission_release(units, write_ready);
         write_ready
     }
@@ -107,7 +111,7 @@ impl OutboundAdmission {
 }
 
 pub(crate) fn outbound_payload_units(payload_len: usize, fin: bool) -> usize {
-    payload_len.max(usize::from(fin))
+    admission::outbound_payload_units(payload_len, fin)
 }
 
 pub(crate) fn accepted_outbound_payload_units(
@@ -116,11 +120,7 @@ pub(crate) fn accepted_outbound_payload_units(
     written: usize,
     fin_accepted: bool,
 ) -> usize {
-    if payload_len == 0 {
-        return usize::from(fin && fin_accepted);
-    }
-
-    written.min(payload_len)
+    admission::accepted_outbound_payload_units(payload_len, fin, written, fin_accepted)
 }
 
 #[cfg(test)]
@@ -169,6 +169,7 @@ mod tests {
         assert_eq!(accepted_outbound_payload_units(0, true, 0, false), 0);
         assert_eq!(accepted_outbound_payload_units(0, true, 0, true), 1);
         assert_eq!(accepted_outbound_payload_units(8, true, 3, false), 3);
+        assert_eq!(accepted_outbound_payload_units(8, true, 8, false), 7);
         assert_eq!(accepted_outbound_payload_units(8, true, 8, true), 8);
     }
 }

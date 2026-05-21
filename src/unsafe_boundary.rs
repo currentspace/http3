@@ -2,6 +2,8 @@
 
 use bytes::BufMut;
 
+use crate::proof_core::{recv_buf_model::RecvBufModel, ring_layout};
+
 /// A packet buffer whose bytes are initialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitializedPacketBuf(Vec<u8>);
@@ -41,7 +43,7 @@ impl InitializedPacketBuf {
 #[derive(Debug)]
 pub struct QuicheRecvBuf {
     buf: Vec<u8>,
-    target_len: usize,
+    model: RecvBufModel,
 }
 
 impl QuicheRecvBuf {
@@ -54,23 +56,26 @@ impl QuicheRecvBuf {
         if buf.capacity() < target_len {
             buf.reserve_exact(target_len);
         }
-        Self { buf, target_len }
+        Self {
+            buf,
+            model: RecvBufModel::new(target_len),
+        }
     }
 
     pub fn initialized_len(&self) -> usize {
-        self.buf.len()
+        self.model.initialized_len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.buf.is_empty()
+        self.model.is_empty()
     }
 
     pub fn is_full(&self) -> bool {
-        self.buf.len() >= self.target_len
+        self.model.is_full()
     }
 
     pub fn remaining(&self) -> usize {
-        self.target_len.saturating_sub(self.buf.len())
+        self.model.remaining()
     }
 
     pub fn recv_h3_body<F>(
@@ -82,7 +87,7 @@ impl QuicheRecvBuf {
     where
         F: quiche::BufFactory,
     {
-        let before = self.buf.len();
+        let before = self.model.initialized_len();
         let remaining = self.remaining();
         let mut out = (&mut self.buf).limit(remaining);
         let written = h3_conn.recv_body_buf(quiche_conn, stream_id, &mut out)?;
@@ -98,7 +103,7 @@ impl QuicheRecvBuf {
     where
         F: quiche::BufFactory,
     {
-        let before = self.buf.len();
+        let before = self.model.initialized_len();
         let remaining = self.remaining();
         let mut out = (&mut self.buf).limit(remaining);
         let (written, fin) = quiche_conn.stream_recv_buf(stream_id, &mut out)?;
@@ -107,21 +112,18 @@ impl QuicheRecvBuf {
     }
 
     pub fn append_initialized(&mut self, data: &[u8]) -> usize {
-        let len = data.len().min(self.remaining());
+        let len = self.model.append_len(data.len());
         self.buf.extend_from_slice(&data[..len]);
+        self.model = self.model.after_append(len);
         len
     }
 
-    fn validate_reported_write(&self, before: usize, remaining: usize, written: usize) {
+    fn validate_reported_write(&mut self, before: usize, remaining: usize, written: usize) {
         assert!(
-            written <= remaining,
+            RecvBufModel::reported_write_is_valid(before, remaining, written, self.buf.len()),
             "quiche receive API reported {written} bytes for {remaining}-byte buffer"
         );
-        assert_eq!(
-            self.buf.len().saturating_sub(before),
-            written,
-            "quiche receive API wrote a different number of bytes than it reported"
-        );
+        self.model = self.model.after_append(written);
     }
 
     pub fn into_initialized_vec(self) -> Vec<u8> {
@@ -140,7 +142,7 @@ pub struct ProvidedBufferId(u16);
 
 impl ProvidedBufferId {
     pub fn new(bid: u16, ring_size: u16) -> Option<Self> {
-        (bid < ring_size).then_some(Self(bid))
+        ring_layout::provided_buffer_id_is_valid(bid, ring_size).then_some(Self(bid))
     }
 
     pub fn get(self) -> u16 {

@@ -6,13 +6,10 @@
 use ring::rand::SecureRandom;
 
 use crate::error::Http3NativeError;
+use crate::proof_core::cid_model::{self, CidModelError};
 
 pub const SCID_LEN: usize = quiche::MAX_CONN_ID_LEN;
-pub const QUIC_LB_SERVER_ID_LEN: usize = 8;
-
-const CONFIG_ROTATION_MASK: u8 = 0b1110_0000;
-const RANDOM_LOW_BITS_MASK: u8 = 0b0001_1111;
-const MAX_CONFIG_ROTATION: u8 = 0b110;
+pub const QUIC_LB_SERVER_ID_LEN: usize = cid_model::QUIC_LB_SERVER_ID_LEN;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CidEncoding {
@@ -32,7 +29,7 @@ impl CidEncoding {
         server_id: [u8; QUIC_LB_SERVER_ID_LEN],
         config_rotation: u8,
     ) -> Result<Self, Http3NativeError> {
-        if config_rotation > MAX_CONFIG_ROTATION {
+        if !cid_model::valid_config_rotation(config_rotation) {
             return Err(Http3NativeError::Config(
                 "quic_lb config_rotation must be in range 0..=6 (0b111 is reserved)".into(),
             ));
@@ -93,19 +90,19 @@ pub fn apply_quic_lb_plaintext(
         )));
     }
 
-    if config_rotation > MAX_CONFIG_ROTATION {
-        return Err(Http3NativeError::Config(
+    cid_model::apply_quic_lb_plaintext(scid, SCID_LEN, server_id, config_rotation)
+        .map_err(cid_model_error)
+}
+
+fn cid_model_error(err: CidModelError) -> Http3NativeError {
+    match err {
+        CidModelError::InvalidScidLen => {
+            Http3NativeError::Config(format!("scid length must be exactly {SCID_LEN} bytes",))
+        }
+        CidModelError::InvalidConfigRotation => Http3NativeError::Config(
             "quic_lb config_rotation must be in range 0..=6 (0b111 is reserved)".into(),
-        ));
+        ),
     }
-
-    // QUIC-LB plaintext format (draft): first octet = config rotation bits +
-    // random low bits; server ID starts at octet 2 (index 1).
-    let random_low_bits = scid[0] & RANDOM_LOW_BITS_MASK;
-    scid[0] = ((config_rotation << 5) & CONFIG_ROTATION_MASK) | random_low_bits;
-    scid[1..1 + QUIC_LB_SERVER_ID_LEN].copy_from_slice(&server_id);
-
-    Ok(())
 }
 
 #[cfg(test)]

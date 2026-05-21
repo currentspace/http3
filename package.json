@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -131,7 +131,17 @@
     "test:rust:stress:all": "cargo test --test stress_udp_quic --test stress_sustained_throughput --test stress_memory_stability --test stress_connection_churn --test stress_timer_accuracy --features bench-internals --no-default-features -- --ignored",
     "test:rust:loom": "cargo test --test unsafe_wrappers_loom --test buffer_recycler_loom --no-default-features",
     "test:rust:miri": "cargo +nightly miri test --lib --no-default-features unsafe_boundary",
-    "test:rust:fuzz:smoke": "cargo +nightly fuzz run unsafe_wrappers -- -runs=1 && cargo +nightly fuzz run pending_write_state -- -runs=1 && cargo +nightly fuzz run parse_recv_cmsgs -- -runs=1",
+    "test:rust:fuzz:smoke": "cargo +nightly fuzz run unsafe_wrappers -- -runs=1 && cargo +nightly fuzz run unsafe_wrappers_structured -- -runs=1 && cargo +nightly fuzz run pending_write_state -- -runs=1 && cargo +nightly fuzz run pending_write_ops -- -runs=1 && cargo +nightly fuzz run parse_recv_cmsgs -- -runs=1 && cargo +nightly fuzz run parse_recv_cmsgs_structured -- -runs=1",
+    "rust:safety:bootstrap": "bash scripts/rust-safety-bootstrap.sh",
+    "test:rust:kani:preflight": "HTTP3_KANI_LIST_ONLY=1 bash scripts/rust-kani-smoke.sh",
+    "test:rust:kani:smoke": "bash scripts/rust-kani-smoke.sh",
+    "test:rust:kani:deep": "HTTP3_KANI_DEEP=1 bash scripts/rust-kani-smoke.sh",
+    "rust:verus:bootstrap": "bash scripts/rust-verus-bootstrap.sh",
+    "test:rust:verus": "bash scripts/rust-verus-smoke.sh",
+    "test:rust:formal:smoke": "npm run test:rust:safety:smoke && npm run test:rust:verus",
+    "test:rust:formal:deep": "HTTP3_KANI_DEEP=1 bash scripts/rust-kani-smoke.sh && HTTP3_VERUS_REQUIRED=1 bash scripts/rust-verus-smoke.sh",
+    "test:rust:safety:smoke": "bash scripts/rust-safety-smoke.sh",
+    "test:rust:sanitizer:asan": "bash scripts/rust-sanitizer-asan.sh",
     "test:ffi:h3": "npm run build:test && node --test --test-isolation=none --test-timeout=15000 dist-test/test/ffi/h3-event-coverage.test.js dist-test/test/ffi/h3-stress.test.js",
     "test:interop:h3": "npm run build:test && node --test --test-isolation=none --test-timeout=15000 dist-test/test/interop/h3-loopback.test.js dist-test/test/interop/h3-edge-cases.test.js",
     "test:longhaul": "npm run build:test && HTTP3_LONGHAUL=1 node --expose-gc --test --test-timeout=700000 dist-test/test/longhaul/**/*.test.js",
@@ -194,8 +204,8 @@
     "typescript-eslint": "catalog:"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.8.3",
-    "@currentspace/http3-linux-arm64-gnu": "0.8.3",
-    "@currentspace/http3-linux-x64-gnu": "0.8.3"
+    "@currentspace/http3-darwin-arm64": "0.8.4",
+    "@currentspace/http3-linux-arm64-gnu": "0.8.4",
+    "@currentspace/http3-linux-x64-gnu": "0.8.4"
   }
 }

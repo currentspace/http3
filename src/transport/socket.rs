@@ -5,6 +5,7 @@
 use std::net::{SocketAddr, UdpSocket};
 
 use crate::error::Http3NativeError;
+use crate::proof_core::cmsg_cursor;
 
 /// Preferred buffer sizes, tried in order until one succeeds.
 /// macOS caps at kern.ipc.maxsockbuf (typically 8MB).
@@ -401,7 +402,7 @@ pub(crate) fn set_recv_ecn(socket: &UdpSocket) {
 // ── Unified cmsg / sockaddr helpers ────────────────────────────────
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn cmsg_align(len: usize) -> usize {
+fn cmsg_alignment() -> usize {
     // Linux's `CMSG_ALIGN` uses sizeof(size_t) = 8 on 64-bit; Darwin's
     // `__DARWIN_ALIGN32` uses sizeof(uint32_t) = 4. Mismatching the
     // alignment makes `cmsg_data_offset()` skip past the actual payload
@@ -409,15 +410,29 @@ fn cmsg_align(len: usize) -> usize {
     // shipped because the IPv4 destination addr it extracts was never
     // observably consumed.)
     #[cfg(target_os = "linux")]
-    let align = std::mem::size_of::<usize>();
+    {
+        std::mem::size_of::<usize>()
+    }
     #[cfg(target_os = "macos")]
-    let align = std::mem::size_of::<u32>();
-    (len + align - 1) & !(align - 1)
+    {
+        std::mem::size_of::<u32>()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn checked_cmsg_align(len: usize) -> Option<usize> {
+    cmsg_cursor::checked_cmsg_align(len, cmsg_alignment())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cmsg_align(len: usize) -> usize {
+    checked_cmsg_align(len).expect("cmsg length alignment overflow")
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cmsg_data_offset() -> usize {
-    cmsg_align(std::mem::size_of::<libc::cmsghdr>())
+    cmsg_cursor::cmsg_data_offset(std::mem::size_of::<libc::cmsghdr>(), cmsg_alignment())
+        .expect("cmsg data offset overflow")
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -448,8 +463,12 @@ pub(crate) struct ParsedRecvCmsgs {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
     let mut out = ParsedRecvCmsgs::default();
-    let mut offset = 0;
-    while offset + std::mem::size_of::<libc::cmsghdr>() <= control.len() {
+    let mut offset: usize = 0;
+    let hdr_size = std::mem::size_of::<libc::cmsghdr>();
+    while offset
+        .checked_add(hdr_size)
+        .is_some_and(|end| end <= control.len())
+    {
         // SAFETY: bounds checked above; read_unaligned handles alignment.
         #[allow(unsafe_code)]
         let hdr: libc::cmsghdr =
@@ -457,7 +476,16 @@ pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
         if hdr.cmsg_len == 0 {
             break;
         }
-        let data_off = offset + cmsg_data_offset();
+        let Some(step) = cmsg_cursor::cmsg_step(
+            control.len(),
+            offset,
+            hdr_size,
+            hdr.cmsg_len as usize,
+            cmsg_alignment(),
+        ) else {
+            break;
+        };
+        let data_off = step.data_offset;
 
         // IPv6 destination address — same cmsg type on Linux and macOS.
         if hdr.cmsg_level == libc::IPPROTO_IPV6 && hdr.cmsg_type == libc::IPV6_PKTINFO {
@@ -526,7 +554,7 @@ pub(crate) fn parse_recv_cmsgs(control: &[u8]) -> ParsedRecvCmsgs {
             }
         }
 
-        offset += cmsg_align(hdr.cmsg_len as usize);
+        offset = step.next_offset;
     }
     out
 }
@@ -695,5 +723,25 @@ mod tests {
         let ceiling = query_path_mtu(&peer).expect("loopback path MTU should be discoverable");
         assert!(ceiling >= crate::config::FALLBACK_MAX_UDP_PAYLOAD);
         assert!(ceiling <= QUIC_MAX_PACKET_SIZE);
+    }
+
+    #[test]
+    fn parse_recv_cmsgs_stops_on_unalignable_cmsg_len() {
+        let mut control = vec![0u8; std::mem::size_of::<libc::cmsghdr>()];
+        let hdr = libc::cmsghdr {
+            cmsg_len: usize::MAX as _,
+            cmsg_level: libc::IPPROTO_IP,
+            cmsg_type: libc::IP_TOS,
+        };
+        #[allow(unsafe_code)]
+        unsafe {
+            std::ptr::write_unaligned(control.as_mut_ptr().cast(), hdr);
+        }
+
+        let parsed = parse_recv_cmsgs(&control);
+
+        assert!(parsed.local_ip.is_none());
+        assert!(parsed.tos.is_none());
+        assert!(parsed.segment_size.is_none());
     }
 }

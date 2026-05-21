@@ -22,6 +22,7 @@ mod outbound_admission;
 mod pending_write;
 mod ping_state;
 pub mod profile;
+mod proof_core;
 #[cfg(feature = "node-api")]
 mod quic_client;
 mod quic_connection;
@@ -38,6 +39,9 @@ mod transport;
 pub mod unsafe_boundary;
 mod worker;
 mod write_outcome;
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench_exports {
@@ -108,6 +112,10 @@ pub mod fuzz_exports {
 
     pub fn pending_write_state(data: &[u8]) {
         crate::pending_write::fuzz_pending_write_state(data);
+    }
+
+    pub fn pending_write_state_ops(ops: &[(u8, u8, u8)]) {
+        crate::pending_write::fuzz_pending_write_state_ops(ops.iter().copied());
     }
 }
 
