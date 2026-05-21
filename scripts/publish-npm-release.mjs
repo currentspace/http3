@@ -218,8 +218,12 @@ function shouldMirrorCanary(distTag) {
   return distTag === 'latest' && process.env.HTTP3_MIRROR_CANARY_ON_LATEST !== '0';
 }
 
+function npmAuthToken() {
+  return process.env.NPM_TOKEN || process.env.NODE_AUTH_TOKEN || '';
+}
+
 function requireNpmTokenForCanaryMirror(dryRun) {
-  const npmToken = process.env.NPM_TOKEN;
+  const npmToken = npmAuthToken();
   if (typeof npmToken === 'string' && npmToken.length > 0) {
     return;
   }
@@ -238,7 +242,7 @@ function updateDistTag(name, version, distTag, dryRun) {
 
   run('npm', ['dist-tag', 'add', `${name}@${version}`, distTag], {
     env: {
-      NODE_AUTH_TOKEN: process.env.NPM_TOKEN,
+      NODE_AUTH_TOKEN: npmAuthToken(),
     },
   });
 }

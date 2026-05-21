@@ -1,5 +1,5 @@
 # Full-verification harness, debian latest (trixie). Mirrors what
-# scripts/verify.sh expects: rust >= 1.94, Node 24/26, pnpm 11, build
+# scripts/verify.sh expects: rust >= 1.95, Node 24/26, pnpm 11, build
 # essentials. Built and run via `pnpm verify:docker`.
 #
 # The source tree is baked into the image (no bind mounts) so the host's
@@ -25,9 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libnss3-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Cargo.toml requires rust >= 1.94.
+# Cargo.toml requires rust >= 1.95.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain 1.94.0 \
+      | sh -s -- -y --profile minimal --default-toolchain 1.95.0 \
     && ln -s /root/.cargo/bin/cargo /usr/local/bin/cargo \
     && ln -s /root/.cargo/bin/rustc /usr/local/bin/rustc \
     && ln -s /root/.cargo/bin/rustup /usr/local/bin/rustup

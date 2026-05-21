@@ -9,6 +9,9 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { spawn, execSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { generateTestCerts } from '../support/generate-certs.js';
 import { createSecureServer, createSseStream } from '../../lib/index.js';
 import type { Http3SecureServer } from '../../lib/index.js';
@@ -25,13 +28,15 @@ type CurlProtocol = 'h3' | 'h2';
 
 async function spawnCurl(url: string, args: string[] = [], protocol: CurlProtocol = 'h3'): Promise<CurlResult> {
   const protocolArgs = protocol === 'h3' ? ['--http3-only'] : ['--http2'];
+  const headerDir = mkdtempSync(join(tmpdir(), 'http3-curl-'));
+  const headerPath = join(headerDir, 'headers.txt');
   return new Promise((resolve) => {
     const proc = spawn('curl', [
       ...protocolArgs,
       '-k',
       '-s',
       '-o', '-',
-      '-D', '/dev/stderr',
+      '-D', headerPath,
       '--max-time', '5',
       ...args,
       url,
@@ -42,6 +47,13 @@ async function spawnCurl(url: string, args: string[] = [], protocol: CurlProtoco
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
     proc.on('close', (code) => {
+      try {
+        stderr += readFileSync(headerPath, 'utf8');
+      } catch {
+        // Header dumps are only diagnostic context for assertion failures.
+      } finally {
+        rmSync(headerDir, { recursive: true, force: true });
+      }
       resolve({ stdout, stderr, exitCode: code ?? 1 });
     });
   });

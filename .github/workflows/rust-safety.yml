@@ -1,0 +1,77 @@
+name: Rust Safety
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 7 * * 2'
+  workflow_dispatch:
+
+concurrency:
+  group: rust-safety-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: safety smoke (latest stable + nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Bootstrap latest safety tools
+        env:
+          HTTP3_SAFETY_FORCE_TOOL_INSTALL: '1'
+        run: bash scripts/rust-safety-bootstrap.sh
+
+      - name: Run safety smoke
+        run: bash scripts/rust-safety-smoke.sh
+
+  scheduled-deep:
+    name: scheduled deep safety
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Bootstrap latest safety tools
+        env:
+          HTTP3_SAFETY_FORCE_TOOL_INSTALL: '1'
+        run: bash scripts/rust-safety-bootstrap.sh
+
+      - name: Bootstrap latest Verus
+        run: bash scripts/rust-verus-bootstrap.sh
+
+      - name: AddressSanitizer smoke
+        run: bash scripts/rust-sanitizer-asan.sh
+
+      - name: One-minute fuzz campaigns
+        run: |
+          cargo +nightly fuzz run unsafe_wrappers -- -max_total_time=60
+          cargo +nightly fuzz run unsafe_wrappers_structured -- -max_total_time=60
+          cargo +nightly fuzz run pending_write_state -- -max_total_time=60
+          cargo +nightly fuzz run pending_write_ops -- -max_total_time=60
+          cargo +nightly fuzz run parse_recv_cmsgs -- -max_total_time=60
+          cargo +nightly fuzz run parse_recv_cmsgs_structured -- -max_total_time=60
+
+      - name: Kani proof smoke
+        env:
+          HTTP3_KANI_DEEP: '1'
+        run: bash scripts/rust-kani-smoke.sh
+
+      - name: Verus proof smoke
+        env:
+          HTTP3_VERUS_REQUIRED: '1'
+        run: bash scripts/rust-verus-smoke.sh
