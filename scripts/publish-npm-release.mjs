@@ -215,23 +215,14 @@ function publishPackage(directory, distTag, dryRun, provenance, ignoreScripts = 
 }
 
 function shouldMirrorCanary(distTag) {
-  return distTag === 'latest' && process.env.HTTP3_MIRROR_CANARY_ON_LATEST !== '0';
+  return distTag === 'latest'
+    && process.env.HTTP3_MIRROR_CANARY_ON_LATEST !== '0'
+    && typeof process.env.NPM_TOKEN === 'string'
+    && process.env.NPM_TOKEN.length > 0;
 }
 
 function npmAuthToken() {
   return process.env.NPM_TOKEN || process.env.NODE_AUTH_TOKEN || '';
-}
-
-function requireNpmTokenForCanaryMirror(dryRun) {
-  const npmToken = npmAuthToken();
-  if (typeof npmToken === 'string' && npmToken.length > 0) {
-    return;
-  }
-
-  const mode = dryRun ? 'dry-run' : 'publish';
-  throw new Error(
-    `NPM_TOKEN is required during ${mode} latest releases so the canary dist-tag can be moved to the new build.`,
-  );
 }
 
 function updateDistTag(name, version, distTag, dryRun) {
@@ -263,7 +254,8 @@ console.log(`Publishing release packages for ${rootManifest.name}@${rootManifest
 console.log(`Mode: ${dryRun ? 'dry-run' : 'publish'}; npm dist-tag: ${distTag}`);
 if (mirrorCanary) {
   console.log('Latest release mode: canary dist-tags will be mirrored to this version.');
-  requireNpmTokenForCanaryMirror(dryRun);
+} else if (distTag === 'latest' && process.env.HTTP3_MIRROR_CANARY_ON_LATEST !== '0') {
+  console.log('Latest release mode: canary dist-tag mirror skipped because NPM_TOKEN is unavailable.');
 }
 
 run(process.execPath, [join(ROOT_DIR, 'scripts', 'verify-prebuilds.mjs')]);

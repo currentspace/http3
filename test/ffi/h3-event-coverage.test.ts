@@ -600,12 +600,8 @@ describe('H3 event coverage', () => {
     it('server closeSession produces SESSION_CLOSE on client', async () => {
       const pair = await createH3Pair();
       try {
-        // Handshake already complete from createH3Pair.
-        // Find the server-side connHandle from NEW_SESSION.
-        const newSessionEvt = pair.serverEvents.allEvents.find(
-          (e: any) => e.eventType === EVENT_NEW_SESSION,
-        );
-        assert.ok(newSessionEvt, 'server should have NEW_SESSION event');
+        // Handshake is complete, but callback delivery can lag behind setup.
+        const newSessionEvt = await pair.serverEvents.waitForEvent(EVENT_NEW_SESSION, 5000);
 
         // Server closes the session.
         pair.server.closeSession(newSessionEvt.connHandle, 0, 'test');

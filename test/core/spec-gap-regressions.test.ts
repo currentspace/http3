@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createSecureServer, connect } from '../../lib/index.js';
 import { Http3ClientSession } from '../../lib/client.js';
@@ -30,7 +30,17 @@ function makePkcs12(keyPem: Buffer, certPem: Buffer, passphrase: string): Buffer
   const pfxPath = join(dir, 'bundle.p12');
   writeFileSync(keyPath, keyPem);
   writeFileSync(certPath, certPem);
-  execSync(`openssl pkcs12 -export -inkey "${keyPath}" -in "${certPath}" -out "${pfxPath}" -passout pass:${passphrase}`);
+  execFileSync('openssl', [
+    'pkcs12',
+    '-export',
+    '-inkey', keyPath,
+    '-in', certPath,
+    '-out', pfxPath,
+    '-passout', `pass:${passphrase}`,
+    '-certpbe', 'PBE-SHA1-3DES',
+    '-keypbe', 'PBE-SHA1-3DES',
+    '-macalg', 'sha1',
+  ]);
   return readFileSync(pfxPath);
 }
 
