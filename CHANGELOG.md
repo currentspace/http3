@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.5
+
+### Dependencies and toolchain
+
+- Updated quiche to `0.29.1` and refreshed the compatible Rust dependency graph, including the jemalloc wrapper stack.
+- Raised the Rust minimum version to `1.96`.
+- Updated the Docker build, test, runtime test, and verification image toolchains to Rust `1.96.0`.
+
+### HTTP/3 stream lifecycle
+
+- Used quiche's closed-stream signal to prune H3 stream bookkeeping after finished/reset streams, preventing stale drain and trailer-FIN state from surviving terminal stream cleanup.
+- Dropped queued H3 pending writes and pending responses when quiche reports the stream closed, releasing outbound admission instead of retrying work that can no longer flush.
+- Added a direct quiche/H3 regression covering closed-stream cleanup after a headers-only response.
+
+### Formal verification
+
+- Added a pure stream-tracking model for H3 and worker per-stream cleanup state.
+- Added Kani harnesses proving closed-stream cleanup removes all target stream state, preserves unrelated streams, and is idempotent, while non-closed cleanup is a no-op.
+
+### Release metadata
+
+- Bumped the package line to `0.8.5`, including Cargo metadata, native sidecar package manifests, and root optional sidecar pins.
+
 ## 0.8.4
 
 ### Rust safety and formal verification

@@ -76,8 +76,8 @@ fn setup_quic_pair_with_flow_control(
     let (client_addr, server_addr) = next_pair_addrs();
 
     let server_options = JsQuicServerOptions {
-        key: key_pem.clone(),
-        cert: cert_pem.clone(),
+        key: key_pem.clone().into(),
+        cert: cert_pem.clone().into(),
         ca: None,
         client_auth: None,
         alpn: None,

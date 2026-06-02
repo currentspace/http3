@@ -43,7 +43,7 @@ jobs:
           node-version: "24"
           cache: pnpm
 
-      - name: Ensure Rust >= 1.95
+      - name: Ensure Rust >= 1.96
         run: rustup update stable && rustc --version
 
       - run: pnpm install --frozen-lockfile --no-optional

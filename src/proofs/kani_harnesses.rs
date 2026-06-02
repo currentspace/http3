@@ -4,7 +4,7 @@
 use crate::cid::{self, SCID_LEN};
 use crate::proof_core::{
     admission, cid_model, cmsg_cursor, pending_write_model, recv_buf_model::RecvBufModel,
-    ring_layout,
+    ring_layout, stream_tracking,
 };
 use crate::unsafe_boundary::ProvidedBufferId;
 
@@ -241,6 +241,62 @@ fn cmsg_cursor_bounded_walk_stays_in_buffer() {
     assert!(offset <= control_len);
 }
 
+#[kani::proof]
+fn stream_tracking_closed_cleanup_drops_target_state() {
+    let ops: [u8; 8] = kani::any();
+    let target_byte: u8 = kani::any();
+    let target = stream_tracking::model_slot(target_byte as usize);
+    let mut model = stream_tracking::StreamTrackingModel::new();
+
+    for op in ops {
+        apply_stream_tracking_model_op(&mut model, op);
+    }
+
+    let slot_0_before = model.flags(0);
+    let slot_1_before = model.flags(1);
+    let slot_2_before = model.flags(2);
+    let slot_3_before = model.flags(3);
+
+    model.cleanup_closed_stream(target);
+
+    assert!(!model.has_any_state(target));
+    assert_eq!(model.blocked_queue_entries(target), 0);
+
+    if target != 0 {
+        assert_eq!(model.flags(0), slot_0_before);
+    }
+    if target != 1 {
+        assert_eq!(model.flags(1), slot_1_before);
+    }
+    if target != 2 {
+        assert_eq!(model.flags(2), slot_2_before);
+    }
+    if target != 3 {
+        assert_eq!(model.flags(3), slot_3_before);
+    }
+
+    let after_cleanup = model;
+    model.cleanup_closed_stream(target);
+    assert_eq!(model, after_cleanup);
+}
+
+#[kani::proof]
+fn stream_tracking_open_cleanup_is_noop() {
+    let ops: [u8; 8] = kani::any();
+    let target_byte: u8 = kani::any();
+    let target = stream_tracking::model_slot(target_byte as usize);
+    let mut model = stream_tracking::StreamTrackingModel::new();
+
+    for op in ops {
+        apply_stream_tracking_model_op(&mut model, op);
+    }
+
+    let before = model;
+    model.cleanup_if_closed(target, false);
+
+    assert_eq!(model, before);
+}
+
 fn checked_cmsg_step_next(
     control_len: usize,
     offset: usize,
@@ -255,5 +311,19 @@ fn checked_cmsg_step_next(
         Some(step.next_offset)
     } else {
         None
+    }
+}
+
+fn apply_stream_tracking_model_op(model: &mut stream_tracking::StreamTrackingModel, op: u8) {
+    let stream_slot = stream_tracking::model_slot((op & 0x03) as usize);
+    match (op >> 2) & 0x07 {
+        0 => model.track_blocked(stream_slot),
+        1 => model.inject_blocked_queue_entry(stream_slot),
+        2 => model.track_pending_body(stream_slot),
+        3 => model.track_trailer_fin(stream_slot),
+        4 => model.track_pending_write(stream_slot),
+        5 => model.track_pending_response(stream_slot),
+        6 => model.cleanup_h3_closed_stream(stream_slot),
+        _ => model.cleanup_worker_closed_stream(stream_slot),
     }
 }

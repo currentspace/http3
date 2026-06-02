@@ -61,14 +61,14 @@ importers:
         version: 8.59.3(eslint@10.4.0)(typescript@6.0.3)
     optionalDependencies:
       '@currentspace/http3-darwin-arm64':
-        specifier: 0.8.4
-        version: 0.8.4
+        specifier: 0.8.5
+        version: 0.8.5
       '@currentspace/http3-linux-arm64-gnu':
-        specifier: 0.8.4
-        version: 0.8.4
+        specifier: 0.8.5
+        version: 0.8.5
       '@currentspace/http3-linux-x64-gnu':
-        specifier: 0.8.4
-        version: 0.8.4
+        specifier: 0.8.5
+        version: 0.8.5
 
   examples/express-adapter:
     dependencies:
