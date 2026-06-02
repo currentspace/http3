@@ -9,3 +9,5 @@ pub(crate) mod cmsg_cursor;
 pub(crate) mod pending_write_model;
 pub(crate) mod recv_buf_model;
 pub(crate) mod ring_layout;
+#[cfg(any(test, kani))]
+pub(crate) mod stream_tracking;

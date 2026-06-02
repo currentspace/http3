@@ -31,6 +31,8 @@ KANI_HARNESSES=(
   provided_buffer_id_constructor_matches_range
   provided_buffer_id_models_iouring_offset_bounds
   quic_lb_plaintext_preserves_low_bits_and_embeds_server_id
+  stream_tracking_closed_cleanup_drops_target_state
+  stream_tracking_open_cleanup_is_noop
 )
 KANI_DEEP_HARNESSES=(
   pending_write_partial_accept_accounting

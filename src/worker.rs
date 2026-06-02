@@ -3077,6 +3077,12 @@ impl ProtocolHandler for H3ServerHandler {
                 continue;
             };
 
+            if conn.quiche_conn.stream_closed(stream_id) {
+                reactor_metrics::record_outbound_pending_write_removed(before);
+                self.release_outbound_admission(before_units, batch);
+                continue;
+            }
+
             match flush_one_h3_pending_response(conn, stream_id, &mut response) {
                 Ok(outcome) if outcome.done => {
                     self.release_outbound_admission(outcome.released_units, batch);
@@ -3924,6 +3930,11 @@ fn flush_pending_writes(
             released_units += before_units;
             return false;
         };
+        if conn.quiche_conn.stream_closed(stream_id) {
+            reactor_metrics::record_outbound_pending_write_removed(before);
+            released_units += before_units;
+            return false;
+        }
         match flush_one_h3_pending_write(conn, stream_id, pw) {
             Ok(outcome) if outcome.done => {
                 flushed.push((conn_handle, stream_id));
@@ -3962,6 +3973,11 @@ fn flush_client_pending_writes(
     pending.retain(|&stream_id, pw| {
         let before = pw.queued_bytes();
         let before_units = pw.queued_units();
+        if conn.quiche_conn.stream_closed(stream_id) {
+            reactor_metrics::record_outbound_pending_write_removed(before);
+            released_units += before_units;
+            return false;
+        }
         match flush_one_h3_pending_write(conn, stream_id, pw) {
             Ok(outcome) if outcome.done => {
                 flushed.push(stream_id);

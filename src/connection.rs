@@ -249,6 +249,8 @@ impl H3Connection {
     ) {
         let recycler = self.event_recycler();
         let mut app_events_remaining = app_event_budget;
+        let mut closed_stream_candidates = Vec::new();
+        let mut reset_streams = Vec::new();
         if app_events_remaining > 0 {
             if let Some(h3_conn) = self.h3_conn.as_mut() {
                 loop {
@@ -402,6 +404,7 @@ impl H3Connection {
                             }
                             events.push(JsH3Event::finished(conn_handle, stream_id));
                             app_events_remaining = app_events_remaining.saturating_sub(1);
+                            closed_stream_candidates.push(stream_id);
                         }
                         Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
                             if push_pending_body_event(
@@ -416,6 +419,7 @@ impl H3Connection {
                             }
                             events.push(JsH3Event::reset(conn_handle, stream_id, error_code));
                             app_events_remaining = app_events_remaining.saturating_sub(1);
+                            reset_streams.push(stream_id);
                         }
                         Ok((_, quiche::h3::Event::PriorityUpdate)) => {
                             // Ignore priority updates for now
@@ -438,6 +442,14 @@ impl H3Connection {
             }
         }
 
+        for stream_id in reset_streams {
+            self.clear_stream_tracking(stream_id);
+        }
+
+        for stream_id in closed_stream_candidates {
+            self.clear_stream_tracking_if_closed(stream_id);
+        }
+
         if app_events_remaining > 0 {
             self.poll_datagram_events(conn_handle, app_events_remaining, events);
         }
@@ -449,12 +461,47 @@ impl H3Connection {
 
     /// Check blocked streams for drain events without polling H3 events.
     pub fn poll_drain_events(&mut self, conn_handle: u32, events: &mut Vec<JsH3Event>) {
+        self.prune_closed_blocked_streams();
+
         while let Some(stream_id) = self.quiche_conn.stream_writable_next() {
             if self.blocked_set.remove(&stream_id) {
                 self.blocked_queue.retain(|&id| id != stream_id);
                 events.push(JsH3Event::drain(conn_handle, stream_id));
             }
         }
+    }
+
+    fn prune_closed_blocked_streams(&mut self) {
+        if self.blocked_set.is_empty() {
+            return;
+        }
+
+        let closed = self
+            .blocked_set
+            .iter()
+            .copied()
+            .filter(|&stream_id| self.quiche_conn.stream_closed(stream_id))
+            .collect::<Vec<_>>();
+
+        for stream_id in closed {
+            self.clear_stream_tracking(stream_id);
+        }
+    }
+
+    fn clear_stream_tracking_if_closed(&mut self, stream_id: u64) {
+        if self.quiche_conn.stream_closed(stream_id) {
+            self.clear_stream_tracking(stream_id);
+        }
+    }
+
+    fn clear_stream_tracking(&mut self, stream_id: u64) {
+        if self.blocked_set.remove(&stream_id) {
+            self.blocked_queue.retain(|&id| id != stream_id);
+        }
+        if let Some(pending) = self.pending_body_data.remove(&stream_id) {
+            self.data_pool.checkin(pending.buf.into_recycle_vec());
+        }
+        self.trailer_fin_streams.remove(&stream_id);
     }
 
     /// Get outbound packets from quiche.
@@ -701,13 +748,7 @@ impl H3Connection {
         self.quiche_conn
             .stream_shutdown(stream_id, quiche::Shutdown::Write, error_code)
             .ok();
-        if self.blocked_set.remove(&stream_id) {
-            self.blocked_queue.retain(|&id| id != stream_id);
-        }
-        if let Some(pending) = self.pending_body_data.remove(&stream_id) {
-            self.data_pool.checkin(pending.buf.into_recycle_vec());
-        }
-        self.trailer_fin_streams.remove(&stream_id);
+        self.clear_stream_tracking(stream_id);
         Ok(())
     }
 
@@ -1147,6 +1188,56 @@ mod tests {
         (client, server_conn, server_h3, client_addr, server_addr)
     }
 
+    fn exchange_h3_packets(
+        client: &mut H3Connection,
+        server_conn: &mut quiche::Connection<ArcBufFactory>,
+        client_addr: SocketAddr,
+        server_addr: SocketAddr,
+    ) -> bool {
+        let mut buf = vec![0_u8; 65_535];
+        let mut progressed = false;
+
+        loop {
+            match client.send(&mut buf) {
+                Ok((len, info)) => {
+                    progressed = true;
+                    server_conn
+                        .recv(
+                            &mut buf[..len],
+                            quiche::RecvInfo {
+                                from: client_addr,
+                                to: info.to,
+                            },
+                        )
+                        .expect("server recv h3 packet");
+                }
+                Err(Http3NativeError::Quiche(quiche::Error::Done)) => break,
+                Err(error) => panic!("client send failed: {error}"),
+            }
+        }
+
+        loop {
+            match server_conn.send(&mut buf) {
+                Ok((len, info)) => {
+                    progressed = true;
+                    client
+                        .recv(
+                            &mut buf[..len],
+                            quiche::RecvInfo {
+                                from: server_addr,
+                                to: info.to,
+                            },
+                        )
+                        .expect("client recv h3 packet");
+                }
+                Err(quiche::Error::Done) => break,
+                Err(error) => panic!("server send failed: {error}"),
+            }
+        }
+
+        progressed
+    }
+
     fn pump_h3_until_client_drain(
         client: &mut H3Connection,
         server_conn: &mut quiche::Connection<ArcBufFactory>,
@@ -1265,6 +1356,93 @@ mod tests {
                 blocked_stream_id,
             ),
             "peer flow-control progress should emit drain for blocked request stream"
+        );
+    }
+
+    #[test]
+    fn finished_event_prunes_closed_stream_tracking() {
+        let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
+            make_direct_h3_pair();
+        let request_headers = vec![
+            quiche::h3::Header::new(b":method", b"GET"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/closed-stream-cleanup"),
+        ];
+        let stream_id = client
+            .send_request(&request_headers, true)
+            .expect("send request");
+
+        let mut server_saw_finished = false;
+        for _ in 0..20 {
+            let mut progressed =
+                exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+
+            loop {
+                match server_h3.poll(&mut server_conn) {
+                    Ok((sid, quiche::h3::Event::Finished)) if sid == stream_id => {
+                        server_saw_finished = true;
+                        progressed = true;
+                    }
+                    Ok((_sid, _event)) => progressed = true,
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(error) => panic!("server h3 poll failed: {error}"),
+                }
+            }
+
+            if server_saw_finished {
+                break;
+            }
+            assert!(progressed, "request packets made no progress before FIN");
+        }
+        assert!(server_saw_finished, "server should receive request FIN");
+
+        let response_headers = vec![quiche::h3::Header::new(b":status", b"200")];
+        server_h3
+            .send_response(&mut server_conn, stream_id, &response_headers, true)
+            .expect("send response");
+
+        assert!(client.blocked_set.insert(stream_id));
+        client.blocked_queue.push_back(stream_id);
+        assert!(client.trailer_fin_streams.insert(stream_id));
+
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            let progressed =
+                exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+
+            if events.iter().any(|event| {
+                event.event_type == crate::h3_event::EVENT_FINISHED
+                    && event.stream_id == stream_id as i64
+            }) {
+                break;
+            }
+            assert!(progressed, "response packets made no progress before FIN");
+        }
+
+        assert!(
+            events.iter().any(|event| {
+                event.event_type == crate::h3_event::EVENT_FINISHED
+                    && event.stream_id == stream_id as i64
+            }),
+            "client should receive response FIN"
+        );
+        assert!(
+            client.quiche_conn.stream_closed(stream_id),
+            "quiche should report the stream closed after both FINs"
+        );
+        assert!(
+            !client.blocked_set.contains(&stream_id),
+            "closed streams should be removed from blocked tracking"
+        );
+        assert!(
+            !client.blocked_queue.contains(&stream_id),
+            "closed streams should be removed from blocked queue"
+        );
+        assert!(
+            !client.trailer_fin_streams.contains(&stream_id),
+            "closed streams should clear deferred trailer FIN tracking"
         );
     }
 }
