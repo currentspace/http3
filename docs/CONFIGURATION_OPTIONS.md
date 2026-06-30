@@ -42,7 +42,7 @@ Used by `createSecureServer()` and `serveFetch()`.
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
-| `maxUdpPayloadSize` | `number` | `1350` | Max UDP payload size for send/receive paths. |
+| `maxUdpPayloadSize` | `number` | `1472` | Max UDP payload size for send/receive paths. |
 | `initialMaxData` | `number` | `100000000` | Connection-level flow-control window in bytes. |
 | `initialMaxStreamDataBidiLocal` | `number` | `2000000` | Per-stream bidi flow-control window in bytes. |
 | `initialMaxStreamsBidi` | `number` | `10000` | Max peer-initiated bidirectional streams. |
@@ -76,7 +76,7 @@ Used by `connect()` and `connectAsync()`.
 | `rejectUnauthorized` | `boolean` | `true` | Set `false` to accept self-signed or otherwise untrusted certs. |
 | `servername` | `string` | authority host | Overrides the SNI hostname sent during TLS handshake. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
-| `maxUdpPayloadSize` | `number` | `1350` | Max UDP payload size for send/receive paths. |
+| `maxUdpPayloadSize` | `number` | `1472` | Max UDP payload size for send/receive paths. |
 | `initialMaxData` | `number` | `100000000` | Connection-level flow-control window in bytes. |
 | `initialMaxStreamDataBidiLocal` | `number` | `2000000` | Per-stream bidi flow-control window in bytes. |
 | `initialMaxStreamsBidi` | `number` | `10000` | Max bidirectional streams advertised to the peer. |
@@ -131,7 +131,7 @@ Used by `createQuicServer()`.
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
-| `maxUdpPayloadSize` | `number` | `1350` | Max UDP payload size for send/receive paths. |
+| `maxUdpPayloadSize` | `number` | `1472` | Max UDP payload size for send/receive paths. |
 | `initialMaxData` | `number` | `100000000` | Connection-level flow-control window in bytes. |
 | `initialMaxStreamDataBidiLocal` | `number` | `2000000` | Per-stream bidi flow-control window in bytes. |
 | `initialMaxStreamsBidi` | `number` | `10000` | Max peer-initiated bidirectional streams. |
@@ -162,7 +162,7 @@ Used by `connectQuic()` and `connectQuicAsync()`.
 | `alpn` | `string[]` | `['quic']` | ALPN protocols offered by the raw QUIC client. |
 | `servername` | `string` | authority host | Overrides the SNI hostname sent during TLS handshake. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
-| `maxUdpPayloadSize` | `number` | `1350` | Max UDP payload size for send/receive paths. |
+| `maxUdpPayloadSize` | `number` | `1472` | Max UDP payload size for send/receive paths. |
 | `initialMaxData` | `number` | `100000000` | Connection-level flow-control window in bytes. |
 | `initialMaxStreamDataBidiLocal` | `number` | `2000000` | Per-stream bidi flow-control window in bytes. |
 | `initialMaxStreamsBidi` | `number` | `10000` | Max bidirectional streams advertised to the peer. |

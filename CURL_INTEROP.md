@@ -26,6 +26,6 @@ Both protocols run on the same host+port in a single server lifecycle.
 
 ## Environment reference
 
-- **quiche**: 0.24.9 (Cloudflare, BoringSSL)
+- **quiche**: 0.29.2 (Cloudflare, BoringSSL)
 - **curl**: 8.18.0 with ngtcp2/nghttp3 and OpenSSL
 - **Node**: 24.x

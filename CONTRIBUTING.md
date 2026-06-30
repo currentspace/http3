@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Node.js 24+
-- Rust 1.85+ (edition 2024)
+- Rust 1.96+ (edition 2024)
 - OpenSSL (for test certificate generation)
 - Docker (optional, for the Linux stress/bench image)
 - curl with HTTP/3 support (optional, for interop checks)

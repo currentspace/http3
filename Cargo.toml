@@ -33,7 +33,7 @@ tikv-jemallocator = "0.7"
 
 [package]
 name = "http3"
-version = "0.8.5"
+version = "0.8.6"
 edition.workspace = true
 rust-version.workspace = true
 autobins = false

@@ -77,7 +77,7 @@ export interface ServerOptions extends TlsOptions {
   onRuntimeEvent?: RuntimeOptions['onRuntimeEvent'];
   /** Idle timeout in milliseconds. Default: 30 000. */
   maxIdleTimeoutMs?: number;
-  /** Maximum UDP payload size. Default: 1350. */
+  /** Maximum UDP payload size. Default: 1472. */
   maxUdpPayloadSize?: number;
   /** Connection-level flow control window. Default: 100_000_000 bytes. */
   initialMaxData?: number;

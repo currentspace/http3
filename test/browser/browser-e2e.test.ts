@@ -2,7 +2,7 @@ import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrowserContext, BrowserType, LaunchOptions } from 'playwright';
 import { chromium, firefox, webkit } from 'playwright';
@@ -15,6 +15,7 @@ const BROWSER_TIMEOUT_MS = 45_000;
 const BROWSER_TEST_HOST = '127.0.0.1';
 const SYSTEM_KEYCHAIN_PATH = '/Library/Keychains/System.keychain';
 const LINUX_CA_CERTIFICATES_PATH = '/usr/local/share/ca-certificates';
+const LINUX_USER_NSSDB_DIR = join(homedir(), '.pki', 'nssdb');
 
 interface BrowserRunResult {
   readonly token: string;
@@ -57,7 +58,16 @@ interface LinuxCaCertificatesTrust {
   readonly installedPath: string;
 }
 
-type BrowserCertificateTrust = UserKeychainTrust | SystemKeychainTrust | LinuxCaCertificatesTrust;
+interface LinuxUserNssdbTrust {
+  readonly mode: 'linux-user-nssdb';
+  readonly nickname: string;
+}
+
+type BrowserCertificateTrust =
+  | UserKeychainTrust
+  | SystemKeychainTrust
+  | LinuxCaCertificatesTrust
+  | LinuxUserNssdbTrust;
 
 let nonInteractiveSudoAvailable: boolean | null = null;
 
@@ -174,9 +184,43 @@ function installLinuxTrust(caPath: string): BrowserCertificateTrust | null {
   return { mode: 'linux-ca-certificates', installedPath };
 }
 
+function hasCertutil(): boolean {
+  try {
+    run('which', ['certutil']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Chromium's certificate verifier on Linux reads the per-user NSS database
+// (~/.pki/nssdb), not the launch profile's NSS db. A profile-only import
+// (importCaIntoNssProfile) is therefore enough for Firefox but leaves
+// Chromium's forced-QUIC handshake failing with CERTIFICATE_VERIFY_FAILED
+// ("certificate unknown"). Import the CA into the user NSS db too when we
+// can't (non-root) or shouldn't touch the system trust store.
+function installLinuxUserNssdbTrust(caPath: string): LinuxUserNssdbTrust | null {
+  if (!hasCertutil()) return null;
+  mkdirSync(LINUX_USER_NSSDB_DIR, { recursive: true });
+  const dbArg = `sql:${LINUX_USER_NSSDB_DIR}`;
+  try {
+    run('certutil', ['-d', dbArg, '-N', '--empty-password']);
+  } catch {
+    // Database already exists; reuse it.
+  }
+  const nickname = `http3-browser-e2e-${process.pid}`;
+  try {
+    run('certutil', ['-d', dbArg, '-D', '-n', nickname]);
+  } catch {
+    // No stale entry to remove.
+  }
+  run('certutil', ['-d', dbArg, '-A', '-n', nickname, '-t', 'C,,', '-i', caPath]);
+  return { mode: 'linux-user-nssdb', nickname };
+}
+
 function installBrowserTrust(caPath: string, tempDir: string): BrowserCertificateTrust | null {
   if (process.platform === 'darwin') return installMacTrust(caPath, tempDir);
-  if (process.platform === 'linux') return installLinuxTrust(caPath);
+  if (process.platform === 'linux') return installLinuxTrust(caPath) ?? installLinuxUserNssdbTrust(caPath);
   return null;
 }
 
@@ -195,6 +239,14 @@ function restoreBrowserTrust(trust: BrowserCertificateTrust | null): void {
       rmSync(trust.installedPath, { force: true });
     } finally {
       run('update-ca-certificates', []);
+    }
+    return;
+  }
+  if (trust.mode === 'linux-user-nssdb') {
+    try {
+      run('certutil', ['-d', `sql:${LINUX_USER_NSSDB_DIR}`, '-D', '-n', trust.nickname]);
+    } catch {
+      // Best-effort cleanup of the per-user NSS trust entry.
     }
     return;
   }

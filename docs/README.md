@@ -30,7 +30,7 @@
 
 - Test strategy: [TEST_STRATEGY.md](./TEST_STRATEGY.md)
 - Lifecycle validation checklist: [LIFECYCLE_VALIDATION_CHECKLIST.md](./LIFECYCLE_VALIDATION_CHECKLIST.md)
-- 0.6.0 release evidence ledger: [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md)
+- 0.8.4 release evidence ledger: [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md)
 - Release process: [RELEASE_RUNBOOK.md](./RELEASE_RUNBOOK.md)
 - [../CONTRIBUTING.md](../CONTRIBUTING.md)
 

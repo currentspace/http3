@@ -7,7 +7,7 @@ import type { RuntimeInfo } from './runtime.js';
 export interface SessionOptions {
   /** Idle timeout in milliseconds before the connection is closed. Default: 30 000. */
   maxIdleTimeoutMs?: number;
-  /** Maximum UDP payload size in bytes. Default: 1350. */
+  /** Maximum UDP payload size in bytes. Default: 1472. */
   maxUdpPayloadSize?: number;
   /** Connection-level flow control window in bytes. Default: 10 MiB. */
   initialMaxData?: number;

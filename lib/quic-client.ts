@@ -50,7 +50,7 @@ export interface QuicConnectOptions {
   maxIdleTimeoutMs?: number;
   /** Maximum time to wait for QUIC/TLS handshake completion. Default: 30_000; 0 disables. */
   connectTimeoutMs?: number;
-  /** Maximum UDP payload size. Default: 1350. */
+  /** Maximum UDP payload size. Default: 1472. */
   maxUdpPayloadSize?: number;
   /** Connection-level flow control window. Default: 100_000_000 bytes. */
   initialMaxData?: number;

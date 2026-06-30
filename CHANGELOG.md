@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.6
+
+### Dependencies and toolchain
+
+- Updated quiche from `0.29.1` to `0.29.2`: corrects stream send-buffer accounting so the congestion controller's app-limited detection and `Stats::tx_buffered_state` track the bytes actually buffered. (The release also fixes use-after-frees in quiche's C FFI API, which this package does not use — it links the Rust API with the `ffi` feature disabled.)
+- Updated napi from `3.9.0` to `3.9.4` and napi-derive from `3.5.6` to `3.5.7`: ThreadsafeFunction weak-reference flag sync, Reference finalize-callback Arc/Rc unification, and zero-copy external strings — all on FFI paths this package exercises (TSFN event delivery and recyclable external buffers).
+- Refreshed the compatible Rust dependency graph, including bytes `1.12.0`, io-uring `0.7.13`, log `0.4.33`, and env_logger `0.11.11`.
+- Updated build/dev tooling: `@napi-rs/cli` to `3.7.2` (regenerates the native loader with corrected tri-state `NAPI_RS_FORCE_WASI` handling), `@types/node` to `^26` (aligning the type baseline with the Node 26 runtime), eslint to `10.6.0`, typescript-eslint to `8.62.1`, and playwright to `1.61.1`.
+
+### Testing
+
+- Fixed the browser HTTP/3 e2e Chromium case on Linux. Chromium's certificate verifier on Linux reads the per-user NSS database (`~/.pki/nssdb`), not the launch-profile NSS db, so the prior profile-only CA import left Chromium's forced-QUIC handshake failing with `CERTIFICATE_VERIFY_FAILED`. The test now also imports the CA into the user NSS database (with matching teardown), so Chromium completes the HTTP/3 handshake on Linux.
+
 ## 0.8.5
 
 ### Dependencies and toolchain

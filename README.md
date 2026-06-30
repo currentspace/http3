@@ -96,15 +96,15 @@ npm run bench:quic -- --profile smoke
 npm run bench:h3 -- --profile smoke
 ```
 
-## New In 0.6.0
+## Raw QUIC mTLS
 
-- Raw QUIC clients can now use mTLS through the stable public `cert` and `key` options on `connectQuic()` and `connectQuicAsync()`.
-- Raw QUIC servers now support explicit client certificate policy with `clientAuth`, defaulting to `require` when a verification `ca` is configured.
-- Raw QUIC server sessions now expose the verified peer certificate so applications can inspect or pin exact client certificates with Node's `X509Certificate` API.
+- Raw QUIC clients can use mTLS through the stable public `cert` and `key` options on `connectQuic()` and `connectQuicAsync()`.
+- Raw QUIC servers support explicit client certificate policy with `clientAuth`, defaulting to `require` when a verification `ca` is configured.
+- Raw QUIC server sessions expose the verified peer certificate so applications can inspect or pin exact client certificates with Node's `X509Certificate` API.
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for the 0.6.0 release notes and
-[`docs/RELEASE_EVIDENCE.md`](./docs/RELEASE_EVIDENCE.md) for the supporting
-audit ledger and caveats behind this release.
+See [`CHANGELOG.md`](./CHANGELOG.md) for release notes and
+[`docs/RELEASE_EVIDENCE.md`](./docs/RELEASE_EVIDENCE.md) for the 0.8.4 audit
+ledger and caveats.
 
 ## Quick QUIC server
 
