@@ -1,0 +1,12 @@
+[package]
+name = "quiche-wasm-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quiche = "0.29"
+
+[workspace]
+
+[patch.crates-io]
+quiche = { path = "/private/tmp/claude-501/-Users-brianmeek-scratch-nodejs-http3/3af8a20f-7882-43a4-9719-7d9894a2c148/scratchpad/quiche-patched" }

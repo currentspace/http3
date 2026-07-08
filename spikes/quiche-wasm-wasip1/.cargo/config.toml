@@ -1,0 +1,2 @@
+[target.wasm32-wasip1]
+rustflags = ["-L", "native=/private/tmp/claude-501/-Users-brianmeek-scratch-nodejs-http3/3af8a20f-7882-43a4-9719-7d9894a2c148/scratchpad/wasi-sdk-33.0-arm64-macos/share/wasi-sysroot/lib/wasm32-wasip1/noeh", "-L", "native=/private/tmp/claude-501/-Users-brianmeek-scratch-nodejs-http3/3af8a20f-7882-43a4-9719-7d9894a2c148/scratchpad/wasi-sdk-33.0-arm64-macos/share/wasi-sysroot/lib/wasm32-wasip1", "-C", "link-arg=-lc++", "-C", "link-arg=-lc++abi"]
