@@ -27,6 +27,27 @@ pnpm run build:test                       # test/ -> dist-test/ (test TS)
 
 Always rebuild the NAPI module after changing Rust code. Always rebuild test TS after changing test files.
 
+### WASM client build (experimental, Phase 2 of docs/WASM_CLIENT_PLAN.md)
+
+```bash
+export WASI_SDK_PATH=/path/to/wasi-sdk-33   # required; never assumed/downloaded by any script
+pnpm run build:bssl-wasi                    # stage BoringSSL for wasm32-wasip1 (cached)
+pnpm run build:wasm                         # -> dist/wasm/http3_client.wasm
+HTTP3_WASM=1 pnpm run test:wasm             # import/export allowlist check (C2)
+```
+
+`WASI_SDK_PATH` must point at a local wasi-sdk 33 install (`share/cmake/wasi-sdk-p1.cmake`
+must exist under it) — it is machine-specific, so no script hardcodes or downloads it.
+`build:wasm` also derives a few other wasm32-wasip1-only env vars
+(`BORING_BSSL_*_wasm32_wasip1`, `BINDGEN_EXTRA_CLANG_ARGS_wasm32_wasip1`,
+`CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS`) itself, inside `scripts/build-wasm.mjs`
+— never by hand-prefixing a cargo command. Rebuild the wasm artifact after
+changing `crates/http3-wasm` or any always-compiled part of `src/`
+(`h3_event.rs`, `config.rs`, `worker.rs`'s `H3ClientHandler`, etc.) the same
+way you'd rebuild the native `.node` addon after other Rust changes. Full
+usage docs land in Phase 4 (`docs/WASM_RUNTIME.md`); see
+`docs/WASM_CLIENT_PLAN.md` for the design.
+
 ## Lint & Typecheck
 
 ```bash
@@ -125,6 +146,10 @@ JS (lib/)  ──NAPI──>  Rust worker threads (src/)  ──quiche──>  U
 | `lib/server.ts` | Http3SecureServer — public H3 server API |
 | `lib/client.ts` | Http3ClientSession — public H3 client API |
 | `test/support/native-test-helpers.ts` | FFI test utilities (createQuicPair, createH3Pair, EventCollector) |
+| `crates/http3-wasm/src/{h3,quic}.rs` | `h3c_*`/`qc_*` extern-C ABI exports (wasm32-wasip1 client-only build) |
+| `scripts/build-wasm.mjs` | Orchestrates `pnpm run build:wasm` (bssl + quiche patch + cargo + wasm-opt) |
+| `scripts/build-bssl-wasi.sh` | Builds BoringSSL for wasm32-wasip1 from boring-sys's vendored source |
+| `scripts/prepare-quiche-wasm-patch.sh` | Vendors + patches quiche's wasm FFI fix into `target/quiche-wasm-patched/` |
 
 ## Conventions
 
@@ -151,6 +176,7 @@ JS (lib/)  ──NAPI──>  Rust worker threads (src/)  ──quiche──>  U
 |----------|---------|
 | `HTTP3_LONGHAUL=1` | Enable 5-min longhaul tests |
 | `HTTP3_BROWSER_E2E=1` | Enable Playwright browser tests |
+| `HTTP3_WASM=1` | Enable wasm artifact tests (`test:wasm`); requires `dist/wasm/http3_client.wasm` (`pnpm run build:wasm`) |
 | `MIMALLOC_PURGE_DELAY=0` | Aggressive RSS reclaim with mimalloc |
 
 ## Docker

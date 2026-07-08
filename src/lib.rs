@@ -155,6 +155,11 @@ pub mod wasm_exports {
     pub use crate::arc_buf::{ArcBuf, ArcBufFactory};
     pub use crate::chunk_pool::Chunk;
 
+    // ── Outbound write-admission window (a `new_direct` constructor
+    // parameter: `Arc<OutboundAdmission>`, native call sites all use
+    // `OutboundAdmission::default()`) ─────────────────────────────────
+    pub use crate::outbound_admission::OutboundAdmission;
+
     // ── Config: option structs + builders (native file-based paths are
     // still `os-runtime`-gated inside `config.rs`; only the always-
     // compiled in-memory builders are usable here) ───────────────────

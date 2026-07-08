@@ -991,6 +991,59 @@ test only). Record the measured post-wasm-opt/gzip size (O4) in this doc.
 `pnpm run build:wasm`; C2 passes; Rust host-target tests of the handle
 plumbing pass.
 
+**Status: DONE (2026-07-08, macOS arm64, local — Linux CI verification per
+D2/O3 remains open).** All A3/A4/A5/D1a/C2 deliverables landed and green:
+
+- `crates/http3-wasm` implements the full `h3c_*`/`qc_*` extern-C table
+  from §5.3 (39 exports + `wasm_alloc`/`wasm_free` = 42 total incl.
+  `memory`); `cargo test -p http3-wasm` is 17/17 green on the host target,
+  including a real lockstep integration test
+  (`tests/h3_lockstep.rs`) that drives `H3ClientHandler::new_direct`
+  through a full QUIC handshake + HTTP/3 GET against a hand-rolled quiche
+  server over real loopback UDP — no wasm target needed for that proof.
+- **O1 (full handshake) closed for real**, beyond the host-target proof
+  above: `spikes/quiche-wasm-wasip1/validate-handshake.mjs` drives the
+  actual compiled `dist/wasm/http3_client.wasm` artifact's `h3c_*` ABI
+  (via the extended `mini-shim.mjs`, no `node:wasi`) over a raw
+  `node:dgram` socket against this repo's real native H3 server
+  in-process, and completes a full QUIC+TLS handshake and an HTTP/3
+  GET/response entirely inside the wasm module. Repeatable, exit 0.
+- **O4 (size), measured for real** (this crate compiled with default
+  workspace profile settings, i.e. `debug = 1` line tables still on):
+  pre-opt 10.0 MiB (vs. the tiny spike's 1.53 MiB — expected, this build
+  includes the full `H3ClientHandler`/`QuicClientHandler`/config/event
+  machinery, not just a `quiche::connect()` smoke test); `wasm-opt -Oz
+  --strip-debug` → **1.47 MiB** (stripping debug info alone accounts for
+  most of the reduction: 10.0 MiB → 1.7 MiB from `--strip-debug`, → 1.47
+  MiB adding `-Oz`); **gzip -9 → ~618 KiB**. Comfortably inside the "1–2
+  MiB gzipped" planning bound and the 10 MB paid-Workers bundle limit
+  (§9 C8).
+- **O5 (import allowlist), re-derived empirically and frozen** in
+  `test/wasm/artifact-shape.test.ts` — **12 names**, not the spike's
+  15-name candidate list: `random_get`, `environ_get`,
+  `environ_sizes_get`, `clock_time_get`, `fd_close`, `fd_prestat_get`,
+  `fd_prestat_dir_name`, `fd_read`, `fd_seek`, `fd_write`, `proc_exit`,
+  `sched_yield`. Two real, explainable deltas from the candidate list:
+  `sched_yield` **is** needed (`crossbeam-channel`'s spin-wait backoff
+  calls `thread::yield_now()` even single-threaded — a real, permanent
+  dependency, not a threads-experiment leftover); `fd_fdstat_get` /
+  `fd_fdstat_set_flags` / `path_filestat_get` / `path_open` are **not**
+  needed (this build excludes `os-runtime` and `qlog-files` entirely, so
+  no filesystem-touching code path exists to reference them — a good
+  sign the A1 feature-gating actually worked). `mini-shim.mjs` extended
+  accordingly (only 3 new stubs needed in practice: `fd_prestat_get`,
+  `fd_prestat_dir_name`, `fd_read` — not 6).
+- **A4 landed as scoped, not static, patching** — see the decision log
+  (§12) for why: `[patch.crates-io]` in the root `Cargo.toml` would break
+  `cargo build --release` on a fresh clone before anyone has run the wasm
+  scripts. Verified explicitly both orders (patch-dir absent vs. present)
+  against a real `cargo build --release`; `git diff Cargo.lock` shows only
+  the expected, permanent `http3-wasm` package addition in both cases.
+- Not yet done (later phases per the plan): Linux/CI bindgen verification
+  (O3, D2), packaging (D3), `verify.sh` wiring (D1b), upstreaming the
+  quiche patch as a real PR (A4 task 2 — needs the repo owner's own GitHub
+  account, out of scope for automation).
+
 ### Phase 3 — TS wasm runtime
 
 B2–B6 (shim, loader, WasmClientEventLoop ×2 incl. keylog-event delivery,
@@ -1035,6 +1088,8 @@ size/startup budgets.
 | Embedded Mozilla root bundle | deferred; `ca` option (in-memory) is the v1 trust path |
 | `peer_certificate_chain` on client HANDSHAKE_COMPLETE | deferred (native client doesn't emit it either; parity preserved) |
 | Browser adapter (WebSocket relay à la quinn-wasm/iroh) | out of scope; falls out of the architecture nearly free — revisit after Phase 5 |
+| A4 quiche-patch wiring: static `[patch.crates-io]` in root `Cargo.toml` vs. scoped `--config` override | **scoped `--config`, not static.** `scripts/prepare-quiche-wasm-patch.sh` vendors + patches quiche into the git-ignored `target/quiche-wasm-patched/<version>/`; `scripts/build-wasm.mjs` passes `--config patch.crates-io.quiche.path="<that dir>"` to *only* its own `cargo build -p http3-wasm --target wasm32-wasip1` invocation. A static `[patch.crates-io]` in the root manifest would make `cargo build --release` (and every other cargo invocation, on every machine, forever) fail hard on a fresh clone before the vendoring script has ever run — Cargo resolves `[patch]` for the whole workspace regardless of target/features. Verified empirically both orders: `cargo build --release` succeeds identically whether or not `target/quiche-wasm-patched/` exists yet, and `git diff Cargo.lock` shows zero churn beyond the permanent `http3-wasm` package entry (a `--config`-patched build transiently drops the `quiche` entry's `source`/`checksum` fields, but a subsequent unpatched build cleanly restores them) |
+| Upstreaming the quiche FFI fix (A4 task 2) | **manual follow-up for the repo owner.** Creating a real `currentspace/quiche` (or similar) GitHub fork and opening a PR against `cloudflare/quiche` requires the repo owner's own GitHub account/credentials — out of scope for automation. The patch itself is ready to submit as-is: `spikes/quiche-wasm-wasip1/quiche-0.29.2-wasm-ffi.patch` (2 lines, `src/crypto/boringssl.rs`, drops an incorrect `-> c_void` on two FFI decls that are `void` in C). Until upstreamed, `scripts/prepare-quiche-wasm-patch.sh` is the local, reproducible, git-ignored vendoring path the wasm build depends on. |
 
 ## 13. References
 

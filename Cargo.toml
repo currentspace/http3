@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "fuzz", "tools/rust-h3-load"]
+members = [".", "crates/http3-wasm", "fuzz", "tools/rust-h3-load"]
 resolver = "3"
 
 [workspace.package]
