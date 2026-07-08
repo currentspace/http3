@@ -21,6 +21,7 @@ import {
   ERR_HTTP3_STREAM_ERROR,
 } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
+import { toNativeEvents, toNativeKeylogLine } from './wasm-event-bridge.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
@@ -848,11 +849,21 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
           },
           async () => {
             // Lazily dynamic-imported so native-only consumers never load
-            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6).
+            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6). Node-only
+            // pieces (`.wasm` file loading, `node:dgram`) are built here,
+            // at this Node-facing call site, and handed to
+            // `WasmH3ClientEventLoop` as an already-instantiated core +
+            // transport factory — that class itself never touches
+            // `node:fs`/`node:dgram` (Phase 5, docs/WASM_CLIENT_PLAN.md §9),
+            // which is what lets it also compile under
+            // `tsconfig.workerd.json` / be reused by a workerd host.
             const { WasmH3ClientEventLoop } = await import('./wasm/h3-client-event-loop.js');
+            const { loadHttp3WasmCoreFromFile } = await import('./wasm/node-core-loader.js');
+            const { connectNodeUdp } = await import('./wasm/node-udp-adapter.js');
             return new WasmH3ClientEventLoop(
               {
-                wasmPath: resolveWasmArtifactPath(),
+                core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
+                transportFactory: connectNodeUdp,
                 ca: normalizeCaOption(options?.ca),
                 rejectUnauthorized: options?.rejectUnauthorized,
                 maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
@@ -866,10 +877,10 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
                 keylog: Boolean(keylogPath),
               },
               (events) => {
-                session._dispatchEvents(events);
+                session._dispatchEvents(toNativeEvents(events));
               },
               (line) => {
-                session.emit('keylog', line);
+                session.emit('keylog', toNativeKeylogLine(line));
               },
             );
           },

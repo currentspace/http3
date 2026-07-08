@@ -12,18 +12,22 @@
  * `lib/quic-stream.ts`'s interface only, which is fine, but the concrete
  * class stays decoupled from `lib/event-loop.ts` (forbidden in
  * `lib/wasm/**` by ESLint) via the same structural-typing argument used
- * there: this class's method surface matches the interface shape exactly.
+ * there: this class's method surface matches the interface shape exactly
+ * (TypeScript checks method parameters bivariantly, so `Uint8Array`
+ * parameters here still satisfy an interface declaring `Buffer`).
+ *
+ * **Host-agnostic by construction (Phase 5, docs/WASM_CLIENT_PLAN.md §9):**
+ * see `h3-client-event-loop.ts`'s identical note — this file takes an
+ * already-instantiated {@link Http3WasmCore} and a caller-supplied
+ * `transportFactory`, never touching `node:fs`/`node:dgram` itself.
  */
 
-import { loadHttp3WasmCoreFromFile } from './core-loader.js';
 import type { Http3WasmCore } from './core-loader.js';
 import { decodeEventBatch, drainKeylog } from './events.js';
 import type { WasmEvent } from './events.js';
-import { connectNodeUdp } from './node-udp-adapter.js';
 import type { DatagramTransport } from './datagram-transport.js';
 import { buildCommonOptionsJson, formatLocalAddr, parseSocketAddress, randomScidHex } from './wasm-options.js';
 import type { CommonWasmClientOptions } from './wasm-options.js';
-import type { ShimOptions } from './wasi-shim.js';
 
 /** Must match `lib/event-loop.ts`'s `EVENT_SHUTDOWN_COMPLETE` sentinel. */
 const EVENT_SHUTDOWN_COMPLETE = 15;
@@ -32,9 +36,16 @@ const EVENT_SHUTDOWN_COMPLETE = 15;
 const CLOSE_DRAIN_DEADLINE_MS = 2000;
 const CLOSE_DRAIN_POLL_MS = 5;
 
-/** Feature-detects `unref()` before calling it — workerd's `nodejs_compat` coverage for timer `unref` is unverified (docs/WASM_CLIENT_PLAN.md §9 C15). */
-function unrefIfSupported(timer: NodeJS.Timeout): void {
-  if (typeof timer.unref === 'function') timer.unref();
+/**
+ * Feature-detects `unref()` before calling it. See
+ * `h3-client-event-loop.ts`'s identical function for why the parameter is
+ * typed as `ReturnType<typeof setTimeout>` (host-dependent: `NodeJS.Timeout`
+ * vs. a plain `number` under `@cloudflare/workers-types`) rather than
+ * `NodeJS.Timeout` directly.
+ */
+function unrefIfSupported(timer: ReturnType<typeof setTimeout>): void {
+  const maybeUnrefable = timer as unknown as { unref?: () => void };
+  if (typeof maybeUnrefable.unref === 'function') maybeUnrefable.unref();
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -45,18 +56,24 @@ async function sleep(ms: number): Promise<void> {
 }
 
 export interface WasmQuicClientEventLoopOptions extends CommonWasmClientOptions {
-  /** Absolute path to the compiled `http3_client.wasm` artifact. */
-  wasmPath: string;
+  /**
+   * An already-instantiated wasm core — see
+   * `WasmH3ClientEventLoopOptions.core`'s identical doc comment
+   * (`h3-client-event-loop.ts`).
+   */
+  core: Http3WasmCore;
   /** PEM-encoded client certificate chain for mutual TLS. */
-  cert?: Buffer;
+  cert?: Uint8Array;
   /** PEM-encoded client private key for mutual TLS. */
-  key?: Buffer;
+  key?: Uint8Array;
   /** ALPN protocol strings. Default (Rust-side): `["quic"]`. */
   alpn?: string[];
-  /** WASI shim options — the injectable clock/random hooks C5's deterministic timer tests use. */
-  shim?: ShimOptions;
-  /** Override the datagram transport factory (tests may substitute a mock transport). Defaults to {@link connectNodeUdp}. */
-  transportFactory?: (host: string, port: number) => Promise<DatagramTransport>;
+  /**
+   * The datagram transport factory — required, not defaulted. See
+   * `WasmH3ClientEventLoopOptions.transportFactory`'s identical doc
+   * comment (`h3-client-event-loop.ts`) for why.
+   */
+  transportFactory: (host: string, port: number) => Promise<DatagramTransport>;
 }
 
 /**
@@ -68,12 +85,12 @@ export class WasmQuicClientEventLoop {
   private readonly core: Http3WasmCore;
   private readonly opts: WasmQuicClientEventLoopOptions;
   private readonly dispatch: (events: WasmEvent[]) => void;
-  private readonly onKeylog: ((line: Buffer) => void) | undefined;
+  private readonly onKeylog: ((line: Uint8Array) => void) | undefined;
 
   private handle = 0;
   private transport: DatagramTransport | null = null;
   private outPtrCell = 0;
-  private timer: NodeJS.Timeout | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private armedAbsoluteDeadlineMs: number | null = null;
   private closeRequested = false;
   private closePromise: Promise<void> | null = null;
@@ -81,18 +98,17 @@ export class WasmQuicClientEventLoop {
   constructor(
     opts: WasmQuicClientEventLoopOptions,
     dispatch: (events: WasmEvent[]) => void,
-    onKeylog?: (line: Buffer) => void,
+    onKeylog?: (line: Uint8Array) => void,
   ) {
     this.opts = opts;
     this.dispatch = dispatch;
     this.onKeylog = onKeylog;
-    this.core = loadHttp3WasmCoreFromFile(opts.wasmPath, opts.shim);
+    this.core = opts.core;
   }
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
     const { host, port } = parseSocketAddress(serverAddr);
-    const transportFactory = this.opts.transportFactory ?? connectNodeUdp;
-    const transport = await transportFactory(host, port);
+    const transport = await this.opts.transportFactory(host, port);
 
     if (this.closeRequested) {
       await transport.close();
@@ -104,8 +120,8 @@ export class WasmQuicClientEventLoop {
 
     const optsJson = {
       ...buildCommonOptionsJson(this.opts),
-      ...(this.opts.cert && { cert: this.opts.cert.toString('utf8') }),
-      ...(this.opts.key && { key: this.opts.key.toString('utf8') }),
+      ...(this.opts.cert && { cert: new TextDecoder('utf-8').decode(this.opts.cert) }),
+      ...(this.opts.key && { key: new TextDecoder('utf-8').decode(this.opts.key) }),
       ...(this.opts.alpn && { alpn: this.opts.alpn }),
       serverAddr,
       serverName,
@@ -143,7 +159,7 @@ export class WasmQuicClientEventLoop {
     return streamId;
   }
 
-  streamSend(streamId: number, data: Buffer, fin: boolean): number {
+  streamSend(streamId: number, data: Uint8Array, fin: boolean): number {
     const { ptr, len } = this.core.writeBytes(data);
     const result = Number(this.core.exports.qc_stream_send(this.handle, BigInt(streamId), ptr, len, fin ? 1 : 0));
     this.core.free(ptr, len);
@@ -160,7 +176,7 @@ export class WasmQuicClientEventLoop {
     return result >= 0;
   }
 
-  sendDatagram(data: Buffer): boolean {
+  sendDatagram(data: Uint8Array): boolean {
     const { ptr, len } = this.core.writeBytes(data);
     const result = Number(this.core.exports.qc_send_datagram(this.handle, ptr, len));
     this.core.free(ptr, len);

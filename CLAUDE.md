@@ -45,17 +45,35 @@ must exist under it) — it is machine-specific, so no script hardcodes or downl
 changing `crates/http3-wasm` or any always-compiled part of `src/`
 (`h3_event.rs`, `config.rs`, `worker.rs`'s `H3ClientHandler`, etc.) the same
 way you'd rebuild the native `.node` addon after other Rust changes. Full
-usage docs land in Phase 4 (`docs/WASM_RUNTIME.md`); see
-`docs/WASM_CLIENT_PLAN.md` for the design.
+usage docs (Node + Workers/workerd status) live in `docs/WASM_RUNTIME.md`;
+see `docs/WASM_CLIENT_PLAN.md` for the design.
+
+Reachable from Node via `runtimeMode: 'wasm'` on `connect`/`connectAsync`/
+`connectQuic`/`connectQuicAsync`, and via the package's `"./wasm"` subpath
+export (`@currentspace/http3/wasm`) for lower-level/workerd use —
+`lib/wasm/index.ts` (Node) and `lib/wasm/index.workerd.ts` (workerd,
+tested against real `wrangler dev`/`wrangler deploy --dry-run` — see
+`examples/workerd-client/`) are the two entry points, selected via
+`package.json`'s per-condition `workerd`/`worker`/`default` exports.
 
 ## Lint & Typecheck
 
 ```bash
 pnpm run lint                             # eslint lib/ test/
 pnpm run typecheck                        # tsc --noEmit on both tsconfigs
+pnpm run typecheck:workerd                # tsc -p tsconfig.workerd.json --noEmit (lib/wasm/** without @types/node)
 ```
 
 ESLint enforces `no-floating-promises`, `explicit-function-return-type`, and `promise-function-async`. Test files get relaxed unsafe rules.
+
+`tsconfig.workerd.json` type-checks `lib/wasm/**` (minus the two
+Node-only files, `node-udp-adapter.ts`/`node-core-loader.ts`, plus the
+Node-facing `index.ts` aggregate) using `@cloudflare/workers-types`
+instead of `@types/node` — it's how a real `Buffer`/`node:fs`/`node:dgram`
+dependency accidentally creeping into that directory gets caught at
+typecheck time instead of at "someone tries to use it from workerd" time.
+Registered in `eslint.config.mjs`'s `parserOptions.project` alongside the
+other two tsconfigs.
 
 ## Testing
 
@@ -147,6 +165,8 @@ JS (lib/)  ──NAPI──>  Rust worker threads (src/)  ──quiche──>  U
 | `lib/client.ts` | Http3ClientSession — public H3 client API |
 | `test/support/native-test-helpers.ts` | FFI test utilities (createQuicPair, createH3Pair, EventCollector) |
 | `crates/http3-wasm/src/{h3,quic}.rs` | `h3c_*`/`qc_*` extern-C ABI exports (wasm32-wasip1 client-only build) |
+| `lib/wasm/index.workerd.ts` | Workers/workerd entry point (`"./wasm"` export's `workerd`/`worker` conditions); no `@types/node`, no Buffer, no `node:*` |
+| `lib/wasm-event-bridge.ts` | Node-only: wraps wasm `Uint8Array` event payloads in real `Buffer`s at the `lib/client.ts`/`lib/quic-client.ts` boundary |
 | `scripts/build-wasm.mjs` | Orchestrates `pnpm run build:wasm` (bssl + quiche patch + cargo + wasm-opt) |
 | `scripts/build-bssl-wasi.sh` | Builds BoringSSL for wasm32-wasip1 from boring-sys's vendored source |
 | `scripts/prepare-quiche-wasm-patch.sh` | Vendors + patches quiche's wasm FFI fix into `target/quiche-wasm-patched/` |

@@ -2,6 +2,11 @@ packages:
   - .
   - examples/*
 
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
+
 catalog:
   '@eslint/js': ^10.0.1
   '@napi-rs/cli': ^3.7.2

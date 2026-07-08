@@ -48,6 +48,8 @@ async function waitForEvent(
 describe('wasm deterministic clock (C5)', { skip: wasmSkipReason() }, () => {
   it('fast-forwards an idle timeout via a mocked clock without a real wall-clock wait', async () => {
     const { WasmH3ClientEventLoop } = await import('../../lib/wasm/h3-client-event-loop.js');
+    const { loadHttp3WasmCoreFromFile } = await import('../../lib/wasm/node-core-loader.js');
+    const { connectNodeUdp } = await import('../../lib/wasm/node-udp-adapter.js');
 
     const binding = loadBinding();
     const certs = generateTestCerts();
@@ -67,10 +69,10 @@ describe('wasm deterministic clock (C5)', { skip: wasmSkipReason() }, () => {
     const dispatched: Array<{ eventType: number; meta?: { errorReason?: string } }> = [];
     const eventLoop = new WasmH3ClientEventLoop(
       {
-        wasmPath: wasmArtifactPath(),
+        core: loadHttp3WasmCoreFromFile(wasmArtifactPath(), { nowNs }),
+        transportFactory: connectNodeUdp,
         rejectUnauthorized: false,
         maxIdleTimeoutMs: MAX_IDLE_TIMEOUT_MS,
-        shim: { nowNs },
       },
       (events) => {
         dispatched.push(...(events as unknown as Array<{ eventType: number; meta?: { errorReason?: string } }>));

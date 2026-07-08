@@ -4,16 +4,37 @@
  * minimal typed facade (`Http3WasmCore`) plus memory-view helpers that
  * respect wasm's "memory.grow detaches views" hazard.
  *
- * `loadHttp3WasmCore` itself never touches `node:fs` — it accepts either an
- * already-compiled `WebAssembly.Module` or raw `bytes`, so the exact same
- * function works under a future workerd host (which bundles `.wasm` as a
- * precompiled `Module` import and cannot compile-from-bytes). The one
- * Node-specific convenience wrapper, {@link loadHttp3WasmCoreFromFile}, is
- * the sanctioned exception noted in docs/WASM_CLIENT_PLAN.md §6.5 ("no
- * node:fs imports outside core-loader.ts's file read").
+ * This file is 100% host-agnostic by construction (Phase 5,
+ * docs/WASM_CLIENT_PLAN.md §9/§6.6): no `node:fs`, no `node:*` of any
+ * kind, and no reference to the ambient Node `Buffer` global — every byte
+ * buffer this module hands back is a plain `Uint8Array` copy (never a
+ * view into wasm linear memory past the point of copying — see the
+ * buffer-lifetime rule on {@link Http3WasmCore.copyOut}). `tsc -p
+ * tsconfig.workerd.json --noEmit` type-checks this file with
+ * `@cloudflare/workers-types` only (no `@types/node`) to enforce this by
+ * construction, not just by convention.
+ *
+ * `loadHttp3WasmCore` accepts either an already-compiled
+ * `WebAssembly.Module` or raw `bytes`, so the exact same function works
+ * under a future workerd host (which bundles `.wasm` as a precompiled
+ * `Module` import and cannot compile-from-bytes). The Node-specific
+ * convenience wrapper that reads a `.wasm` file from disk,
+ * `loadHttp3WasmCoreFromFile`, lives in the separate, Node-only
+ * `lib/wasm/node-core-loader.ts` — kept out of this file entirely (not
+ * merely behind an `if`) because a static *or* dynamic `import` of a file
+ * that itself imports `node:fs` is enough to make `tsc` resolve and
+ * type-check that file's `node:fs` usage even when the importing branch
+ * is never reached at runtime (verified empirically while building this
+ * phase: TypeScript does not defer module resolution for dynamic
+ * `import()` expressions, so "just make it a lazy import" does not work
+ * here — only a real file boundary does).
+ *
+ * Every Node-facing call site (`lib/client.ts`, `lib/quic-client.ts`,
+ * direct-construction tests) builds an `Http3WasmCore` via
+ * `node-core-loader.ts` and passes it in; nothing in `lib/wasm/**` other
+ * than that one Node-only file ever touches the filesystem.
  */
 
-import { readFileSync } from 'node:fs';
 import { makePreview1Imports } from './wasi-shim.js';
 import type { ShimOptions } from './wasi-shim.js';
 
@@ -134,11 +155,23 @@ export interface Http3WasmCore {
   writeUtf8(text: string): { ptr: number; len: number };
   /**
    * Copy `len` bytes starting at `ptr` out of linear memory into a fresh
-   * `Buffer` the caller owns indefinitely. Use this — never a raw view —
-   * for anything that must outlive the next ABI call on the same handle
+   * `Uint8Array` the caller owns indefinitely (a real, independent copy —
+   * `TypedArray.prototype.slice` always allocates a new backing buffer,
+   * never a view onto the source). Use this — never a raw view — for
+   * anything that must outlive the next ABI call on the same handle
    * (crates/http3-wasm/src/lib.rs's buffer-lifetime rule).
+   *
+   * Returns `Uint8Array`, not Node's `Buffer`, so this stays usable from a
+   * workerd host with no `@types/node` in scope (Phase 5,
+   * docs/WASM_CLIENT_PLAN.md §6.6/§9). Node-facing call sites
+   * (`lib/client.ts`, `lib/quic-client.ts`) wrap the result in a real
+   * `Buffer.from(...)` right at their own integration boundary — a real
+   * Buffer instance, not just a type-level fiction — so every existing,
+   * documented, Buffer-typed public API (`'sessionTicket'`/`'datagram'`
+   * events, stream `'data'` chunks) keeps receiving exactly what it did
+   * before this phase; nothing downstream of that boundary changes.
    */
-  copyOut(ptr: number, len: number): Buffer;
+  copyOut(ptr: number, len: number): Uint8Array;
   /** Decode `len` bytes starting at `ptr` as UTF-8 text (decoding copies immediately; safe past the next ABI call). */
   readUtf8(ptr: number, len: number): string;
   /** Read a little-endian `u32` at `ptr`. */
@@ -150,7 +183,7 @@ export interface Http3WasmCore {
    * same `outPtrPtr` cell passed to it, read the absolute data pointer the
    * export wrote back and return a **copy** of the bytes.
    */
-  readOutPtrResult(outPtrPtr: number, len: number): Buffer;
+  readOutPtrResult(outPtrPtr: number, len: number): Uint8Array;
   /** Same as {@link readOutPtrResult}, decoded as UTF-8 text instead of copied bytes. */
   readOutPtrResultUtf8(outPtrPtr: number, len: number): string;
   /**
@@ -198,13 +231,13 @@ class Http3WasmCoreImpl implements Http3WasmCore {
     return this.writeBytes(new TextEncoder().encode(text));
   }
 
-  copyOut(ptr: number, len: number): Buffer {
-    if (len <= 0) return Buffer.alloc(0);
-    // `Buffer.from(typedArrayOrBuffer)` copies; `Buffer.from(arrayBuffer, offset, length)`
-    // would only create a *view* onto wasm memory — the mistake the
-    // buffer-lifetime rule exists to prevent. Slicing the (fresh, per-call)
-    // Uint8Array first, then wrapping in Buffer.from, forces a real copy.
-    return Buffer.from(this.view.bytes().slice(ptr, ptr + len));
+  copyOut(ptr: number, len: number): Uint8Array {
+    if (len <= 0) return new Uint8Array(0);
+    // `TypedArray.prototype.slice` always allocates a fresh backing
+    // buffer and copies into it (unlike `.subarray`, which would return a
+    // *view* onto wasm memory — the mistake the buffer-lifetime rule
+    // exists to prevent).
+    return this.view.bytes().slice(ptr, ptr + len);
   }
 
   readUtf8(ptr: number, len: number): string {
@@ -220,8 +253,8 @@ class Http3WasmCoreImpl implements Http3WasmCore {
     return this.alloc(4);
   }
 
-  readOutPtrResult(outPtrPtr: number, len: number): Buffer {
-    if (len <= 0) return Buffer.alloc(0);
+  readOutPtrResult(outPtrPtr: number, len: number): Uint8Array {
+    if (len <= 0) return new Uint8Array(0);
     return this.copyOut(this.readU32(outPtrPtr), len);
   }
 
@@ -241,13 +274,32 @@ class Http3WasmCoreImpl implements Http3WasmCore {
   }
 }
 
+/**
+ * `@cloudflare/workers-types` (deliberately — see docs/WASM_CLIENT_PLAN.md
+ * §9 C2/C13) declares `WebAssembly.Module` as `abstract class Module {
+ * static customSections/exports/imports }` with **no public constructor**:
+ * workerd genuinely does not support synchronous compile-from-bytes inside
+ * a Worker (only precompiled `.wasm` module imports), so the type
+ * accurately refuses `new WebAssembly.Module(bytes)`. Node's real
+ * `WebAssembly.Module` *does* support this constructor — this branch is
+ * only ever exercised there (a workerd caller must always pass `{ module
+ * }`, never `{ bytes }`) — so this local, narrow, documented constructor
+ * type is how the same shared source keeps compiling under both
+ * `tsconfig.json` (real `@types/node` typings, real constructor) and
+ * `tsconfig.workerd.json` (workers-types' deliberately-abstract stand-in).
+ */
+interface BytesCompilableModule {
+  new (bytes: BufferSource): WebAssembly.Module;
+}
+
 function resolveModule(src: WasmCoreSource): WebAssembly.Module {
   if (src.module) return src.module;
   if (src.bytes) {
     // Cast is sound: never actually SharedArrayBuffer-backed in practice
     // (works around Uint8Array's generic buffer-type parameter not
     // structurally matching this TypeScript/lib version's `BufferSource`).
-    return new WebAssembly.Module(src.bytes as Uint8Array<ArrayBuffer>);
+    const ModuleCtor = WebAssembly.Module as unknown as BytesCompilableModule;
+    return new ModuleCtor(src.bytes as Uint8Array<ArrayBuffer>);
   }
   throw new Error('loadHttp3WasmCore: WasmCoreSource must supply either `module` or `bytes`');
 }
@@ -279,23 +331,4 @@ export function loadHttp3WasmCore(src: WasmCoreSource, opts: ShimOptions = {}): 
   state.instance = instance;
 
   return new Http3WasmCoreImpl(instance.exports as unknown as Http3WasmExports);
-}
-
-const moduleCacheByPath = new Map<string, WebAssembly.Module>();
-
-/**
- * Node convenience path: read + compile a `.wasm` file once, cached at
- * module scope keyed by path so repeated calls (e.g. one per connection)
- * never recompile (`new WebAssembly.Module` for this artifact's size is
- * on the order of a fraction of a millisecond, but there is no reason to
- * repeat it). This is the sanctioned Node-specific exception in this
- * otherwise host-agnostic file — see the module doc comment.
- */
-export function loadHttp3WasmCoreFromFile(path: string, opts: ShimOptions = {}): Http3WasmCore {
-  let module = moduleCacheByPath.get(path);
-  if (!module) {
-    module = new WebAssembly.Module(readFileSync(path));
-    moduleCacheByPath.set(path, module);
-  }
-  return loadHttp3WasmCore({ module }, opts);
 }

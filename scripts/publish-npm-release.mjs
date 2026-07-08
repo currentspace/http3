@@ -180,6 +180,15 @@ function assertRootPackageLayout(rootManifest, nativePackages) {
     'dist/wasm/http3_client.wasm',
     'dist/wasm/core-loader.js',
     'dist/wasm/wasi-shim.js',
+    // Phase 5 (docs/WASM_CLIENT_PLAN.md §9): these two are the actual
+    // `"./wasm"` package export targets (`default` and `workerd`/`worker`
+    // conditions respectively, package.json) — unlike the three files
+    // above (representative internals), a missing one of these means the
+    // export literally fails to resolve for a real consumer.
+    'dist/wasm/index.js',
+    'dist/wasm/index.d.ts',
+    'dist/wasm/index.workerd.js',
+    'dist/wasm/index.workerd.d.ts',
     'index.js',
     'index.d.ts',
     ...nativePackages.map((pkg) => pkg.binaryName),

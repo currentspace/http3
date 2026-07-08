@@ -31,19 +31,45 @@ export function formatLocalAddr(address: string, family: string, port: number): 
   return family === 'IPv6' ? `[${address}]:${String(port)}` : `${address}:${String(port)}`;
 }
 
-/** Options common to both `h3c_new` and `qc_new` beyond the connect params (§5.3). */
+/**
+ * Options common to both `h3c_new` and `qc_new` beyond the connect params
+ * (§5.3). Binary fields are `Uint8Array`, not Node's `Buffer` — this file
+ * must stay compilable with no `@types/node` in scope (Phase 5,
+ * docs/WASM_CLIENT_PLAN.md §9; a future workerd host has none). Node's
+ * `Buffer` instances satisfy `Uint8Array` fine, so every existing
+ * Node-facing call site (`lib/client.ts`/`lib/quic-client.ts` passing
+ * `options?.ca`/`options?.sessionTicket`, both publicly typed `Buffer`)
+ * keeps working unchanged.
+ */
 export interface CommonWasmClientOptions {
-  ca?: Buffer;
+  ca?: Uint8Array;
   rejectUnauthorized?: boolean;
   maxIdleTimeoutMs?: number;
   maxUdpPayloadSize?: number;
   initialMaxData?: number;
   initialMaxStreamDataBidiLocal?: number;
   initialMaxStreamsBidi?: number;
-  sessionTicket?: Buffer;
+  sessionTicket?: Uint8Array;
   allow0RTT?: boolean;
   enableDatagrams?: boolean;
   keylog?: boolean;
+}
+
+/** UTF-8 decode, portable across Node and workerd (`TextDecoder` is a Web-standard global present in both, unlike Buffer's `.toString('utf8')`). */
+function utf8Decode(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+/**
+ * Base64-encode, portable across Node and workerd: `btoa` is a Web-standard
+ * global present in both (unlike Buffer's `.toString('base64')`) but
+ * operates on a "binary string" (one UTF-16 code unit per byte), not a
+ * byte array directly — hence the `String.fromCharCode` spread. Fine for
+ * this module's inputs (PEM certs, session tickets: at most a few KB),
+ * well under engines' safe argument-spread limits.
+ */
+function base64Encode(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes));
 }
 
 /**
@@ -62,14 +88,14 @@ export interface CommonWasmClientOptions {
  */
 export function buildCommonOptionsJson(opts: CommonWasmClientOptions): Record<string, unknown> {
   const json: Record<string, unknown> = {};
-  if (opts.ca) json.ca = opts.ca.toString('utf8');
+  if (opts.ca) json.ca = utf8Decode(opts.ca);
   if (opts.rejectUnauthorized !== undefined) json.rejectUnauthorized = opts.rejectUnauthorized;
   if (opts.maxIdleTimeoutMs !== undefined) json.maxIdleTimeoutMs = opts.maxIdleTimeoutMs;
   if (opts.maxUdpPayloadSize !== undefined) json.maxUdpPayloadSize = opts.maxUdpPayloadSize;
   if (opts.initialMaxData !== undefined) json.initialMaxData = opts.initialMaxData;
   if (opts.initialMaxStreamDataBidiLocal !== undefined) json.initialMaxStreamDataBidiLocal = opts.initialMaxStreamDataBidiLocal;
   if (opts.initialMaxStreamsBidi !== undefined) json.initialMaxStreamsBidi = opts.initialMaxStreamsBidi;
-  if (opts.sessionTicket) json.sessionTicket = opts.sessionTicket.toString('base64');
+  if (opts.sessionTicket) json.sessionTicket = base64Encode(opts.sessionTicket);
   if (opts.allow0RTT !== undefined) json.allow0rtt = opts.allow0RTT;
   if (opts.enableDatagrams !== undefined) json.enableDatagrams = opts.enableDatagrams;
   if (opts.keylog !== undefined) json.keylog = opts.keylog;

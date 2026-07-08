@@ -11,3 +11,6 @@ package-lock.json
 results/
 # Node --report-on-fatalerror dumps from killed/crashed test processes.
 report.*.json
+# wrangler dev/deploy local state + generated runtime types (examples/workerd-client/).
+.wrangler/
+worker-configuration.d.ts

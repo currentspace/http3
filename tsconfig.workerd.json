@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["@cloudflare/workers-types"],
+    "noEmit": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["lib/wasm/**/*.ts"],
+  "exclude": [
+    "lib/wasm/node-udp-adapter.ts",
+    "lib/wasm/node-core-loader.ts",
+    "lib/wasm/index.ts"
+  ]
+}

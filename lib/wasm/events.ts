@@ -10,23 +10,30 @@
  * This module deliberately does NOT import `NativeEvent` from
  * `lib/event-loop.ts` — the `lib/wasm/**` ESLint zone forbids importing
  * that file (docs/WASM_CLIENT_PLAN.md §6.6). {@link WasmEvent} below is a
- * structurally identical shape, kept in sync by hand: structural typing
- * means a `(events: WasmEvent[]) => void` callback and a real
+ * structurally *almost* identical shape, kept in sync by hand, with one
+ * deliberate difference (Phase 5, docs/WASM_CLIENT_PLAN.md §9): binary
+ * fields are `Uint8Array`, not Node's `Buffer` — this file must stay
+ * compilable with no `@types/node` in scope (a future workerd host has
+ * none). Because of that one difference, a `(events: WasmEvent[]) => void`
+ * callback is **not** directly assignable to a real
  * `(events: NativeEvent[]) => void` callback (e.g. `session._dispatchEvents`)
- * are mutually assignable, so `lib/client-event-loop-factory.ts` (outside
- * `lib/wasm/`, free to import the real type) can pass one straight through
- * with no adapter shim.
+ * the way it was pre-Phase-5 — `lib/client.ts`/`lib/quic-client.ts` (outside
+ * `lib/wasm/`, Node-only, free to import both types) now do one small,
+ * explicit conversion step (wrapping every `Uint8Array` payload in a real
+ * `Buffer.from(...)`) right at that boundary, so every existing,
+ * documented, Buffer-typed public API keeps receiving exactly what it did
+ * before this phase — see `lib/wasm-event-bridge.ts`.
  */
 
 import type { Http3WasmCore } from './core-loader.js';
 
-/** Mirrors `NativeEvent` in `lib/event-loop.ts` field-for-field — keep in sync by hand. */
+/** Mirrors `NativeEvent` in `lib/event-loop.ts` field-for-field, except binary payloads are `Uint8Array` — see the module doc comment. */
 export interface WasmEvent {
   eventType: number;
   connHandle: number;
   streamId: number;
   headers?: Array<{ name: string; value: string }>;
-  data?: Buffer;
+  data?: Uint8Array;
   fin?: boolean;
   meta?: {
     errorCode?: number;
@@ -43,7 +50,8 @@ export interface WasmEvent {
     errno?: number;
     syscall?: string;
     peerCertificatePresented?: boolean;
-    peerCertificateChain?: Buffer[];
+    /** Never actually populated on either runtime today (WASM_CLIENT_PLAN.md §12 decision log) — kept only for shape parity. */
+    peerCertificateChain?: Uint8Array[];
     durationMs?: number;
   };
   metrics?: {
@@ -72,7 +80,7 @@ interface RawWasmEventJson {
 
 /**
  * Decode a `drain_events` JSON array and copy every `dataOff`/`dataLen`
- * payload out of linear memory into a fresh `Buffer` **synchronously**,
+ * payload out of linear memory into a fresh `Uint8Array` **synchronously**,
  * right now — before the caller makes any further ABI call on this
  * handle. `connHandle` is stamped onto every event because the wire JSON
  * omits it: the native NAPI event batch carries a `connHandle` per event
@@ -113,7 +121,7 @@ export function drainKeylog(
   takeKeylogFn: (handle: number, outPtrPtr: number) => bigint,
   handle: number,
   outPtrPtr: number,
-): Buffer | null {
+): Uint8Array | null {
   const len = Number(takeKeylogFn(handle, outPtrPtr));
   if (len <= 0) return null;
   return core.readOutPtrResult(outPtrPtr, len);

@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // C7 smoke harness / illustrative workerd fixture — see README.md.
+  // Status: instantiation + export-shape + in-memory-mock-transport
+  // smoke-tested for real under `wrangler dev` (see README's "What was
+  // actually verified" section). Real outbound UDP does not exist in
+  // workerd yet (cloudflare/workerd#4463), so this cannot do a real
+  // network handshake.
+  "name": "http3-wasm-workerd-example",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-08",
+  // Deliberately NOT set: this worker's import graph
+  // (dist/wasm/index.workerd.js and everything it pulls in) is
+  // host-agnostic by construction and does not use Buffer/node:*/any
+  // nodejs_compat surface — omitting the flag is itself part of what this
+  // fixture demonstrates. Add it back only if you extend this worker with
+  // code that genuinely needs it.
+  "compatibility_flags": []
+}

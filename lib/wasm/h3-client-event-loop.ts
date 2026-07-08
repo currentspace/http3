@@ -8,21 +8,32 @@
  * doing so would require importing `lib/event-loop.ts`, which the
  * `lib/wasm/**` ESLint zone forbids (docs/WASM_CLIENT_PLAN.md §6.6).
  * `WasmH3ClientEventLoop`'s method surface is *structurally* identical to
- * `ClientEventLoopLike`, which is all TypeScript's structural typing needs
- * for `lib/client-event-loop-factory.ts` (outside `lib/wasm/`, free to
- * import the real interface) to use an instance of this class wherever a
- * `ClientEventLoopLike` is expected.
+ * `ClientEventLoopLike` (TypeScript checks method parameters bivariantly,
+ * so this class's `Uint8Array`-typed parameters still satisfy an interface
+ * declaring `Buffer` — Buffer instances are Uint8Array instances), which is
+ * all TypeScript's structural typing needs for `lib/client-event-loop-factory.ts`
+ * (outside `lib/wasm/`, free to import the real interface) to use an
+ * instance of this class wherever a `ClientEventLoopLike` is expected.
+ *
+ * **Host-agnostic by construction (Phase 5, docs/WASM_CLIENT_PLAN.md §9):**
+ * this file takes an already-instantiated {@link Http3WasmCore} and a
+ * caller-supplied `transportFactory` — it never touches `node:fs` or
+ * `node:dgram`, directly or transitively, so it compiles under
+ * `tsconfig.workerd.json` (no `@types/node`) and is exactly what a workerd
+ * host constructs against (`lib/wasm/index.workerd.ts`). The Node
+ * convenience of "just give me a `.wasm` path and a UDP socket" now lives
+ * one layer up, at the caller (`lib/client.ts` uses
+ * `lib/wasm/node-core-loader.ts` + `lib/wasm/node-udp-adapter.ts`
+ * explicitly) — see those files' doc comments for why this couldn't stay a
+ * same-file `if` branch.
  */
 
-import { loadHttp3WasmCoreFromFile } from './core-loader.js';
 import type { Http3WasmCore } from './core-loader.js';
 import { decodeEventBatch, drainKeylog } from './events.js';
 import type { WasmEvent } from './events.js';
-import { connectNodeUdp } from './node-udp-adapter.js';
 import type { DatagramTransport } from './datagram-transport.js';
 import { buildCommonOptionsJson, formatLocalAddr, parseSocketAddress, randomScidHex } from './wasm-options.js';
 import type { CommonWasmClientOptions } from './wasm-options.js';
-import type { ShimOptions } from './wasi-shim.js';
 
 /** Must match `lib/event-loop.ts`'s `EVENT_SHUTDOWN_COMPLETE` sentinel. */
 const EVENT_SHUTDOWN_COMPLETE = 15;
@@ -31,9 +42,22 @@ const EVENT_SHUTDOWN_COMPLETE = 15;
 const CLOSE_DRAIN_DEADLINE_MS = 2000;
 const CLOSE_DRAIN_POLL_MS = 5;
 
-/** Feature-detects `unref()` before calling it — workerd's `nodejs_compat` coverage for timer `unref` is unverified (docs/WASM_CLIENT_PLAN.md §9 C15). */
-function unrefIfSupported(timer: NodeJS.Timeout): void {
-  if (typeof timer.unref === 'function') timer.unref();
+/**
+ * Feature-detects `unref()` before calling it. `setTimeout`'s return type
+ * is host-dependent (`NodeJS.Timeout` under Node's real types, a plain
+ * `number` under `@cloudflare/workers-types` — neither declares `unref` on
+ * a bare `number`), so the parameter is deliberately typed as whatever
+ * `setTimeout` itself returns under whichever tsconfig compiles this file,
+ * then narrowed via a runtime-safe cast. Workers has no timer `unref`
+ * concept at all (no threads to keep a process alive around); this is a
+ * true no-op there, which is correct, not a gap (docs/WASM_CLIENT_PLAN.md
+ * §9 C15 is about `nodejs_compat` *polyfill* fidelity — this code path
+ * never depends on nodejs_compat, it feature-detects the real platform
+ * global directly).
+ */
+function unrefIfSupported(timer: ReturnType<typeof setTimeout>): void {
+  const maybeUnrefable = timer as unknown as { unref?: () => void };
+  if (typeof maybeUnrefable.unref === 'function') maybeUnrefable.unref();
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -44,12 +68,26 @@ async function sleep(ms: number): Promise<void> {
 }
 
 export interface WasmH3ClientEventLoopOptions extends CommonWasmClientOptions {
-  /** Absolute path to the compiled `http3_client.wasm` artifact. */
-  wasmPath: string;
-  /** WASI shim options — the injectable clock/random hooks C5's deterministic timer tests use. */
-  shim?: ShimOptions;
-  /** Override the datagram transport factory (tests may substitute a mock transport). Defaults to {@link connectNodeUdp}. */
-  transportFactory?: (host: string, port: number) => Promise<DatagramTransport>;
+  /**
+   * An already-instantiated wasm core. Node callers build this via
+   * `lib/wasm/node-core-loader.ts`'s `loadHttp3WasmCoreFromFile`; a
+   * workerd host builds it via `core-loader.ts`'s host-agnostic
+   * `loadHttp3WasmCore({ module })` from its own precompiled `.wasm`
+   * module import. This class never loads or compiles the module itself
+   * (Phase 5, docs/WASM_CLIENT_PLAN.md §9).
+   */
+  core: Http3WasmCore;
+  /**
+   * The datagram transport factory — required, not defaulted: this class
+   * has no built-in notion of "the Node way" to open a socket (that would
+   * mean statically depending on `node:dgram`, which would break
+   * compilation under `tsconfig.workerd.json`). Node callers pass
+   * `lib/wasm/node-udp-adapter.ts`'s `connectNodeUdp` explicitly
+   * (`lib/client.ts` does); a workerd host passes its own implementation
+   * of `DatagramTransport` once one exists (docs/WASM_CLIENT_PLAN.md §9
+   * C1); tests substitute a mock transport.
+   */
+  transportFactory: (host: string, port: number) => Promise<DatagramTransport>;
 }
 
 /**
@@ -61,12 +99,12 @@ export class WasmH3ClientEventLoop {
   private readonly core: Http3WasmCore;
   private readonly opts: WasmH3ClientEventLoopOptions;
   private readonly dispatch: (events: WasmEvent[]) => void;
-  private readonly onKeylog: ((line: Buffer) => void) | undefined;
+  private readonly onKeylog: ((line: Uint8Array) => void) | undefined;
 
   private handle = 0;
   private transport: DatagramTransport | null = null;
   private outPtrCell = 0;
-  private timer: NodeJS.Timeout | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private armedAbsoluteDeadlineMs: number | null = null;
   private closeRequested = false;
   private closePromise: Promise<void> | null = null;
@@ -79,23 +117,25 @@ export class WasmH3ClientEventLoop {
    *   (`lib/client.ts` + `lib/keylog.ts`'s file-tailing, replaced here by
    *   draining `take_keylog` each pump) — wired by
    *   `lib/client-event-loop-factory.ts`/`lib/client.ts`, not part of the
-   *   shared `ClientEventLoopLike` contract.
+   *   shared `ClientEventLoopLike` contract. Receives a `Uint8Array`, not a
+   *   `Buffer` — `lib/client.ts`/`lib/quic-client.ts` wrap it in a real
+   *   `Buffer.from(...)` before emitting the public `'keylog'` event
+   *   (Phase 5, docs/WASM_CLIENT_PLAN.md §9).
    */
   constructor(
     opts: WasmH3ClientEventLoopOptions,
     dispatch: (events: WasmEvent[]) => void,
-    onKeylog?: (line: Buffer) => void,
+    onKeylog?: (line: Uint8Array) => void,
   ) {
     this.opts = opts;
     this.dispatch = dispatch;
     this.onKeylog = onKeylog;
-    this.core = loadHttp3WasmCoreFromFile(opts.wasmPath, opts.shim);
+    this.core = opts.core;
   }
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
     const { host, port } = parseSocketAddress(serverAddr);
-    const transportFactory = this.opts.transportFactory ?? connectNodeUdp;
-    const transport = await transportFactory(host, port);
+    const transport = await this.opts.transportFactory(host, port);
 
     if (this.closeRequested) {
       // A close() raced connect()'s async transport bind — tear down what
@@ -148,7 +188,7 @@ export class WasmH3ClientEventLoop {
     return streamId;
   }
 
-  streamSend(streamId: number, data: Buffer, fin: boolean): number {
+  streamSend(streamId: number, data: Uint8Array, fin: boolean): number {
     const { ptr, len } = this.core.writeBytes(data);
     const result = Number(this.core.exports.h3c_stream_send(this.handle, BigInt(streamId), ptr, len, fin ? 1 : 0));
     this.core.free(ptr, len);
@@ -167,7 +207,7 @@ export class WasmH3ClientEventLoop {
     return result >= 0;
   }
 
-  sendDatagram(data: Buffer): boolean {
+  sendDatagram(data: Uint8Array): boolean {
     const { ptr, len } = this.core.writeBytes(data);
     const result = Number(this.core.exports.h3c_send_datagram(this.handle, ptr, len));
     this.core.free(ptr, len);
@@ -353,9 +393,9 @@ export class WasmH3ClientEventLoop {
     // 2. drain_events: settles app/drain events + retried pending writes
     //    (crates/http3-wasm/src/h3.rs's h3c_drain_events doc comment) and
     //    returns the serialized batch. Synchronously decode the JSON and
-    //    copy every dataOff/dataLen payload into fresh Buffers right now —
-    //    core.copyOut inside decodeEventBatch does this before any further
-    //    ABI call below.
+    //    copy every dataOff/dataLen payload into fresh Uint8Arrays right
+    //    now — core.copyOut inside decodeEventBatch does this before any
+    //    further ABI call below.
     const len = Number(this.core.exports.h3c_drain_events(this.handle, this.outPtrCell));
     const json = len > 0 ? this.core.readOutPtrResultUtf8(this.outPtrCell, len) : '[]';
     const events = decodeEventBatch(this.core, json, this.handle);

@@ -78,6 +78,10 @@ step "typecheck (lib + tests)"
 pnpm run typecheck
 mark_done
 
+step "typecheck (workerd tsconfig — lib/wasm/** without @types/node)"
+pnpm run typecheck:workerd
+mark_done
+
 step "Node-API boundary check"
 pnpm run check:napi-boundary
 mark_done

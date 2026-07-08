@@ -179,7 +179,7 @@ function collectClientResponse(
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     const headers: Record<string, string> = {};
-    const chunks: Buffer[] = [];
+    const chunks: Uint8Array[] = [];
     let processed = 0;
 
     const check = (): void => {
@@ -235,6 +235,7 @@ describe('wasm frozen-clock simulation (C6)', { skip: wasmSkipReason() }, () => 
   it('completes a full handshake + GET with a clock frozen except at explicit I/O ticks', async () => {
     const { WasmH3ClientEventLoop } = await import('../../lib/wasm/h3-client-event-loop.js');
     const { connectNodeUdp } = await import('../../lib/wasm/node-udp-adapter.js');
+    const { loadHttp3WasmCoreFromFile } = await import('../../lib/wasm/node-core-loader.js');
 
     const binding = loadBinding();
     const certs = generateTestCerts();
@@ -249,9 +250,8 @@ describe('wasm frozen-clock simulation (C6)', { skip: wasmSkipReason() }, () => 
     const dispatched: WasmEvent[] = [];
     const eventLoop = new WasmH3ClientEventLoop(
       {
-        wasmPath: wasmArtifactPath(),
+        core: loadHttp3WasmCoreFromFile(wasmArtifactPath(), { nowNs: clock.nowNs }),
         rejectUnauthorized: false,
-        shim: { nowNs: clock.nowNs },
         transportFactory: async (host, port) => wrapWithFrozenClock(await connectNodeUdp(host, port), clock),
       },
       (events) => {

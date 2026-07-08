@@ -1285,6 +1285,150 @@ wrangler resolution, C7 smoke harness, docs, tracking issue for #4463.
 `wrangler deploy --dry-run` on a sample worker resolves and stays under
 size/startup budgets.
 
+**Status: DONE (2026-07-08, macOS arm64, local) — real `workerd`/`wrangler`
+signal obtained, not simulated; gate met exactly as written above.**
+
+- **`lib/wasm/index.workerd.ts`** (new): thin re-export entry point —
+  `loadHttp3WasmCore`, `WasmH3ClientEventLoop`/`WasmQuicClientEventLoop`,
+  `DatagramTransport`, option/event types — plus
+  `createUnavailableDatagramTransport()`, a `DatagramTransport` that
+  throws a descriptive, unmissable error from every method rather than
+  silently no-op-ing, for wiring before a real transport exists. No fake
+  workerd UDP transport was written, per this phase's explicit
+  instruction — there is nothing to point it at yet (§9 C1).
+- **A real, necessary Phase 3 gap found and fixed, not just a Phase 5
+  addition**: `WasmH3ClientEventLoop`/`WasmQuicClientEventLoop` originally
+  (Phase 3) took a `wasmPath: string` and hard-imported
+  `loadHttp3WasmCoreFromFile`/`connectNodeUdp` — both `node:fs`/
+  `node:dgram`-dependent — directly into files otherwise designed to be
+  host-agnostic. That was invisible on Node (the only host ever tried
+  before this phase) but made the classes **impossible to compile, let
+  alone construct, under a tsconfig without `@types/node`** — verified
+  empirically: a dynamic `import()` of a file that itself imports
+  `node:fs` still surfaces that file's type errors under such a tsconfig
+  (TypeScript does not defer module resolution for dynamic imports the
+  way a same-file `if` branch might suggest). Fixed by having the
+  constructors take an already-instantiated `core: Http3WasmCore` and a
+  required `transportFactory`; the Node-only pieces moved to
+  `lib/wasm/node-core-loader.ts` (new, holds `loadHttp3WasmCoreFromFile`,
+  split out of `core-loader.ts`) and are now built by the *caller*
+  (`lib/client.ts`/`lib/quic-client.ts`, and 2 direct-construction tests)
+  rather than the event loop classes themselves.
+- **The event/data contract went `Uint8Array`-only inside `lib/wasm/**`**
+  (`WasmEvent.data`, keylog lines, `Http3WasmCore.copyOut`/
+  `readOutPtrResult`, `CommonWasmClientOptions.ca`/`sessionTicket`,
+  `WasmQuicClientEventLoopOptions.cert`/`key`) — `Buffer` is a Node
+  ambient global `@cloudflare/workers-types` deliberately does not
+  declare (verified by installing it and grepping — no `Buffer`
+  anywhere), and the whole point of `tsconfig.workerd.json` is to catch
+  exactly this kind of accidental dependency rather than paper over it
+  with a fake ambient shim. `.toString('utf8')`/`.toString('base64')`
+  (Buffer-specific) became `TextDecoder`/`btoa(String.fromCharCode(...))`
+  (Web-standard, present in both Node and workers-types). Every place the
+  *native-parity contract* genuinely requires a real `Buffer` instance
+  (the public, documented `'sessionTicket'`/`'datagram'` events, stream
+  `'data'` chunks, `'keylog'`) still gets one — `lib/wasm-event-bridge.ts`
+  (new, deliberately outside `lib/wasm/**` since it imports
+  `lib/event-loop.ts`'s `NativeEvent`, forbidden there) wraps every
+  `Uint8Array` payload in a real `Buffer.from(...)` at the
+  `lib/client.ts`/`lib/quic-client.ts` integration boundary — zero
+  behavior change for any existing consumer, confirmed by the full
+  existing native suite (362/362, 1 pre-existing skip) and wasm suite
+  (21/21) staying green through this refactor.
+- **`tsconfig.workerd.json`** (new): compiles `lib/wasm/**/*.ts` with
+  `@cloudflare/workers-types` (new devDependency) instead of `@types/node`,
+  excluding the two files that are Node-only by design
+  (`node-udp-adapter.ts`, `node-core-loader.ts`) plus the new Node-facing
+  `index.ts` aggregate. `tsc -p tsconfig.workerd.json --noEmit` passes
+  clean. Registered in `eslint.config.mjs`'s `parserOptions.project`;
+  the existing `lib/wasm/**` ESLint zone's node:fs exception moved from
+  `core-loader.ts` (now fully host-agnostic) to the new
+  `node-core-loader.ts`. Beyond `Buffer`, this surfaced two more real
+  friction points, both fixed with narrow, documented, verified-correct
+  workarounds rather than papered over: `NodeJS.Timeout` (host-dependent —
+  `setTimeout`'s return type differs between `@types/node` and
+  workers-types; fixed via `ReturnType<typeof setTimeout>`, which
+  correctly resolves to whichever ambient declaration is in scope) and
+  `WebAssembly.Module`'s constructor (workers-types correctly declares
+  `Module` as `abstract` with no public constructor, accurately modeling
+  that workerd cannot compile-from-bytes — worked around with a narrow,
+  documented local constructor type for the one branch Node's real
+  implementation supports; a workerd caller must always pass `{ module }`,
+  never `{ bytes }`, which was already true by design).
+- **`"./wasm"` package export** (deferred from Phase 4, §12): added with
+  **per-condition nested `types`** — `workerd`/`worker` conditions each
+  carry their own `types: "./dist/wasm/index.workerd.d.ts"` — not a flat
+  top-level `types` key. Verified this distinction matters, not just in
+  theory: with a flat key (the plan's originally-sketched shape), a
+  `customConditions: ["workerd"]` tsc consumer resolved
+  `connectNodeUdp`/`loadHttp3WasmCoreFromFile` successfully even though
+  the JS runtime resolved `index.workerd.js`, which does *not* export
+  them — exactly the workers-sdk#2805-class shadowing bug the plan
+  warned about, reproduced and then fixed with the nested shape (same
+  `customConditions: ["workerd"]` consumer now correctly fails to resolve
+  those two names — `error TS2305`). `dist/wasm/index.js`'s `default`
+  condition target is a new small Node-facing aggregate,
+  `lib/wasm/index.ts` (re-exports the same host-agnostic surface plus the
+  two Node-only conveniences). Verified against real `pnpm run build` +
+  `pnpm pack --dry-run`: every referenced file (`index.d.ts`, `index.js`,
+  `index.workerd.d.ts`, `index.workerd.js`, `http3_client.wasm`) exists in
+  the packed tarball. The root `.` export is unchanged.
+- **C7 smoke harness + sample worker fixture, combined**
+  (`examples/workerd-client/`): real `wrangler.jsonc` +
+  `worker.ts`, importing `@currentspace/http3/wasm` through a genuine
+  `workspace:*` dependency (not a relative path) — resolved through a
+  real pnpm workspace symlink exactly like an npm-installed consumer.
+  `workerd`/`wrangler` added as devDependencies (the gate needed them, and
+  they produced real, working signal — not added speculatively). Real,
+  repeated, honest results (full transcripts in the example's own
+  README.md and the phase-6/status report):
+  - `wrangler dev`: the compiled `dist/wasm/http3_client.wasm` instantiates
+    under a real local `workerd` V8 isolate; the full `h3c_*`/`qc_*`
+    export surface resolves; `WasmH3ClientEventLoop` (the identical class
+    the Node runtime path uses) constructs and drives `connect()` against
+    an in-memory mock `DatagramTransport`, producing a real, well-formed
+    1200-byte QUIC v1 Initial packet — proving the WASI shim's
+    `crypto.getRandomValues`/`performance.now()` bindings, `TextEncoder`/
+    `TextDecoder`, `queueMicrotask`-deferred dispatch, and the
+    single-`setTimeout` pump/close discipline all run correctly inside
+    workerd's own engine. Achieved with `compatibility_flags: []` — no
+    `nodejs_compat` — real (if narrow) positive signal that this code path
+    specifically does not depend on nodejs_compat fidelity (C15 stays open
+    for anything that does need it).
+  - `wrangler deploy --dry-run`: succeeds; 1542.56 KiB / 630.20 KiB gzip
+    upload size — comfortably under the free-tier 3 MB gzip limit,
+    consistent with Phase 2's measurement of the artifact alone.
+  - **Not proven, honestly**: any real network I/O (no outbound UDP exists
+    to test against — this is the whole point of C1); nodejs_compat
+    fidelity for `node:stream`/`node:events`/`Buffer` (C15) — this code
+    path is built specifically to avoid needing any of that. No real
+    `wrangler deploy` to a Cloudflare account was attempted (out of scope;
+    `--dry-run` already covers everything short of the missing UDP piece).
+  - One real, unrelated environment finding recorded (not a blocker, not
+    part of this fix's scope): pnpm's generated `node_modules/.bin/workerd`
+    shim on this platform wraps the `workerd` binary (a raw Mach-O
+    executable, not a JS file) with `exec node <path>`, which fails —
+    `npx workerd`/`./node_modules/.bin/workerd` both error trying to parse
+    the binary as JS. Invoking the real binary path directly works fine,
+    and `wrangler` itself is unaffected (it resolves the platform-specific
+    `@cloudflare/workerd-darwin-arm64` binary directly, not through this
+    shim) — this only matters if you want bare `workerd --experimental`
+    rather than `wrangler dev`.
+- **Docs**: `docs/WASM_RUNTIME.md`'s existing "Workers / workerd status"
+  section (added in Phase 4's docs pass) extended in place with what this
+  phase built, the full honest C7 results, what remains, and a
+  ready-to-file draft tracking-issue template — no real GitHub artifact
+  created (repo owner's call, matching how the Phase 2 quiche-patch
+  upstreaming and Phase 4 CI-workflow TODOs were handled).
+- **Verification**: `pnpm run lint`, `pnpm run typecheck` (both existing
+  tsconfigs), and the new `tsc -p tsconfig.workerd.json --noEmit` all
+  clean; full native `pnpm test` unaffected (362/362, 1 pre-existing
+  skip); `HTTP3_WASM=1 pnpm run test:wasm` unaffected (21/21, including
+  the 2 direct-construction tests updated for the `core`/
+  `transportFactory` constructor shape change); `pnpm run build` +
+  `pnpm pack --dry-run` confirm every file the new export references is
+  actually in the packed tarball.
+
 ---
 
 ## 12. Decision log / deliberately deferred
@@ -1304,8 +1448,10 @@ size/startup budgets.
 | Browser adapter (WebSocket relay à la quinn-wasm/iroh) | out of scope; falls out of the architecture nearly free — revisit after Phase 5 |
 | A4 quiche-patch wiring: static `[patch.crates-io]` in root `Cargo.toml` vs. scoped `--config` override | **scoped `--config`, not static.** `scripts/prepare-quiche-wasm-patch.sh` vendors + patches quiche into the git-ignored `target/quiche-wasm-patched/<version>/`; `scripts/build-wasm.mjs` passes `--config patch.crates-io.quiche.path="<that dir>"` to *only* its own `cargo build -p http3-wasm --target wasm32-wasip1` invocation. A static `[patch.crates-io]` in the root manifest would make `cargo build --release` (and every other cargo invocation, on every machine, forever) fail hard on a fresh clone before the vendoring script has ever run — Cargo resolves `[patch]` for the whole workspace regardless of target/features. Verified empirically both orders: `cargo build --release` succeeds identically whether or not `target/quiche-wasm-patched/` exists yet, and `git diff Cargo.lock` shows zero churn beyond the permanent `http3-wasm` package entry (a `--config`-patched build transiently drops the `quiche` entry's `source`/`checksum` fields, but a subsequent unpatched build cleanly restores them) |
 | Upstreaming the quiche FFI fix (A4 task 2) | **manual follow-up for the repo owner.** Creating a real `currentspace/quiche` (or similar) GitHub fork and opening a PR against `cloudflare/quiche` requires the repo owner's own GitHub account/credentials — out of scope for automation. The patch itself is ready to submit as-is: `spikes/quiche-wasm-wasip1/quiche-0.29.2-wasm-ffi.patch` (2 lines, `src/crypto/boringssl.rs`, drops an incorrect `-> c_void` on two FFI decls that are `void` in C). Until upstreamed, `scripts/prepare-quiche-wasm-patch.sh` is the local, reproducible, git-ignored vendoring path the wasm build depends on. |
-| `package.json` `"./wasm"` subpath export (D3) | **deferred to Phase 5, not added in the Phase 4 D1b/D3 pass.** The condition map would point `workerd`/`worker` at `dist/wasm/index.workerd.js`, which doesn't exist until Phase 5's `lib/wasm/index.workerd.ts` lands (§6.6/§9 E-tasks); exporting a subpath that resolves to a nonexistent file fails (or silently mis-resolves) for any consumer who tries it today, which is worse than omitting it. Add it once that file and its dedicated tsconfig exist, and verify condition ordering against real wrangler resolution. See the Phase 4 status block above for the full note. |
-| CI wiring for the wasm artifact: D2's new `ci.yml` `wasm` job, D3's `release.yml` upload + validate lane | **not implemented in this pass — `.github/workflows/*.yml` is out of scope for an agent that cannot execute a real GitHub Actions run** (same reasoning as the "cannot create a real GitHub fork" row above: document precisely, don't commit unverifiable infrastructure changes). A complete, directly-actionable spec — including a real consequence this pass's `publish-npm-release.mjs` change introduces (release now hard-fails without a prior wasm build) — is written out in the Phase 4 status block's TODO above rather than duplicated here. |
+| `package.json` `"./wasm"` subpath export (D3) | ~~**deferred to Phase 5, not added in the Phase 4 D1b/D3 pass.**~~ **LANDED in Phase 5** (2026-07-08): added with **per-condition nested `types`** (`workerd`/`worker` each carry their own `types: "./dist/wasm/index.workerd.d.ts"`), not the flat single top-level `types` key originally sketched in §8 D3 above — a flat key turned out to be a real, reproduced instance of the workers-sdk#2805-class shadowing bug this plan already worried about (verified: under `customConditions: ["workerd"]`, a flat `types` key let `connectNodeUdp` — a Node-only export — resolve successfully even though the actual JS runtime target, `index.workerd.js`, does not export it; the nested shape fixes this, confirmed by the same check now correctly failing with `TS2305`). See the Phase 5 status block for the full verification (real `wrangler`, real `node --conditions=workerd`, real `customConditions` tsc checks). |
+| CI wiring for the wasm artifact: D2's new `ci.yml` `wasm` job, D3's `release.yml` upload + validate lane | **not implemented in this pass — `.github/workflows/*.yml` is out of scope for an agent that cannot execute a real GitHub Actions run** (same reasoning as the "cannot create a real GitHub fork" row above: document precisely, don't commit unverifiable infrastructure changes). A complete, directly-actionable spec — including a real consequence this pass's `publish-npm-release.mjs` change introduces (release now hard-fails without a prior wasm build) — is written out in the Phase 4 status block's TODO above rather than duplicated here. **Still true after Phase 5** — nothing in Phase 5 touched CI workflow files either, for the same reason. |
+| Phase 5 `WasmH3ClientEventLoop`/`WasmQuicClientEventLoop` constructor shape: `wasmPath`+implicit `node:dgram` default (Phase 3) vs. `core: Http3WasmCore`+required `transportFactory` (Phase 5) | **changed in Phase 5, not additive.** The Phase 3 shape hard-imported `node:fs`/`node:dgram` from inside files otherwise meant to be host-agnostic, which is invisible on Node (the only host tried before Phase 5) but makes the classes impossible to compile under a tsconfig without `@types/node` — a real, necessary fix rather than a style preference. `lib/client.ts`/`lib/quic-client.ts` and 2 direct-construction tests (`test/wasm/deterministic-clock.test.ts`, `test/wasm/frozen-clock.test.ts`) were updated accordingly; all pre-existing wasm tests (21/21) and the native suite (362/362) stayed green through the change. |
+| `lib/wasm/**` event/data payload type: `Buffer` (Phase 3) vs. `Uint8Array` (Phase 5) | **changed in Phase 5, not additive — but the public API contract is unchanged.** `Buffer` is a Node ambient global `@cloudflare/workers-types` deliberately does not declare. `WasmEvent.data`, keylog lines, `Http3WasmCore.copyOut`/`readOutPtrResult`, and the `ca`/`sessionTicket`/`cert`/`key` option fields are `Uint8Array` throughout `lib/wasm/**` now; the native-parity contract (real `Buffer` instances for the documented public `'sessionTicket'`/`'datagram'` events, stream `'data'` chunks, `'keylog'`) is preserved by a new, deliberately Node-only bridge file, `lib/wasm-event-bridge.ts` (outside `lib/wasm/**`, since it imports `lib/event-loop.ts`'s `NativeEvent`, forbidden there), which wraps every payload in a real `Buffer.from(...)` at the `lib/client.ts`/`lib/quic-client.ts` integration boundary. Zero behavior change for any existing consumer — confirmed by the full native and wasm suites staying green. |
 
 ## 13. References
 

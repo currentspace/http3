@@ -5,6 +5,7 @@ import { createClientEventLoop, resolveWasmArtifactPath } from './client-event-l
 import type { ConnectionEndpoint, DnsLookupFn } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
+import { toNativeEvents, toNativeKeylogLine } from './wasm-event-bridge.js';
 import { ERR_HTTP3_INVALID_STATE, ERR_HTTP3_SESSION_ERROR, ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
@@ -807,11 +808,18 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
           },
           async () => {
             // Lazily dynamic-imported so native-only consumers never load
-            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6).
+            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6). See the
+            // identical note in lib/client.ts: Node-only pieces (`.wasm`
+            // file loading, `node:dgram`) are built here and handed to
+            // `WasmQuicClientEventLoop` as an already-instantiated core +
+            // transport factory (Phase 5, docs/WASM_CLIENT_PLAN.md §9).
             const { WasmQuicClientEventLoop } = await import('./wasm/quic-client-event-loop.js');
+            const { loadHttp3WasmCoreFromFile } = await import('./wasm/node-core-loader.js');
+            const { connectNodeUdp } = await import('./wasm/node-udp-adapter.js');
             return new WasmQuicClientEventLoop(
               {
-                wasmPath: resolveWasmArtifactPath(),
+                core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
+                transportFactory: connectNodeUdp,
                 ca: tls.ca,
                 cert: tls.cert,
                 key: tls.key,
@@ -828,10 +836,10 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
                 keylog: options?.keylog,
               },
               (events) => {
-                session._dispatchEvents(events);
+                session._dispatchEvents(toNativeEvents(events));
               },
               (line) => {
-                session.emit('keylog', line);
+                session.emit('keylog', toNativeKeylogLine(line));
               },
             );
           },

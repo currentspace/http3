@@ -21,7 +21,7 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        project: ['./tsconfig.json', './tsconfig.test.json'],
+        project: ['./tsconfig.json', './tsconfig.test.json', './tsconfig.workerd.json'],
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -110,7 +110,12 @@ export default tseslint.config(
   },
   {
     // Sole exception: this file's own `readFileSync` for the Node artifact-load path.
-    files: ['lib/wasm/core-loader.ts'],
+    // (Phase 5: this used to be core-loader.ts itself; that file is now
+    // 100% host-agnostic — the node:fs-touching convenience wrapper lives
+    // in this separate file instead, precisely so core-loader.ts and
+    // everything that imports it can compile under tsconfig.workerd.json.
+    // See node-core-loader.ts's doc comment.)
+    files: ['lib/wasm/node-core-loader.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         paths: wasmZoneRestrictedImports.filter((p) => p.name !== 'node:fs'),

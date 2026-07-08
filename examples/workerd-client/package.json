@@ -1,0 +1,8 @@
+{
+  "name": "http3-workerd-client-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@currentspace/http3": "workspace:*"
+  }
+}
