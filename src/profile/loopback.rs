@@ -643,6 +643,7 @@ fn build_client_quiche_config(options: &ClientOptions) -> Result<quiche::Config,
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
     new_quic_client_config(&client_options).map_err(|err| err.to_string())
 }

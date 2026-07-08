@@ -7,9 +7,9 @@ import {
 import { ClientHttp3Stream } from './stream.js';
 import { incomingHeadersToNativeHeaders, nativeHeadersToIncomingHeaders } from './stream.js';
 import type { IncomingHeaders } from './stream.js';
-import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
+import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, getBinding } from './event-loop.js';
 import type { NativeEvent } from './event-loop.js';
-import type { ConnectionEndpoint } from './endpoint.js';
+import type { ConnectionEndpoint, DnsLookupFn } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import {
   Http3Error,
@@ -89,6 +89,8 @@ function requestRetryDelayMs(attempt: number, deadlineMs: number): number {
 export interface ConnectOptions {
   /** Abort the connect attempt (DNS lookup + handshake). Audit finding #15. */
   signal?: AbortSignal;
+  /** Override DNS resolution for hostname endpoints. Defaults to `node:dns/promises`'s `lookup`. IP-literal endpoints bypass DNS regardless. */
+  dnsLookup?: DnsLookupFn;
   /** Runtime selection mode. Default: `'auto'`. */
   runtimeMode?: RuntimeOptions['runtimeMode'];
   /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
@@ -786,13 +788,15 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
         defaultScheme: 'https',
         defaultPort: 443,
         signal: options?.signal,
+        dnsLookup: options?.dnsLookup,
       });
       if (shouldAbortConnect()) {
         return;
       }
 
       await runWithRuntimeSelection(session, options, async (runtimeMode) => {
-        const nativeClient = new binding.NativeWorkerClient({
+        const NativeWorkerClient = getBinding().NativeWorkerClient;
+        const nativeClient = new NativeWorkerClient({
           ca: normalizeCaOption(options?.ca),
           rejectUnauthorized: options?.rejectUnauthorized,
           runtimeMode,

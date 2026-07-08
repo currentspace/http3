@@ -14,7 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender};
+#[cfg(feature = "os-runtime")]
 use ring::hmac;
+#[cfg(feature = "os-runtime")]
 use ring::rand::SecureRandom;
 use slab::Slab;
 
@@ -22,16 +24,19 @@ use crate::arc_buf::ArcBufFactory;
 use crate::buffer_pool::BufferPool;
 use crate::chunk_pool::{Chunk, ChunkPool};
 use crate::cid::CidEncoding;
+#[cfg(feature = "os-runtime")]
 use crate::client_topology::{
     ClientSocketStrategy, SharedClientWorkerKey as SharedQuicClientWorkerKey,
     default_quic_client_socket_strategy, shared_client_bind_addr, shared_client_worker_key,
 };
 use crate::config::{ClientAuthMode, TransportRuntimeMode};
+use crate::datagram::TxDatagram;
 use crate::error::Http3NativeError;
 #[cfg(feature = "node-api")]
 use crate::event_loop::EventTsfn;
 use crate::event_loop::{self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, SEND_BUF_SIZE};
 use crate::h3_event::{JsH3Event, JsSessionMetrics};
+use crate::keylog_sink::KeylogBuffer;
 use crate::outbound_admission::{
     OutboundAdmission, accepted_outbound_payload_units, outbound_payload_units,
 };
@@ -43,15 +48,19 @@ use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{
     self, RawQuicClientCloseCause, SessionKind, WorkerLoopExitCause, WorkerSpawnKind,
 };
+#[cfg(feature = "os-runtime")]
 use crate::shared_client_reactor;
+#[cfg(feature = "os-runtime")]
 use crate::timer_heap::TimerHeap;
-use crate::transport::{self, ErasedWaker, TxDatagram};
+#[cfg(feature = "os-runtime")]
+use crate::transport::{self, ErasedWaker};
 
 const SCID_LEN: usize = crate::cid::SCID_LEN;
 const TOKEN_LIFETIME_SECS: u64 = 60;
 
 // ── Server command/handle ──────────────────────────────────────────
 
+#[cfg(feature = "os-runtime")]
 pub enum QuicServerCommand {
     StreamSend {
         conn_handle: u32,
@@ -90,6 +99,7 @@ pub enum QuicServerCommand {
 }
 
 /// Per-worker state inside a `QuicServerHandle`.
+#[cfg(feature = "os-runtime")]
 pub struct QuicServerWorker {
     pub cmd_tx: Sender<QuicServerCommand>,
     pub join_handle: Option<thread::JoinHandle<()>>,
@@ -97,13 +107,16 @@ pub struct QuicServerWorker {
     outbound_admission: Arc<OutboundAdmission>,
 }
 
+#[cfg(feature = "os-runtime")]
 use crate::server_sharding;
 
+#[cfg(feature = "os-runtime")]
 pub struct QuicServerHandle {
     workers: Vec<QuicServerWorker>,
     local_addr: SocketAddr,
 }
 
+#[cfg(feature = "os-runtime")]
 impl QuicServerHandle {
     pub fn from_workers(workers: Vec<QuicServerWorker>, local_addr: SocketAddr) -> Self {
         Self {
@@ -257,6 +270,7 @@ impl QuicServerHandle {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn shutdown_spawned_quic_server_workers(workers: &mut Vec<QuicServerWorker>) {
     for worker in workers.iter() {
         let _ = worker.cmd_tx.send(QuicServerCommand::Shutdown);
@@ -269,6 +283,7 @@ fn shutdown_spawned_quic_server_workers(workers: &mut Vec<QuicServerWorker>) {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 impl Drop for QuicServerHandle {
     fn drop(&mut self) {
         self.shutdown();
@@ -276,6 +291,7 @@ impl Drop for QuicServerHandle {
 }
 
 /// Extract the conn_handle from a command for routing purposes.
+#[cfg(feature = "os-runtime")]
 fn command_conn_handle(cmd: &QuicServerCommand) -> u32 {
     match cmd {
         QuicServerCommand::StreamSend { conn_handle, .. }
@@ -290,6 +306,7 @@ fn command_conn_handle(cmd: &QuicServerCommand) -> u32 {
 }
 
 /// Remap a command's conn_handle from global to local (strip worker bits).
+#[cfg(feature = "os-runtime")]
 fn remap_command_handle(cmd: QuicServerCommand) -> QuicServerCommand {
     match cmd {
         QuicServerCommand::StreamSend {
@@ -390,6 +407,7 @@ pub enum QuicClientCommand {
     Shutdown,
 }
 
+#[cfg(feature = "os-runtime")]
 enum SharedQuicClientCommand {
     OpenSession {
         quiche_config: quiche::Config,
@@ -443,6 +461,7 @@ enum SharedQuicClientCommand {
     },
 }
 
+#[cfg(feature = "os-runtime")]
 struct SharedQuicClientWorkerControl {
     cmd_tx: Sender<SharedQuicClientCommand>,
     waker: Arc<dyn ErasedWaker>,
@@ -454,12 +473,14 @@ struct SharedQuicClientWorkerControl {
     key: SharedQuicClientWorkerKey,
 }
 
+#[cfg(feature = "os-runtime")]
 impl SharedQuicClientWorkerControl {
     fn wake(&self) {
         let _ = self.waker.wake();
     }
 }
 
+#[cfg(feature = "os-runtime")]
 enum QuicClientHandleKind {
     Dedicated {
         cmd_tx: Sender<QuicClientCommand>,
@@ -472,12 +493,14 @@ enum QuicClientHandleKind {
     },
 }
 
+#[cfg(feature = "os-runtime")]
 pub struct QuicClientHandle {
     kind: Option<QuicClientHandleKind>,
     local_addr: SocketAddr,
     outbound_admission: Arc<OutboundAdmission>,
 }
 
+#[cfg(feature = "os-runtime")]
 impl QuicClientHandle {
     pub(crate) fn try_admit_outbound(&self, payload_len: usize, fin: bool) -> bool {
         self.outbound_admission
@@ -883,6 +906,7 @@ impl QuicClientHandle {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 impl Drop for QuicClientHandle {
     fn drop(&mut self) {
         self.shutdown();
@@ -891,6 +915,7 @@ impl Drop for QuicClientHandle {
 
 // ── Minimal connection map for QUIC ────────────────────────────────
 
+#[cfg(feature = "os-runtime")]
 struct QuicConnectionMap {
     by_dcid: HashMap<Vec<u8>, usize>,
     connections: Slab<QuicConnection>,
@@ -899,6 +924,7 @@ struct QuicConnectionMap {
     cid_encoding: CidEncoding,
 }
 
+#[cfg(feature = "os-runtime")]
 impl QuicConnectionMap {
     fn new(max_connections: usize, cid_encoding: CidEncoding) -> Self {
         let rng = ring::rand::SystemRandom::new();
@@ -1129,6 +1155,7 @@ where
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn quic_server_command_outbound_bytes(cmd: &QuicServerCommand) -> usize {
     match cmd {
         QuicServerCommand::StreamSend { chunk, fin, .. } => {
@@ -1149,6 +1176,7 @@ fn quic_client_command_outbound_bytes(cmd: &QuicClientCommand) -> usize {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn shared_quic_client_command_outbound_bytes(cmd: &SharedQuicClientCommand) -> usize {
     match cmd {
         SharedQuicClientCommand::StreamSend { chunk, fin, .. } => {
@@ -1161,6 +1189,7 @@ fn shared_quic_client_command_outbound_bytes(cmd: &SharedQuicClientCommand) -> u
 
 // ── Spawn functions ────────────────────────────────────────────────
 
+#[cfg(feature = "os-runtime")]
 pub struct QuicServerConfig {
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
@@ -1171,6 +1200,7 @@ pub struct QuicServerConfig {
     pub runtime_mode: TransportRuntimeMode,
 }
 
+#[cfg(feature = "os-runtime")]
 pub fn spawn_server_worker_on_driver<D>(
     quiche_config: quiche::Config,
     server_config: QuicServerConfig,
@@ -1201,6 +1231,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "os-runtime")]
 fn spawn_server_worker_on_driver_with_admission<D>(
     quiche_config: quiche::Config,
     server_config: QuicServerConfig,
@@ -1242,6 +1273,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "os-runtime")]
 pub fn spawn_dedicated_quic_client_on_driver<D>(
     quiche_config: quiche::Config,
     server_addr: SocketAddr,
@@ -1294,6 +1326,7 @@ where
     })
 }
 
+#[cfg(feature = "os-runtime")]
 #[cfg(feature = "node-api")]
 pub fn spawn_quic_server(
     quiche_config: quiche::Config,
@@ -1309,6 +1342,7 @@ pub fn spawn_quic_server(
     )
 }
 
+#[cfg(feature = "os-runtime")]
 pub(crate) fn spawn_quic_server_with_batcher(
     quiche_config: quiche::Config,
     server_config: QuicServerConfig,
@@ -1342,6 +1376,7 @@ pub(crate) fn spawn_quic_server_with_batcher(
 ///
 /// `make_quiche_config` is called once per worker (quiche::Config is not Clone).
 /// `make_batcher` is called once per worker with the worker index.
+#[cfg(feature = "os-runtime")]
 pub(crate) fn spawn_quic_server_sharded<Q, B>(
     mut make_quiche_config: Q,
     server_config: QuicServerConfig,
@@ -1468,6 +1503,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "os-runtime")]
 #[cfg(feature = "node-api")]
 pub fn spawn_quic_client(
     quiche_config: quiche::Config,
@@ -1491,6 +1527,7 @@ pub fn spawn_quic_client(
     )
 }
 
+#[cfg(feature = "os-runtime")]
 pub(crate) fn spawn_quic_client_with_batcher(
     mut quiche_config: quiche::Config,
     server_addr: SocketAddr,
@@ -1541,12 +1578,14 @@ pub(crate) fn spawn_quic_client_with_batcher(
     )
 }
 
+#[cfg(feature = "os-runtime")]
 struct SharedQuicClientSession {
     handler: QuicClientHandler,
     batcher: EventBatcher,
     server_addr: SocketAddr,
 }
 
+#[cfg(feature = "os-runtime")]
 fn shared_quic_client_worker_registry()
 -> &'static Mutex<HashMap<SharedQuicClientWorkerKey, Weak<SharedQuicClientWorkerControl>>> {
     static REGISTRY: OnceLock<
@@ -1555,6 +1594,7 @@ fn shared_quic_client_worker_registry()
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(feature = "os-runtime")]
 fn acquire_shared_quic_client_worker(
     server_addr: SocketAddr,
     runtime_mode: TransportRuntimeMode,
@@ -1601,6 +1641,7 @@ fn acquire_shared_quic_client_worker(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "os-runtime")]
 fn spawn_shared_quic_client(
     quiche_config: quiche::Config,
     server_addr: SocketAddr,
@@ -1646,6 +1687,7 @@ fn spawn_shared_quic_client(
     })
 }
 
+#[cfg(feature = "os-runtime")]
 fn emit_shared_quic_client_runtime_error<D: transport::Driver>(
     sessions: &mut Slab<SharedQuicClientSession>,
     driver: &D,
@@ -1663,6 +1705,7 @@ fn emit_shared_quic_client_runtime_error<D: transport::Driver>(
     );
 }
 
+#[cfg(feature = "os-runtime")]
 fn emit_shared_quic_client_write_ready(
     sessions: &mut Slab<SharedQuicClientSession>,
     pending_release: &mut Vec<u32>,
@@ -1677,6 +1720,7 @@ fn emit_shared_quic_client_write_ready(
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn remove_shared_quic_client_session(
     sessions: &mut Slab<SharedQuicClientSession>,
     route_by_dcid: &mut HashMap<Vec<u8>, usize>,
@@ -1722,6 +1766,7 @@ fn remove_shared_quic_client_session(
     route_by_dcid.retain(|_, mapped_handle| *mapped_handle != handle);
 }
 
+#[cfg(feature = "os-runtime")]
 fn refresh_shared_quic_client_dcid(
     route_by_dcid: &mut HashMap<Vec<u8>, usize>,
     handle: usize,
@@ -1736,6 +1781,7 @@ fn refresh_shared_quic_client_dcid(
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn sync_shared_quic_client_timer(
     timer_heap: &mut TimerHeap,
     handle: usize,
@@ -1746,6 +1792,7 @@ fn sync_shared_quic_client_timer(
     });
 }
 
+#[cfg(feature = "os-runtime")]
 fn flush_shared_quic_client_sends(
     sessions: &mut Slab<SharedQuicClientSession>,
     handles_buf: &mut Vec<usize>,
@@ -1761,6 +1808,7 @@ fn flush_shared_quic_client_sends(
     });
 }
 
+#[cfg(feature = "os-runtime")]
 fn refresh_shared_quic_client_timers_after_sends(
     sessions: &mut Slab<SharedQuicClientSession>,
     timer_heap: &mut TimerHeap,
@@ -1776,6 +1824,7 @@ fn refresh_shared_quic_client_timers_after_sends(
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn run_shared_quic_client_event_loop<D: transport::Driver>(
     driver: &mut D,
     cmd_rx: crossbeam_channel::Receiver<SharedQuicClientCommand>,
@@ -2265,6 +2314,7 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
 
 // ── QUIC Server Protocol Handler ────────────────────────────────────
 
+#[cfg(feature = "os-runtime")]
 struct QuicServerHandler {
     conn_map: QuicConnectionMap,
     timer_heap: TimerHeap,
@@ -2286,6 +2336,7 @@ struct QuicServerHandler {
     outbound_admission: Arc<OutboundAdmission>,
 }
 
+#[cfg(feature = "os-runtime")]
 impl QuicServerHandler {
     fn new(
         quiche_config: quiche::Config,
@@ -2329,6 +2380,7 @@ impl QuicServerHandler {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 impl ProtocolHandler for QuicServerHandler {
     type Command = QuicServerCommand;
 
@@ -2927,7 +2979,16 @@ impl ProtocolHandler for QuicServerHandler {
 
 // ── QUIC Client Protocol Handler ────────────────────────────────────
 
-struct QuicClientHandler {
+/// Raw QUIC client protocol state machine (no HTTP/3 framing): a single
+/// connection's worth of quiche state plus pending-write/chunk-pool
+/// bookkeeping.
+///
+/// Kept always-compiled (no `os-runtime` gate) and `pub` (re-exported by
+/// `wasm_exports` under `wasm-abi`) — see the identical note on
+/// [`crate::worker::H3ClientHandler`]. Only [`QuicClientHandler::new`] (the
+/// ring-backed SCID native constructor) is `os-runtime`-gated;
+/// [`QuicClientHandler::new_direct`] is the always-compiled alternative.
+pub struct QuicClientHandler {
     conn: QuicConnection,
     pending_writes: HashMap<u64, PendingWrite>,
     next_bidi_stream_id: u64,
@@ -2938,9 +2999,16 @@ struct QuicClientHandler {
     chunk_pool: ChunkPool,
     chunk_pool_rx: crossbeam_channel::Receiver<Vec<u8>>,
     outbound_admission: Arc<OutboundAdmission>,
+    keylog: Option<KeylogBuffer>,
 }
 
 impl QuicClientHandler {
+    /// Native constructor: sources the SCID from `ring`'s system RNG.
+    /// Requires `os-runtime` for the same reason as
+    /// `H3ClientHandler::new` — every native call site already runs with
+    /// `os-runtime` on (it is in the default feature set).
+    #[cfg(feature = "os-runtime")]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         local_addr: SocketAddr,
         server_addr: SocketAddr,
@@ -2954,6 +3022,59 @@ impl QuicClientHandler {
         let Ok(scid) = CidEncoding::random().generate_scid() else {
             return None;
         };
+        Self::from_scid(
+            scid,
+            local_addr,
+            server_addr,
+            server_name,
+            session_ticket,
+            qlog_dir,
+            qlog_level,
+            quiche_config,
+            outbound_admission,
+        )
+    }
+
+    /// Direct-call constructor for a sans-IO caller (a future wasm ABI, or
+    /// the unit tests below): the caller supplies the 20-byte SCID
+    /// directly instead of requiring `ring`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_direct(
+        scid: Vec<u8>,
+        local_addr: SocketAddr,
+        server_addr: SocketAddr,
+        server_name: &str,
+        session_ticket: Option<&[u8]>,
+        qlog_dir: Option<&str>,
+        qlog_level: Option<&str>,
+        quiche_config: &mut quiche::Config,
+        outbound_admission: Arc<OutboundAdmission>,
+    ) -> Option<Self> {
+        Self::from_scid(
+            scid,
+            local_addr,
+            server_addr,
+            server_name,
+            session_ticket,
+            qlog_dir,
+            qlog_level,
+            quiche_config,
+            outbound_admission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_scid(
+        scid: Vec<u8>,
+        local_addr: SocketAddr,
+        server_addr: SocketAddr,
+        server_name: &str,
+        session_ticket: Option<&[u8]>,
+        qlog_dir: Option<&str>,
+        qlog_level: Option<&str>,
+        quiche_config: &mut quiche::Config,
+        outbound_admission: Arc<OutboundAdmission>,
+    ) -> Option<Self> {
         let scid_ref = quiche::ConnectionId::from_ref(&scid);
         let Ok(mut quiche_conn) = quiche::connect_with_buffer_factory::<ArcBufFactory>(
             Some(server_name),
@@ -2990,7 +3111,22 @@ impl QuicClientHandler {
             chunk_pool,
             chunk_pool_rx,
             outbound_admission,
+            keylog: None,
         })
+    }
+
+    /// Enable in-memory NSS-format keylog capture (A2 task 5); see
+    /// `H3ClientHandler::enable_keylog` for the full rationale.
+    pub fn enable_keylog(&mut self) {
+        let buffer = KeylogBuffer::new();
+        self.conn.quiche_conn.set_keylog(buffer.writer());
+        self.keylog = Some(buffer);
+    }
+
+    /// Drain accumulated NSS-format keylog lines captured since the last
+    /// call (or since `enable_keylog`). Empty when keylog isn't enabled.
+    pub fn take_keylog_lines(&mut self) -> Vec<u8> {
+        self.keylog.as_ref().map(KeylogBuffer::take).unwrap_or_default()
     }
 
     fn current_dcid(&self) -> Vec<u8> {
@@ -3010,7 +3146,8 @@ impl QuicClientHandler {
         (current_dcid, needs_update, retired_dcids)
     }
 
-    fn close_session(&mut self, error_code: u32, reason: &str) {
+    /// Request a graceful close (the "close" direct-call operation).
+    pub fn close_session(&mut self, error_code: u32, reason: &str) {
         reactor_metrics::record_lifecycle_trace(
             "quic-client",
             "close-session-requested",
@@ -3034,7 +3171,7 @@ impl QuicClientHandler {
         self.timer_deadline = self.conn.timeout().map(|timeout| Instant::now() + timeout);
     }
 
-    fn open_bidi_stream(&mut self) -> Result<u64, Http3NativeError> {
+    pub fn open_bidi_stream(&mut self) -> Result<u64, Http3NativeError> {
         let stream_id = self.next_bidi_stream_id;
         let next_stream_id = stream_id.checked_add(4).ok_or_else(|| {
             Http3NativeError::InvalidState("client bidirectional stream id overflow".into())
@@ -3044,7 +3181,7 @@ impl QuicClientHandler {
         Ok(stream_id)
     }
 
-    fn queue_stream_send(
+    pub fn queue_stream_send(
         &mut self,
         stream_id: u64,
         chunk: Chunk,
@@ -3095,7 +3232,7 @@ impl QuicClientHandler {
         }
     }
 
-    fn close_stream(&mut self, stream_id: u64, error_code: u32) -> usize {
+    pub fn close_stream(&mut self, stream_id: u64, error_code: u32) -> usize {
         match self.conn.stream_close(stream_id, u64::from(error_code)) {
             Ok(()) => {
                 let released = remove_pending_write(&mut self.pending_writes, &stream_id);
@@ -3111,19 +3248,19 @@ impl QuicClientHandler {
         }
     }
 
-    fn send_datagram(&mut self, data: Chunk) -> bool {
+    pub fn send_datagram(&mut self, data: Chunk) -> bool {
         self.conn.queue_datagram(data).unwrap_or(false)
     }
 
-    fn metrics_snapshot(&self) -> JsSessionMetrics {
+    pub fn metrics_snapshot(&self) -> JsSessionMetrics {
         snapshot_quic_metrics(&self.conn)
     }
 
-    fn ping(&mut self) -> bool {
+    pub fn ping(&mut self) -> bool {
         self.conn.queue_ping().is_ok()
     }
 
-    fn qlog_path(&self) -> Option<String> {
+    pub fn qlog_path(&self) -> Option<String> {
         self.conn.qlog_path.clone()
     }
 
@@ -3183,7 +3320,7 @@ impl QuicClientHandler {
         self.session_closed_emitted = true;
     }
 
-    fn process_packet_for_handle(
+    pub fn process_packet_for_handle(
         &mut self,
         buf: &mut [u8],
         peer: SocketAddr,
@@ -3221,7 +3358,7 @@ impl QuicClientHandler {
         }
     }
 
-    fn process_timers_for_handle(
+    pub fn process_timers_for_handle(
         &mut self,
         now: Instant,
         app_event_budget: usize,
@@ -3250,7 +3387,7 @@ impl QuicClientHandler {
         }
     }
 
-    fn poll_app_events_for_handle(
+    pub fn poll_app_events_for_handle(
         &mut self,
         app_event_budget: usize,
         batch: &mut Vec<JsH3Event>,
@@ -3270,7 +3407,9 @@ impl QuicClientHandler {
         }
     }
 
-    fn try_send_next(&mut self) -> Option<TxDatagram> {
+    /// Write the next outbound datagram, if any (the `flush_sends`
+    /// primitive, one packet at a time).
+    pub fn try_send_next(&mut self) -> Option<TxDatagram> {
         Self::try_send_next_with_pool_parts(
             &mut self.conn,
             self.send_buf.as_mut_slice(),
@@ -3294,7 +3433,7 @@ impl QuicClientHandler {
         Some(TxDatagram::new(tx_buf, len, send_info.to, mtu))
     }
 
-    fn flush_pending_writes_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
+    pub fn flush_pending_writes_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
         let flushed = flush_quic_client_pending_writes(&mut self.conn, &mut self.pending_writes);
         self.release_outbound_admission(flushed.released_units, batch);
         for stream_id in flushed {
@@ -3303,7 +3442,7 @@ impl QuicClientHandler {
         }
     }
 
-    fn poll_drain_events_for_handle(
+    pub fn poll_drain_events_for_handle(
         &mut self,
         app_event_budget: usize,
         batch: &mut Vec<JsH3Event>,
@@ -3318,15 +3457,21 @@ impl QuicClientHandler {
         }
     }
 
-    fn recycle_tx_buffers_into_pool(&mut self, buffers: Vec<Vec<u8>>) {
+    pub fn recycle_tx_buffers_into_pool(&mut self, buffers: Vec<Vec<u8>>) {
         reactor_metrics::record_tx_buffers_recycled(buffers.len());
         for buf in buffers {
             self.tx_pool.checkin(buf);
         }
     }
 
-    fn is_reapable(&self) -> bool {
+    pub fn is_reapable(&self) -> bool {
         self.session_closed_emitted && self.pending_writes.is_empty()
+    }
+
+    /// Soonest quiche timeout deadline, or `None` (the "next timeout"
+    /// direct-call operation).
+    pub fn next_timer_deadline(&self) -> Option<Instant> {
+        self.timer_deadline
     }
 }
 
@@ -3461,7 +3606,7 @@ impl ProtocolHandler for QuicClientHandler {
     }
 
     fn next_deadline(&mut self) -> Option<Instant> {
-        self.timer_deadline
+        self.next_timer_deadline()
     }
 
     fn is_done(&self) -> bool {
@@ -3471,6 +3616,7 @@ impl ProtocolHandler for QuicClientHandler {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+#[cfg(feature = "os-runtime")]
 fn top_up_server_scids(conn_map: &mut QuicConnectionMap, handle: usize) {
     loop {
         let should_add = match conn_map.get_mut(handle) {
@@ -3502,6 +3648,7 @@ fn top_up_server_scids(conn_map: &mut QuicConnectionMap, handle: usize) {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn generate_stateless_reset_token() -> Result<u128, Http3NativeError> {
     let rng = ring::rand::SystemRandom::new();
     let mut token = [0u8; 16];
@@ -3538,6 +3685,7 @@ impl<T> IntoIterator for PendingWriteFlushEvents<T> {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 fn flush_quic_pending_writes(
     conn_map: &mut QuicConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
@@ -3669,23 +3817,11 @@ mod tests {
     }
 
     #[test]
-    fn quic_command_outbound_bytes_reads_unflattened_chunks() {
-        let server_cmd = QuicServerCommand::StreamSend {
-            conn_handle: 1,
-            stream_id: 2,
-            chunk: Chunk::unpooled(vec![1; 7]),
-            fin: false,
-        };
+    fn quic_command_outbound_bytes_reads_unflattened_chunks_client() {
         let client_cmd = QuicClientCommand::StreamSend {
             stream_id: 4,
             chunk: Chunk::unpooled(vec![2; 12]),
             fin: true,
-        };
-        let (server_resp_tx, _server_resp_rx) = crossbeam_channel::bounded(1);
-        let server_datagram_cmd = QuicServerCommand::SendDatagram {
-            conn_handle: 1,
-            data: Chunk::unpooled(vec![3; 14]),
-            resp_tx: server_resp_tx,
         };
         let (client_resp_tx, _client_resp_rx) = crossbeam_channel::bounded(1);
         let client_datagram_cmd = QuicClientCommand::SendDatagram {
@@ -3693,9 +3829,409 @@ mod tests {
             resp_tx: client_resp_tx,
         };
 
-        assert_eq!(quic_server_command_outbound_bytes(&server_cmd), 7);
         assert_eq!(quic_client_command_outbound_bytes(&client_cmd), 12);
-        assert_eq!(quic_server_command_outbound_bytes(&server_datagram_cmd), 14);
         assert_eq!(quic_client_command_outbound_bytes(&client_datagram_cmd), 15);
+    }
+
+    #[cfg(feature = "os-runtime")]
+    #[test]
+    fn quic_command_outbound_bytes_reads_unflattened_chunks_server() {
+        let server_cmd = QuicServerCommand::StreamSend {
+            conn_handle: 1,
+            stream_id: 2,
+            chunk: Chunk::unpooled(vec![1; 7]),
+            fin: false,
+        };
+        let (server_resp_tx, _server_resp_rx) = crossbeam_channel::bounded(1);
+        let server_datagram_cmd = QuicServerCommand::SendDatagram {
+            conn_handle: 1,
+            data: Chunk::unpooled(vec![3; 14]),
+            resp_tx: server_resp_tx,
+        };
+
+        assert_eq!(quic_server_command_outbound_bytes(&server_cmd), 7);
+        assert_eq!(quic_server_command_outbound_bytes(&server_datagram_cmd), 14);
+    }
+
+    // ── A2 task 6: direct-call surface tests (QuicClientHandler::new_direct) ──
+    //
+    // Mirrors `worker.rs`'s `direct_call_h3` module exactly (see the doc
+    // comments there for the rationale behind the pump helpers), but drives
+    // the raw-QUIC handler surface: `open_bidi_stream`/`queue_stream_send`
+    // instead of `send_request`.
+    mod direct_call_quic {
+        use super::*;
+        use crate::h3_event::{EVENT_HANDSHAKE_COMPLETE, EVENT_SESSION_CLOSE};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        const TEST_SCID_LEN: usize = crate::cid::SCID_LEN;
+
+        fn test_addrs() -> (SocketAddr, SocketAddr) {
+            (
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42_001),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52_001),
+            )
+        }
+
+        fn build_test_configs() -> (quiche::Config, quiche::Config) {
+            use rcgen::{CertificateParams, KeyPair};
+            let key_pair =
+                KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("test key");
+            let mut params =
+                CertificateParams::new(vec!["localhost".into()]).expect("test cert params");
+            params.distinguished_name = rcgen::DistinguishedName::new();
+            let cert = params.self_signed(&key_pair).expect("test cert");
+            let (cert_pem, key_pem) = (cert.pem(), key_pair.serialize_pem());
+
+            let id = std::thread::current().id();
+            let cert_path =
+                std::env::temp_dir().join(format!("quic_direct_test_cert_{id:?}.pem"));
+            let key_path = std::env::temp_dir().join(format!("quic_direct_test_key_{id:?}.pem"));
+            std::fs::write(&cert_path, cert_pem).expect("write test cert");
+            std::fs::write(&key_path, key_pem).expect("write test key");
+
+            let mut server_config =
+                quiche::Config::new(quiche::PROTOCOL_VERSION).expect("server cfg");
+            server_config
+                .load_cert_chain_from_pem_file(cert_path.to_str().expect("cert path"))
+                .expect("load cert");
+            server_config
+                .load_priv_key_from_pem_file(key_path.to_str().expect("key path"))
+                .expect("load key");
+            server_config
+                .set_application_protos(&[b"quic"])
+                .expect("server alpn");
+            server_config.set_max_idle_timeout(30_000);
+            server_config.set_initial_max_data(1_000_000);
+            server_config.set_initial_max_stream_data_bidi_local(100_000);
+            server_config.set_initial_max_stream_data_bidi_remote(100_000);
+            server_config.set_initial_max_stream_data_uni(100_000);
+            server_config.set_initial_max_streams_bidi(100);
+            server_config.set_initial_max_streams_uni(100);
+            server_config.set_disable_active_migration(true);
+
+            let mut client_config =
+                quiche::Config::new(quiche::PROTOCOL_VERSION).expect("client cfg");
+            client_config
+                .set_application_protos(&[b"quic"])
+                .expect("client alpn");
+            client_config.verify_peer(false);
+            client_config.set_max_idle_timeout(30_000);
+            client_config.set_initial_max_data(1_000_000);
+            client_config.set_initial_max_stream_data_bidi_local(100_000);
+            client_config.set_initial_max_stream_data_bidi_remote(100_000);
+            client_config.set_initial_max_stream_data_uni(100_000);
+            client_config.set_initial_max_streams_bidi(100);
+            client_config.set_initial_max_streams_uni(100);
+            client_config.set_disable_active_migration(true);
+
+            let _ = std::fs::remove_file(cert_path);
+            let _ = std::fs::remove_file(key_path);
+            (server_config, client_config)
+        }
+
+        fn pump_until_established(
+            handler: &mut QuicClientHandler,
+            server_conn: &mut Option<quiche::Connection<ArcBufFactory>>,
+            server_config: &mut quiche::Config,
+            client_addr: SocketAddr,
+            server_addr: SocketAddr,
+            batch: &mut Vec<JsH3Event>,
+        ) {
+            for _ in 0..200 {
+                let mut progressed = false;
+
+                let mut outbound = Vec::new();
+                while let Some(pkt) = handler.try_send_next() {
+                    outbound.push(pkt);
+                }
+                for pkt in &outbound {
+                    progressed = true;
+                    let payload_len = pkt.payload_len();
+                    let mut buf = pkt.payload().to_vec();
+                    if server_conn.is_none() {
+                        let hdr = quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN)
+                            .expect("parse initial header");
+                        let server_scid = vec![0xef; quiche::MAX_CONN_ID_LEN];
+                        let server_scid = quiche::ConnectionId::from_ref(&server_scid);
+                        *server_conn = Some(
+                            quiche::accept_with_buf_factory::<ArcBufFactory>(
+                                &server_scid,
+                                Some(&hdr.dcid),
+                                server_addr,
+                                client_addr,
+                                server_config,
+                            )
+                            .expect("accept server conn"),
+                        );
+                    }
+                    server_conn
+                        .as_mut()
+                        .expect("server conn")
+                        .recv(
+                            &mut buf[..payload_len],
+                            quiche::RecvInfo {
+                                from: client_addr,
+                                to: server_addr,
+                            },
+                        )
+                        .expect("server recv client packet");
+                }
+
+                if let Some(server) = server_conn.as_mut() {
+                    let mut send_buf = vec![0_u8; 65_535];
+                    loop {
+                        match server.send(&mut send_buf) {
+                            Ok((len, _info)) => {
+                                progressed = true;
+                                handler.process_packet_for_handle(
+                                    &mut send_buf[..len],
+                                    server_addr,
+                                    client_addr,
+                                    usize::MAX,
+                                    batch,
+                                    0,
+                                );
+                            }
+                            Err(quiche::Error::Done) => break,
+                            Err(error) => panic!("server send failed: {error}"),
+                        }
+                    }
+
+                    if handler.conn.quiche_conn.is_established() && server.is_established() {
+                        return;
+                    }
+                }
+
+                assert!(progressed, "handshake made no progress");
+            }
+            panic!("handshake did not complete");
+        }
+
+        /// See `worker.rs`'s `direct_call_h3::pump_until_reapable` doc
+        /// comment for why this needs real wall-clock time.
+        fn pump_until_reapable(
+            handler: &mut QuicClientHandler,
+            server_conn: &mut Option<quiche::Connection<ArcBufFactory>>,
+            client_addr: SocketAddr,
+            server_addr: SocketAddr,
+            batch: &mut Vec<JsH3Event>,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if handler.is_reapable() {
+                    return;
+                }
+
+                let mut outbound = Vec::new();
+                while let Some(pkt) = handler.try_send_next() {
+                    outbound.push(pkt);
+                }
+                handler.refresh_timeout_deadline();
+                for pkt in &outbound {
+                    let payload_len = pkt.payload_len();
+                    let mut buf = pkt.payload().to_vec();
+                    if let Some(server) = server_conn.as_mut() {
+                        let _ = server.recv(
+                            &mut buf[..payload_len],
+                            quiche::RecvInfo {
+                                from: client_addr,
+                                to: server_addr,
+                            },
+                        );
+                    }
+                }
+
+                if let Some(server) = server_conn.as_mut() {
+                    let mut send_buf = vec![0_u8; 65_535];
+                    loop {
+                        match server.send(&mut send_buf) {
+                            Ok((len, _info)) => {
+                                handler.process_packet_for_handle(
+                                    &mut send_buf[..len],
+                                    server_addr,
+                                    client_addr,
+                                    usize::MAX,
+                                    batch,
+                                    0,
+                                );
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(20));
+                handler.process_timers_for_handle(Instant::now(), usize::MAX, batch, 0);
+            }
+            panic!("handler did not become reapable within the drain deadline");
+        }
+
+        #[test]
+        fn new_direct_completes_handshake_open_stream_and_close() {
+            let _guard = setup_metrics();
+            let (mut server_config, mut client_config) = build_test_configs();
+            let (client_addr, server_addr) = test_addrs();
+            let scid = vec![0x33_u8; TEST_SCID_LEN];
+            let outbound_admission = Arc::new(OutboundAdmission::default());
+
+            let mut handler = QuicClientHandler::new_direct(
+                scid,
+                client_addr,
+                server_addr,
+                "localhost",
+                None,
+                None,
+                None,
+                &mut client_config,
+                outbound_admission,
+            )
+            .expect("new_direct should construct a handler");
+
+            let mut batch = Vec::new();
+            let mut server_conn = None;
+            pump_until_established(
+                &mut handler,
+                &mut server_conn,
+                &mut server_config,
+                client_addr,
+                server_addr,
+                &mut batch,
+            );
+
+            let event_types: Vec<u8> = batch.iter().map(|e| e.event_type).collect();
+            assert!(
+                event_types.contains(&EVENT_HANDSHAKE_COMPLETE),
+                "expected a handshake-complete event, got event types {event_types:?}"
+            );
+            assert!(!handler.is_reapable());
+            assert!(handler.next_timer_deadline().is_some());
+
+            let stream_id = handler
+                .open_bidi_stream()
+                .expect("open_bidi_stream should succeed after handshake");
+            assert_eq!(stream_id, 0, "first client-initiated bidi stream is 0");
+
+            batch.clear();
+            let released = handler.queue_stream_send(
+                stream_id,
+                Chunk::unpooled(b"hello".to_vec()),
+                true,
+                &mut batch,
+                0,
+            );
+            assert!(released > 0, "expected admitted bytes back for the write");
+
+            // Drive the stream data to the server.
+            pump_until_established(
+                &mut handler,
+                &mut server_conn,
+                &mut server_config,
+                client_addr,
+                server_addr,
+                &mut batch,
+            );
+            if let Some(server) = server_conn.as_mut() {
+                let mut recv_buf = vec![0_u8; 1024];
+                let (len, fin) = server
+                    .stream_recv(stream_id, &mut recv_buf)
+                    .expect("server should have received the client's stream data");
+                assert_eq!(&recv_buf[..len], b"hello");
+                assert!(fin, "expected the FIN to be delivered with the data");
+            }
+
+            handler.close_session(0, "test done");
+            batch.clear();
+            pump_until_reapable(
+                &mut handler,
+                &mut server_conn,
+                client_addr,
+                server_addr,
+                &mut batch,
+            );
+            let event_types: Vec<u8> = batch.iter().map(|e| e.event_type).collect();
+            assert!(
+                event_types.contains(&EVENT_SESSION_CLOSE),
+                "expected a session-close event after close_session, got {event_types:?}"
+            );
+            assert!(handler.is_reapable());
+        }
+
+        #[test]
+        fn new_direct_uses_the_caller_supplied_scid_bytes() {
+            let (_server_config_a, mut client_config_a) = build_test_configs();
+            let (_server_config_b, mut client_config_b) = build_test_configs();
+            let (client_addr, server_addr) = test_addrs();
+
+            let handler_a = QuicClientHandler::new_direct(
+                vec![0x11_u8; TEST_SCID_LEN],
+                client_addr,
+                server_addr,
+                "localhost",
+                None,
+                None,
+                None,
+                &mut client_config_a,
+                Arc::new(OutboundAdmission::default()),
+            )
+            .expect("new_direct should construct a handler");
+            let handler_b = QuicClientHandler::new_direct(
+                vec![0x22_u8; TEST_SCID_LEN],
+                client_addr,
+                server_addr,
+                "localhost",
+                None,
+                None,
+                None,
+                &mut client_config_b,
+                Arc::new(OutboundAdmission::default()),
+            )
+            .expect("new_direct should construct a handler");
+
+            assert_eq!(handler_a.current_dcid(), vec![0x11_u8; TEST_SCID_LEN]);
+            assert_eq!(handler_b.current_dcid(), vec![0x22_u8; TEST_SCID_LEN]);
+        }
+
+        #[test]
+        fn keylog_capture_accumulates_lines_during_handshake() {
+            let _guard = setup_metrics();
+            let (mut server_config, mut client_config) = build_test_configs();
+            client_config.log_keys();
+            let (client_addr, server_addr) = test_addrs();
+            let scid = vec![0x77_u8; TEST_SCID_LEN];
+            let outbound_admission = Arc::new(OutboundAdmission::default());
+
+            let mut handler = QuicClientHandler::new_direct(
+                scid,
+                client_addr,
+                server_addr,
+                "localhost",
+                None,
+                None,
+                None,
+                &mut client_config,
+                outbound_admission,
+            )
+            .expect("new_direct should construct a handler");
+            handler.enable_keylog();
+
+            let mut batch = Vec::new();
+            let mut server_conn = None;
+            pump_until_established(
+                &mut handler,
+                &mut server_conn,
+                &mut server_config,
+                client_addr,
+                server_addr,
+                &mut batch,
+            );
+
+            let lines = handler.take_keylog_lines();
+            assert!(
+                !lines.is_empty(),
+                "expected at least one NSS-format keylog line after handshake"
+            );
+            assert!(handler.take_keylog_lines().is_empty());
+        }
     }
 }

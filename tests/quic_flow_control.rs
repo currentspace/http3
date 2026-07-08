@@ -114,6 +114,7 @@ fn setup_quic_pair_with_flow_control(
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let (server_quiche, client_quiche) = {

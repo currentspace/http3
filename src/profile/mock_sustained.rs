@@ -395,6 +395,7 @@ fn run_quic(args: &CliArgs) -> Result<SustainedResult, String> {
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let server_quiche = new_quic_server_config(&server_options).map_err(|e| e.to_string())?;
@@ -610,6 +611,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let server_quiche =

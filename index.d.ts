@@ -136,6 +136,13 @@ export interface JsClientOptions {
   keylog?: boolean
   qlogDir?: string
   qlogLevel?: string
+  /**
+   * Disable quiche's send pacing. Sans-IO/wasm callers have no way to
+   * honor sub-ms `SendInfo` release times (A2 task 4) — plumbing exists
+   * here for that profile; native behavior is unaffected unless a
+   * caller explicitly opts in.
+   */
+  disablePacing?: boolean
 }
 
 /**
@@ -230,6 +237,8 @@ export interface JsQuicClientOptions {
   keylog?: boolean
   qlogDir?: string
   qlogLevel?: string
+  /** Disable quiche's send pacing (see `JsClientOptions::disable_pacing`). */
+  disablePacing?: boolean
 }
 
 export interface JsQuicServerOptions {

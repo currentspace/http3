@@ -113,6 +113,7 @@ fn setup_quic_pair_with_datagrams(enable_datagrams: bool) -> QuicPair {
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let (server_quiche, client_quiche) = {

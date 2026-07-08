@@ -12,13 +12,12 @@ import {
   sessionCloseInfoFromEvent,
 } from './session.js';
 import {
-  ServerHttp2StreamAdapter,
   ServerHttp3Stream,
   nativeHeadersToIncomingHeaders,
-  normalizeIncomingHeaders,
 } from './stream.js';
 import type { IncomingHeaders, StreamFlags } from './stream.js';
-import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
+import { ServerHttp2StreamAdapter, normalizeIncomingHeaders } from './stream-h2-adapter.js';
+import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, getBinding } from './event-loop.js';
 import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from './event-loop.js';
 import {
   Http3Error,
@@ -209,7 +208,8 @@ export class Http3SecureServer extends EventEmitter {
     };
     try {
       quicStart = runWithRuntimeSelectionSync(this, this._options, (runtimeMode) => {
-        const workerServer = new binding.NativeWorkerServer({
+        const NativeWorkerServer = getBinding().NativeWorkerServer;
+        const workerServer = new NativeWorkerServer({
           key,
           cert,
           ca,

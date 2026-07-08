@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { X509Certificate } from 'node:crypto';
-import { EVENT_SHUTDOWN_COMPLETE, binding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
-import type { NativeEvent, NativeQuicServerBinding } from './event-loop.js';
+import { EVENT_SHUTDOWN_COMPLETE, getBinding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
+import type { NativeEvent, NativeBinding, NativeQuicServerBinding } from './event-loop.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
 import { toSessionError } from './error-map.js';
@@ -606,8 +606,8 @@ export class QuicServer extends EventEmitter {
   }
 }
 
-function getNativeQuicServerConstructor(): typeof binding.NativeQuicServer {
-  const NativeQuicServer = (binding as Partial<typeof binding>).NativeQuicServer;
+function getNativeQuicServerConstructor(): NativeBinding['NativeQuicServer'] {
+  const NativeQuicServer = (getBinding() as Partial<NativeBinding>).NativeQuicServer;
   if (typeof NativeQuicServer !== 'function') {
     throw new Error(
       'The loaded @currentspace/http3 native binding is missing `NativeQuicServer`. '

@@ -69,7 +69,7 @@ export type {
   RuntimeInfo,
   RuntimeOptions,
 } from './runtime.js';
-export type { ConnectionEndpoint, HostEndpoint, AddressEndpoint } from './endpoint.js';
+export type { ConnectionEndpoint, HostEndpoint, AddressEndpoint, DnsLookupFn } from './endpoint.js';
 
 export * as constants from './constants.js';
 export * as parity from './http2-parity.js';

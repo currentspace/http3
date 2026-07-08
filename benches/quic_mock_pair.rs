@@ -93,6 +93,7 @@ fn setup_quic_pair() -> BenchQuicPair {
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let (server_quiche, client_quiche) = {

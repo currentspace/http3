@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { Http2Session } from 'node:http2';
-import type { NativeEvent, ServerEventLoopLike, ClientEventLoop } from './event-loop.js';
+import type { NativeEvent, ServerEventLoopLike, ClientEventLoopLike } from './event-loop.js';
 import type { RuntimeInfo } from './runtime.js';
 
 /** QUIC transport tuning parameters shared by server and client. */
@@ -469,7 +469,7 @@ export class Http2ServerSessionAdapter extends Http3ServerSession {
  */
 export class Http3ClientSessionBase extends Http3Session {
   /** @internal */
-  _eventLoop: ClientEventLoop | null = null;
+  _eventLoop: ClientEventLoopLike | null = null;
   /** @internal */
   _qlogPath: string | null = null;
 

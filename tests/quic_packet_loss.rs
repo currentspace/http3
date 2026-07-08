@@ -92,6 +92,7 @@ fn setup_quic_pair_with_loss(drop_pct: u32) -> QuicPairWithLoss {
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let (server_quiche, client_quiche) = {

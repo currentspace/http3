@@ -1,7 +1,9 @@
 //! QUIC/TLS configuration builder that translates JS option objects into
 //! `quiche::Config` instances for both server and client use.
 
+#[cfg(feature = "os-runtime")]
 use std::io::Write;
+#[cfg(feature = "os-runtime")]
 use std::path::PathBuf;
 
 use crate::cid::{CidEncoding, parse_server_id_bytes};
@@ -34,9 +36,21 @@ const DEFAULT_INITIAL_MAX_STREAMS_UNI: u64 = 1_000;
 /// standard Ethernet it returns 1472; on jumbo frames ~8972. Loopback is
 /// platform-dependent but should land near quiche's 16 KB data-packet cap.
 ///
-/// Falls back to `FALLBACK_MAX_UDP_PAYLOAD` (1472) if the query fails.
+/// Falls back to `FALLBACK_MAX_UDP_PAYLOAD` (1472) if the query fails, and
+/// unconditionally when `os-runtime` is disabled (no socket to query the
+/// route table with — e.g. a future wasm build; `1472` is the standard
+/// Ethernet MTU minus IPv4/UDP headers, a safe default no real path is
+/// likely to be below).
 pub fn effective_pmtud_ceiling(peer: &std::net::SocketAddr) -> usize {
-    crate::transport::socket::query_path_mtu(peer).unwrap_or(FALLBACK_MAX_UDP_PAYLOAD)
+    #[cfg(feature = "os-runtime")]
+    {
+        crate::transport::socket::query_path_mtu(peer).unwrap_or(FALLBACK_MAX_UDP_PAYLOAD)
+    }
+    #[cfg(not(feature = "os-runtime"))]
+    {
+        let _ = peer;
+        FALLBACK_MAX_UDP_PAYLOAD
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -151,6 +165,7 @@ fn apply_flow_control_window_tuning(
 }
 
 /// Write bytes to a temp file and return the path.
+#[cfg(feature = "os-runtime")]
 fn write_temp_file(data: &[u8], suffix: &str) -> Result<std::path::PathBuf, Http3NativeError> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("http3_{}{}", std::process::id(), suffix));
@@ -159,10 +174,17 @@ fn write_temp_file(data: &[u8], suffix: &str) -> Result<std::path::PathBuf, Http
     Ok(path)
 }
 
+/// Loads TLS material from temp files (`quiche::Config`'s
+/// `load_*_from_pem_file` only takes paths). Native-only: `os-runtime`
+/// gated. The wasm/sans-IO alternative is the `*_in_memory` config
+/// builders below, which use `quiche::Config::with_boring_ssl_ctx_builder`
+/// + boring's in-memory `X509`/`PKey` loading instead (A2 task 4).
+#[cfg(feature = "os-runtime")]
 struct TempFileGuard {
     path: PathBuf,
 }
 
+#[cfg(feature = "os-runtime")]
 impl TempFileGuard {
     fn new(data: &[u8], suffix: &str) -> Result<Self, Http3NativeError> {
         Ok(Self {
@@ -177,6 +199,7 @@ impl TempFileGuard {
     }
 }
 
+#[cfg(feature = "os-runtime")]
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -227,6 +250,11 @@ pub struct JsClientOptions {
     pub keylog: Option<bool>,
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
+    /// Disable quiche's send pacing. Sans-IO/wasm callers have no way to
+    /// honor sub-ms `SendInfo` release times (A2 task 4) — plumbing exists
+    /// here for that profile; native behavior is unaffected unless a
+    /// caller explicitly opts in.
+    pub disable_pacing: Option<bool>,
 }
 
 pub struct Http3Config {
@@ -242,6 +270,7 @@ pub struct Http3Config {
 }
 
 impl Http3Config {
+    #[cfg(feature = "os-runtime")]
     pub fn new_server_quiche_config(
         options: &JsServerOptions,
     ) -> Result<quiche::Config, Http3NativeError> {
@@ -334,6 +363,7 @@ impl Http3Config {
         Ok(config)
     }
 
+    #[cfg(feature = "os-runtime")]
     pub fn new_client_quiche_config(
         options: &JsClientOptions,
     ) -> Result<quiche::Config, Http3NativeError> {
@@ -404,6 +434,113 @@ impl Http3Config {
             ],
         );
         apply_congestion_tuning(&mut config);
+
+        if options.disable_pacing.unwrap_or(false) {
+            config.enable_pacing(false);
+        }
+
+        if options.allow_0rtt.unwrap_or(false) {
+            config.enable_early_data();
+        }
+
+        if options.enable_datagrams.unwrap_or(false) {
+            config.enable_dgram(true, 1000, 1000);
+        }
+
+        if options.keylog.unwrap_or(false) {
+            config.log_keys();
+        }
+
+        Ok(config)
+    }
+
+    /// In-memory alternative to [`Http3Config::new_client_quiche_config`]
+    /// for a sans-IO / `wasm-abi` caller: loads `ca` via BoringSSL's
+    /// `SslContextBuilder` instead of a temp file (A2 task 4). H3 client
+    /// mTLS (`cert`/`key`) is out of scope here too — same asymmetry as
+    /// the native file-based path (`docs/WASM_CLIENT_PLAN.md` decision
+    /// log: "H3 client mTLS parity — deferred").
+    pub fn new_client_quiche_config_in_memory(
+        options: &JsClientOptions,
+    ) -> Result<quiche::Config, Http3NativeError> {
+        let mut tls = boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
+            .map_err(|e| {
+                Http3NativeError::Config(format!("boring SslContextBuilder::new failed: {e}"))
+            })?;
+
+        tls.set_verify(if options.reject_unauthorized.unwrap_or(true) {
+            boring::ssl::SslVerifyMode::PEER
+        } else {
+            boring::ssl::SslVerifyMode::NONE
+        });
+
+        if let Some(ca) = options.ca.as_ref() {
+            let ca_cert = boring::x509::X509::from_pem(ca)
+                .map_err(|e| Http3NativeError::Config(format!("invalid ca PEM: {e}")))?;
+            tls.cert_store_mut().add_cert(ca_cert).map_err(|e| {
+                Http3NativeError::Config(format!("failed to add ca cert to store: {e}"))
+            })?;
+        }
+
+        let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls)
+            .map_err(Http3NativeError::Quiche)?;
+
+        config
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .map_err(Http3NativeError::Quiche)?;
+
+        config.set_max_idle_timeout(u64::from(options.max_idle_timeout_ms.unwrap_or(30_000)));
+        config.set_max_recv_udp_payload_size(
+            options
+                .max_udp_payload_size
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+        );
+        config.set_max_send_udp_payload_size(
+            options
+                .max_udp_payload_size
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+        );
+        let initial_max_data = u64::from(
+            options
+                .initial_max_data
+                .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+        );
+        let initial_stream_data_bidi_local = u64::from(
+            options
+                .initial_max_stream_data_bidi_local
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+        );
+        let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        config.set_initial_max_data(initial_max_data);
+        config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+        config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+        config.set_initial_max_stream_data_uni(initial_stream_data_uni);
+        config.set_initial_max_streams_bidi(u64::from(
+            options
+                .initial_max_streams_bidi
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
+        ));
+        config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
+
+        apply_flow_control_window_tuning(
+            &mut config,
+            initial_max_data,
+            &[
+                initial_stream_data_bidi_local,
+                initial_stream_data_bidi_remote,
+                initial_stream_data_uni,
+            ],
+        );
+        apply_congestion_tuning(&mut config);
+
+        // No qlog / real socket in this profile: force disable pacing by
+        // default unless the caller explicitly re-enables it, since a
+        // sans-IO caller cannot honor sub-ms `SendInfo` release times
+        // anyway (docs/WASM_CLIENT_PLAN.md §4.7).
+        if !options.disable_pacing.is_some_and(|disable| !disable) {
+            config.enable_pacing(false);
+        }
 
         if options.allow_0rtt.unwrap_or(false) {
             config.enable_early_data();
@@ -495,6 +632,8 @@ pub struct JsQuicClientOptions {
     pub keylog: Option<bool>,
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
+    /// Disable quiche's send pacing (see `JsClientOptions::disable_pacing`).
+    pub disable_pacing: Option<bool>,
 }
 
 fn alpn_to_bytes(protocols: &[String]) -> Vec<Vec<u8>> {
@@ -505,6 +644,7 @@ fn alpn_refs(protos: &[Vec<u8>]) -> Vec<&[u8]> {
     protos.iter().map(Vec::as_slice).collect()
 }
 
+#[cfg(feature = "os-runtime")]
 pub fn new_quic_server_config(
     options: &JsQuicServerOptions,
 ) -> Result<quiche::Config, Http3NativeError> {
@@ -600,6 +740,7 @@ pub fn new_quic_server_config(
     Ok(config)
 }
 
+#[cfg(feature = "os-runtime")]
 pub fn new_quic_client_config(
     options: &JsQuicClientOptions,
 ) -> Result<quiche::Config, Http3NativeError> {
@@ -700,6 +841,140 @@ pub fn new_quic_client_config(
         ],
     );
     apply_congestion_tuning(&mut config);
+
+    if options.disable_pacing.unwrap_or(false) {
+        config.enable_pacing(false);
+    }
+
+    if options.allow_0rtt.unwrap_or(false) {
+        config.enable_early_data();
+    }
+
+    if options.enable_datagrams.unwrap_or(false) {
+        config.enable_dgram(true, 1000, 1000);
+    }
+
+    if options.keylog.unwrap_or(false) {
+        config.log_keys();
+    }
+
+    Ok(config)
+}
+
+/// In-memory alternative to [`new_quic_client_config`] for a sans-IO /
+/// `wasm-abi` caller: loads `ca`/`cert`/`key` PEM buffers via BoringSSL's
+/// `SslContextBuilder` instead of writing them to temp files (A2 task 4;
+/// O2 in `docs/WASM_CLIENT_PLAN.md`). The file-based path above stays
+/// unchanged for native under `os-runtime`.
+pub fn new_quic_client_config_in_memory(
+    options: &JsQuicClientOptions,
+) -> Result<quiche::Config, Http3NativeError> {
+    let mut tls = boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
+        .map_err(|e| Http3NativeError::Config(format!("boring SslContextBuilder::new failed: {e}")))?;
+
+    tls.set_verify(if options.reject_unauthorized.unwrap_or(true) {
+        boring::ssl::SslVerifyMode::PEER
+    } else {
+        boring::ssl::SslVerifyMode::NONE
+    });
+
+    match (options.cert.as_ref(), options.key.as_ref()) {
+        (Some(cert), Some(key)) => {
+            let cert = boring::x509::X509::from_pem(cert).map_err(|e| {
+                Http3NativeError::Config(format!("invalid client certificate PEM: {e}"))
+            })?;
+            tls.set_certificate(&cert).map_err(|e| {
+                Http3NativeError::Config(format!("failed to set client certificate: {e}"))
+            })?;
+            let key = boring::pkey::PKey::private_key_from_pem(key).map_err(|e| {
+                Http3NativeError::Config(format!("invalid client private key PEM: {e}"))
+            })?;
+            tls.set_private_key(&key).map_err(|e| {
+                Http3NativeError::Config(format!("failed to set client private key: {e}"))
+            })?;
+        }
+        (Some(_), None) => {
+            return Err(Http3NativeError::Config(
+                "client certificate requires private key".into(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(Http3NativeError::Config(
+                "client private key requires certificate".into(),
+            ));
+        }
+        (None, None) => {}
+    }
+
+    if let Some(ca) = options.ca.as_ref() {
+        let ca_cert = boring::x509::X509::from_pem(ca)
+            .map_err(|e| Http3NativeError::Config(format!("invalid ca PEM: {e}")))?;
+        tls.cert_store_mut()
+            .add_cert(ca_cert)
+            .map_err(|e| Http3NativeError::Config(format!("failed to add ca cert to store: {e}")))?;
+    }
+
+    let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls)
+        .map_err(Http3NativeError::Quiche)?;
+
+    let default_alpn = vec!["quic".to_string()];
+    let alpn_protos = options.alpn.as_deref().unwrap_or(&default_alpn);
+    let alpn_bytes = alpn_to_bytes(alpn_protos);
+    let alpn_slice = alpn_refs(&alpn_bytes);
+    config
+        .set_application_protos(&alpn_slice)
+        .map_err(Http3NativeError::Quiche)?;
+
+    config.set_max_idle_timeout(u64::from(options.max_idle_timeout_ms.unwrap_or(30_000)));
+    config.set_max_recv_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+    );
+    config.set_max_send_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+    );
+    let initial_max_data = u64::from(
+        options
+            .initial_max_data
+            .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+    );
+    let initial_stream_data_bidi_local = u64::from(
+        options
+            .initial_max_stream_data_bidi_local
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+    );
+    let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    config.set_initial_max_data(initial_max_data);
+    config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+    config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+    config.set_initial_max_stream_data_uni(initial_stream_data_uni);
+    config.set_initial_max_streams_bidi(u64::from(
+        options
+            .initial_max_streams_bidi
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
+    ));
+    config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
+
+    apply_flow_control_window_tuning(
+        &mut config,
+        initial_max_data,
+        &[
+            initial_stream_data_bidi_local,
+            initial_stream_data_bidi_remote,
+            initial_stream_data_uni,
+        ],
+    );
+    apply_congestion_tuning(&mut config);
+
+    // See the H3 in-memory profile's comment: default pacing off in this
+    // profile unless the caller explicitly re-enables it.
+    if !options.disable_pacing.is_some_and(|disable| !disable) {
+        config.enable_pacing(false);
+    }
 
     if options.allow_0rtt.unwrap_or(false) {
         config.enable_early_data();
@@ -842,5 +1117,149 @@ mod tests {
             "error should mention ca requirement, got: {}",
             err
         );
+    }
+
+    // ── A2 task 4: in-memory (boring-backed) config builders ───────────
+
+    fn generate_self_signed_pem() -> (Vec<u8>, Vec<u8>) {
+        use rcgen::{CertificateParams, KeyPair};
+        let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+        let mut params = CertificateParams::new(vec!["localhost".into()]).expect("params");
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        let cert = params.self_signed(&key_pair).expect("self-signed cert");
+        (
+            cert.pem().into_bytes(),
+            key_pair.serialize_pem().into_bytes(),
+        )
+    }
+
+    fn base_client_options() -> JsClientOptions {
+        JsClientOptions {
+            ca: None,
+            reject_unauthorized: None,
+            runtime_mode: None,
+            max_idle_timeout_ms: None,
+            max_udp_payload_size: None,
+            initial_max_data: None,
+            initial_max_stream_data_bidi_local: None,
+            initial_max_streams_bidi: None,
+            session_ticket: None,
+            allow_0rtt: None,
+            enable_datagrams: None,
+            keylog: None,
+            qlog_dir: None,
+            qlog_level: None,
+            disable_pacing: None,
+        }
+    }
+
+    fn base_quic_client_options() -> JsQuicClientOptions {
+        JsQuicClientOptions {
+            ca: None,
+            cert: None,
+            key: None,
+            reject_unauthorized: None,
+            alpn: None,
+            runtime_mode: None,
+            max_idle_timeout_ms: None,
+            max_udp_payload_size: None,
+            initial_max_data: None,
+            initial_max_stream_data_bidi_local: None,
+            initial_max_streams_bidi: None,
+            session_ticket: None,
+            allow_0rtt: None,
+            enable_datagrams: None,
+            keylog: None,
+            qlog_dir: None,
+            qlog_level: None,
+            disable_pacing: None,
+        }
+    }
+
+    #[test]
+    fn h3_in_memory_client_config_accepts_self_signed_ca() {
+        let (ca_pem, _key_pem) = generate_self_signed_pem();
+        let mut options = base_client_options();
+        options.ca = Some(ca_pem.into());
+
+        let config = Http3Config::new_client_quiche_config_in_memory(&options);
+        assert!(
+            config.is_ok(),
+            "expected in-memory H3 client config to build: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn h3_in_memory_client_config_works_without_ca() {
+        let options = base_client_options();
+        let config = Http3Config::new_client_quiche_config_in_memory(&options);
+        assert!(config.is_ok(), "expected config with no ca to build");
+    }
+
+    #[test]
+    fn quic_in_memory_client_config_accepts_self_signed_ca_and_mtls_cert() {
+        let (ca_pem, _) = generate_self_signed_pem();
+        let (client_cert_pem, client_key_pem) = generate_self_signed_pem();
+        let mut options = base_quic_client_options();
+        options.ca = Some(ca_pem.into());
+        options.cert = Some(client_cert_pem.into());
+        options.key = Some(client_key_pem.into());
+
+        let config = new_quic_client_config_in_memory(&options);
+        assert!(
+            config.is_ok(),
+            "expected in-memory QUIC client config to build: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn quic_in_memory_client_config_rejects_cert_without_key() {
+        let (client_cert_pem, _) = generate_self_signed_pem();
+        let mut options = base_quic_client_options();
+        options.cert = Some(client_cert_pem.into());
+
+        // `quiche::Config` isn't `Debug`, so `Result::expect_err` (which
+        // requires `T: Debug`) doesn't work here — match manually instead.
+        let err = match new_quic_client_config_in_memory(&options) {
+            Err(e) => e,
+            Ok(_) => panic!("expected cert-without-key to be rejected"),
+        };
+        assert!(err.to_string().contains("requires private key"));
+    }
+
+    #[test]
+    fn quic_in_memory_client_config_rejects_key_without_cert() {
+        let (_, client_key_pem) = generate_self_signed_pem();
+        let mut options = base_quic_client_options();
+        options.key = Some(client_key_pem.into());
+
+        let err = match new_quic_client_config_in_memory(&options) {
+            Err(e) => e,
+            Ok(_) => panic!("expected key-without-cert to be rejected"),
+        };
+        assert!(err.to_string().contains("requires certificate"));
+    }
+
+    #[test]
+    fn quic_in_memory_client_config_defaults_build_successfully() {
+        // No ca/cert/key at all — proves the pacing-off-by-default profile
+        // (A2 task 4) and ALPN/tuning plumbing don't error on their own.
+        let options = base_quic_client_options();
+        let config = new_quic_client_config_in_memory(&options);
+        assert!(config.is_ok(), "expected default config to build");
+    }
+
+    #[test]
+    fn effective_pmtud_ceiling_returns_fallback_constant_without_os_runtime() {
+        // Always exercises the `not(os-runtime)` branch's constant fallback
+        // directly when `os-runtime` is off; under `os-runtime` this just
+        // confirms the function still returns a sane, non-zero ceiling.
+        let peer: std::net::SocketAddr = "127.0.0.1:4433".parse().expect("valid addr");
+        let ceiling = effective_pmtud_ceiling(&peer);
+        assert!(ceiling > 0);
+        #[cfg(not(feature = "os-runtime"))]
+        assert_eq!(ceiling, FALLBACK_MAX_UDP_PAYLOAD);
     }
 }

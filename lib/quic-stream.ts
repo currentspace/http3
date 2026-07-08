@@ -24,13 +24,30 @@ export interface QuicServerEventLoopLike {
 }
 
 /**
- * Event loop interface for QUIC client-side stream commands.
+ * Event loop interface for QUIC client-side session + stream commands.
+ *
+ * Widened to cover the full surface {@link QuicClientSession} needs (not
+ * just the stream-command subset {@link QuicStream} uses), so
+ * `QuicClientSession._eventLoop` can also be typed against this interface
+ * instead of the concrete `QuicClientEventLoop` class — which has private
+ * fields, so TS's class typing would otherwise reject any
+ * structurally-equivalent substitute (e.g. a future non-native event loop
+ * implementation).
  * @internal
  */
 export interface QuicClientEventLoopLike {
+  connect(serverAddr: string, serverName: string): Promise<void>;
   openStream(): number;
   streamSend(streamId: number, data: Buffer, fin: boolean): number;
   streamClose(streamId: number, errorCode: number): boolean;
+  sendDatagram(data: Buffer): boolean;
+  getSessionMetrics(): {
+    packetsIn: number; packetsOut: number;
+    bytesIn: number; bytesOut: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
+  };
+  ping(): boolean;
+  close(errorCode?: number, reason?: string): Promise<void>;
 }
 
 /**

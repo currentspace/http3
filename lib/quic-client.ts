@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
-import { EVENT_SHUTDOWN_COMPLETE, binding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
-import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
-import type { ConnectionEndpoint } from './endpoint.js';
+import { EVENT_SHUTDOWN_COMPLETE, getBinding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
+import type { NativeEvent, NativeBinding, NativeQuicClientBinding } from './event-loop.js';
+import type { ConnectionEndpoint, DnsLookupFn } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
 import { ERR_HTTP3_INVALID_STATE, ERR_HTTP3_SESSION_ERROR, ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
@@ -28,6 +28,8 @@ const EVENT_DATAGRAM = 14;
 export interface QuicConnectOptions {
   /** Abort the connect attempt (DNS lookup + handshake). Audit finding #15. */
   signal?: AbortSignal;
+  /** Override DNS resolution for hostname endpoints. Defaults to `node:dns/promises`'s `lookup`. IP-literal endpoints bypass DNS regardless. */
+  dnsLookup?: DnsLookupFn;
   /** Runtime selection mode. Default: `'auto'`. */
   runtimeMode?: RuntimeOptions['runtimeMode'];
   /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
@@ -171,7 +173,7 @@ export interface QuicClientSession {
  * Obtain an instance via {@link connectQuic} or {@link connectQuicAsync}.
  */
 export class QuicClientSession extends EventEmitter {
-  private _eventLoop: QuicClientEventLoop | null = null;
+  private _eventLoop: QuicClientEventLoopLike | null = null;
   private readonly _streams = new Map<number, QuicStream>();
   private _handshakeComplete = false;
   /** @internal */
@@ -288,7 +290,7 @@ export class QuicClientSession extends EventEmitter {
   }
 
   /** @internal */
-  _setEventLoop(loop_: QuicClientEventLoop | null): void {
+  _setEventLoop(loop_: QuicClientEventLoopLike | null): void {
     this._eventLoop = loop_;
   }
 
@@ -655,8 +657,8 @@ function toQuicClientConnectError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
-  const NativeQuicClient = (binding as Partial<typeof binding>).NativeQuicClient;
+function getNativeQuicClientConstructor(): NativeBinding['NativeQuicClient'] {
+  const NativeQuicClient = (getBinding() as Partial<NativeBinding>).NativeQuicClient;
   if (typeof NativeQuicClient !== 'function') {
     throw new Error(
       'The loaded @currentspace/http3 native binding is missing `NativeQuicClient`. '
@@ -740,6 +742,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
         defaultScheme: 'quic',
         defaultPort: 4433,
         signal: options?.signal,
+        dnsLookup: options?.dnsLookup,
       });
       if (shouldAbortConnect()) {
         return;

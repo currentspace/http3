@@ -116,6 +116,7 @@ fn setup_quic_pair() -> QuicPair {
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let (server_quiche, client_quiche) = {
