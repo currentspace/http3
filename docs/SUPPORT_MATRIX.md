@@ -46,6 +46,25 @@
 | Docker/Kubernetes with `seccomp=unconfined` or equivalent custom seccomp allowing `io_uring_*` | supported | supported | prefers `fast` |
 | `privileged: true` container | supported | supported | prefers `fast` |
 
+## WASM Client Runtime
+
+- `runtimeMode: 'wasm'` runs the same HTTP/3 + raw QUIC **client** protocol
+  core (quiche + BoringSSL) compiled to `wasm32-wasip1`, driven from Node.js
+  over a `node:dgram` adapter — not a reimplementation, not a native-driver
+  substitute.
+- Protocol support: HTTP/3 client (no client mTLS, matching an existing
+  native asymmetry) and raw QUIC client (mTLS supported) — no server
+  support on either protocol.
+- `runtimeMode: 'auto'` never selects `'wasm'`; it must be requested
+  explicitly, and `fallbackPolicy` does not apply to it.
+- See [WASM_RUNTIME.md](./WASM_RUNTIME.md) for build steps, usage examples,
+  and limitations.
+
+| Platform | Status |
+| --- | --- |
+| Node.js (same `>=24.0.0` floor as native) | Supported today via `runtimeMode: 'wasm'` |
+| Cloudflare Workers / `workerd` | Designed for, not yet deployable — blocked on outbound UDP client sockets ([cloudflare/workerd discussion #4463](https://github.com/cloudflare/workerd/discussions/4463)) |
+
 ## Container / Deployment Notes
 
 - Linux arm64 Docker Desktop is validated through the repository runtime matrix.

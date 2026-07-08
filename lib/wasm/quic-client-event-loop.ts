@@ -290,6 +290,23 @@ export class WasmQuicClientEventLoop {
 
   private onTimerFire(): void {
     this.timer = null;
+    // Must also forget the deadline the just-fired timer was armed for, not
+    // only the timer handle itself — otherwise rearmTimer()'s dedup check
+    // below can compare the *new* deadline `pump()` computes against this
+    // *stale* (already-consumed) one. Both `process_timers_for_handle` and
+    // `qc_timeout_ms` frequently recompute a fresh deadline whose absolute
+    // value coincides (often to the millisecond, e.g. immediately following
+    // a draining-state transition) with the one that just fired, which used
+    // to make rearmTimer() believe a timer was still armed for it and skip
+    // arming a real one — silently orphaning the connection with no timer
+    // left to ever recheck `is_done()`/`is_closed()` again (found via C4's
+    // `test/interop/quic-loopback.test.ts` parameterization,
+    // docs/WASM_CLIENT_PLAN.md §7: a mismatched/missing client certificate
+    // puts the connection into "draining" before the peer's
+    // CONNECTION_CLOSE is fully recognized as closed, needing exactly one
+    // more timer tick to finish — see the QuicClientEventLoopLike
+    // counterpart in h3-client-event-loop.ts for the identical fix).
+    this.armedAbsoluteDeadlineMs = null;
     if (this.handle === 0) return;
     this.core.exports.qc_on_timeout(this.handle);
     this.pump();

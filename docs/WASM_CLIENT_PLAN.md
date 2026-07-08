@@ -1118,6 +1118,165 @@ C3 handshake passes **with `ca` verification enabled (O2)**; packed-tarball
 smoke test proves `require('@currentspace/http3')` and the `./wasm` entry
 resolve; test lane ungated and inside the 2-min budget.
 
+**Status: PARTIAL (2026-07-08, macOS arm64, local) — D1b and the
+locally-verifiable slice of D3 are DONE; C4/C6 (owned by
+`test/interop/**`/`test/wasm/**`/`test/support/**`, a parallel workstream)
+and the two CI-workflow-file changes below are tracked separately and are
+NOT part of this update — see the TODO at the end of this block.**
+
+D1b (`scripts/verify.sh`, §8):
+- New wasm build+test step added between the napi-release-build/`build:dist`
+  block and `build:test`/the TS test suite, gated on **both**
+  `VERIFY_SKIP_WASM` (new — same convention as `VERIFY_SKIP_BROWSER_E2E` /
+  `_PERF_GATES` / `_SMOKE_INSTALL`) and `WASI_SDK_PATH` being non-empty;
+  prints a clear, distinct notice and exits 0 on either skip condition
+  rather than doing nothing silently. Verified both ways:
+  `WASI_SDK_PATH` unset → clean skip, full `bash scripts/verify.sh --fast`
+  (13 steps, native build assumed already done) green in 73 s;
+  `WASI_SDK_PATH` set → runs `pnpm run build:wasm` for real, then
+  `HTTP3_WASM=1 pnpm run test:wasm` for real (not a stub) — 20/21 wasm
+  tests passed on this run, the one failure being in the just-created,
+  still-in-progress `test/wasm/frozen-clock.test.ts` (C6, a parallel
+  agent's untracked WIP file per `git status` at the time — outside this
+  slice's ownership); isolating that one file out, the wasm suite is
+  20/20. The build+test wiring itself is proven correct: it builds the
+  real artifact and runs the real suite, and correctly propagates a real
+  failure rather than swallowing it.
+
+D3 (packaging, §8, non-CI slice only):
+- **Fixed the `dist/wasm`-wiped-by-`build:dist` bug**, the core packaging
+  defect this pass was scoped to fix. Root cause: `build:dist` did an
+  unconditional `rmSync('dist', { recursive: true })` before `tsc`; `tsc`
+  has no way to regenerate `dist/wasm/http3_client.wasm` (a separate
+  cargo+wasm-opt pipeline's output — D1a), so `pnpm run build:wasm`
+  followed by `pnpm run build` (or bare `build:dist`) silently deleted it.
+  Fix: new `scripts/clean-dist.mjs` stashes `dist/wasm/http3_client.wasm`
+  (via `copyFileSync`, not `renameSync`, so it survives the stash dir
+  living on a different filesystem than the repo) before the `rmSync`,
+  restores it after, and is a byte-for-byte no-op when the artifact
+  doesn't exist yet (the common case — no `WASI_SDK_PATH`). `package.json`'s
+  `build:dist` now runs it instead of the old inline `node -e` one-liner.
+  **Chosen over the alternative** of folding `build:wasm` into the `build`
+  script chain, because `build:wasm` hard-requires a wasi-sdk toolchain
+  almost nobody has installed by default — wiring it into the default
+  `build` script would break plain `pnpm run build` for every native-only
+  contributor. Verified: ran `pnpm run build:wasm` then `pnpm run build`
+  (that order); the resulting `dist/wasm/http3_client.wasm` is
+  byte-identical (sha256 `4d7c4e85…`, 1,539,140 bytes) to what `build:wasm`
+  alone produced, while every other `dist/*` file was freshly and fully
+  rebuilt by `tsc` in the same run; `pnpm test` afterward: 363 tests, 362
+  pass, 1 pre-existing unrelated skip, 0 fail — unaffected.
+- **`files` whitelist**: no change needed. A real `pnpm pack --dry-run`
+  confirms the existing `"dist"` entry already recursively covers
+  `dist/wasm/*` — both `http3_client.wasm` and every compiled
+  `lib/wasm/*.ts` → `dist/wasm/*.js`/`.d.ts` output — with no
+  `.npmignore`/negation pattern excluding it. `tsconfig.json`'s
+  `include: ["lib"]` / `rootDir: "lib"` already covers `lib/wasm/**`
+  automatically (no separate include entry was ever needed); `dist/wasm`
+  simply looked incomplete earlier in this phase because `build:dist` was
+  stale relative to `lib/wasm/*.ts`, not because of a tsconfig gap.
+- **`scripts/publish-npm-release.mjs`**: `assertRootPackageLayout`'s
+  `requiredFiles` now also lists `dist/wasm/http3_client.wasm`,
+  `dist/wasm/core-loader.js`, and `dist/wasm/wasi-shim.js` — the artifact
+  plus its two foundational compiled entry points (no single
+  `lib/wasm/index.ts` exists yet to name one canonical entry, so this is a
+  representative sample, matching the existing check's own granularity for
+  the native side, which also samples rather than enumerates every
+  `dist/*.js`). **Flagging an immediate, real consequence for whoever wires
+  `release.yml` (TODO below): a real `scripts/publish-npm-release.mjs` run
+  will now hard-fail unless `pnpm run build:wasm` ran first** — intended
+  (this is the regression guard the task asked for), but `release.yml`
+  must account for it.
+- **`scripts/verify-prebuilds.mjs`**: left untouched, deliberately. It only
+  checks presence + literal napi-export byte-markers in the three OS/arch
+  `.node` prebuild binaries under `optionalDependencies`
+  (`http3.linux-x64-gnu.node` etc.) before they're copied into `npm/<pkg>/`;
+  it has no concept of the root tarball's `files` list or `dist/wasm` at
+  all. That surface is exactly what the `assertRootPackageLayout` change
+  above covers — nothing wasm-shaped belongs in this script.
+- **`"./wasm"` subpath export: intentionally NOT added.** The plan's D3
+  text above specifies `workerd`/`worker` conditions pointing at
+  `dist/wasm/index.workerd.js`, which does not exist — that file is Phase
+  5's `lib/wasm/index.workerd.ts` deliverable (§6.6/§9 E-tasks), not yet
+  written. Adding an export that resolves to a nonexistent file would make
+  any attempt to `require`/`import` `@currentspace/http3/wasm` today fail
+  outright (or silently pick the wrong condition), which is strictly worse
+  than not exporting the subpath at all. **Deferred to Phase 5**: add the
+  export once `lib/wasm/index.workerd.ts` and its dedicated
+  (non-`types:["node"]`) tsconfig actually exist, and verify the condition
+  ordering (`workerd`→`worker`→`browser`→`default`) against real wrangler
+  resolution, per this plan's own note on workers-sdk#2805-class shadowing
+  bugs.
+- `.github/workflows/ci.yml` (D2) and `.github/workflows/release.yml` (D3)
+  intentionally **not touched** — modifying CI workflow YAML that cannot be
+  executed/verified in this environment is out of scope here (mirrors how
+  Phase 2 handled "cannot create a real GitHub fork": document precisely,
+  don't commit unverifiable infrastructure changes). Full, concrete,
+  ready-to-implement spec follows.
+
+**TODO for a human or a future agent with CI-execution access** (nothing
+below is implemented yet in `.github/workflows/*`; this is meant to be
+directly actionable without re-deriving anything):
+
+*`ci.yml` — new `wasm` job (D2):*
+1. New job, same triggers as the other CI jobs (PR + push).
+2. `dtolnay/rust-toolchain@stable` with `targets: wasm32-wasip1`.
+3. `Swatinem/rust-cache@v2` — `ci.yml` has no cargo cache today; this job
+   needs one (the bssl+quiche cold build is the long pole). Fold the
+   boring-sys version from `Cargo.lock` **and** the pinned wasi-sdk version
+   into the cache key so either bump invalidates it.
+4. Download+stage wasi-sdk 33 (Linux x86_64 tarball) and
+   `export WASI_SDK_PATH=...` via `$GITHUB_ENV` (not a plain shell export)
+   so it survives into later steps.
+5. Install binaryen (`wasm-opt`) from apt or a pinned release tarball.
+   `scripts/build-wasm.mjs` already degrades gracefully (copies the
+   unoptimized ~10 MiB build with a log line) if it's missing, but CI
+   should install it so the size-checked, real artifact is what ships.
+6. `pnpm run build:wasm`.
+7. `HTTP3_WASM=1 pnpm run test:wasm`.
+8. This job is also the real O3 gate (Linux/bindgen libclang variance,
+   Risk R3) — it has never run on Linux CI as of this writing (the spike
+   and Phase 2 build were both macOS-only); expect to need
+   `-fvisibility=default` (already in `scripts/build-wasm.mjs`) and
+   possibly a pinned `LIBCLANG_PATH`.
+9. Budget: comfortably inside the existing 45–60 min timeouts once the
+   cache in step 3 is warm.
+10. Separately (a plain Node script change, not workflow YAML — in scope
+    for a future non-CI pass, just not part of this one): extend
+    `scripts/check-node-api-boundary.mjs`'s `scanEntries` to include
+    `crates/http3-wasm/src` (it currently scans only `src/` + `build.rs`);
+    this check is release-blocking and the new crate must stay NAPI-free by
+    construction.
+
+*`release.yml` — wasm artifact wiring (D3):*
+1. **This pass's change makes this non-optional, not aspirational:**
+   `scripts/publish-npm-release.mjs`'s `assertRootPackageLayout` now
+   requires `dist/wasm/http3_client.wasm` (+ two compiled TS entries) to be
+   in the packed tarball or the publish step throws. `release.yml` MUST run
+   a wasm build before invoking `scripts/publish-npm-release.mjs`
+   (`npm run release:publish:npm`), or every future real release will
+   hard-fail at that check.
+2. Add a `build-wasm` job (or step in the existing release job): install
+   wasi-sdk 33 + binaryen (same recipe as `ci.yml`'s `wasm` job — consider
+   factoring "install wasi-sdk + binaryen" into one composite action shared
+   by both workflows so the two copies can't drift), run
+   `pnpm run build:wasm`, then `actions/upload-artifact` the resulting
+   `dist/wasm/http3_client.wasm`.
+3. The job that runs `scripts/publish-npm-release.mjs` should
+   `actions/download-artifact` it into `dist/wasm/http3_client.wasm` any
+   time before `buildRootPackage()`'s `assertRootPackageLayout` call —
+   before **or** after `build:dist` both work now, since this pass's
+   `scripts/clean-dist.mjs` fix means `build:dist` no longer wipes a
+   pre-staged artifact.
+4. **Validate lane**: run `HTTP3_WASM=1 pnpm run test:wasm` against the
+   *packed-and-installed* tarball (not the repo's own `dist/`), the same
+   shape as the existing `scripts/smoke-install.mjs` precedent
+   (pack → install into a temp dir → exercise it), so the lane proves the
+   published layout actually works, not just the local build tree.
+5. Do not add the `"./wasm"` export as part of this — see the decision-log
+   entry (§12) and the paragraph above: Phase 5's job, once
+   `lib/wasm/index.workerd.ts` exists.
+
 ### Phase 5 — workerd readiness
 
 E-tasks (§9): workerd entry + tsconfig, exports conditions verified against
@@ -1145,6 +1304,8 @@ size/startup budgets.
 | Browser adapter (WebSocket relay à la quinn-wasm/iroh) | out of scope; falls out of the architecture nearly free — revisit after Phase 5 |
 | A4 quiche-patch wiring: static `[patch.crates-io]` in root `Cargo.toml` vs. scoped `--config` override | **scoped `--config`, not static.** `scripts/prepare-quiche-wasm-patch.sh` vendors + patches quiche into the git-ignored `target/quiche-wasm-patched/<version>/`; `scripts/build-wasm.mjs` passes `--config patch.crates-io.quiche.path="<that dir>"` to *only* its own `cargo build -p http3-wasm --target wasm32-wasip1` invocation. A static `[patch.crates-io]` in the root manifest would make `cargo build --release` (and every other cargo invocation, on every machine, forever) fail hard on a fresh clone before the vendoring script has ever run — Cargo resolves `[patch]` for the whole workspace regardless of target/features. Verified empirically both orders: `cargo build --release` succeeds identically whether or not `target/quiche-wasm-patched/` exists yet, and `git diff Cargo.lock` shows zero churn beyond the permanent `http3-wasm` package entry (a `--config`-patched build transiently drops the `quiche` entry's `source`/`checksum` fields, but a subsequent unpatched build cleanly restores them) |
 | Upstreaming the quiche FFI fix (A4 task 2) | **manual follow-up for the repo owner.** Creating a real `currentspace/quiche` (or similar) GitHub fork and opening a PR against `cloudflare/quiche` requires the repo owner's own GitHub account/credentials — out of scope for automation. The patch itself is ready to submit as-is: `spikes/quiche-wasm-wasip1/quiche-0.29.2-wasm-ffi.patch` (2 lines, `src/crypto/boringssl.rs`, drops an incorrect `-> c_void` on two FFI decls that are `void` in C). Until upstreamed, `scripts/prepare-quiche-wasm-patch.sh` is the local, reproducible, git-ignored vendoring path the wasm build depends on. |
+| `package.json` `"./wasm"` subpath export (D3) | **deferred to Phase 5, not added in the Phase 4 D1b/D3 pass.** The condition map would point `workerd`/`worker` at `dist/wasm/index.workerd.js`, which doesn't exist until Phase 5's `lib/wasm/index.workerd.ts` lands (§6.6/§9 E-tasks); exporting a subpath that resolves to a nonexistent file fails (or silently mis-resolves) for any consumer who tries it today, which is worse than omitting it. Add it once that file and its dedicated tsconfig exist, and verify condition ordering against real wrangler resolution. See the Phase 4 status block above for the full note. |
+| CI wiring for the wasm artifact: D2's new `ci.yml` `wasm` job, D3's `release.yml` upload + validate lane | **not implemented in this pass — `.github/workflows/*.yml` is out of scope for an agent that cannot execute a real GitHub Actions run** (same reasoning as the "cannot create a real GitHub fork" row above: document precisely, don't commit unverifiable infrastructure changes). A complete, directly-actionable spec — including a real consequence this pass's `publish-npm-release.mjs` change introduces (release now hard-fails without a prior wasm build) — is written out in the Phase 4 status block's TODO above rather than duplicated here. |
 
 ## 13. References
 

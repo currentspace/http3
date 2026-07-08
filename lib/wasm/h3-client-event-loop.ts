@@ -317,6 +317,16 @@ export class WasmH3ClientEventLoop {
 
   private onTimerFire(): void {
     this.timer = null;
+    // Must also forget the deadline the just-fired timer was armed for —
+    // otherwise rearmTimer()'s dedup check can compare the *new* deadline
+    // pump() computes against this *stale* (already-consumed) one and
+    // wrongly skip arming a real timer, silently orphaning the connection
+    // with nothing left to ever recheck is_done()/is_closed() again. See
+    // WasmQuicClientEventLoop's identical fix (quic-client-event-loop.ts)
+    // for the full incident writeup — found via C4's
+    // test/interop/quic-loopback.test.ts parameterization
+    // (docs/WASM_CLIENT_PLAN.md §7).
+    this.armedAbsoluteDeadlineMs = null;
     if (this.handle === 0) return;
     this.core.exports.h3c_on_timeout(this.handle);
     this.pump();

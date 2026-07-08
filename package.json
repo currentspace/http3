@@ -94,7 +94,7 @@
     ]
   },
   "scripts": {
-    "build:dist": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
+    "build:dist": "node scripts/clean-dist.mjs && tsc",
     "build": "napi build --platform --release && npm run patch:native-loader && npm run build:dist",
     "build:debug": "napi build --platform && npm run patch:native-loader && npm run build:dist",
     "build:test": "tsc -p tsconfig.test.json",

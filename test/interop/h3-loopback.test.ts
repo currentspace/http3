@@ -6,6 +6,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { generateTestCerts } from '../support/generate-certs.js';
+import { clientRuntimeMode } from '../support/wasm-test-helpers.js';
 import { createSecureServer, connect, connectAsync } from '../../lib/index.js';
 import type { Http3SecureServer, Http3ClientSession, ServerHttp3Stream, IncomingHeaders, StreamFlags } from '../../lib/index.js';
 import type { ClientHttp3Stream } from '../../lib/stream.js';
@@ -182,7 +183,7 @@ describe('H3 loopback', () => {
   });
 
   it('basic GET request/response', async () => {
-    const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
     let connected = false;
     session.on('connect', () => { connected = true; });
     await waitFor(() => connected, 3000);
@@ -195,7 +196,7 @@ describe('H3 loopback', () => {
   });
 
   it('POST with echo body', async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     const payload = Buffer.alloc(4 * 1024, 'E');
     const res = await doRequest(session, 'POST', '/echo', payload);
@@ -207,7 +208,7 @@ describe('H3 loopback', () => {
   });
 
   it('POST with 1MB body', { timeout: 30000 }, async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     const payload = Buffer.alloc(1024 * 1024, 'M');
     const res = await doRequest(session, 'POST', '/echo-1m', payload);
@@ -220,7 +221,7 @@ describe('H3 loopback', () => {
   it('multiple concurrent sessions to same server', async () => {
     const sessions = await Promise.all(
       Array.from({ length: 3 }, () =>
-        connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false }),
+        connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' }),
       ),
     );
 
@@ -240,7 +241,7 @@ describe('H3 loopback', () => {
   });
 
   it('5 sequential request/response cycles on same session', async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     for (let i = 0; i < 5; i++) {
       const res = await doRequest(session, 'GET', `/seq-${i}`);
@@ -252,7 +253,7 @@ describe('H3 loopback', () => {
   });
 
   it('large streaming response: 256KB chunked', async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     const res = await doRequest(session, 'GET', '/large-stream');
     assert.strictEqual(res.status, '200');
@@ -262,7 +263,7 @@ describe('H3 loopback', () => {
   });
 
   it('server responds with 204 No Content', async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     const res = await doRequest(session, 'GET', '/no-content');
     assert.strictEqual(res.status, '204');
@@ -272,7 +273,7 @@ describe('H3 loopback', () => {
   });
 
   it('session metrics available', async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     // Do a request so metrics accumulate
     await doRequest(session, 'GET', '/hello');
@@ -288,7 +289,7 @@ describe('H3 loopback', () => {
   });
 
   it('HEAD request returns no body', async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     const res = await doRequest(session, 'HEAD', '/hello');
     assert.strictEqual(res.status, '200');
@@ -298,7 +299,7 @@ describe('H3 loopback', () => {
   });
 
   it('custom response headers preserved', async () => {
-    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' });
 
     const res = await doRequest(session, 'GET', '/custom-headers');
     assert.strictEqual(res.status, '200');

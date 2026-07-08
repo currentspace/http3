@@ -10,8 +10,17 @@
  * Kept as a separate file from `native-test-helpers.ts` (rather than
  * extending it) so the always-loaded native FFI test helper module never
  * gains a wasm-conditional code path: every native test in the repo
- * imports `native-test-helpers.ts`, but only `test/wasm/**` imports this
- * file.
+ * imports `native-test-helpers.ts`, but only `test/wasm/**` imports most of
+ * this file. The sole exception is {@link clientRuntimeMode} (C4,
+ * docs/WASM_CLIENT_PLAN.md §7): `test/interop/h3-loopback.test.ts` and
+ * `test/interop/quic-loopback.test.ts` import that one function to thread
+ * `runtimeMode: 'wasm'` into their **client**-side `connect()`/
+ * `connectQuic()` options when enabled, so the exact same interop
+ * scenarios run over both runtimes. Importing it is safe even when
+ * `HTTP3_WASM` is unset — the module-level check below is a cheap env-var
+ * + `existsSync` read with no side effects, and every other import this
+ * file has (`native-test-helpers.js`, `lib/client.js`, `lib/quic-client.js`)
+ * is already part of those suites' own dependency graph.
  *
  * Gated by `HTTP3_WASM=1` (same pattern as `HTTP3_LONGHAUL`/
  * `HTTP3_BROWSER_E2E` — see test/wasm/artifact-shape.test.ts's C2 test,
@@ -29,6 +38,7 @@ import { connectAsync } from '../../lib/client.js';
 import { connectQuicAsync } from '../../lib/quic-client.js';
 import type { Http3ClientSession } from '../../lib/client.js';
 import type { QuicClientSession } from '../../lib/quic-client.js';
+import type { RuntimeMode } from '../../lib/runtime.js';
 
 /** @internal Walk up from this file's compiled location until the repo root (identified by pnpm-workspace.yaml) is found. Mirrors test/wasm/artifact-shape.test.ts's findRepoRoot. */
 function findRepoRoot(): string {
@@ -65,6 +75,23 @@ export function wasmSkipReason(): string | false {
  */
 export function wasmArtifactPath(): string {
   return artifactPath;
+}
+
+/**
+ * C4 (docs/WASM_CLIENT_PLAN.md §7): the `runtimeMode` the **client** side
+ * of an interop suite should request, or `undefined` to fall back to
+ * whatever the caller's default is (typically `'portable'`).
+ *
+ * Returns `'wasm'` under exactly the same gate {@link wasmSkipReason} uses
+ * (`HTTP3_WASM` set **and** `dist/wasm/http3_client.wasm` built) so the
+ * decision "does the wasm test lane run at all" and "do the parameterized
+ * interop suites exercise the wasm client" always flip together. Returns
+ * `undefined` otherwise — never `'portable'` itself, so callers stay in
+ * charge of their own default (`connect(addr, { runtimeMode:
+ * clientRuntimeMode() ?? 'portable' })`).
+ */
+export function clientRuntimeMode(): RuntimeMode | undefined {
+  return wasmSkipReason() === false ? 'wasm' : undefined;
 }
 
 // ---- H3 pair ----
