@@ -6,7 +6,6 @@
 const { readFileSync } = require('fs')
 let nativeBinding = null
 const loadErrors = []
-const EXPECTED_NATIVE_PACKAGE_VERSION = require('./package.json').version
 
 const isMusl = () => {
   let musl = false
@@ -78,8 +77,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-android-arm64')
         const bindingPackageVersion = require('@currentspace/http3-android-arm64/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -94,8 +93,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-android-arm-eabi')
         const bindingPackageVersion = require('@currentspace/http3-android-arm-eabi/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -115,8 +114,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-win32-x64-gnu')
         const bindingPackageVersion = require('@currentspace/http3-win32-x64-gnu/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -131,8 +130,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-win32-x64-msvc')
         const bindingPackageVersion = require('@currentspace/http3-win32-x64-msvc/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -148,8 +147,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-win32-ia32-msvc')
         const bindingPackageVersion = require('@currentspace/http3-win32-ia32-msvc/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -164,8 +163,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-win32-arm64-msvc')
         const bindingPackageVersion = require('@currentspace/http3-win32-arm64-msvc/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -183,8 +182,8 @@ function requireNative() {
     try {
       const binding = require('@currentspace/http3-darwin-universal')
       const bindingPackageVersion = require('@currentspace/http3-darwin-universal/package.json').version
-      if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-        throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+      if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+        throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
       }
       return binding
     } catch (e) {
@@ -199,8 +198,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-darwin-x64')
         const bindingPackageVersion = require('@currentspace/http3-darwin-x64/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -215,8 +214,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-darwin-arm64')
         const bindingPackageVersion = require('@currentspace/http3-darwin-arm64/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -235,8 +234,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-freebsd-x64')
         const bindingPackageVersion = require('@currentspace/http3-freebsd-x64/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -251,8 +250,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-freebsd-arm64')
         const bindingPackageVersion = require('@currentspace/http3-freebsd-arm64/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -272,8 +271,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-x64-musl')
           const bindingPackageVersion = require('@currentspace/http3-linux-x64-musl/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -288,8 +287,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-x64-gnu')
           const bindingPackageVersion = require('@currentspace/http3-linux-x64-gnu/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -306,8 +305,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-arm64-musl')
           const bindingPackageVersion = require('@currentspace/http3-linux-arm64-musl/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -322,8 +321,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-arm64-gnu')
           const bindingPackageVersion = require('@currentspace/http3-linux-arm64-gnu/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -340,8 +339,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-arm-musleabihf')
           const bindingPackageVersion = require('@currentspace/http3-linux-arm-musleabihf/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -356,8 +355,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-arm-gnueabihf')
           const bindingPackageVersion = require('@currentspace/http3-linux-arm-gnueabihf/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -374,8 +373,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-loong64-musl')
           const bindingPackageVersion = require('@currentspace/http3-linux-loong64-musl/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -390,8 +389,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-loong64-gnu')
           const bindingPackageVersion = require('@currentspace/http3-linux-loong64-gnu/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -408,8 +407,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-riscv64-musl')
           const bindingPackageVersion = require('@currentspace/http3-linux-riscv64-musl/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -424,8 +423,8 @@ function requireNative() {
         try {
           const binding = require('@currentspace/http3-linux-riscv64-gnu')
           const bindingPackageVersion = require('@currentspace/http3-linux-riscv64-gnu/package.json').version
-          if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-            throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+          if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+            throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
           return binding
         } catch (e) {
@@ -441,8 +440,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-linux-ppc64-gnu')
         const bindingPackageVersion = require('@currentspace/http3-linux-ppc64-gnu/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -457,8 +456,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-linux-s390x-gnu')
         const bindingPackageVersion = require('@currentspace/http3-linux-s390x-gnu/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -477,8 +476,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-openharmony-arm64')
         const bindingPackageVersion = require('@currentspace/http3-openharmony-arm64/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -493,8 +492,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-openharmony-x64')
         const bindingPackageVersion = require('@currentspace/http3-openharmony-x64/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {
@@ -509,8 +508,8 @@ function requireNative() {
       try {
         const binding = require('@currentspace/http3-openharmony-arm')
         const bindingPackageVersion = require('@currentspace/http3-openharmony-arm/package.json').version
-        if (bindingPackageVersion !== EXPECTED_NATIVE_PACKAGE_VERSION && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          throw new Error(`Native binding package version mismatch, expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
+        if (bindingPackageVersion !== '0.8.6' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
+          throw new Error(`Native binding package version mismatch, expected 0.8.6 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
         return binding
       } catch (e) {

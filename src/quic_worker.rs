@@ -3410,11 +3410,18 @@ impl QuicClientHandler {
     /// Write the next outbound datagram, if any (the `flush_sends`
     /// primitive, one packet at a time).
     pub fn try_send_next(&mut self) -> Option<TxDatagram> {
-        Self::try_send_next_with_pool_parts(
+        let result = Self::try_send_next_with_pool_parts(
             &mut self.conn,
             self.send_buf.as_mut_slice(),
             &mut self.tx_pool,
-        )
+        );
+        if result.is_none() {
+            // Deviation (Phase 3 wasm-plan discovery) — see worker.rs's
+            // identical fix + comment on H3ClientHandler::try_send_next
+            // for the full rationale.
+            self.refresh_timeout_deadline();
+        }
+        result
     }
 
     fn try_send_next_with_pool_parts(

@@ -22,6 +22,7 @@ import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from
 import {
   Http3Error,
   ERR_HTTP3_INVALID_STATE,
+  ERR_HTTP3_RUNTIME_UNSUPPORTED,
   ERR_HTTP3_STREAM_ERROR,
   ERR_HTTP3_TLS_CONFIG_ERROR,
 } from './errors.js';
@@ -208,6 +209,11 @@ export class Http3SecureServer extends EventEmitter {
     };
     try {
       quicStart = runWithRuntimeSelectionSync(this, this._options, (runtimeMode) => {
+        if (runtimeMode === 'wasm') {
+          // Unreachable: runWithRuntimeSelectionSync rejects 'wasm' before
+          // ever invoking this callback (N1: no server support in wasm).
+          throw new Http3Error('unreachable: wasm runtime mode reached server construction', ERR_HTTP3_RUNTIME_UNSUPPORTED);
+        }
         const NativeWorkerServer = getBinding().NativeWorkerServer;
         const workerServer = new NativeWorkerServer({
           key,

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { EVENT_SHUTDOWN_COMPLETE, getBinding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
 import type { NativeEvent, NativeBinding, NativeQuicClientBinding } from './event-loop.js';
+import { createClientEventLoop, resolveWasmArtifactPath } from './client-event-loop-factory.js';
 import type { ConnectionEndpoint, DnsLookupFn } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
@@ -749,49 +750,92 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
       }
 
       await runWithRuntimeSelection(session, options, async (runtimeMode) => {
-        const nativeClient = new NativeQuicClient(
-          {
-            ca: tls.ca,
-            cert: tls.cert,
-            key: tls.key,
-            rejectUnauthorized: options?.rejectUnauthorized,
-            alpn: options?.alpn,
-            runtimeMode,
-            maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
-            maxUdpPayloadSize: options?.maxUdpPayloadSize,
-            initialMaxData: options?.initialMaxData,
-            initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
-            initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
-            sessionTicket: options?.sessionTicket,
-            allow0Rtt: options?.allow0RTT,
-            enableDatagrams: options?.enableDatagrams,
-            keylog: options?.keylog,
-            qlogDir: options?.qlogDir,
-            qlogLevel: options?.qlogLevel,
-          },
-          (_err: Error | null, events: NativeEvent[]) => {
-            try {
-              let hasShutdown = false;
-              for (const event of events) {
-                if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-                  hasShutdown = true;
-                }
-              }
-              if (!hasShutdown) {
-                session._dispatchEvents(events);
-              } else {
-                session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-                eventLoop._onShutdownSentinel();
-              }
-            } finally {
-              // Audit #14: release credit on the outstanding-events gauge even
-              // when user event handlers throw during dispatch.
-              nativeClient.ackEventBatch(events.length);
+        const eventLoop = await createClientEventLoop<QuicClientEventLoopLike>(
+          runtimeMode,
+          () => {
+            if (runtimeMode === 'wasm') {
+              // Unreachable: createClientEventLoop never invokes this thunk
+              // for 'wasm' — see docs/WASM_CLIENT_PLAN.md §6.6 ("never pass
+              // 'wasm' to the native binding"). Guarded explicitly rather
+              // than asserted away so a future bug here fails loudly.
+              throw new Http3Error('unreachable: native constructor invoked for wasm runtime mode', ERR_HTTP3_INVALID_STATE);
             }
+            const nativeClient = new NativeQuicClient(
+              {
+                ca: tls.ca,
+                cert: tls.cert,
+                key: tls.key,
+                rejectUnauthorized: options?.rejectUnauthorized,
+                alpn: options?.alpn,
+                runtimeMode,
+                maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+                maxUdpPayloadSize: options?.maxUdpPayloadSize,
+                initialMaxData: options?.initialMaxData,
+                initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+                initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+                sessionTicket: options?.sessionTicket,
+                allow0Rtt: options?.allow0RTT,
+                enableDatagrams: options?.enableDatagrams,
+                keylog: options?.keylog,
+                qlogDir: options?.qlogDir,
+                qlogLevel: options?.qlogLevel,
+              },
+              (_err: Error | null, events: NativeEvent[]) => {
+                try {
+                  let hasShutdown = false;
+                  for (const event of events) {
+                    if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                      hasShutdown = true;
+                    }
+                  }
+                  if (!hasShutdown) {
+                    session._dispatchEvents(events);
+                  } else {
+                    session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+                    nativeEventLoop._onShutdownSentinel();
+                  }
+                } finally {
+                  // Audit #14: release credit on the outstanding-events gauge even
+                  // when user event handlers throw during dispatch.
+                  nativeClient.ackEventBatch(events.length);
+                }
+              },
+            );
+
+            const nativeEventLoop = new QuicClientEventLoop(nativeClient);
+            return nativeEventLoop;
+          },
+          async () => {
+            // Lazily dynamic-imported so native-only consumers never load
+            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6).
+            const { WasmQuicClientEventLoop } = await import('./wasm/quic-client-event-loop.js');
+            return new WasmQuicClientEventLoop(
+              {
+                wasmPath: resolveWasmArtifactPath(),
+                ca: tls.ca,
+                cert: tls.cert,
+                key: tls.key,
+                alpn: options?.alpn,
+                rejectUnauthorized: options?.rejectUnauthorized,
+                maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+                maxUdpPayloadSize: options?.maxUdpPayloadSize,
+                initialMaxData: options?.initialMaxData,
+                initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+                initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+                sessionTicket: options?.sessionTicket,
+                allow0RTT: options?.allow0RTT,
+                enableDatagrams: options?.enableDatagrams,
+                keylog: options?.keylog,
+              },
+              (events) => {
+                session._dispatchEvents(events);
+              },
+              (line) => {
+                session.emit('keylog', line);
+              },
+            );
           },
         );
-
-        const eventLoop = new QuicClientEventLoop(nativeClient);
         session._setEventLoop(eventLoop);
         if (shouldAbortConnect()) {
           await eventLoop.close();

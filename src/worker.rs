@@ -3753,11 +3753,31 @@ impl H3ClientHandler {
     /// this until it returns `None`, mirroring the native
     /// `ProtocolHandler::flush_sends` drain loop below).
     pub fn try_send_next(&mut self) -> Option<TxDatagram> {
-        Self::try_send_next_with_pool_parts(
+        let result = Self::try_send_next_with_pool_parts(
             &mut self.conn,
             self.send_buf.as_mut_slice(),
             &mut self.tx_pool,
-        )
+        );
+        if result.is_none() {
+            // Deviation (Phase 3 wasm-plan discovery, docs/WASM_CLIENT_PLAN.md):
+            // mirrors ProtocolHandler::flush_sends's own post-loop
+            // self.refresh_timeout_deadline() call (used by the native
+            // reactor loop) for the direct-call surface — wasm's
+            // h3c_next_send wraps try_send_next directly, and a
+            // direct-call caller loops on it until None exactly like
+            // flush_sends's own loop does. Without this,
+            // `timer_deadline` (what h3c_timeout_ms/process_timers_for_handle
+            // read) stays stale until it happens to naturally elapse on
+            // its own — e.g. right after h3c_close, it is still whatever
+            // it was *before* the close request (commonly the idle
+            // timeout, tens of seconds out), so h3c_on_timeout can never
+            // observe the freshly-shortened post-close draining timer.
+            // Refreshing only on the "nothing left to send" (None) return
+            // matches flush_sends's once-per-flush-cycle timing, rather
+            // than refreshing redundantly on every packet.
+            self.refresh_timeout_deadline();
+        }
+        result
     }
 
     fn try_send_next_with_pool_parts(

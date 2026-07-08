@@ -5,6 +5,7 @@ import type { NativeEvent, NativeBinding, NativeQuicServerBinding } from './even
 import { QuicStream } from './quic-stream.js';
 import type { QuicServerEventLoopLike } from './quic-stream.js';
 import { toSessionError } from './error-map.js';
+import { Http3Error, ERR_HTTP3_RUNTIME_UNSUPPORTED } from './errors.js';
 import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
@@ -348,6 +349,11 @@ export class QuicServer extends EventEmitter {
       clientAuth: opts.clientAuth,
     });
     const addr = runWithRuntimeSelectionSync(this, opts, (runtimeMode) => {
+      if (runtimeMode === 'wasm') {
+        // Unreachable: runWithRuntimeSelectionSync rejects 'wasm' before
+        // ever invoking this callback (N1: no server support in wasm).
+        throw new Http3Error('unreachable: wasm runtime mode reached server construction', ERR_HTTP3_RUNTIME_UNSUPPORTED);
+      }
       const native = new NativeQuicServer(
         {
           key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,

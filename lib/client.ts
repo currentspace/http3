@@ -8,7 +8,8 @@ import { ClientHttp3Stream } from './stream.js';
 import { incomingHeadersToNativeHeaders, nativeHeadersToIncomingHeaders } from './stream.js';
 import type { IncomingHeaders } from './stream.js';
 import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, getBinding } from './event-loop.js';
-import type { NativeEvent } from './event-loop.js';
+import type { ClientEventLoopLike, NativeEvent } from './event-loop.js';
+import { createClientEventLoop, resolveWasmArtifactPath } from './client-event-loop-factory.js';
 import type { ConnectionEndpoint, DnsLookupFn } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import {
@@ -795,44 +796,84 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
       }
 
       await runWithRuntimeSelection(session, options, async (runtimeMode) => {
-        const NativeWorkerClient = getBinding().NativeWorkerClient;
-        const nativeClient = new NativeWorkerClient({
-          ca: normalizeCaOption(options?.ca),
-          rejectUnauthorized: options?.rejectUnauthorized,
+        const eventLoop = await createClientEventLoop<ClientEventLoopLike>(
           runtimeMode,
-          maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
-          maxUdpPayloadSize: options?.maxUdpPayloadSize,
-          initialMaxData: options?.initialMaxData,
-          initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
-          initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
-          sessionTicket: options?.sessionTicket,
-          allow0Rtt: options?.allow0RTT,
-          keylog: Boolean(keylogPath),
-          enableDatagrams: options?.enableDatagrams,
-          qlogDir: options?.qlogDir,
-          qlogLevel: options?.qlogLevel,
-        }, (_err: Error | null, events: NativeEvent[]) => {
-          try {
-            let hasShutdown = false;
-            for (const event of events) {
-              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-                hasShutdown = true;
+          () => {
+            if (runtimeMode === 'wasm') {
+              // Unreachable: createClientEventLoop never invokes this thunk
+              // for 'wasm' — see docs/WASM_CLIENT_PLAN.md §6.6 ("never pass
+              // 'wasm' to the native binding"). Guarded explicitly rather
+              // than asserted away so a future bug here fails loudly.
+              throw new Http3Error('unreachable: native constructor invoked for wasm runtime mode', ERR_HTTP3_INVALID_STATE);
+            }
+            const NativeWorkerClient = getBinding().NativeWorkerClient;
+            const nativeClient = new NativeWorkerClient({
+              ca: normalizeCaOption(options?.ca),
+              rejectUnauthorized: options?.rejectUnauthorized,
+              runtimeMode,
+              maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+              maxUdpPayloadSize: options?.maxUdpPayloadSize,
+              initialMaxData: options?.initialMaxData,
+              initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+              initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+              sessionTicket: options?.sessionTicket,
+              allow0Rtt: options?.allow0RTT,
+              keylog: Boolean(keylogPath),
+              enableDatagrams: options?.enableDatagrams,
+              qlogDir: options?.qlogDir,
+              qlogLevel: options?.qlogLevel,
+            }, (_err: Error | null, events: NativeEvent[]) => {
+              try {
+                let hasShutdown = false;
+                for (const event of events) {
+                  if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                    hasShutdown = true;
+                  }
+                }
+                if (!hasShutdown) {
+                  session._dispatchEvents(events);
+                } else {
+                  session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+                  nativeEventLoop._onShutdownSentinel();
+                }
+              } finally {
+                // Audit #14: release credit on the outstanding-events gauge even
+                // when user event handlers throw during dispatch.
+                nativeClient.ackEventBatch(events.length);
               }
-            }
-            if (!hasShutdown) {
-              session._dispatchEvents(events);
-            } else {
-              session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-              eventLoop._onShutdownSentinel();
-            }
-          } finally {
-            // Audit #14: release credit on the outstanding-events gauge even
-            // when user event handlers throw during dispatch.
-            nativeClient.ackEventBatch(events.length);
-          }
-        });
+            });
 
-        const eventLoop = new ClientEventLoop(nativeClient);
+            const nativeEventLoop = new ClientEventLoop(nativeClient);
+            return nativeEventLoop;
+          },
+          async () => {
+            // Lazily dynamic-imported so native-only consumers never load
+            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6).
+            const { WasmH3ClientEventLoop } = await import('./wasm/h3-client-event-loop.js');
+            return new WasmH3ClientEventLoop(
+              {
+                wasmPath: resolveWasmArtifactPath(),
+                ca: normalizeCaOption(options?.ca),
+                rejectUnauthorized: options?.rejectUnauthorized,
+                maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+                maxUdpPayloadSize: options?.maxUdpPayloadSize,
+                initialMaxData: options?.initialMaxData,
+                initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+                initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+                sessionTicket: options?.sessionTicket,
+                allow0RTT: options?.allow0RTT,
+                enableDatagrams: options?.enableDatagrams,
+                keylog: Boolean(keylogPath),
+              },
+              (events) => {
+                session._dispatchEvents(events);
+              },
+              (line) => {
+                session.emit('keylog', line);
+              },
+            );
+          },
+        );
         session._eventLoop = eventLoop;
         if (shouldAbortConnect()) {
           await eventLoop.close();

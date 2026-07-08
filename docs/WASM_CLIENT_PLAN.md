@@ -1052,6 +1052,61 @@ Node UDP adapter, runtimeMode 'wasm', factory file, ESLint zone).
 `HTTP3_WASM=1`; C5 deterministic timer tests green; lint/typecheck clean
 with the new eslint project entries.
 
+**Status: DONE (2026-07-08, macOS arm64, local).** All B2–B6 deliverables
+landed and green:
+
+- `lib/wasm/wasi-shim.ts` (`makePreview1Imports`), `lib/wasm/core-loader.ts`
+  (`loadHttp3WasmCore` / `loadHttp3WasmCoreFromFile`, `Http3WasmCore` typed
+  facade + memory-view helpers with the grow-detach guard),
+  `lib/wasm/events.ts` (`decodeEventBatch`/`drainKeylog`),
+  `lib/wasm/wasm-options.ts` (shared options/SCID/addr helpers — centralizes
+  the `allow0rtt` vs native `allow0Rtt` naming gotcha),
+  `lib/wasm/datagram-transport.ts` + `lib/wasm/node-udp-adapter.ts`,
+  `lib/wasm/h3-client-event-loop.ts` + `lib/wasm/quic-client-event-loop.ts`
+  (`WasmH3ClientEventLoop` / `WasmQuicClientEventLoop`, structurally —not
+  nominally— implementing `ClientEventLoopLike`/`QuicClientEventLoopLike` so
+  neither file needs to import `lib/event-loop.ts`), `lib/client-event-loop-factory.ts`
+  (`createClientEventLoop` mode-branching + `resolveWasmArtifactPath`), the
+  `lib/wasm/**` ESLint `no-restricted-imports` zone (`eslint.config.mjs`),
+  and `'wasm'` added to `RuntimeMode`/`RuntimeDriver`/`RuntimeReasonCode`
+  plus an early branch in `runWithRuntimeSelection` (`lib/runtime.ts`).
+- C3 (`test/support/wasm-test-helpers.ts` + `test/wasm/h3-loopback.test.ts` +
+  `test/wasm/quic-loopback.test.ts`) and C5
+  (`test/wasm/deterministic-clock.test.ts`) all green: 20/20 new tests,
+  `HTTP3_WASM=1 pnpm run test:wasm` (24 incl. C2) completes in well under
+  1 s; full `pnpm test` (native suite) unaffected (362/362, one pre-existing
+  unrelated skip).
+- **Two genuine Phase 2 ABI gaps found and fixed** (smallest-possible Rust
+  change, per this phase's deviation allowance — full rationale inline as
+  code comments at each site): `H3ClientHandler::try_send_next` /
+  `QuicClientHandler::try_send_next` (`src/worker.rs`, `src/quic_worker.rs`)
+  now call the already-existing (but previously close()-path-unreachable)
+  `refresh_timeout_deadline()` when a flush cycle has nothing left to send —
+  mirroring what `ProtocolHandler::flush_sends` already does for the native
+  reactor loop. Without this, the direct-call surface's cached
+  `timer_deadline` stayed whatever it was *before* a `h3c_close`/`qc_close`
+  request (typically the idle timeout, tens of seconds out) until it
+  happened to naturally elapse, since `process_timers_for_handle` only
+  refreshes it *after* confirming the stale value is already due — a
+  structural gap invisible to native (whose reactor loop refreshes every
+  session unconditionally after every command) but fatal to the direct-call
+  `close()` sequence's "prompt, sentinel-driven" contract. Caught by this
+  phase's own `close()`-timing test going from ~2000 ms (hitting
+  `CLOSE_DRAIN_DEADLINE_MS`) to ~40–90 ms once fixed; confirmed via a
+  standalone timing diagnostic and a full Rust suite re-run
+  (`cargo test --lib`, `test:rust:mock:extended`, `cargo test -p http3-wasm`
+  — all green before and after).
+- Two deliberate, documented test-design lessons worth keeping in mind for
+  Phase 4+: (1) raw QUIC signals "stream fully done" via a distinct
+  `EVENT_FINISHED` (5), not necessarily a `fin: true` flag on the last DATA
+  event — a test helper that gates completion detection on `evt.data` being
+  present will hang on a FIN-only final frame. (2) C5-style clock-jump tests
+  must trigger the post-jump re-check via a command that does **not** send
+  fresh data (e.g. not `ping()`) — sending anything lets quiche observe
+  post-jump activity and "revive" its own idle-time bookkeeping, undoing the
+  simulated fast-forward; `WasmH3ClientEventLoop`/`WasmQuicClientEventLoop`
+  expose a test-only `_forceTimeoutCheck()` for exactly this.
+
 ### Phase 4 — Full test + release integration
 
 C4 (client-side runtimeMode threading + interop suites), C6 (frozen clock),
