@@ -717,7 +717,16 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
   const tls = normalizeQuicClientTlsOptions(options);
   const session = new QuicClientSession();
   setPendingRuntimeInfo(session, options);
-  const NativeQuicClient = getNativeQuicClientConstructor();
+  // Pre-flight validation, synchronously, for every mode EXCEPT an explicit
+  // 'wasm' request: this preserves the existing "throws a clear error when
+  // NativeQuicClient is missing" contract (test/release/raw-quic-prebuild-guard.test.ts)
+  // for 'auto'/'fast'/'portable' callers, while a `runtimeMode: 'wasm'`
+  // caller never resolves the native binding at all, at any point
+  // (docs/WASM_CLIENT_PLAN.md §6.6) — 'auto' still validates native here
+  // because auto-selection only ever falls back between 'fast'/'portable',
+  // never to 'wasm', so native is always needed on that path regardless of
+  // which of the two auto ultimately picks.
+  const NativeQuicClient = options?.runtimeMode === 'wasm' ? null : getNativeQuicClientConstructor();
   const shouldAbortConnect = (): boolean => session._closeRequested;
   installQuicConnectAbortHandler(session, options?.signal);
   const authorityString = typeof authority === 'string'
@@ -760,6 +769,14 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
               // 'wasm' to the native binding"). Guarded explicitly rather
               // than asserted away so a future bug here fails loudly.
               throw new Http3Error('unreachable: native constructor invoked for wasm runtime mode', ERR_HTTP3_INVALID_STATE);
+            }
+            if (!NativeQuicClient) {
+              // Unreachable: `NativeQuicClient` is resolved synchronously
+              // above, at the top of `connectQuic`, whenever
+              // `runtimeMode !== 'wasm'` — exactly the condition guarding
+              // this branch. Guarded explicitly (like the wasm case above)
+              // rather than asserted away so a future bug here fails loudly.
+              throw new Http3Error('unreachable: native constructor unavailable for non-wasm runtime mode', ERR_HTTP3_INVALID_STATE);
             }
             const nativeClient = new NativeQuicClient(
               {

@@ -343,7 +343,6 @@ export class QuicServer extends EventEmitter {
    */
   async listen(port: number, host?: string): Promise<{ address: string; family: string; port: number }> {
     const opts = this._options;
-    const NativeQuicServer = getNativeQuicServerConstructor();
     const clientAuth = resolveServerClientAuthMode({
       ca: opts.ca,
       clientAuth: opts.clientAuth,
@@ -354,6 +353,12 @@ export class QuicServer extends EventEmitter {
         // ever invoking this callback (N1: no server support in wasm).
         throw new Http3Error('unreachable: wasm runtime mode reached server construction', ERR_HTTP3_RUNTIME_UNSUPPORTED);
       }
+      // Resolved lazily, here (after the wasm rejection above), so a
+      // mistaken `runtimeMode: 'wasm'` server request surfaces the
+      // intended ERR_HTTP3_RUNTIME_UNSUPPORTED instead of a generic
+      // "missing NativeQuicServer" error in an environment with no
+      // native binding resolvable at all.
+      const NativeQuicServer = getNativeQuicServerConstructor();
       const native = new NativeQuicServer(
         {
           key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
