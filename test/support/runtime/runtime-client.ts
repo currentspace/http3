@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   await h3Session.close();
 }
 
-void main().catch((err: unknown) => {
+main().catch((err: unknown) => {
   const error = err instanceof Error ? err : new Error(String(err));
   console.error(error.stack ?? error.message);
   process.exit(1);

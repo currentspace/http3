@@ -407,7 +407,7 @@ describe('QUIC protocol verification', () => {
           return;
         }
 
-        void collect(stream6, 3000).then(
+        collect(stream6, 3000).then(
           (data) => settle(`ok:${data.toString()}`),
           (err: unknown) => settle(`error:${(err as Error).message}`),
         );

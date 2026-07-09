@@ -91,15 +91,17 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  process.on('SIGINT', () => {
-    void shutdown();
-  });
-  process.on('SIGTERM', () => {
-    void shutdown();
-  });
+  const onSignal = (): void => {
+    shutdown().catch((err: unknown) => {
+      console.error('error during shutdown:', err);
+      process.exit(1);
+    });
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
 }
 
-void main().catch((err: unknown) => {
+main().catch((err: unknown) => {
   const error = err instanceof Error ? err : new Error(String(err));
   console.error(error.stack ?? error.message);
   process.exit(1);

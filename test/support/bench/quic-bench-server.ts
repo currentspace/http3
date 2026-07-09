@@ -146,7 +146,7 @@ async function main(): Promise<void> {
         chunks.push(chunk);
       });
       stream.on('end', () => {
-        void writeChunkedResponse(stream, chunks).catch((error) => {
+        writeChunkedResponse(stream, chunks).catch((error) => {
           stream.destroy(error);
         });
       });
@@ -201,17 +201,29 @@ async function main(): Promise<void> {
     await server.close();
     await sleep(100);
     emitJson(snapshot('summary'));
-    process.exit(0);
   };
 
-  process.on('SIGTERM', () => {
-    void shutdown();
-  });
-  process.on('SIGINT', () => {
-    void shutdown();
-  });
+  // process.on() never awaits/tracks its listener's return value, so an
+  // unhandled rejection from shutdown() would surface at exactly the
+  // moment we're trying to exit cleanly — catch explicitly and still
+  // force an exit rather than leaving shutdown to hang or crash
+  // unpredictably.
+  const onSignal = (): void => {
+    shutdown().then(
+      () => { process.exit(0); },
+      (err: unknown) => {
+        console.error('error during shutdown:', err);
+        process.exit(1);
+      },
+    );
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
 
   process.stdin.resume();
 }
 
-void main();
+main().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});
