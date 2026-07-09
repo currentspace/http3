@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::arc_buf::ArcBufFactory;
 use crate::connection::{H3Connection, H3ConnectionInit};
 use crate::error::Http3NativeError;
+use crate::proof_core::retry_token_model::{build_token_payload, parse_token_payload};
 use crate::retry_token::{self, DeterministicScidSource};
 
 pub const SCID_LEN: usize = crate::cid::SCID_LEN;
@@ -133,33 +134,16 @@ impl ConnectionMap {
     }
 
     /// Mint a stateless retry token for address validation.
-    /// Token format: HMAC(peer_addr_bytes || timestamp) || peer_addr_bytes || timestamp
+    /// Token format: HMAC(payload) || payload, where payload is
+    /// `build_token_payload`'s encoding of the peer address, mint
+    /// timestamp, and original DCID (see `retry_token_model.rs`).
     pub fn mint_token(&self, peer: &SocketAddr, odcid: &[u8]) -> Vec<u8> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let mut payload = Vec::new();
-        // Encode peer address
-        match peer {
-            SocketAddr::V4(v4) => {
-                payload.push(4);
-                payload.extend_from_slice(&v4.ip().octets());
-                payload.extend_from_slice(&v4.port().to_be_bytes());
-            }
-            SocketAddr::V6(v6) => {
-                payload.push(6);
-                payload.extend_from_slice(&v6.ip().octets());
-                payload.extend_from_slice(&v6.port().to_be_bytes());
-            }
-        }
-        // Encode timestamp
-        payload.extend_from_slice(&now.to_be_bytes());
-        // Encode original DCID
-        payload.push(odcid.len() as u8);
-        payload.extend_from_slice(odcid);
-
+        let payload = build_token_payload(peer, now, odcid);
         let tag = retry_token::hmac_sha256(&self.token_key, &payload);
         let mut token = tag.to_vec();
         token.extend_from_slice(&payload);
@@ -178,75 +162,11 @@ impl ConnectionMap {
             return None;
         }
 
-        // Parse payload
-        let mut pos = 0;
-        if pos >= payload.len() {
-            return None;
-        }
-        let family = payload[pos];
-        pos += 1;
-
-        // Verify peer address matches
-        match (family, peer) {
-            (4, SocketAddr::V4(v4)) => {
-                if payload.len() < pos + 6 {
-                    return None;
-                }
-                if payload[pos..pos + 4] != v4.ip().octets() {
-                    return None;
-                }
-                pos += 4;
-                if payload[pos..pos + 2] != v4.port().to_be_bytes() {
-                    return None;
-                }
-                pos += 2;
-            }
-            (6, SocketAddr::V6(v6)) => {
-                if payload.len() < pos + 18 {
-                    return None;
-                }
-                if payload[pos..pos + 16] != v6.ip().octets() {
-                    return None;
-                }
-                pos += 16;
-                if payload[pos..pos + 2] != v6.port().to_be_bytes() {
-                    return None;
-                }
-                pos += 2;
-            }
-            _ => return None,
-        }
-
-        // Check timestamp
-        if payload.len() < pos + 8 {
-            return None;
-        }
-        let timestamp = u64::from_be_bytes(payload[pos..pos + 8].try_into().ok()?);
-        pos += 8;
-
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // Audit finding #4: use a signed window so a backwards clock jump
-        // doesn't suddenly accept all in-flight tokens (saturating_sub
-        // would underflow to 0 there) and a forwards jump doesn't reject
-        // freshly minted tokens.
-        let skew = (now as i64).saturating_sub(timestamp as i64).abs();
-        if skew > TOKEN_LIFETIME_SECS as i64 {
-            return None; // Token expired or clock skew too large
-        }
-
-        // Extract original DCID
-        if pos >= payload.len() {
-            return None;
-        }
-        let odcid_len = payload[pos] as usize;
-        pos += 1;
-        if payload.len() < pos + odcid_len {
-            return None;
-        }
-        Some(payload[pos..pos + odcid_len].to_vec())
+        parse_token_payload(payload, peer, now, TOKEN_LIFETIME_SECS)
     }
 
     /// Accept a new server-side connection.
@@ -532,22 +452,7 @@ mod tests {
         odcid: &[u8],
         ts: u64,
     ) -> Vec<u8> {
-        let mut payload = Vec::new();
-        match peer {
-            SocketAddr::V4(v4) => {
-                payload.push(4);
-                payload.extend_from_slice(&v4.ip().octets());
-                payload.extend_from_slice(&v4.port().to_be_bytes());
-            }
-            SocketAddr::V6(v6) => {
-                payload.push(6);
-                payload.extend_from_slice(&v6.ip().octets());
-                payload.extend_from_slice(&v6.port().to_be_bytes());
-            }
-        }
-        payload.extend_from_slice(&ts.to_be_bytes());
-        payload.push(odcid.len() as u8);
-        payload.extend_from_slice(odcid);
+        let payload = build_token_payload(peer, ts, odcid);
         let tag = retry_token::hmac_sha256(&map.token_key, &payload);
         let mut token = tag.to_vec();
         token.extend_from_slice(&payload);

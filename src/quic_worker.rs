@@ -42,6 +42,7 @@ use crate::pending_write::{
     PendingWrite, PendingWriteFlushOutcome, PendingWriteSendOutcome,
     flush_pending_write_with_progress,
 };
+use crate::proof_core::retry_token_model::{build_token_payload, parse_token_payload};
 use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{
     self, RawQuicClientCloseCause, SessionKind, WorkerLoopExitCause, WorkerSpawnKind,
@@ -992,22 +993,7 @@ impl QuicConnectionMap {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut payload = Vec::new();
-        match peer {
-            SocketAddr::V4(v4) => {
-                payload.push(4);
-                payload.extend_from_slice(&v4.ip().octets());
-                payload.extend_from_slice(&v4.port().to_be_bytes());
-            }
-            SocketAddr::V6(v6) => {
-                payload.push(6);
-                payload.extend_from_slice(&v6.ip().octets());
-                payload.extend_from_slice(&v6.port().to_be_bytes());
-            }
-        }
-        payload.extend_from_slice(&now.to_be_bytes());
-        payload.push(odcid.len() as u8);
-        payload.extend_from_slice(odcid);
+        let payload = build_token_payload(peer, now, odcid);
         let tag = retry_token::hmac_sha256(&self.token_key, &payload);
         let mut token = tag.to_vec();
         token.extend_from_slice(&payload);
@@ -1022,66 +1008,11 @@ impl QuicConnectionMap {
         if !retry_token::hmac_sha256_verify(&self.token_key, payload, tag_bytes) {
             return None;
         }
-        let mut pos = 0;
-        if pos >= payload.len() {
-            return None;
-        }
-        let family = payload[pos];
-        pos += 1;
-        match (family, peer) {
-            (4, SocketAddr::V4(v4)) => {
-                if payload.len() < pos + 6 {
-                    return None;
-                }
-                if payload[pos..pos + 4] != v4.ip().octets() {
-                    return None;
-                }
-                pos += 4;
-                if payload[pos..pos + 2] != v4.port().to_be_bytes() {
-                    return None;
-                }
-                pos += 2;
-            }
-            (6, SocketAddr::V6(v6)) => {
-                if payload.len() < pos + 18 {
-                    return None;
-                }
-                if payload[pos..pos + 16] != v6.ip().octets() {
-                    return None;
-                }
-                pos += 16;
-                if payload[pos..pos + 2] != v6.port().to_be_bytes() {
-                    return None;
-                }
-                pos += 2;
-            }
-            _ => return None,
-        }
-        if payload.len() < pos + 8 {
-            return None;
-        }
-        let timestamp = u64::from_be_bytes(payload[pos..pos + 8].try_into().ok()?);
-        pos += 8;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // Audit finding #4: signed window guards both directions of clock
-        // skew. saturating_sub by itself would underflow to 0 on a
-        // backwards jump and accept all in-flight tokens.
-        let skew = (now as i64).saturating_sub(timestamp as i64).abs();
-        if skew > TOKEN_LIFETIME_SECS as i64 {
-            return None;
-        }
-        if pos >= payload.len() {
-            return None;
-        }
-        let odcid_len = payload[pos] as usize;
-        pos += 1;
-        if payload.len() < pos + odcid_len {
-            return None;
-        }
-        Some(payload[pos..pos + odcid_len].to_vec())
+        parse_token_payload(payload, peer, now, TOKEN_LIFETIME_SECS)
     }
 
     fn accept_new(

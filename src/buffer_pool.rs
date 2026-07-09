@@ -5,17 +5,13 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::proof_core::buffer_pool_model::{
+    RIGHT_SIZED_CLASSES, class_for_capacity, class_for_request,
+};
 use crate::unsafe_boundary::{InitializedPacketBuf, QuicheRecvBuf};
 
 const DEFAULT_BUF_SIZE: usize = 65535;
 const DEFAULT_POOL_SIZE: usize = 256;
-const RIGHT_SIZED_CLASSES: [usize; 5] = [
-    16 * 1024,
-    64 * 1024,
-    256 * 1024,
-    1024 * 1024,
-    4 * 1024 * 1024,
-];
 const RIGHT_SIZED_MAX_PER_CLASS: usize = 256;
 
 static RIGHT_SIZED_POOL: OnceLock<Mutex<RightSizedPool>> = OnceLock::new();
@@ -32,20 +28,8 @@ impl RightSizedPool {
         }
     }
 
-    fn class_for_capacity(capacity: usize) -> Option<usize> {
-        RIGHT_SIZED_CLASSES
-            .iter()
-            .position(|class_capacity| capacity <= *class_capacity)
-    }
-
-    fn class_for_request(len: usize) -> Option<usize> {
-        RIGHT_SIZED_CLASSES
-            .iter()
-            .position(|class_capacity| len <= *class_capacity)
-    }
-
     fn take(&mut self, len: usize) -> Option<Vec<u8>> {
-        let start = Self::class_for_request(len)?;
+        let start = class_for_request(len)?;
         for bucket in &mut self.buckets[start..] {
             if let Some(mut buf) = bucket.pop() {
                 buf.clear();
@@ -58,7 +42,7 @@ impl RightSizedPool {
     }
 
     fn recycle(&mut self, mut buf: Vec<u8>) -> bool {
-        let Some(index) = Self::class_for_capacity(buf.capacity()) else {
+        let Some(index) = class_for_capacity(buf.capacity()) else {
             return false;
         };
         let bucket = &mut self.buckets[index];
@@ -354,14 +338,23 @@ mod tests {
         let _guard = RIGHT_SIZED_TEST_LOCK.lock().expect("test lock poisoned");
         clear_right_sized_pool_for_test();
 
-        let mut pool = AdaptiveBufferPool::new(1, 16);
-        assert!(pool.checkin(vec![0u8; 16]));
-        assert!(pool.checkin(vec![0u8; 16]));
+        // 16 KiB is the smallest right-sized class (`RIGHT_SIZED_CLASSES[0]`)
+        // — a buffer must actually reach a real class threshold to be
+        // retained by the fallback pool at all, so this test uses that
+        // exact size rather than an arbitrary small one (a capacity below
+        // every class, e.g. 16 bytes, is correctly rejected by
+        // `class_for_capacity`/`recycle` instead of being misfiled into a
+        // class it doesn't meet — see `proof_core::buffer_pool_model`).
+        const RIGHT_SIZED_CAP: usize = 16 * 1024;
 
-        let mut next_pool = AdaptiveBufferPool::new(1, 16);
-        let (buf, reused) = next_pool.checkout(16);
+        let mut pool = AdaptiveBufferPool::new(1, RIGHT_SIZED_CAP);
+        assert!(pool.checkin(Vec::with_capacity(RIGHT_SIZED_CAP)));
+        assert!(pool.checkin(Vec::with_capacity(RIGHT_SIZED_CAP)));
+
+        let mut next_pool = AdaptiveBufferPool::new(1, RIGHT_SIZED_CAP);
+        let (buf, reused) = next_pool.checkout(RIGHT_SIZED_CAP);
         assert!(reused);
-        assert_eq!(buf, vec![0u8; 16]);
+        assert_eq!(buf, vec![0u8; RIGHT_SIZED_CAP]);
 
         clear_right_sized_pool_for_test();
     }
