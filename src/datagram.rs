@@ -27,8 +27,17 @@ pub struct RxDatagram {
 
 /// A transmit request. Ownership transfers to the driver.
 pub struct TxDatagram {
-    data: Vec<u8>,
-    payload_len: usize,
+    // `pub(crate)`, not private: the Linux-only OS drivers (`transport/
+    // io_uring.rs`, `transport/poll.rs`) and the Linux-only GSO grouper in
+    // `transport/mod.rs` construct/reassign these fields directly rather
+    // than through the accessor methods below — code that predates this
+    // struct's move into its own always-compiled module and compiled fine
+    // when everything lived in `transport/mod.rs` together. `pub(crate)`
+    // restores exactly that crate-wide visibility without exposing the
+    // fields outside the crate (the wasm ABI crate only ever uses the
+    // public `payload()`/`payload_len()` methods below).
+    pub(crate) data: Vec<u8>,
+    pub(crate) payload_len: usize,
     pub to: SocketAddr,
     /// Quiche's negotiated max_send_udp_payload_size for this connection
     /// at the moment the packet was emitted, used by the GSO grouper to
