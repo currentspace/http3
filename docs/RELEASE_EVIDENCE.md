@@ -1,157 +1,169 @@
 # Release Evidence
 
-This document is the supporting audit ledger for `0.8.4`. It captures the
-release story behind the Rust safety, fuzzing, and formal-verification work.
+This document is the supporting audit ledger for `0.9.0`. It captures the
+release story behind the WASM client/server runtime.
 
 `CHANGELOG.md` is the public release-note source; this file records the working
 evidence behind that release entry.
 
 ## Scope
 
-- Base tag: `v0.8.3`
-- Release framing: Rust safety hardening and proof coverage release
+- Base tag: `v0.8.6`
+- Release framing: WASM runtime release (client and server)
 - Evidence sources:
-  - proof-friendly models: `src/proof_core/`
-  - Kani harnesses/contracts: `src/proofs/`, `scripts/rust-kani-smoke.sh`
-  - Verus sidecar proofs: `proofs/verus/`, `scripts/rust-verus-smoke.sh`, `scripts/rust-verus-bootstrap.sh`
-  - fuzz/Miri/sanitizer lanes: `fuzz/fuzz_targets/`, `scripts/rust-safety-smoke.sh`, `scripts/rust-sanitizer-asan.sh`
+  - design doc: `docs/WASM_CLIENT_PLAN.md`
+  - usage guide: `docs/WASM_RUNTIME.md`
+  - wasm ABI crate: `crates/http3-wasm/`
+  - TS wasm runtime: `lib/wasm/`, `lib/client-event-loop-factory.ts`, `lib/wasm-event-bridge.ts`
+  - workerd verification: `examples/workerd-client/`
+  - proof-friendly retry-token/pool models: `src/proof_core/`
+  - Kani harnesses/fuzz target for the above: `src/proofs/kani_harnesses.rs`, `fuzz/fuzz_targets/retry_token_roundtrip.rs`
+  - detached-promise cleanup: `lib/run-detached.ts` and its call sites
   - release metadata: `package.json`, `Cargo.toml`, `npm/*/package.json`, `CHANGELOG.md`
 
 ## Release framing
 
-This delta is best described as a native Rust safety release:
+This delta is best described as a WASM runtime release:
 
-- unsafe-adjacent native logic is split into pure models that are easier to
-  fuzz, model-check, and prove
-- Kani and Verus are now first-class local/CI verification lanes
-- the deferred-FIN outbound admission edge case is fixed and covered
+- the client (HTTP/3 and raw QUIC) and, Node-only, the server now run on a
+  `wasm32-wasip1` build of the same quiche + BoringSSL protocol core used
+  natively, reachable via `runtimeMode: 'wasm'`
+- the client build is verified running inside real Cloudflare workerd, not
+  just Node — the only remaining gap is workerd's own lack of an outbound UDP
+  client socket API
+- two real bugs (a pool-bucketing inefficiency, a retry-token panic on
+  hostile input) surfaced by writing Kani proofs for the server-side code
+  this work touched, both fixed and now proof-covered
+- a systemic `void`-detached-promise pattern in `lib/` (no rejection
+  handling, no way for shutdown to wait for background work) was replaced
+  with a drainable task registry
 
 ## Downstream-visible outcomes
 
-### Native safety tooling is part of the release process
+### WASM runtime is a first-class `runtimeMode`
 
 Evidence:
 
-- `package.json`
-- `.github/workflows/rust-safety.yml`
-- `scripts/rust-safety-smoke.sh`
-- `scripts/rust-kani-smoke.sh`
-- `scripts/rust-verus-smoke.sh`
-- `scripts/rust-verus-bootstrap.sh`
+- `lib/client.ts`, `lib/quic-client.ts` (`connect()`/`connectAsync()`/`connectQuic()`/`connectQuicAsync()`)
+- `lib/server.ts`, `lib/quic-server.ts` (`Http3SecureServer.listen()`/`QuicServer.listen()`)
+- `lib/client-event-loop-factory.ts` (native/wasm branch, lazy `import()` so native-only consumers never load wasm code)
+- `crates/http3-wasm/src/{h3,quic,h3_server,quic_server}.rs` (the `h3c_*`/`qc_*`/`hs_*`/`qs_*` extern-C ABI)
 
 Outcome:
 
-- release candidates can run Miri, structure-aware fuzz smoke targets, Kani
-  bounded proofs, and standalone Verus proofs from npm scripts
-- local Verus bootstrap installs the latest binary release and the matching
-  Rust toolchain path is validated by the smoke script
-- Kani smoke handles the current verifier/MSRV gap by proving against a
-  temporary manifest shadow without lowering the real workspace MSRV
+- `runtimeMode: 'wasm'` works end to end for both HTTP/3 and raw QUIC, both
+  client and server, verified across the full native x wasm x client x
+  server x QUIC x HTTP/3 matrix (8 cells), including a wasm client talking
+  to a wasm server over real loopback UDP with zero native code involved
+- servers remain Node-only by design (N1) — workerd has no inbound-listening-
+  socket model, so a "workerd server" isn't a coherent concept
 
-### Proof-friendly Rust models now back production behavior
+### Verified inside real Cloudflare workerd, not just asserted
 
 Evidence:
 
-- `src/proof_core/admission.rs`
-- `src/proof_core/pending_write_model.rs`
-- `src/proof_core/cid_model.rs`
-- `src/proof_core/cmsg_cursor.rs`
-- `src/proof_core/recv_buf_model.rs`
-- `src/proof_core/ring_layout.rs`
-- production call sites in `src/outbound_admission.rs`, `src/pending_write.rs`,
-  `src/cid.rs`, `src/transport/socket.rs`, `src/transport/io_uring.rs`, and
-  `src/unsafe_boundary.rs`
+- `examples/workerd-client/worker.ts`, `wrangler.jsonc`, `README.md`
+- `lib/wasm/index.workerd.ts`, `lib/wasm/wasi-shim.ts` (host-agnostic — no `node:wasi`, no Buffer, no `node:*`)
 
 Outcome:
 
-- the proof modules are small, deterministic, allocation-free models of the
-  arithmetic and boundary conditions that matter for native safety
-- production code now uses those models instead of duplicating ad hoc logic
-- Kani/Verus proofs and unit tests exercise the same semantics production uses
+- the compiled `http3_client.wasm` artifact instantiates under real
+  `wrangler dev`/`workerd`, its full ABI export surface resolves, and
+  `WasmH3ClientEventLoop.connect()` generates a real, valid 1200-byte QUIC
+  Initial packet inside workerd's own V8 isolate
+- `wrangler deploy --dry-run` reproduces cleanly (bundle size confirmed)
+- real network handshakes are blocked purely by workerd's own missing
+  outbound-UDP API (cloudflare/workerd#4463), not by anything in this package
 
-### Deferred-FIN outbound accounting is fixed
+### Server-side retry-token/connection-routing logic is wasm-compatible and proof-covered
 
 Evidence:
 
-- `src/proof_core/admission.rs`
-- `src/pending_write.rs`
-- `src/outbound_admission.rs`
-- `src/proofs/kani_harnesses.rs`
-- `proofs/verus/admission.rs`
-- `proofs/verus/pending_write.rs`
+- `src/retry_token.rs` (HMAC-SHA256 via `boring`, replacing `ring` for the server-side token path)
+- `src/proof_core/retry_token_model.rs` (payload build/parse, extracted from
+  duplicated code in `src/connection_map.rs` and `src/quic_worker.rs`)
+- `src/proofs/kani_harnesses.rs` (round-trip correctness, no-panic-on-
+  arbitrary-bytes, clock-skew regression — all proven, not just example-tested)
+- `fuzz/fuzz_targets/retry_token_roundtrip.rs` (real HMAC-integrated
+  `ConnectionMap` path, coverage-guided mutation, 1.69M runs / 46s locally
+  with no crashes)
 
 Outcome:
 
-- when a payload write succeeds but the associated FIN is deferred, admission
-  accounting keeps one unit outstanding until the FIN is accepted
-- partial write release accounting remains bounded by the originally admitted
-  units
+- the retry-token clock-skew check's `i64`-cast-and-`.abs()` panic on
+  hostile input (found by writing the no-panic Kani proof) is fixed with
+  `u64::abs_diff`, proven correct over the full `u64` domain
+- the two server implementations' previously-duplicated token parsing logic
+  now has one source of truth
+
+### `buffer_pool.rs`'s checkin bucketing bug is fixed and proof-covered
+
+Evidence:
+
+- `src/proof_core/buffer_pool_model.rs`, `src/proof_core/chunk_pool_model.rs`
+- `src/proofs/kani_harnesses.rs` (`*_returns_largest_class_leq_cap`, `*_accepts_every_*_allocation`)
+
+Outcome:
+
+- `class_for_capacity` now returns the largest class `<=` capacity (matching
+  `chunk_pool.rs`'s existing fix for the identical bug shape) instead of
+  reusing the checkout-side "smallest class `>=`" classification, which
+  filed a buffer into a bucket whose declared capacity it didn't meet
+
+### No promise in `lib/` is fire-and-forget without a rejection handler or a shutdown drain
+
+Evidence:
+
+- `lib/run-detached.ts` (`runDetached`, `DetachedTasks`)
+- `lib/client.ts`, `lib/quic-client.ts`, `lib/server.ts` (own a `DetachedTasks` registry, drain it in `close()`/`destroy()`)
+- `lib/eventsource.ts` (`_startConnection()` gained the try/catch its sibling `_finalizeClose()` already had)
+
+Outcome:
+
+- every `void asyncCall()` site in `lib/` (constructors, event-handler
+  callbacks, timers) now either routes its rejection through the object's
+  own error-reporting path, or is tracked in a registry the object's own
+  `close()`/`destroy()` awaits before completing
+- `pnpm run test:core` previously hung 40+ minutes after every test had
+  already passed, with no visible cause until the process was killed; after
+  this fix it exits in under 10 seconds — the hang was exactly this class of
+  bug (a test's own detached background work outliving the test)
 
 ## Caveats To Disclose
 
-- The current released `cargo-kani` verifier bundles a Rust compiler older than
-  the workspace MSRV, so the Kani script uses a temporary manifest shadow for
-  proof execution while keeping the real crate at Rust `1.95`.
-- Verus proofs are sidecar specifications of the model behavior, not full
-  end-to-end proofs of quiche, napi-rs, or the operating-system syscalls.
-- The local macOS browser E2E gate requires cached sudo credentials so the test
-  harness can trust the temporary localhost certificate in the System keychain.
-- npm publish validation still requires the final prebuild artifact set produced
-  by the release workflow before the actual `0.8.4` tag/publish step.
+- Real outbound UDP from Cloudflare Workers/workerd does not exist yet
+  (cloudflare/workerd#4463); the workerd verification in this release proves
+  module instantiation, ABI resolution, and in-memory protocol-core
+  correctness, not a live network handshake from a deployed Worker.
+- The wasm ABI crate is client-and-server-capable, but only the client half
+  is reachable from workerd; the server half is Node-only by design.
+- `crates/http3-wasm/src/abi.rs`'s pointer/length trust boundary
+  (`bytes_in`/`write_out_ptr_len`) is enforced by the TypeScript caller, not
+  provable in Rust alone — a caller bug there is a real OOB risk in wasm
+  linear memory, same as any FFI boundary.
+- No `NPM_TOKEN` repository secret is configured; the `latest` release's
+  canary-dist-tag mirror step is skipped (logged, non-fatal) rather than
+  failing outright. The core publish itself uses npm Trusted Publisher
+  (OIDC, `--provenance`), unaffected by this.
 
 ## Release-Blocking Checks
 
 - Full local release gate: `npm run release:local-gate`
 - Dry-run publish validation: `npm run release:latest -- --validate-only --dist-tag latest`
-- Rust safety smoke: `npm run test:rust:safety:smoke`
-- Formal deep lane: `npm run test:rust:formal:deep`
 
 Validated in this release pass:
 
-- `npm run verify:docker`
-- `cargo clippy --lib`
-- `cargo clippy --tests --features bench-internals --no-default-features`
-- `npm run test:rust:full`
-- `npm run test:rust:loom`
-- `npm run test:rust:diagnostics`
-- `npm run test:rust:safety:smoke`
-- `npm run test:rust:formal:deep`
-- `npm run test:rust:sanitizer:asan`
-- `npm run test:e2e`
-- `npm run test:ffi:stress`
-- `npm run test:perf`
-- `npm run test:longhaul`
-- `npm run test:rust:stress:all`
-- `npm run test:docker:runtime`
-- `HTTP3_RUNTIME_SKIP_BUILD=1 npm run test:docker:runtime:privileged`
-- `npm run docker:interop:build`
-- `npm run test:interop:cross-platform`
-- `npm run test:interop:cross-platform:io-uring`
-- `HTTP3_CONCURRENCY_MAX_MS=12000 pnpm run perf:concurrency-gate`
-- `HTTP3_LOAD_SMOKE_TOTAL=150 HTTP3_LOAD_SMOKE_CONCURRENCY=25 HTTP3_LOAD_SMOKE_MAX_MS=10000 pnpm run perf:load-smoke-gate`
-- `pnpm run smoke:install`
-- `HTTP3_VERUS_REQUIRED=1 bash scripts/rust-verus-smoke.sh`
-- `cargo fmt --check`
-- `rustfmt --check proofs/verus/*.rs`
-- `git diff --check`
-
-Blocked locally:
-
-- `npm run test:browser:e2e` on macOS stopped at the expected keychain
-  preflight because cached sudo credentials were unavailable:
-  `Run sudo -v before test:browser:e2e`. The same browser E2E lane passed in
-  `npm run verify:docker`, where Linux Firefox performs the HTTP/3 validation.
-- `HTTP3_BROWSER_SECURITY_SUDO=0 npm run test:browser:e2e` also could not
-  complete in this non-interactive shell because macOS `security
-  add-trusted-cert` timed out while adding the temporary user-keychain trust
-  entry.
-- `node scripts/verify-prebuilds.mjs` correctly reports that the release
-  workspace still needs the Linux prebuild artifacts from CI:
-  `http3.linux-x64-gnu.node` and `http3.linux-arm64-gnu.node`.
-- The first CI dry-run release workflow built and validated all prebuilds, then
-  failed in the publish dry-run because the runner exposed npm auth through
-  `NODE_AUTH_TOKEN` while the canary dist-tag mirror guard only accepted
-  `NPM_TOKEN`. The publisher now accepts either environment variable.
+- `cargo test --lib --no-default-features` (223/223)
+- `pnpm run test:rust:mock:extended` (11/11 integration test binaries)
+- `cargo clippy --lib --no-default-features --features os-runtime,node-api`
+- `cargo check --no-default-features --features wasm-abi`
+- Kani: 19 always-run harnesses + 3 deep harnesses (`HTTP3_KANI_DEEP=1`), all passing
+- `cargo +nightly fuzz run retry_token_roundtrip -- -max_total_time=45` (1.69M runs, no crashes)
+- `npx napi build --platform --release`
+- `pnpm test` (core + runtime + interop + release + ffi, 349 tests)
+- `pnpm run lint`, `pnpm run typecheck`
+- Full GitHub Actions CI on PR #9: 38/38 checks green, including every
+  `verify (macos-15-intel, kqueue)` job (previously intermittently flaky)
 
 ## 0.8.4 Changelog Entry
 

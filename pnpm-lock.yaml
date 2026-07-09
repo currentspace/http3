@@ -70,14 +70,14 @@ importers:
         version: 4.107.1(@cloudflare/workers-types@5.20260707.1)
     optionalDependencies:
       '@currentspace/http3-darwin-arm64':
-        specifier: 0.8.6
-        version: 0.8.6
+        specifier: 0.9.0
+        version: 0.9.0
       '@currentspace/http3-linux-arm64-gnu':
-        specifier: 0.8.6
-        version: 0.8.6
+        specifier: 0.9.0
+        version: 0.9.0
       '@currentspace/http3-linux-x64-gnu':
-        specifier: 0.8.6
-        version: 0.8.6
+        specifier: 0.9.0
+        version: 0.9.0
 
   examples/express-adapter:
     dependencies:
@@ -186,26 +186,6 @@ packages:
   '@cspotcode/source-map-support@0.8.1':
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
     engines: {node: '>=12'}
-
-  '@currentspace/http3-darwin-arm64@0.8.6':
-    resolution: {integrity: sha512-0oBjg9hU3bh9jAumkhe4FcsYpc3D/egS0Eby0vzmveULQxIHG3NSlk0wmdwtsfBa+VwbwSUYPMdqVuAUrL5CNg==}
-    engines: {node: '>=24.0.0'}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@currentspace/http3-linux-arm64-gnu@0.8.6':
-    resolution: {integrity: sha512-Mx9jLbEUw05MBiADMDaEEOJw2BF6/Vpc9/8jXdXUhmnKuVWygi15WDLtZczXxrOGiHRSQjR/ZTiUZZxKOxXPCA==}
-    engines: {node: '>=24.0.0'}
-    cpu: [arm64]
-    os: [linux]
-    libc: [glibc]
-
-  '@currentspace/http3-linux-x64-gnu@0.8.6':
-    resolution: {integrity: sha512-zSY538IE3FvDutZ7KSKpUR1eVQ1TIAOVhzn1A4tzThQjuuuKRmb+P9GK/F9640++VuOYLyjgKUdte2RftAU4Og==}
-    engines: {node: '>=24.0.0'}
-    cpu: [x64]
-    os: [linux]
-    libc: [glibc]
 
   '@emnapi/core@1.9.1':
     resolution: {integrity: sha512-mukuNALVsoix/w1BJwFzwXBN/dHeejQtuVzcDsfOEsdpCumXb/E9j8w11h5S54tT1xhifGfbbSm/ICrObRb3KA==}
@@ -2133,15 +2113,6 @@ snapshots:
   '@cspotcode/source-map-support@0.8.1':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.9
-
-  '@currentspace/http3-darwin-arm64@0.8.6':
-    optional: true
-
-  '@currentspace/http3-linux-arm64-gnu@0.8.6':
-    optional: true
-
-  '@currentspace/http3-linux-x64-gnu@0.8.6':
-    optional: true
 
   '@emnapi/core@1.9.1':
     dependencies:

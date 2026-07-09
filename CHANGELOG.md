@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.9.0
+
+### WASM runtime (client and server)
+
+- Added `runtimeMode: 'wasm'` for HTTP/3 and raw QUIC clients
+  (`connect()`/`connectAsync()`/`connectQuic()`/`connectQuicAsync()`),
+  backed by a `wasm32-wasip1` build of the same quiche + BoringSSL
+  protocol core used natively (`crates/http3-wasm`'s `h3c_*`/`qc_*`
+  extern-C ABI) — no native `.node` addon required in the process.
+- Added Node-only server-side `runtimeMode: 'wasm'` support
+  (`Http3SecureServer.listen()`/`QuicServer.listen()`), via the same
+  crate's `hs_*`/`qs_*` ABI. `ConnectionMap`/`QuicConnectionMap`'s
+  retry-token HMAC moved from `ring` to `boring::hash::hmac_sha256` so
+  the server-side connection-routing/token logic compiles for wasm too.
+- Verified the full native x wasm x client x server x QUIC x HTTP/3
+  matrix (8 cells), including a wasm client talking to a wasm server
+  over real loopback UDP with no native code involved at all.
+- Verified the client build running inside real Cloudflare workerd
+  (`wrangler dev` and `wrangler deploy --dry-run`) — see
+  `examples/workerd-client`. The only remaining blocker to a real
+  workerd deployment is outside this package: Workers has no outbound
+  UDP client socket API yet ([cloudflare/workerd#4463](https://github.com/cloudflare/workerd/issues/4463)).
+- See [`docs/WASM_RUNTIME.md`](./docs/WASM_RUNTIME.md) for the usage
+  guide and current Node/workerd support matrix, and
+  [`docs/WASM_CLIENT_PLAN.md`](./docs/WASM_CLIENT_PLAN.md) for the
+  design and decision log.
+
+### Correctness
+
+- Fixed `buffer_pool.rs`'s right-sized pool checkin bucketing: it
+  reused the checkout-side "smallest class `>=` request" classification
+  instead of "largest class `<=` capacity," so a buffer whose capacity
+  fell strictly between two class thresholds was filed into a bucket
+  whose declared capacity it didn't meet — the same bug class as an
+  earlier `chunk_pool.rs` fix, now caught by a Kani proof of the
+  general property rather than by inspection.
+- Fixed a retry-token validation panic: the clock-skew check cast a
+  parsed (attacker/corruption-controlled) timestamp to `i64` and took
+  `.saturating_sub(..).abs()`, which can panic on `i64::MIN` for a
+  hostile byte pattern. Replaced with `u64::abs_diff`, proven correct
+  over the entire `u64` domain.
+- Fixed `Http3EventSource`'s reconnect path (`_startConnection()`)
+  having no internal error handling, unlike its sibling
+  `_finalizeClose()` — a `_closeSession()` rejection or a synchronous
+  `connect()` throw would have escaped as an unhandled promise
+  rejection instead of triggering the class's own reconnect/error flow.
+- Replaced `void asyncCall()` throughout `lib/` (constructors,
+  event-handler callbacks, timers kicking off background work) with a
+  drainable task registry (`lib/run-detached.ts`): every detached
+  operation's rejection is now observed, and `Http3ClientSession`,
+  `QuicClientSession`, and `Http3SecureServer` await all of theirs
+  before their own `close()`/`destroy()` completes, instead of leaving
+  background work to finish unobserved after shutdown.
+
+### Formal verification and fuzzing
+
+- Added Kani proofs for `chunk_pool`/`buffer_pool` size-class
+  arithmetic (largest-class-`<=`-capacity, and that every checkout
+  allocation is accepted back on checkin) and for retry-token
+  mint/parse (round-trip correctness, no panic on arbitrary bytes, and
+  the clock-skew regression above, all proven rather than just
+  example-tested).
+- Extracted the retry-token payload build/parse logic (previously
+  duplicated verbatim between `connection_map.rs` and
+  `quic_worker.rs`) into a single shared `proof_core` model.
+- Added a `retry_token_roundtrip` fuzz target exercising the real
+  HMAC-integrated `ConnectionMap` mint/validate path under libFuzzer's
+  coverage-guided mutation.
+
+### CI and infrastructure
+
+- Fixed a Linux-only Rust compile failure (`TxDatagram`'s `data`/
+  `payload_len` fields needed `pub(crate)` visibility after their
+  extraction into an always-compiled module).
+- Fixed the `npm-audit-and-sbom` CI job choking on optional
+  dependencies that are fully resolved in the lockfile but skipped via
+  `--no-optional` (`pnpm licenses list` needs them actually installed
+  to inspect).
+- Fixed the Docker build contexts (`Dockerfile`, `Dockerfile.test`,
+  `Dockerfile.runtime-test`) missing `crates/` after
+  `crates/http3-wasm` became a Cargo workspace member.
+- Fixed a flaky high-connection-count interop test
+  (`quic-high-conn.test.ts`): it connected clients strictly
+  sequentially, so under CI thread-scheduling contention a handful of
+  slow handshakes serialized into a very long stall instead of racing
+  concurrently; connections are now established concurrently, matching
+  the test's own stream-handling phase.
+
 ## 0.8.6
 
 ### Dependencies and toolchain

@@ -9,6 +9,9 @@ HTTP/3, HTTP/2, and raw QUIC server/client package for Node.js 24+, powered by R
 - Raw QUIC: bidirectional streams, datagrams, session resumption, custom ALPN
 - Explicit runtime selection: `fast`, `portable`, or `auto`
 - Platform-native I/O: kqueue (macOS), io_uring (Linux fast path), `poll` (Linux portable path)
+- WASM runtime (`runtimeMode: 'wasm'`) for HTTP/3 and raw QUIC clients, plus a
+  Node-only WASM server — no native `.node` addon required, and confirmed
+  running inside real Cloudflare workerd
 - fetch/SSE/EventSource adapters
 - Express compatibility via `@currentspace/http3/express`
 
@@ -96,6 +99,29 @@ npm run bench:quic -- --profile smoke
 npm run bench:h3 -- --profile smoke
 ```
 
+## WASM runtime
+
+`runtimeMode: 'wasm'` runs the client (HTTP/3 or raw QUIC) entirely on a
+`wasm32-wasip1` build of the same quiche + BoringSSL protocol core, with no
+native `.node` addon in the process:
+
+```ts
+import { connectAsync } from '@currentspace/http3';
+
+const session = await connectAsync('example.com:443', { runtimeMode: 'wasm' });
+```
+
+The server side (`Http3SecureServer.listen()` / `QuicServer.listen()`) also
+supports `runtimeMode: 'wasm'`, Node-only. The client build has additionally
+been verified running inside real Cloudflare workerd — see
+[`examples/workerd-client`](./examples/workerd-client/README.md); the only
+remaining blocker to a real workerd deployment is that Workers has no outbound
+UDP client socket API yet ([cloudflare/workerd#4463](https://github.com/cloudflare/workerd/issues/4463)).
+
+See [`docs/WASM_RUNTIME.md`](./docs/WASM_RUNTIME.md) for the full usage guide
+and current Node/workerd support matrix, and
+[`docs/WASM_CLIENT_PLAN.md`](./docs/WASM_CLIENT_PLAN.md) for the design.
+
 ## Raw QUIC mTLS
 
 - Raw QUIC clients can use mTLS through the stable public `cert` and `key` options on `connectQuic()` and `connectQuicAsync()`.
@@ -103,8 +129,8 @@ npm run bench:h3 -- --profile smoke
 - Raw QUIC server sessions expose the verified peer certificate so applications can inspect or pin exact client certificates with Node's `X509Certificate` API.
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes and
-[`docs/RELEASE_EVIDENCE.md`](./docs/RELEASE_EVIDENCE.md) for the 0.8.4 audit
-ledger and caveats.
+[`docs/RELEASE_EVIDENCE.md`](./docs/RELEASE_EVIDENCE.md) for the current
+release's audit ledger and caveats.
 
 ## Quick QUIC server
 
@@ -158,6 +184,7 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 
 - [Quickstart](./docs/QUICKSTART.md)
 - [Runtime modes and deployment matrix](./docs/RUNTIME_MODES.md)
+- [WASM runtime guide](./docs/WASM_RUNTIME.md)
 - [Support matrix](./docs/SUPPORT_MATRIX.md)
 - [Configuration options reference](./docs/CONFIGURATION_OPTIONS.md)
 - [Error handling guide](./docs/ERROR_HANDLING.md)
