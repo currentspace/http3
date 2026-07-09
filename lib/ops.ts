@@ -1,5 +1,6 @@
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { runDetached } from './run-detached.js';
 import type { Http3SecureServer } from './server.js';
 
 /** Point-in-time health check data returned by {@link HealthController.snapshot}. */
@@ -196,7 +197,9 @@ export function installGracefulShutdown(
   };
 
   const onSignal = (signal: NodeJS.Signals): void => {
-    void shutdown(signal);
+    // shutdown() already has its own try/catch/finally (reports failures
+    // via options.onError), so this onError is a defensive backstop.
+    runDetached(shutdown(signal), (err) => { options?.onError?.(err); });
   };
 
   for (const signal of signals) {

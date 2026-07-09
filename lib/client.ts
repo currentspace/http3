@@ -23,6 +23,7 @@ import {
 import { toSessionError, toStreamError } from './error-map.js';
 import { toNativeEvents, toNativeKeylogLine } from './wasm-event-bridge.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
+import { DetachedTasks } from './run-detached.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
 
@@ -189,6 +190,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   private _connectAbortCleanup: (() => void) | null = null;
   private _connectTimer: NodeJS.Timeout | null = null;
   private readonly _requestDrainResolvers = new Set<() => void>();
+  private readonly _detachedTasks = new DetachedTasks();
 
   constructor(authority: string, options?: Pick<ConnectOptions, 'allow0RTT' | 'allowUnsafe0RTTMethods' | 'onEarlyData'>) {
     super();
@@ -200,16 +202,19 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
-    // ready() is optional for event-driven callers; swallow unobserved
-    // rejections via an explicit try/await (project rule: no `.catch`).
-    const readyPromise = this._readyPromise;
-    void (async (): Promise<void> => {
-      try {
-        await readyPromise;
-      } catch {
-        /* unobserved — caller chose event-driven flow */
-      }
-    })();
+    // ready() is optional for event-driven callers; tracking it here
+    // observes (and, since readyPromise itself is fully driven by
+    // _resolveReady/_rejectReady below, can never itself surface) any
+    // rejection so an event-driven caller who never calls ready() doesn't
+    // leave an unhandled promise rejection sitting around — and close()/
+    // destroy() below wait for it to settle like every other detached
+    // task this session kicks off.
+    this._detachedTasks.run(this._readyPromise, () => { /* unobserved — caller chose event-driven flow */ });
+  }
+
+  /** @internal */
+  _registerDetachedTask(operation: Promise<unknown>, onError: (error: Error) => void): void {
+    this._detachedTasks.run(operation, onError);
   }
 
   /** The authority (host:port) this session is connected to. */
@@ -236,6 +241,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._markReadyError(new Http3Error('session closed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
     await super.close(code, reason);
+    await this._detachedTasks.drain();
   }
 
   override async destroy(err?: Error): Promise<void> {
@@ -245,6 +251,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._markReadyError(err ?? new Http3Error('session destroyed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
     await super.destroy(err);
+    await this._detachedTasks.drain();
   }
 
   /** @internal */
@@ -278,13 +285,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (loop_) {
-      void (async (): Promise<void> => {
-        try {
-          await loop_.close();
-        } catch {
-          /* best-effort abort cleanup */
-        }
-      })();
+      this._detachedTasks.run(loop_.close(), () => { /* best-effort abort cleanup */ });
     }
     this._emitSessionError(err);
   }
@@ -470,13 +471,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (!loop_) return;
-    void (async (): Promise<void> => {
-      try {
-        await loop_.close();
-      } catch {
-        /* native close cleanup is best-effort after SESSION_CLOSE */
-      }
-    })();
+    this._detachedTasks.run(loop_.close(), () => { /* native close cleanup is best-effort after SESSION_CLOSE */ });
   }
 
   private _onHeaders(event: NativeEvent): void {
@@ -784,7 +779,7 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
     }, connectTimeoutMs));
   }
 
-  void (async (): Promise<void> => {
+  session._registerDetachedTask((async (): Promise<void> => {
     try {
       const resolved = await resolveConnectionEndpoint(authority, {
         defaultScheme: 'https',
@@ -912,7 +907,12 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
       session._markReadyError(error);
       session._emitSessionError(error);
     }
-  })();
+  })(), (err: Error) => {
+    // Unreachable: the catch above already reports every failure via
+    // session._markReadyError/_emitSessionError without rethrowing. Pure
+    // defensive backstop.
+    console.error('unhandled error establishing HTTP/3 connection:', err);
+  });
 
   return session;
 }

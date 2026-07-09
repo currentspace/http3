@@ -18,6 +18,7 @@ import {
 import type { IncomingHeaders, StreamFlags } from './stream.js';
 import { ServerHttp2StreamAdapter, normalizeIncomingHeaders } from './stream-h2-adapter.js';
 import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, getBinding } from './event-loop.js';
+import { DetachedTasks } from './run-detached.js';
 import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from './event-loop.js';
 import { createServerEventLoop, resolveWasmArtifactPath } from './client-event-loop-factory.js';
 import { toNativeEvents } from './wasm-event-bridge.js';
@@ -169,6 +170,7 @@ export class Http3SecureServer extends EventEmitter {
   private readonly _h2Sessions = new Map<Http2Session, Http2ServerSessionAdapter>();
   private readonly _h2SessionStreams = new Map<Http2Session, Set<ServerHttp3Stream>>();
   private readonly _streams = new Map<string, ServerHttp3Stream>();
+  private readonly _detachedTasks = new DetachedTasks();
 
   constructor(options: ServerOptions, onStream?: StreamListener) {
     super();
@@ -218,7 +220,12 @@ export class Http3SecureServer extends EventEmitter {
     // "connectQuic() unconditionally resolved the native binding".
     if (normalizeRuntimeMode(this._options.runtimeMode) === 'wasm') {
       this._starting = true;
-      void this._listenWasm(port, listenHost, { key, cert, ca, serverId });
+      // _listenWasm() already has its own try/catch routing failures
+      // through _abortStartup (which itself never rejects — see its own
+      // try/catch/finally), so this onError is a defensive backstop.
+      this._detachedTasks.run(this._listenWasm(port, listenHost, { key, cert, ca, serverId }), (err) => {
+        console.error('unhandled error starting wasm listener:', err);
+      });
       return this;
     }
 
@@ -310,14 +317,19 @@ export class Http3SecureServer extends EventEmitter {
     try {
       h2Server = this._createH2Server();
     } catch (err: unknown) {
-      void this._abortStartup(err);
+      // _abortStartup() already has its own try/catch/finally — see below.
+      this._detachedTasks.run(this._abortStartup(err), (abortErr) => {
+        console.error('unhandled error aborting server startup:', abortErr);
+      });
       return this;
     }
     this._h2Server = h2Server;
     this._attachH2ServerListeners(h2Server);
 
     const onH2BindError = (err: Error): void => {
-      void this._abortStartup(err);
+      this._detachedTasks.run(this._abortStartup(err), (abortErr) => {
+        console.error('unhandled error aborting server startup:', abortErr);
+      });
     };
     h2Server.once('error', onH2BindError);
     h2Server.listen(quicStart.addrInfo.port, listenHost, () => {
@@ -445,7 +457,9 @@ export class Http3SecureServer extends EventEmitter {
     this._attachH2ServerListeners(h2Server);
 
     const onH2BindError = (err: Error): void => {
-      void this._abortStartup(err);
+      this._detachedTasks.run(this._abortStartup(err), (abortErr) => {
+        console.error('unhandled error aborting server startup:', abortErr);
+      });
     };
     h2Server.once('error', onH2BindError);
     h2Server.listen(addrInfo.port, listenHost, () => {
@@ -475,6 +489,7 @@ export class Http3SecureServer extends EventEmitter {
       this._streams.clear();
       this._address = null;
       this._keylogPath = null;
+      await this._detachedTasks.drain();
       this.emit('close');
       cb?.();
     } catch (err: unknown) {

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { connect } from './client.js';
 import type { ConnectOptions } from './client.js';
 import type { Http3ClientSession } from './client.js';
+import { runDetached } from './run-detached.js';
 import type { ClientHttp3Stream, IncomingHeaders } from './stream.js';
 
 /** Options for creating an {@link Http3EventSource}. Extends {@link ConnectOptions}. */
@@ -73,7 +74,6 @@ export class Http3EventSource extends EventEmitter {
   private readonly _maxRetryMs: number;
   private _reconnectTimer: NodeJS.Timeout | null = null;
   private _closed = false;
-  private _closePromise: Promise<void> | null = null;
   private _sessionClosePromise: Promise<void> | null = null;
 
   constructor(url: string, options?: EventSourceInit) {
@@ -83,7 +83,7 @@ export class Http3EventSource extends EventEmitter {
     this._options = options ?? {};
     this._retryMs = options?.initialRetryMs ?? 1000;
     this._maxRetryMs = options?.maxRetryMs ?? 30000;
-    void this._startConnection();
+    runDetached(this._startConnection(), (err) => { this._emitError(err); });
   }
 
   addEventListener(event: string, listener: (...args: unknown[]) => void): void {
@@ -103,37 +103,56 @@ export class Http3EventSource extends EventEmitter {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
-    this._closePromise = this._finalizeClose();
-    void this._closePromise;
+    // _finalizeClose() already has its own try/catch/finally (reports
+    // failures via _emitError, always emits 'close'), so runDetached's
+    // onError here is a pure defensive backstop, not the primary handling
+    // path. Completion is externally observable via the 'close' event,
+    // matching the W3C EventSource interface's synchronous `close(): void`
+    // (no Promise-typed return to keep compatible with).
+    runDetached(this._finalizeClose(), (err) => { this._emitError(err); });
   }
 
+  // Callers invoke this via `void` from the constructor and from a
+  // setTimeout reconnect callback — neither is in a position to await it,
+  // so unlike those call sites this method must never let a rejection
+  // escape (a bare `_closeSession()` rejection, or `connect()` throwing
+  // synchronously, would otherwise become a genuine unhandled promise
+  // rejection). Routes any failure through the same _emitError +
+  // _scheduleReconnect path the post-connect 'error' listener below uses,
+  // so a failure before vs. after the session exists is handled
+  // identically.
   private async _startConnection(): Promise<void> {
-    if (this._closed) return;
-    this.readyState = CONNECTING;
-    await this._closeSession();
-    // _closeSession is async; close() may have flipped _closed during the
-    // await. The cast tells TS to re-read, since narrowing from line above
-    // is still in effect for it.
-    if (this._closed as boolean) return;
+    try {
+      if (this._closed) return;
+      this.readyState = CONNECTING;
+      await this._closeSession();
+      // _closeSession is async; close() may have flipped _closed during the
+      // await. The cast tells TS to re-read, since narrowing from line above
+      // is still in effect for it.
+      if (this._closed as boolean) return;
 
-    const authority = `${this._url.hostname}:${this._url.port || '443'}`;
-    this._session = connect(authority, {
-      ...this._options,
-      servername: this._options.servername ?? this._url.hostname,
-    });
+      const authority = `${this._url.hostname}:${this._url.port || '443'}`;
+      this._session = connect(authority, {
+        ...this._options,
+        servername: this._options.servername ?? this._url.hostname,
+      });
 
-    this._session.once('connect', () => {
-      this._openStream();
-    });
-    this._session.on('error', (err: Error) => {
-      this._emitError(err);
-      this._scheduleReconnect();
-    });
-    this._session.on('close', () => {
-      if (!this._closed) {
+      this._session.once('connect', () => {
+        this._openStream();
+      });
+      this._session.on('error', (err: Error) => {
+        this._emitError(err);
         this._scheduleReconnect();
-      }
-    });
+      });
+      this._session.on('close', () => {
+        if (!this._closed) {
+          this._scheduleReconnect();
+        }
+      });
+    } catch (error: unknown) {
+      this._emitError(error instanceof Error ? error : new Error(String(error)));
+      this._scheduleReconnect();
+    }
   }
 
   private _openStream(): void {
@@ -273,7 +292,7 @@ export class Http3EventSource extends EventEmitter {
     this.readyState = CONNECTING;
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
-      void this._startConnection();
+      runDetached(this._startConnection(), (err) => { this._emitError(err); });
     }, this._retryMs);
     this._reconnectTimer.unref();
   }

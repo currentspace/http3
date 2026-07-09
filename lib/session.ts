@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { Http2Session } from 'node:http2';
 import type { NativeEvent, ServerEventLoopLike, ClientEventLoopLike } from './event-loop.js';
+import { runDetached } from './run-detached.js';
 import type { RuntimeInfo } from './runtime.js';
 
 /** QUIC transport tuning parameters shared by server and client. */
@@ -146,18 +147,21 @@ export class Http3Session extends EventEmitter {
     this._metricsTimer = setInterval(() => {
       if (this._metricsPolling) return;
       this._metricsPolling = true;
-      void (async () => {
-        try {
-          const snapshot = await pollMetrics();
-          if (!snapshot) return;
-          this._lastMetrics = snapshot;
-          this.emit('metrics', snapshot);
-        } catch {
-          // Metrics polling is best-effort and must not crash the session.
-        } finally {
-          this._metricsPolling = false;
-        }
-      })();
+      runDetached(
+        (async () => {
+          try {
+            const snapshot = await pollMetrics();
+            if (!snapshot) return;
+            this._lastMetrics = snapshot;
+            this.emit('metrics', snapshot);
+          } catch {
+            // Metrics polling is best-effort and must not crash the session.
+          } finally {
+            this._metricsPolling = false;
+          }
+        })(),
+        () => { /* unreachable: the IIFE above has no unhandled catch path */ },
+      );
     }, intervalMs);
     this._metricsTimer.unref();
   }

@@ -12,6 +12,7 @@ import type { QuicClientEventLoopLike } from './quic-stream.js';
 import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
+import { DetachedTasks } from './run-detached.js';
 
 const EVENT_NEW_STREAM = 2;
 const EVENT_DATA = 4;
@@ -191,6 +192,7 @@ export class QuicClientSession extends EventEmitter {
   private _connectTimer: NodeJS.Timeout | null = null;
   private _closeEmitted = false;
   private _closeInfo: SessionCloseInfo | null = null;
+  private readonly _detachedTasks = new DetachedTasks();
 
   constructor() {
     super();
@@ -198,15 +200,17 @@ export class QuicClientSession extends EventEmitter {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
-    // Swallow unobserved rejections via try/await (project rule: no `.catch`).
-    const readyPromise = this._readyPromise;
-    void (async (): Promise<void> => {
-      try {
-        await readyPromise;
-      } catch {
-        /* unobserved — caller chose event-driven flow */
-      }
-    })();
+    // ready() is optional for event-driven callers; tracking it here
+    // observes (and, since readyPromise is fully driven by _resolveReady/
+    // _rejectReady above, can never itself surface) any rejection, and
+    // close() below waits for it to settle like every other detached task
+    // this session kicks off.
+    this._detachedTasks.run(this._readyPromise, () => { /* unobserved — caller chose event-driven flow */ });
+  }
+
+  /** @internal */
+  _registerDetachedTask(operation: Promise<unknown>, onError: (error: Error) => void): void {
+    this._detachedTasks.run(operation, onError);
   }
 
   /** Whether the QUIC/TLS handshake has completed. */
@@ -289,6 +293,7 @@ export class QuicClientSession extends EventEmitter {
       this._eventLoop = null;
     }
     this._emitClose({ errorCode, reason });
+    await this._detachedTasks.drain();
   }
 
   /** @internal */
@@ -324,13 +329,7 @@ export class QuicClientSession extends EventEmitter {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (loop_) {
-      void (async (): Promise<void> => {
-        try {
-          await loop_.close();
-        } catch {
-          /* best-effort abort cleanup */
-        }
-      })();
+      this._detachedTasks.run(loop_.close(), () => { /* best-effort abort cleanup */ });
     }
     this._emitSessionError(err);
   }
@@ -521,13 +520,10 @@ export class QuicClientSession extends EventEmitter {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (!loop_) return;
-    void (async (): Promise<void> => {
-      try {
-        await loop_.close(info.errorCode, info.reason);
-      } catch {
-        /* native close cleanup is best-effort after SESSION_CLOSE */
-      }
-    })();
+    this._detachedTasks.run(
+      loop_.close(info.errorCode, info.reason),
+      () => { /* native close cleanup is best-effort after SESSION_CLOSE */ },
+    );
   }
 
   private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
@@ -747,7 +743,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
     }, connectTimeoutMs));
   }
 
-  void (async (): Promise<void> => {
+  session._registerDetachedTask((async (): Promise<void> => {
     try {
       const resolved = await resolveConnectionEndpoint(authority, {
         defaultScheme: 'quic',
@@ -887,7 +883,12 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
       session._markReadyError(error);
       session._emitSessionError(error);
     }
-  })();
+  })(), (err: Error) => {
+    // Unreachable: the catch above already reports every failure via
+    // session._markReadyError/_emitSessionError without rethrowing. Pure
+    // defensive backstop.
+    console.error('unhandled error establishing raw QUIC connection:', err);
+  });
 
   return session;
 }
