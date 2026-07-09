@@ -3,16 +3,17 @@ import tseslint from 'typescript-eslint';
 
 // docs/WASM_CLIENT_PLAN.md §6.6: lib/wasm/** must stay host-agnostic (Node
 // today, workerd/browsers later) and must never pull in the native binding
-// loader or the file-tailing keylog module. Two files are narrowly exempted
-// for the one Node-specific thing each legitimately needs — see their own
-// doc comments (lib/wasm/core-loader.ts, lib/wasm/node-udp-adapter.ts).
+// loader or the file-tailing keylog module. A small number of files are
+// narrowly exempted for the one Node-specific thing each legitimately needs
+// — see their own doc comments (lib/wasm/node-core-loader.ts,
+// lib/wasm/node-udp-adapter.ts, lib/wasm/node-udp-server-adapter.ts).
 const wasmZoneRestrictedImports = [
-  { name: '../event-loop.js', message: 'lib/wasm/** must not import the native binding loader/event-loop types (docs/WASM_CLIENT_PLAN.md §6.6). A wasm event loop is structurally, not nominally, typed against ClientEventLoopLike/QuicClientEventLoopLike.' },
+  { name: '../event-loop.js', message: 'lib/wasm/** must not import the native binding loader/event-loop types (docs/WASM_CLIENT_PLAN.md §6.6). A wasm event loop is structurally, not nominally, typed against ClientEventLoopLike/QuicClientEventLoopLike/ServerEventLoopLike/QuicServerEventLoopLike.' },
   { name: '../keylog.js', message: 'lib/wasm/** must not import the file-tailing keylog module — the wasm runtime delivers keylog via take_keylog + events instead (§6.4, N5).' },
   { name: 'node:http2', message: 'lib/wasm/** must stay free of node:http2 — relevant only to the native H2/H3 fallback path.' },
   { name: 'node:dns', message: 'lib/wasm/** must not resolve hostnames itself — connect() already resolves the endpoint before constructing the wasm event loop.' },
-  { name: 'node:fs', message: 'lib/wasm/** must stay host-agnostic. The sole exception is core-loader.ts\'s own file-read (see its override below).' },
-  { name: 'node:dgram', message: 'lib/wasm/** must stay host-agnostic. The sole exception is node-udp-adapter.ts (see its override below).' },
+  { name: 'node:fs', message: 'lib/wasm/** must stay host-agnostic. The sole exception is node-core-loader.ts\'s own file-read (see its override below).' },
+  { name: 'node:dgram', message: 'lib/wasm/** must stay host-agnostic. The sole exceptions are node-udp-adapter.ts (client) and node-udp-server-adapter.ts (server) — see their overrides below.' },
 ];
 
 export default tseslint.config(
@@ -124,7 +125,7 @@ export default tseslint.config(
   },
   {
     // Sole exception: this file's own `node:dgram` transport implementation.
-    files: ['lib/wasm/node-udp-adapter.ts'],
+    files: ['lib/wasm/node-udp-adapter.ts', 'lib/wasm/node-udp-server-adapter.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         paths: wasmZoneRestrictedImports.filter((p) => p.name !== 'node:dgram'),

@@ -129,6 +129,64 @@ const EXPECTED_EXPORTS = [
   'qc_free',
 ];
 
+/**
+ * The full `hs_*` HTTP/3 server + `qs_*` raw QUIC server ABI table
+ * (server-side wasm support, added alongside the client table above —
+ * `crates/http3-wasm/src/h3_server.rs` / `src/quic_server.rs`). One handle
+ * is the whole bound server (not a single connection); every
+ * per-connection export additionally takes a `connHandle` parameter —
+ * see those files' crate-level "client vs. server shape" doc comment.
+ * `hs_send_trailers` is a deliberate, minimal, additive Rust ABI addition
+ * made alongside the TS server runtime (the inherited surface omitted it —
+ * see that export's own doc comment for why it's a genuinely distinct
+ * primitive from `hs_send_response_headers`, not a duplicate).
+ */
+const EXPECTED_SERVER_EXPORTS = [
+  'hs_new',
+  'hs_last_error',
+  'hs_rx_buffer',
+  'hs_tx_buffer',
+  'hs_recv',
+  'hs_next_send',
+  'hs_next_send_dest',
+  'hs_timeout_ms',
+  'hs_on_timeout',
+  'hs_drain_events',
+  'hs_send_response_headers',
+  'hs_send_trailers',
+  'hs_stream_send',
+  'hs_stream_close',
+  'hs_send_datagram',
+  'hs_ping',
+  'hs_session_metrics',
+  'hs_remote_settings',
+  'hs_close_connection',
+  'hs_connection_is_closed',
+  'hs_is_done',
+  'hs_shutdown',
+  'hs_free',
+  'qs_new',
+  'qs_last_error',
+  'qs_rx_buffer',
+  'qs_tx_buffer',
+  'qs_recv',
+  'qs_next_send',
+  'qs_next_send_dest',
+  'qs_timeout_ms',
+  'qs_on_timeout',
+  'qs_drain_events',
+  'qs_stream_send',
+  'qs_stream_close',
+  'qs_send_datagram',
+  'qs_ping',
+  'qs_session_metrics',
+  'qs_close_connection',
+  'qs_connection_is_closed',
+  'qs_is_done',
+  'qs_shutdown',
+  'qs_free',
+];
+
 describe('wasm artifact shape (C2)', { skip: skipReason }, () => {
   const bytes = readFileSync(artifactPath);
   const mod = new WebAssembly.Module(bytes);
@@ -160,6 +218,12 @@ describe('wasm artifact shape (C2)', { skip: skipReason }, () => {
     const exportNames = new Set(WebAssembly.Module.exports(mod).map((e) => e.name));
     const missing = EXPECTED_EXPORTS.filter((name) => !exportNames.has(name));
     assert.deepEqual(missing, [], `missing expected exports: ${missing.join(', ')}`);
+  });
+
+  it('exports the full hs_*/qs_* server ABI table', () => {
+    const exportNames = new Set(WebAssembly.Module.exports(mod).map((e) => e.name));
+    const missing = EXPECTED_SERVER_EXPORTS.filter((name) => !exportNames.has(name));
+    assert.deepEqual(missing, [], `missing expected server exports: ${missing.join(', ')}`);
   });
 
   it('exports a linear memory', () => {

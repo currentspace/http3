@@ -15,12 +15,31 @@ import {
 const EMPTY_BUFFER = Buffer.alloc(0);
 
 /**
- * Event loop interface for QUIC server-side stream commands.
+ * Event loop interface for QUIC server-side session + stream commands.
+ *
+ * Widened (mirroring {@link QuicClientEventLoopLike}'s identical note) to
+ * cover the full surface {@link QuicServerSession} needs (not just the
+ * stream-command subset {@link QuicStream} uses: `closeSession`,
+ * `sendDatagram`, `getSessionMetrics`, `pingSession`, `close`), so
+ * `QuicServerSession._eventLoop`/`QuicServer._eventLoop` can also be typed
+ * against this interface instead of the concrete `QuicWorkerEventLoop`
+ * class (`lib/quic-server.ts`) — which has private fields, so TS's class
+ * typing would otherwise reject any structurally-equivalent substitute
+ * (e.g. `WasmQuicServerEventLoop`).
  * @internal
  */
 export interface QuicServerEventLoopLike {
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number;
   streamClose(connHandle: number, streamId: number, errorCode: number): void;
+  closeSession(connHandle: number, errorCode: number, reason: string): void;
+  sendDatagram(connHandle: number, data: Buffer): boolean;
+  getSessionMetrics(connHandle: number): {
+    packetsIn: number; packetsOut: number;
+    bytesIn: number; bytesOut: number;
+    handshakeTimeMs: number; rttMs: number; cwnd: number; datagramQueueDepth: number;
+  };
+  pingSession(connHandle: number): boolean;
+  close(): Promise<void>;
 }
 
 /**

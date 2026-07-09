@@ -426,15 +426,28 @@ export function runWithRuntimeSelectionSync<T>(
 ): T {
   const runtime = normalizeRuntimeOptions(options);
 
-  // wasm is a client-only runtime (N1: no server support in wasm) and is
-  // never routed through the synchronous native-server selection path in
-  // the first place (servers never construct a wasm event loop) — reject
-  // it explicitly here rather than silently falling through to the
-  // 'auto' branch below, which would attempt 'fast' then 'portable'
-  // instead of honoring (or rejecting) what was actually requested.
+  // This helper's contract is synchronous: `attempt` must produce `T`
+  // without awaiting anything, which is true of every native
+  // construction path (native `.listen()`/`.connect()` calls are
+  // synchronous NAPI calls) but never true of a wasm server bind (binding
+  // a `node:dgram` socket is inherently asynchronous). Servers now DO
+  // support `runtimeMode: 'wasm'` (`Http3SecureServer.listen()` /
+  // `QuicServer.listen()`, `lib/server.ts` / `lib/quic-server.ts`) — but
+  // they branch to the async-safe `runWithRuntimeSelection` below
+  // *before* ever calling this synchronous helper, precisely because of
+  // that mismatch. Reaching this point with `runtimeMode: 'wasm'` would
+  // mean a caller routed wasm through the wrong selection function — a
+  // real internal bug, not a policy rejection — so this stays a loud,
+  // explicit throw rather than silently falling through to the 'auto'
+  // branch below (which would attempt 'fast' then 'portable' instead of
+  // honoring — or rejecting — what was actually requested).
   if (runtime.runtimeMode === 'wasm') {
     throw new Http3Error(
-      "runtimeMode 'wasm' is not supported for servers (wasm is a client-only runtime)",
+      "runtimeMode 'wasm' cannot be constructed via the synchronous native-runtime " +
+      'selector (runWithRuntimeSelectionSync) — wasm server construction is ' +
+      'asynchronous (binding a node:dgram socket). This indicates an internal ' +
+      'routing bug: the caller should branch to the async runWithRuntimeSelection ' +
+      'bootstrap before ever reaching this function for wasm mode.',
       ERR_HTTP3_RUNTIME_UNSUPPORTED,
       { requestedMode: runtime.runtimeMode, reasonCode: 'runtime-error' },
     );

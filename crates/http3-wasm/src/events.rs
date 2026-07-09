@@ -45,6 +45,19 @@ pub(crate) fn serialize_events(
 fn event_to_json_relative(event: &JsH3Event, data_scratch: &mut Vec<u8>) -> Value {
     let mut obj = Map::new();
     obj.insert("eventType".to_string(), Value::from(event.event_type));
+    // Deviation (server-side wasm support, not in the original client-only
+    // ABI this crate landed with): `JsH3Event.conn_handle` was never
+    // serialized here, even though `hs_drain_events`/`qs_drain_events`'s own
+    // doc comments already promised "`connHandle` in each event
+    // distinguishes which connection it belongs to" — true of the Rust
+    // struct field, but not of the JSON this function produced. A client
+    // handle is always exactly one connection, so
+    // `lib/wasm/events.ts::decodeEventBatch` never needed this (it stamps
+    // the caller-owned ABI handle onto every event instead); a **server**
+    // handle multiplexes many connections, so its event batch has no other
+    // way to route each event to the right connection/session. Harmless to
+    // always include: the client decoder ignores/overwrites this field.
+    obj.insert("connHandle".to_string(), Value::from(event.conn_handle));
     obj.insert("streamId".to_string(), Value::from(event.stream_id));
 
     if let Some(fin) = event.fin {

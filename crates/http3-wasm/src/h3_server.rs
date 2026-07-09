@@ -393,6 +393,51 @@ pub extern "C" fn hs_stream_send(
     .unwrap_or(ERR_INVALID_HANDLE)
 }
 
+/// Send trailing headers for `stream_id` on `conn_handle` — the
+/// `hs_send_trailers` primitive.
+///
+/// Deviation (server-side wasm support): the inherited `hs_*` ABI surface
+/// omitted this export even though `H3ServerHandler::send_trailers`
+/// (worker.rs) already exists and is a genuinely distinct H3 frame from
+/// `hs_send_response_headers` — quiche's `send_additional_headers` with
+/// `is_trailer_section=true`. Calling `hs_send_response_headers` a second
+/// time is not equivalent: it would re-emit/silently drop the initial
+/// response frame instead of sending trailers (see
+/// `H3Connection::send_trailers`'s own doc comment in `src/connection.rs`).
+/// `lib/event-loop.ts`'s `ServerEventLoopLike.sendTrailers` requires this
+/// primitive, so it is added here as a minimal, additive export mirroring
+/// `hs_send_response_headers`'s exact shape minus the `fin`/blocked-retry
+/// handling (`H3ServerHandler::send_trailers` has no pending-write buffering
+/// path — trailers always carry an implicit FIN and are not retried on
+/// `StreamBlocked` the way headers-before-any-body are).
+///
+/// # Safety
+/// `headers_json_ptr`/`len` must describe a valid, readable UTF-8 JSON
+/// array-of-`{name,value}` byte range.
+#[unsafe(no_mangle)]
+pub extern "C" fn hs_send_trailers(
+    handle: u32,
+    conn_handle: u32,
+    stream_id: u64,
+    headers_json_ptr: u32,
+    headers_json_len: u32,
+) -> i64 {
+    let Some(headers) = parse_headers_json(headers_json_ptr, headers_json_len) else {
+        set_session_error(handle, "[h3:config] invalid headers JSON".to_string());
+        return ERR_BAD_ARGS;
+    };
+    with_session_mut(handle, |sess| {
+        match sess.handler.send_trailers(conn_handle, stream_id, &headers) {
+            Ok(()) => 0i64,
+            Err(msg) => {
+                sess.last_error = Some(format!("[h3:h3] {msg}"));
+                ERR_PROTOCOL
+            }
+        }
+    })
+    .unwrap_or(ERR_INVALID_HANDLE)
+}
+
 fn classify_send_outcome(newly_pushed: &[JsH3Event], released_units: usize) -> i64 {
     let has_error = newly_pushed.iter().any(|e| e.event_type == EVENT_ERROR);
     let has_blocked = newly_pushed

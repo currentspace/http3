@@ -42,6 +42,16 @@ export type { WasmQuicClientEventLoopOptions } from './quic-client-event-loop.js
 
 export type { DatagramTransport, DatagramTransportAddress } from './datagram-transport.js';
 
+export { WasmH3ServerEventLoop } from './h3-server-event-loop.js';
+export type { WasmH3ServerEventLoopOptions } from './h3-server-event-loop.js';
+
+export { WasmQuicServerEventLoop } from './quic-server-event-loop.js';
+export type { WasmQuicServerEventLoopOptions } from './quic-server-event-loop.js';
+
+export type { DatagramServerTransport, DatagramServerTransportAddress } from './datagram-server-transport.js';
+
 export { loadHttp3WasmCoreFromFile } from './node-core-loader.js';
 export { connectNodeUdp } from './node-udp-adapter.js';
 export type { ConnectNodeUdpOptions } from './node-udp-adapter.js';
+export { bindNodeUdpServer } from './node-udp-server-adapter.js';
+export type { BindNodeUdpServerOptions } from './node-udp-server-adapter.js';

@@ -13,6 +13,7 @@
   "include": ["lib/wasm/**/*.ts"],
   "exclude": [
     "lib/wasm/node-udp-adapter.ts",
+    "lib/wasm/node-udp-server-adapter.ts",
     "lib/wasm/node-core-loader.ts",
     "lib/wasm/index.ts"
   ]

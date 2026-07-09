@@ -47,10 +47,16 @@ export interface WasmCoreSource {
 
 /**
  * The raw `http3-wasm` export surface, typed from `crates/http3-wasm`'s
- * `extern "C"` signatures (`src/h3.rs` / `src/quic.rs` / `src/abi.rs`) —
- * not guessed. Every `u64` Rust parameter (`stream_id`) and every `i64`
- * Rust return value crosses the wasm<->JS boundary as `bigint`; every
- * `u32`/`i32` crosses as `number`.
+ * `extern "C"` signatures (`src/h3.rs` / `src/quic.rs` / `src/h3_server.rs` /
+ * `src/quic_server.rs` / `src/abi.rs`) — not guessed. Every `u64` Rust
+ * parameter (`stream_id`) and every `i64` Rust return value crosses the
+ * wasm<->JS boundary as `bigint`; every `u32`/`i32` crosses as `number`.
+ *
+ * Server handles (`hs_*`/`qs_*`) are the whole bound server, not a single
+ * connection — every per-connection export takes an additional
+ * `connHandle: number` parameter identifying which connection within that
+ * server it applies to (see `h3_server.rs`'s crate-level "client vs. server
+ * shape" doc comment).
  */
 export interface Http3WasmExports {
   readonly memory: WebAssembly.Memory;
@@ -106,6 +112,77 @@ export interface Http3WasmExports {
   qc_take_keylog(this: void, handle: number, outPtrPtr: number): bigint;
   qc_is_done(this: void, handle: number): number;
   qc_free(this: void, handle: number): void;
+
+  // ---- hs_* (HTTP/3 server) — one handle is the whole bound server (its
+  // connection map + config + timer heap), not a single connection; every
+  // per-connection method takes an additional `connHandle` parameter that
+  // passes straight through to the Rust connection map
+  // (crates/http3-wasm/src/h3_server.rs's crate doc comment: "client vs.
+  // server shape"). ----
+  hs_new(this: void, optsPtr: number, optsLen: number): number;
+  hs_last_error(this: void, handle: number, bufPtr: number, cap: number): number;
+  hs_rx_buffer(this: void, handle: number): number;
+  hs_tx_buffer(this: void, handle: number): number;
+  hs_recv(this: void, handle: number, len: number, peerAddrPtr: number, peerAddrLen: number): bigint;
+  hs_next_send(this: void, handle: number): bigint;
+  /** Destination ("ip:port"/"[v6]:port") of the packet most recently written by hs_next_send. `0` if hs_next_send last returned 0. */
+  hs_next_send_dest(this: void, handle: number, outPtrPtr: number): bigint;
+  hs_timeout_ms(this: void, handle: number): bigint;
+  hs_on_timeout(this: void, handle: number): bigint;
+  hs_drain_events(this: void, handle: number, outPtrPtr: number): bigint;
+  hs_send_response_headers(
+    this: void,
+    handle: number,
+    connHandle: number,
+    streamId: bigint,
+    headersJsonPtr: number,
+    headersJsonLen: number,
+    fin: number,
+  ): bigint;
+  /** Deviation: added alongside the TS server runtime — see h3_server.rs's doc comment on this export. */
+  hs_send_trailers(
+    this: void,
+    handle: number,
+    connHandle: number,
+    streamId: bigint,
+    headersJsonPtr: number,
+    headersJsonLen: number,
+  ): bigint;
+  hs_stream_send(this: void, handle: number, connHandle: number, streamId: bigint, ptr: number, len: number, fin: number): bigint;
+  hs_stream_close(this: void, handle: number, connHandle: number, streamId: bigint, errorCode: number): bigint;
+  hs_send_datagram(this: void, handle: number, connHandle: number, ptr: number, len: number): bigint;
+  hs_ping(this: void, handle: number, connHandle: number): bigint;
+  hs_session_metrics(this: void, handle: number, connHandle: number, outPtrPtr: number): bigint;
+  hs_remote_settings(this: void, handle: number, connHandle: number, outPtrPtr: number): bigint;
+  hs_close_connection(this: void, handle: number, connHandle: number, code: number, reasonPtr: number, reasonLen: number): bigint;
+  hs_connection_is_closed(this: void, handle: number, connHandle: number): number;
+  hs_is_done(this: void, handle: number): number;
+  hs_shutdown(this: void, handle: number): bigint;
+  hs_free(this: void, handle: number): void;
+
+  // ---- qs_* (raw QUIC server) — mirrors hs_* minus
+  // send_response_headers/send_trailers/remote_settings (no H3 framing/QPACK
+  // in raw QUIC). ----
+  qs_new(this: void, optsPtr: number, optsLen: number): number;
+  qs_last_error(this: void, handle: number, bufPtr: number, cap: number): number;
+  qs_rx_buffer(this: void, handle: number): number;
+  qs_tx_buffer(this: void, handle: number): number;
+  qs_recv(this: void, handle: number, len: number, peerAddrPtr: number, peerAddrLen: number): bigint;
+  qs_next_send(this: void, handle: number): bigint;
+  qs_next_send_dest(this: void, handle: number, outPtrPtr: number): bigint;
+  qs_timeout_ms(this: void, handle: number): bigint;
+  qs_on_timeout(this: void, handle: number): bigint;
+  qs_drain_events(this: void, handle: number, outPtrPtr: number): bigint;
+  qs_stream_send(this: void, handle: number, connHandle: number, streamId: bigint, ptr: number, len: number, fin: number): bigint;
+  qs_stream_close(this: void, handle: number, connHandle: number, streamId: bigint, errorCode: number): bigint;
+  qs_send_datagram(this: void, handle: number, connHandle: number, ptr: number, len: number): bigint;
+  qs_ping(this: void, handle: number, connHandle: number): bigint;
+  qs_session_metrics(this: void, handle: number, connHandle: number, outPtrPtr: number): bigint;
+  qs_close_connection(this: void, handle: number, connHandle: number, code: number, reasonPtr: number, reasonLen: number): bigint;
+  qs_connection_is_closed(this: void, handle: number, connHandle: number): number;
+  qs_is_done(this: void, handle: number): number;
+  qs_shutdown(this: void, handle: number): bigint;
+  qs_free(this: void, handle: number): void;
 }
 
 /**

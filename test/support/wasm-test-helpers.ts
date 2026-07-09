@@ -38,6 +38,11 @@ import { connectAsync } from '../../lib/client.js';
 import { connectQuicAsync } from '../../lib/quic-client.js';
 import type { Http3ClientSession } from '../../lib/client.js';
 import type { QuicClientSession } from '../../lib/quic-client.js';
+import { createSecureServer } from '../../lib/server.js';
+import type { Http3SecureServer } from '../../lib/server.js';
+import { createQuicServer } from '../../lib/quic-server.js';
+import type { QuicServer, QuicServerSession } from '../../lib/quic-server.js';
+import type { Http3ServerSession } from '../../lib/session.js';
 import type { RuntimeMode } from '../../lib/runtime.js';
 
 /** @internal Walk up from this file's compiled location until the repo root (identified by pnpm-workspace.yaml) is found. Mirrors test/wasm/artifact-shape.test.ts's findRepoRoot. */
@@ -223,6 +228,184 @@ export async function createWasmQuicPair(opts?: WasmQuicPairOptions): Promise<Wa
       try { await client.close(); } catch { /* already closed */ }
       try { server.requestShutdown(); } catch { /* already shut down */ }
       try { server.joinWorker(); } catch { /* already joined */ }
+    },
+  };
+}
+
+// ---- Wasm SERVER pairs (server-side wasm support) ----
+//
+// Unlike createWasmH3Pair/createWasmQuicPair above (native server driven via
+// the raw NAPI binding, wasm only on the client), these helpers put the
+// wasm runtime on the SERVER side, through the full public API
+// (`createSecureServer`/`createQuicServer` with `runtimeMode: 'wasm'`) —
+// there is no raw-binding equivalent for a wasm server (the wasm server
+// event loop is only ever reached through `Http3SecureServer.listen()`/
+// `QuicServer.listen()`). `clientRuntimeMode` parameterizes the CLIENT side
+// so the same helper covers both "native client x wasm server" and "wasm
+// client x wasm server" — see test/wasm/h3-server-loopback.test.ts /
+// test/wasm/quic-server-loopback.test.ts.
+
+/** Wait for `server.listen(port, host)` (`Http3SecureServer`, synchronous-returning) to actually bind, since its 'listening' event fires asynchronously. */
+function waitForH3ServerListening(server: Http3SecureServer): Promise<{ address: string; family: string; port: number }> {
+  return new Promise((resolve, reject) => {
+    server.once('error', (err: Error) => reject(err));
+    server.once('listening', () => {
+      const addr = server.address();
+      if (!addr) {
+        reject(new Error('Http3SecureServer.address() is null right after the listening event'));
+        return;
+      }
+      resolve(addr);
+    });
+  });
+}
+
+export interface WasmServerH3Pair {
+  /** A real `Http3SecureServer` bound with `runtimeMode: 'wasm'` — drive it via the public session/stream API (`server.on('stream', ...)`), not a raw binding. */
+  server: Http3SecureServer;
+  /** The server-side session for `client`'s connection — captured eagerly (registered before the client connects) since the 'session' event has already fired by the time this pair resolves (the client only resolves after its own handshake completes, which implies the server-side session already exists). */
+  serverSession: Http3ServerSession;
+  serverAddr: { address: string; family: string; port: number };
+  client: Http3ClientSession;
+  cleanup(): Promise<void>;
+}
+
+export interface WasmServerH3PairOptions {
+  /** The CLIENT's runtime mode — `'portable'` (native client x wasm server, cell 5) or `'wasm'` (wasm client x wasm server, cell 7). Default: `'portable'`. */
+  clientRuntimeMode?: 'portable' | 'wasm';
+  enableDatagrams?: boolean;
+  maxIdleTimeoutMs?: number;
+  initialMaxStreamDataBidiLocal?: number;
+  initialMaxData?: number;
+}
+
+/**
+ * A wasm-backed `Http3SecureServer` (`runtimeMode: 'wasm'`, self-signed
+ * cert, `disableRetry`) paired with a client whose own runtime mode is
+ * controlled by `opts.clientRuntimeMode`.
+ */
+export async function createWasmServerH3Pair(opts?: WasmServerH3PairOptions): Promise<WasmServerH3Pair> {
+  const certs = generateTestCerts();
+
+  const server = createSecureServer({
+    key: certs.key,
+    cert: certs.cert,
+    runtimeMode: 'wasm',
+    fallbackPolicy: 'error',
+    disableRetry: true,
+    enableDatagrams: opts?.enableDatagrams ?? false,
+    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+    ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
+    ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
+  });
+
+  // Registered before the client ever starts connecting (not after this
+  // function returns) — the 'session' event fires as soon as the QUIC
+  // handshake begins on the server side, which happens well before
+  // connectAsync's returned promise resolves (that only resolves once the
+  // full handshake completes), so a listener attached only after this
+  // function returns would already have missed it.
+  let serverSession: Http3ServerSession | null = null;
+  server.on('session', (session) => {
+    serverSession = session;
+  });
+
+  const listeningPromise = waitForH3ServerListening(server);
+  server.listen(0, '127.0.0.1');
+  const serverAddr = await listeningPromise;
+
+  const client = await connectAsync(`127.0.0.1:${serverAddr.port}`, {
+    rejectUnauthorized: false,
+    runtimeMode: opts?.clientRuntimeMode ?? 'portable',
+    fallbackPolicy: 'error',
+    servername: 'localhost',
+    enableDatagrams: opts?.enableDatagrams ?? false,
+    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+    ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
+    ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
+  });
+
+  if (!serverSession) {
+    throw new Error('wasm H3 server did not emit a "session" event before the client finished its handshake');
+  }
+
+  return {
+    serverSession,
+    server,
+    serverAddr,
+    client,
+    async cleanup() {
+      try { await client.close(); } catch { /* already closed */ }
+      try { await server.close(); } catch { /* already closed */ }
+    },
+  };
+}
+
+export interface WasmServerQuicPair {
+  /** A real `QuicServer` bound with `runtimeMode: 'wasm'` — drive it via the public session/stream API (`server.on('session', ...)`), not a raw binding. */
+  server: QuicServer;
+  /** The server-side session for `client`'s connection — captured eagerly (registered before the client connects). Server-side handshake completion (which is what fires QuicServer's 'session' event) always precedes the client's own — the client's HANDSHAKE_DONE arrives only after the server has already processed the client's Finished — so this is reliably populated by the time this pair resolves. */
+  serverSession: QuicServerSession;
+  serverAddr: { address: string; family: string; port: number };
+  client: QuicClientSession;
+  cleanup(): Promise<void>;
+}
+
+export interface WasmServerQuicPairOptions {
+  /** The CLIENT's runtime mode — `'portable'` (native client x wasm server, cell 6) or `'wasm'` (wasm client x wasm server, cell 8). Default: `'portable'`. */
+  clientRuntimeMode?: 'portable' | 'wasm';
+  enableDatagrams?: boolean;
+  maxIdleTimeoutMs?: number;
+}
+
+/**
+ * A wasm-backed `QuicServer` (`runtimeMode: 'wasm'`, self-signed cert,
+ * `disableRetry`) paired with a client whose own runtime mode is
+ * controlled by `opts.clientRuntimeMode`.
+ */
+export async function createWasmServerQuicPair(opts?: WasmServerQuicPairOptions): Promise<WasmServerQuicPair> {
+  const certs = generateTestCerts();
+
+  const server = createQuicServer({
+    key: certs.key,
+    cert: certs.cert,
+    runtimeMode: 'wasm',
+    fallbackPolicy: 'error',
+    disableRetry: true,
+    enableDatagrams: opts?.enableDatagrams ?? false,
+    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+  });
+
+  // See WasmServerQuicPair.serverSession's doc comment for why eager
+  // registration (before the client connects) reliably captures this.
+  let serverSession: QuicServerSession | null = null;
+  server.on('session', (session) => {
+    serverSession = session;
+  });
+
+  const serverAddr = await server.listen(0, '127.0.0.1');
+
+  const client = await connectQuicAsync(`127.0.0.1:${serverAddr.port}`, {
+    rejectUnauthorized: false,
+    runtimeMode: opts?.clientRuntimeMode ?? 'portable',
+    fallbackPolicy: 'error',
+    servername: 'localhost',
+    enableDatagrams: opts?.enableDatagrams ?? false,
+    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+  });
+
+  if (!serverSession) {
+    throw new Error('wasm QUIC server did not emit a "session" event before the client finished its handshake');
+  }
+
+  return {
+    server,
+    serverSession,
+    serverAddr,
+    client,
+    async cleanup() {
+      try { await client.close(); } catch { /* already closed */ }
+      try { await server.close(); } catch { /* already closed */ }
     },
   };
 }

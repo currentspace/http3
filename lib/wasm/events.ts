@@ -66,9 +66,20 @@ export interface WasmEvent {
   };
 }
 
-/** Raw per-event JSON shape `serde_json` produces (`crates/http3-wasm/src/events.rs`). */
+/**
+ * Raw per-event JSON shape `serde_json` produces
+ * (`crates/http3-wasm/src/events.rs`).
+ *
+ * `connHandle` is always present in the wire JSON (a small, additive Rust
+ * fix made alongside the server runtime — `events.rs`'s serializer used to
+ * omit `JsH3Event.conn_handle` entirely, even though its own doc comments
+ * promised otherwise; harmless for the client, which never reads this field
+ * — see {@link decodeEventBatch}'s doc comment). Kept optional here anyway
+ * so this type doesn't silently assume a specific artifact build.
+ */
 interface RawWasmEventJson {
   eventType: number;
+  connHandle?: number;
   streamId: number;
   headers?: Array<{ name: string; value: string }>;
   fin?: boolean;
@@ -76,6 +87,23 @@ interface RawWasmEventJson {
   dataLen?: number;
   meta?: WasmEvent['meta'];
   metrics?: WasmEvent['metrics'];
+}
+
+/** Shared per-event decode: headers/fin/meta/metrics/data-copy-out, everything except how `connHandle` is resolved (client: caller-supplied override; server: read straight from the JSON — see {@link decodeEventBatch} vs. {@link decodeServerEventBatch}). */
+function decodeOneEvent(core: Http3WasmCore, e: RawWasmEventJson, connHandle: number): WasmEvent {
+  const event: WasmEvent = {
+    eventType: e.eventType,
+    connHandle,
+    streamId: e.streamId,
+  };
+  if (e.headers) event.headers = e.headers;
+  if (e.fin !== undefined) event.fin = e.fin;
+  if (e.meta) event.meta = e.meta;
+  if (e.metrics) event.metrics = e.metrics;
+  if (typeof e.dataOff === 'number' && typeof e.dataLen === 'number' && e.dataLen > 0) {
+    event.data = core.copyOut(e.dataOff, e.dataLen);
+  }
+  return event;
 }
 
 /**
@@ -91,23 +119,25 @@ interface RawWasmEventJson {
  */
 export function decodeEventBatch(core: Http3WasmCore, json: string, connHandle: number): WasmEvent[] {
   const raw = JSON.parse(json) as RawWasmEventJson[];
-  const events: WasmEvent[] = [];
-  for (const e of raw) {
-    const event: WasmEvent = {
-      eventType: e.eventType,
-      connHandle,
-      streamId: e.streamId,
-    };
-    if (e.headers) event.headers = e.headers;
-    if (e.fin !== undefined) event.fin = e.fin;
-    if (e.meta) event.meta = e.meta;
-    if (e.metrics) event.metrics = e.metrics;
-    if (typeof e.dataOff === 'number' && typeof e.dataLen === 'number' && e.dataLen > 0) {
-      event.data = core.copyOut(e.dataOff, e.dataLen);
-    }
-    events.push(event);
-  }
-  return events;
+  return raw.map((e) => decodeOneEvent(core, e, connHandle));
+}
+
+/**
+ * Server variant of {@link decodeEventBatch}: a server handle multiplexes
+ * many connections through one `hs_drain_events`/`qs_drain_events` call, so
+ * (unlike the client, which is always exactly one connection and supplies
+ * its own ABI handle as a stand-in `connHandle`) each event's real
+ * `connHandle` must come from the JSON itself — this is the Rust-internal
+ * connection-map slot (`JsH3Event.conn_handle`), the same identifier every
+ * `hs_*`/`qs_*` per-connection export takes as its `connHandle` parameter.
+ * A missing field (should not happen against a real built artifact — see
+ * {@link RawWasmEventJson}'s doc comment) falls back to `0`, a handle value
+ * the ABI never assigns to a real connection, rather than `undefined`
+ * propagating into session-map lookups.
+ */
+export function decodeServerEventBatch(core: Http3WasmCore, json: string): WasmEvent[] {
+  const raw = JSON.parse(json) as RawWasmEventJson[];
+  return raw.map((e) => decodeOneEvent(core, e, e.connHandle ?? 0));
 }
 
 /**

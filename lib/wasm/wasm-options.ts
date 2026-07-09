@@ -9,7 +9,22 @@
 
 /** Generate a 20-byte SCID and return it as 40 lowercase hex chars (the `scidHex` ABI field). */
 export function randomScidHex(): string {
-  const bytes = new Uint8Array(20);
+  return randomHex(20);
+}
+
+/**
+ * Generate a 32-byte retry-token/SCID-derivation key and return it as 64
+ * lowercase hex chars (the `retryTokenKeyHex` ABI field `hs_new`/`qs_new`
+ * expect — mirrors `randomScidHex`'s exact convention, generated once per
+ * server instance at construction time, per `crates/http3-wasm/src/h3_server.rs`'s
+ * `hs_new` doc comment).
+ */
+export function randomRetryTokenKeyHex(): string {
+  return randomHex(32);
+}
+
+function randomHex(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
   globalThis.crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -98,6 +113,58 @@ export function buildCommonOptionsJson(opts: CommonWasmClientOptions): Record<st
   if (opts.sessionTicket) json.sessionTicket = base64Encode(opts.sessionTicket);
   if (opts.allow0RTT !== undefined) json.allow0rtt = opts.allow0RTT;
   if (opts.enableDatagrams !== undefined) json.enableDatagrams = opts.enableDatagrams;
+  if (opts.keylog !== undefined) json.keylog = opts.keylog;
+  return json;
+}
+
+/**
+ * Options common to both `hs_new` and `qs_new` beyond the ABI-only setup
+ * fields (`localAddr`/`retryTokenKeyHex`, built by the caller — see
+ * `crates/http3-wasm/src/json_opts.rs`'s `ServerParams`/`parse_server_params`).
+ * `key`/`cert` are mandatory (a server cannot start without them); binary
+ * fields are `Uint8Array` for the same host-agnostic reasons as
+ * {@link CommonWasmClientOptions}.
+ */
+export interface CommonWasmServerOptions {
+  key: Uint8Array;
+  cert: Uint8Array;
+  ca?: Uint8Array;
+  clientAuth?: 'none' | 'request' | 'require';
+  maxIdleTimeoutMs?: number;
+  maxUdpPayloadSize?: number;
+  initialMaxData?: number;
+  initialMaxStreamDataBidiLocal?: number;
+  initialMaxStreamsBidi?: number;
+  disableActiveMigration?: boolean;
+  enableDatagrams?: boolean;
+  disableRetry?: boolean;
+  maxConnections?: number;
+  keylog?: boolean;
+}
+
+/**
+ * Build the common (protocol-agnostic) portion of the server options JSON
+ * object. Merge the result with the ABI-only setup fields (`localAddr`,
+ * `retryTokenKeyHex`) and any protocol-specific fields (H3's
+ * `qpackMaxTableCapacity`/`qpackBlockedStreams`/`quicLb`/`serverId`, QUIC's
+ * `alpn`).
+ */
+export function buildCommonServerOptionsJson(opts: CommonWasmServerOptions): Record<string, unknown> {
+  const json: Record<string, unknown> = {
+    key: utf8Decode(opts.key),
+    cert: utf8Decode(opts.cert),
+  };
+  if (opts.ca) json.ca = utf8Decode(opts.ca);
+  if (opts.clientAuth !== undefined) json.clientAuth = opts.clientAuth;
+  if (opts.maxIdleTimeoutMs !== undefined) json.maxIdleTimeoutMs = opts.maxIdleTimeoutMs;
+  if (opts.maxUdpPayloadSize !== undefined) json.maxUdpPayloadSize = opts.maxUdpPayloadSize;
+  if (opts.initialMaxData !== undefined) json.initialMaxData = opts.initialMaxData;
+  if (opts.initialMaxStreamDataBidiLocal !== undefined) json.initialMaxStreamDataBidiLocal = opts.initialMaxStreamDataBidiLocal;
+  if (opts.initialMaxStreamsBidi !== undefined) json.initialMaxStreamsBidi = opts.initialMaxStreamsBidi;
+  if (opts.disableActiveMigration !== undefined) json.disableActiveMigration = opts.disableActiveMigration;
+  if (opts.enableDatagrams !== undefined) json.enableDatagrams = opts.enableDatagrams;
+  if (opts.disableRetry !== undefined) json.disableRetry = opts.disableRetry;
+  if (opts.maxConnections !== undefined) json.maxConnections = opts.maxConnections;
   if (opts.keylog !== undefined) json.keylog = opts.keylog;
   return json;
 }

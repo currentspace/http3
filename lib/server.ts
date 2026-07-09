@@ -19,6 +19,9 @@ import type { IncomingHeaders, StreamFlags } from './stream.js';
 import { ServerHttp2StreamAdapter, normalizeIncomingHeaders } from './stream-h2-adapter.js';
 import { WorkerEventLoop, EVENT_SHUTDOWN_COMPLETE, getBinding } from './event-loop.js';
 import type { NativeEvent, NativeWorkerServerBinding, ServerEventLoopLike } from './event-loop.js';
+import { createServerEventLoop, resolveWasmArtifactPath } from './client-event-loop-factory.js';
+import { toNativeEvents } from './wasm-event-bridge.js';
+import type { WasmH3ServerEventLoop } from './wasm/h3-server-event-loop.js';
 import {
   Http3Error,
   ERR_HTTP3_INVALID_STATE,
@@ -29,7 +32,7 @@ import {
 import { toSessionError, toStreamError } from './error-map.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
-import { runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
+import { normalizeRuntimeMode, runWithRuntimeSelection, runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
 
 // Event type constants (must match Rust EventType enum)
 const EVENT_NEW_SESSION = 1;
@@ -202,6 +205,23 @@ export class Http3SecureServer extends EventEmitter {
       throw new TypeError('serverId requires quicLb=true');
     }
     this._keylogPath = prepareKeylogFile(this._options.keylog);
+
+    // wasm construction (binding a node:dgram socket) is inherently
+    // asynchronous, unlike every native path below (a synchronous NAPI
+    // call) — branch out to a dedicated async bootstrap *before* ever
+    // calling the synchronous runWithRuntimeSelectionSync, which cannot
+    // (and, per its own guard, must not) be asked to run 'wasm'. This
+    // keeps the native path below byte-for-byte unchanged: native binding
+    // resolution (`getBinding()`) happens only inside its own thunk, never
+    // eagerly, exactly like `lib/client-event-loop-factory.ts`'s pattern —
+    // this is the fix for the same bug class as
+    // "connectQuic() unconditionally resolved the native binding".
+    if (normalizeRuntimeMode(this._options.runtimeMode) === 'wasm') {
+      this._starting = true;
+      void this._listenWasm(port, listenHost, { key, cert, ca, serverId });
+      return this;
+    }
+
     let quicStart: {
       workerServer: NativeWorkerServerBinding;
       eventLoop: WorkerEventLoop;
@@ -210,9 +230,16 @@ export class Http3SecureServer extends EventEmitter {
     try {
       quicStart = runWithRuntimeSelectionSync(this, this._options, (runtimeMode) => {
         if (runtimeMode === 'wasm') {
-          // Unreachable: runWithRuntimeSelectionSync rejects 'wasm' before
-          // ever invoking this callback (N1: no server support in wasm).
-          throw new Http3Error('unreachable: wasm runtime mode reached server construction', ERR_HTTP3_RUNTIME_UNSUPPORTED);
+          // Unreachable in two independent ways: the outer `if
+          // (normalizeRuntimeMode(...) === 'wasm')` branch above already
+          // diverted every wasm request to `_listenWasm` before this call,
+          // and `runWithRuntimeSelectionSync` itself also rejects 'wasm'
+          // before ever invoking this callback. Kept as an explicit,
+          // narrow-failing guard (matching `connectQuic()`'s identical
+          // pattern) rather than asserted away — this also narrows
+          // `runtimeMode`'s type to `'fast' | 'portable'` for
+          // `NativeServerOptions.runtimeMode` below.
+          throw new Http3Error('unreachable: wasm runtime mode reached native server construction', ERR_HTTP3_RUNTIME_UNSUPPORTED);
         }
         const NativeWorkerServer = getBinding().NativeWorkerServer;
         const workerServer = new NativeWorkerServer({
@@ -300,6 +327,132 @@ export class Http3SecureServer extends EventEmitter {
     });
 
     return this;
+  }
+
+  /**
+   * wasm bootstrap for `listen()`: binds a `node:dgram` UDP socket (via
+   * `bindNodeUdpServer`), constructs a `WasmH3ServerEventLoop`, then starts
+   * the H2 fallback TCP listener on the same port — mirroring the native
+   * path's own two-step bind (QUIC/UDP synchronously, then H2/TCP
+   * asynchronously) as closely as an inherently-async UDP bind allows.
+   *
+   * `this._eventLoop` ends up typed `ServerEventLoopLike` either way — the
+   * session/stream dispatch code (`_dispatchEvents`, `_onNewSession`, etc.)
+   * is completely unchanged and unaware which runtime produced the events
+   * it receives, as long as they arrive `NativeEvent`-shaped (via
+   * `toNativeEvents`) through a `ServerEventLoopLike`-shaped adapter.
+   *
+   * Errors here (bad TLS/wasm construction, bind failure, H2 bind failure)
+   * all funnel through the existing `_abortStartup` path and surface as an
+   * asynchronous `'error'` event — `listen()` itself already returns
+   * synchronously before this method's construction/bind work has even
+   * started, so there is no synchronous throw to preserve here (this
+   * mirrors how the native path's own H2-bind failures are already
+   * reported asynchronously, via `onH2BindError` above, not a synchronous
+   * throw).
+   */
+  private async _listenWasm(
+    port: number,
+    listenHost: string,
+    tls: { key: Buffer; cert: Buffer; ca?: Buffer; serverId?: Buffer },
+  ): Promise<void> {
+    let eventLoop: WasmH3ServerEventLoop;
+    let addrInfo: { address: string; family: string; port: number };
+    try {
+      const result = await runWithRuntimeSelection(this, this._options, async (runtimeMode) => {
+        const loop = await createServerEventLoop<WasmH3ServerEventLoop>(
+          runtimeMode,
+          () => {
+            // Unreachable: `_listenWasm` is only ever called when
+            // `normalizeRuntimeMode(this._options.runtimeMode) === 'wasm'`,
+            // and `runWithRuntimeSelection`'s own early 'wasm' branch never
+            // attempts anything else — guarded explicitly (matching
+            // connectQuic()'s identical pattern) so a future bug here
+            // fails loudly instead of silently resolving the native
+            // binding for a wasm request.
+            throw new Http3Error(
+              'unreachable: native constructor invoked for wasm runtime mode',
+              ERR_HTTP3_RUNTIME_UNSUPPORTED,
+            );
+          },
+          async () => {
+            // Lazily dynamic-imported so native-only consumers never load
+            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6) — mirrors
+            // lib/quic-client.ts's identical wasm-branch construction.
+            const { WasmH3ServerEventLoop: WasmLoopCtor } = await import('./wasm/h3-server-event-loop.js');
+            const { loadHttp3WasmCoreFromFile } = await import('./wasm/node-core-loader.js');
+            const { bindNodeUdpServer } = await import('./wasm/node-udp-server-adapter.js');
+            return new WasmLoopCtor(
+              {
+                core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
+                transportFactory: bindNodeUdpServer,
+                key: tls.key,
+                cert: tls.cert,
+                ca: tls.ca,
+                maxIdleTimeoutMs: this._options.maxIdleTimeoutMs,
+                maxUdpPayloadSize: this._options.maxUdpPayloadSize,
+                initialMaxData: this._options.initialMaxData,
+                initialMaxStreamDataBidiLocal: this._options.initialMaxStreamDataBidiLocal,
+                initialMaxStreamsBidi: this._options.initialMaxStreamsBidi,
+                disableActiveMigration: this._options.disableActiveMigration,
+                enableDatagrams: this._options.enableDatagrams,
+                qpackMaxTableCapacity: this._options.qpackMaxTableCapacity,
+                qpackBlockedStreams: this._options.qpackBlockedStreams,
+                disableRetry: this._options.disableRetry,
+                maxConnections: this._options.maxConnections,
+                quicLb: this._options.quicLb,
+                serverId: tls.serverId,
+                // Deliberate limitation (documented, not a silent gap):
+                // the hs_*/qs_* wasm server ABI has no take_keylog-style
+                // export (unlike the wasm client ABI), so there is no way
+                // to ever drain a per-connection keylog buffer the Rust
+                // side might accumulate — enabling it here would risk
+                // unbounded growth in wasm linear memory for any
+                // long-lived connection. Always disabled for the wasm
+                // server runtime regardless of `this._options.keylog`
+                // (native servers are unaffected).
+                keylog: false,
+              },
+              (events) => {
+                this._dispatchEvents(toNativeEvents(events));
+              },
+            );
+          },
+        );
+        const addr = await loop.listen(port, listenHost);
+        return { loop, addr };
+      });
+      eventLoop = result.loop;
+      addrInfo = { address: result.addr.address, family: result.addr.family, port: result.addr.port };
+    } catch (err: unknown) {
+      this._keylogPath = null;
+      await this._abortStartup(err);
+      return;
+    }
+
+    this._eventLoop = eventLoop;
+    this._workerServer = null;
+    this._address = addrInfo;
+
+    let h2Server: Http2SecureServer;
+    try {
+      h2Server = this._createH2Server();
+    } catch (err: unknown) {
+      await this._abortStartup(err);
+      return;
+    }
+    this._h2Server = h2Server;
+    this._attachH2ServerListeners(h2Server);
+
+    const onH2BindError = (err: Error): void => {
+      void this._abortStartup(err);
+    };
+    h2Server.once('error', onH2BindError);
+    h2Server.listen(addrInfo.port, listenHost, () => {
+      h2Server.off('error', onH2BindError);
+      this._starting = false;
+      process.nextTick(() => this.emit('listening'));
+    });
   }
 
   /** Gracefully shut down the server, closing all sessions and sockets. */

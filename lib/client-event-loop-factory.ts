@@ -40,6 +40,28 @@ export async function createClientEventLoop<TLoop>(
 }
 
 /**
+ * Server-side sibling of {@link createClientEventLoop} — identical
+ * branching shape (same reasoning: `mode === 'wasm'` lazily resolves
+ * `createWasm`'s own `import()`, never invoking the native constructor
+ * thunk for wasm, so native-only server consumers never load any
+ * `lib/wasm/**` code). Kept as a distinct, separately-named export (rather
+ * than reusing `createClientEventLoop` directly under a client-flavored
+ * name at server call sites) purely for readability at `lib/server.ts`/
+ * `lib/quic-server.ts`'s call sites — the body is intentionally
+ * byte-for-byte the same generic branch.
+ */
+export async function createServerEventLoop<TLoop>(
+  mode: SelectedRuntimeMode,
+  createNative: () => TLoop,
+  createWasm: () => Promise<TLoop>,
+): Promise<TLoop> {
+  if (mode === 'wasm') {
+    return createWasm();
+  }
+  return createNative();
+}
+
+/**
  * Locate `dist/wasm/http3_client.wasm` relative to this package's own
  * install location — robust to both the production compiled layout
  * (`dist/client-event-loop-factory.js`, one level under the package root)
