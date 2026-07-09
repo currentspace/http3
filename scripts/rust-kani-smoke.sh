@@ -33,10 +33,23 @@ KANI_HARNESSES=(
   quic_lb_plaintext_preserves_low_bits_and_embeds_server_id
   stream_tracking_closed_cleanup_drops_target_state
   stream_tracking_open_cleanup_is_noop
+  chunk_pool_bin_for_cap_returns_largest_class_leq_cap
+  chunk_pool_bin_for_cap_accepts_every_bin_for_allocation
+  buffer_pool_class_for_capacity_returns_largest_class_leq_cap
+  buffer_pool_class_for_capacity_accepts_every_class_for_request_allocation
+  retry_token_round_trip_recovers_empty_odcid
+  retry_token_parse_never_panics_on_arbitrary_bytes
+  retry_token_rejects_large_backwards_clock_jump
 )
 KANI_DEEP_HARNESSES=(
   pending_write_partial_accept_accounting
   cmsg_cursor_bounded_walk_stays_in_buffer
+  # Needs ~185s to solve (20 fully-symbolic ODCID bytes x both address
+  # families), well past the 60s default harness-timeout the always-run
+  # smoke list assumes — see rust-safety.yml's "Kani proof smoke" step in
+  # the scheduled-deep job, which raises HTTP3_KANI_HARNESS_TIMEOUT for
+  # exactly this harness.
+  retry_token_round_trip_recovers_full_length_odcid
 )
 
 note_blocked() {

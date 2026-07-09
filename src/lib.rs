@@ -124,6 +124,39 @@ pub mod fuzz_exports {
     pub fn pending_write_state_ops(ops: &[(u8, u8, u8)]) {
         crate::pending_write::fuzz_pending_write_state_ops(ops.iter().copied());
     }
+
+    /// Mint a retry token via the real `ConnectionMap` path (HMAC included,
+    /// not just `proof_core::retry_token_model`'s pure parsing logic that
+    /// Kani already covers) — the fuzz target's incremental value over the
+    /// Kani proofs is exercising this integration and the real `boring`
+    /// HMAC FFI call under adversarial/coverage-guided byte patterns.
+    pub fn retry_token_mint(
+        key: [u8; 32],
+        peer: std::net::SocketAddr,
+        odcid: &[u8],
+    ) -> Vec<u8> {
+        let map = crate::connection_map::ConnectionMap::with_key_bytes(
+            1,
+            crate::cid::CidEncoding::random(),
+            key,
+        );
+        map.mint_token(&peer, odcid)
+    }
+
+    /// Validate a (possibly mutated/adversarial) retry token via the real
+    /// `ConnectionMap` path.
+    pub fn retry_token_validate(
+        key: [u8; 32],
+        token: &[u8],
+        peer: std::net::SocketAddr,
+    ) -> Option<Vec<u8>> {
+        let map = crate::connection_map::ConnectionMap::with_key_bytes(
+            1,
+            crate::cid::CidEncoding::random(),
+            key,
+        );
+        map.validate_token(token, &peer)
+    }
 }
 
 /// Export surface for a future `crates/http3-wasm` extern-C ABI crate (see

@@ -65,10 +65,15 @@ jobs:
           cargo +nightly fuzz run pending_write_ops -- -max_total_time=60
           cargo +nightly fuzz run parse_recv_cmsgs -- -max_total_time=60
           cargo +nightly fuzz run parse_recv_cmsgs_structured -- -max_total_time=60
+          cargo +nightly fuzz run retry_token_roundtrip -- -max_total_time=60
 
       - name: Kani proof smoke
         env:
           HTTP3_KANI_DEEP: '1'
+          # retry_token_round_trip_recovers_full_length_odcid needs ~185s
+          # to solve; the default 60s (fine for every other harness) isn't
+          # enough for it.
+          HTTP3_KANI_HARNESS_TIMEOUT: '300s'
         run: bash scripts/rust-kani-smoke.sh
 
       - name: Verus proof smoke
