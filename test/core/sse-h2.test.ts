@@ -40,11 +40,13 @@ describe('SSE over H2', () => {
         return;
       }
       const sse = createSseStream(stream);
-      void (async () => {
+      (async () => {
         await sse.send({ data: 'alpha' });
         await sse.send({ data: ['beta', 'line'] });
         sse.close();
-      })();
+      })().catch((err: unknown) => {
+        stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
     });
 
     const port = await new Promise<number>((resolve) => {

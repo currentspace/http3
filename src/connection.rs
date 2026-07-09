@@ -4,7 +4,9 @@
 #![deny(unsafe_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(feature = "qlog-files")]
 use std::fmt::Write as _;
+#[cfg(feature = "qlog-files")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -944,6 +946,7 @@ impl H3Connection {
     }
 }
 
+#[cfg(feature = "qlog-files")]
 fn maybe_enable_qlog(
     quiche_conn: &mut quiche::Connection<ArcBufFactory>,
     conn_id: &[u8],
@@ -983,6 +986,19 @@ fn maybe_enable_qlog(
     );
 
     Some(file_path.to_string_lossy().into_owned())
+}
+
+/// No-op stand-in when `quiche/qlog` isn't compiled in (N5 in
+/// `docs/WASM_CLIENT_PLAN.md`: qlog is excluded from the wasm build).
+#[cfg(not(feature = "qlog-files"))]
+fn maybe_enable_qlog(
+    _quiche_conn: &mut quiche::Connection<ArcBufFactory>,
+    _conn_id: &[u8],
+    _role: &str,
+    _qlog_dir: Option<&str>,
+    _qlog_level: Option<&str>,
+) -> Option<String> {
+    None
 }
 
 #[cfg(test)]

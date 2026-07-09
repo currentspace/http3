@@ -145,9 +145,9 @@ describe('QUIC E2E scenarios', () => {
     });
 
     // Listen for server-initiated stream
-    const serverData = new Promise<Buffer>((resolve) => {
+    const serverData = new Promise<Buffer>((resolve, reject) => {
       client.on('stream', (stream: QuicStream) => {
-        collect(stream).then(resolve);
+        collect(stream).then(resolve, reject);
       });
     });
 

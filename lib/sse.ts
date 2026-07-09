@@ -1,4 +1,5 @@
 import { once } from 'node:events';
+import { runDetached } from './run-detached.js';
 import type { IncomingHeaders, ServerHttp3Stream } from './stream.js';
 
 /** A single Server-Sent Event payload. */
@@ -104,13 +105,7 @@ export class ServerSentEventStream {
   heartbeat(intervalMs = 15000, comment = 'keepalive'): void {
     this._clearHeartbeat();
     this._heartbeatTimer = setInterval(() => {
-      void (async (): Promise<void> => {
-        try {
-          await this.comment(comment);
-        } catch {
-          this.close();
-        }
-      })();
+      runDetached(this.comment(comment), () => { this.close(); });
     }, intervalMs);
     this._heartbeatTimer.unref();
   }

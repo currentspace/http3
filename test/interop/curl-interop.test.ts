@@ -290,11 +290,13 @@ describe('Curl Interop (dual H3+H2)', {
         return;
       }
       const sse = createSseStream(stream);
-      void (async () => {
+      (async () => {
         await sse.send({ data: 'hello' });
         await sse.send({ data: 'world' });
         sse.close();
-      })();
+      })().catch((err: unknown) => {
+        stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
     });
 
     try {

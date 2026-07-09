@@ -97,6 +97,60 @@ impl std::fmt::Display for Http3NativeError {
 
 impl std::error::Error for Http3NativeError {}
 
+impl Http3NativeError {
+    /// The `[h3:CATEGORY|key=value|...]` structured prefix used by both the
+    /// napi error conversion below and a sans-IO / `wasm-abi` caller's
+    /// `last_error` ABI export (`crates/http3-wasm`). Kept always-compiled
+    /// (no `node-api` gate) and independent of it so the wasm build
+    /// preserves the exact same error-message contract `lib/error-map.ts`
+    /// already parses — see `docs/WASM_CLIENT_PLAN.md` A3 §5.3.
+    ///
+    /// Audit finding #30: prefix the message with a structured tag so a
+    /// TS-side helper (`lib/error-map.ts::fromNapiError`) can recover
+    /// category + metadata without scraping free-form English.
+    pub fn structured_tag(&self) -> String {
+        match self {
+            Self::Quiche(_) => "[h3:quic]".to_string(),
+            Self::H3(_) => "[h3:h3]".to_string(),
+            Self::Io(io) => match io.raw_os_error() {
+                Some(errno) => format!("[h3:io|errno={errno}]"),
+                None => "[h3:io]".to_string(),
+            },
+            Self::FastPathUnavailable {
+                driver,
+                syscall,
+                errno,
+                ..
+            } => {
+                let errno_part = errno.map(|e| format!("|errno={e}")).unwrap_or_default();
+                format!("[h3:fast-path|driver={driver}|syscall={syscall}{errno_part}]")
+            }
+            Self::RuntimeIo {
+                driver,
+                syscall,
+                errno,
+                reason_code,
+                ..
+            } => {
+                let errno_part = errno.map(|e| format!("|errno={e}")).unwrap_or_default();
+                format!(
+                    "[h3:runtime-io|driver={driver}|syscall={syscall}|reason={reason_code}{errno_part}]"
+                )
+            }
+            Self::InvalidState(_) => "[h3:invalid-state]".to_string(),
+            Self::Config(_) => "[h3:config]".to_string(),
+            Self::ConnectionNotFound(handle) => format!("[h3:not-found|handle={handle}]"),
+        }
+    }
+
+    /// `structured_tag()` followed by the existing human-readable
+    /// `Display` message — the full wire format of every error surfaced
+    /// across the FFI boundary (napi or wasm-abi).
+    pub fn tagged_message(&self) -> String {
+        format!("{} {self}", self.structured_tag())
+    }
+}
+
 impl From<quiche::Error> for Http3NativeError {
     fn from(e: quiche::Error) -> Self {
         Self::Quiche(e)
@@ -277,46 +331,8 @@ impl From<Http3NativeError> for napi::Error {
             | Http3NativeError::Config(_)
             | Http3NativeError::ConnectionNotFound(_) => Status::InvalidArg,
         };
-        // Audit finding #30: prefix the message with a structured tag so
-        // a TS-side helper (lib/error-map.ts::fromNapiError) can recover
-        // category + metadata without scraping free-form English. The
-        // tag is `[h3:CATEGORY|key=value|...] ...` followed by the
-        // existing human-readable message — backward-compat with any
-        // regex match on the trailing text.
-        let tag = match &err {
-            Http3NativeError::Quiche(_) => "[h3:quic]".to_string(),
-            Http3NativeError::H3(_) => "[h3:h3]".to_string(),
-            Http3NativeError::Io(io) => match io.raw_os_error() {
-                Some(errno) => format!("[h3:io|errno={errno}]"),
-                None => "[h3:io]".to_string(),
-            },
-            Http3NativeError::FastPathUnavailable {
-                driver,
-                syscall,
-                errno,
-                ..
-            } => {
-                let errno_part = errno.map(|e| format!("|errno={e}")).unwrap_or_default();
-                format!("[h3:fast-path|driver={driver}|syscall={syscall}{errno_part}]")
-            }
-            Http3NativeError::RuntimeIo {
-                driver,
-                syscall,
-                errno,
-                reason_code,
-                ..
-            } => {
-                let errno_part = errno.map(|e| format!("|errno={e}")).unwrap_or_default();
-                format!(
-                    "[h3:runtime-io|driver={driver}|syscall={syscall}|reason={reason_code}{errno_part}]"
-                )
-            }
-            Http3NativeError::InvalidState(_) => "[h3:invalid-state]".to_string(),
-            Http3NativeError::Config(_) => "[h3:config]".to_string(),
-            Http3NativeError::ConnectionNotFound(handle) => {
-                format!("[h3:not-found|handle={handle}]")
-            }
-        };
-        napi::Error::new(status, format!("{tag} {err}"))
+        // backward-compat with any regex match on the trailing human text —
+        // see Http3NativeError::tagged_message for the shared tag logic.
+        napi::Error::new(status, err.tagged_message())
     }
 }

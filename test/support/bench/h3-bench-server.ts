@@ -141,7 +141,7 @@ async function main(): Promise<void> {
       chunks.push(c);
     });
     stream.on('end', () => {
-      void writeChunkedResponse(stream, chunks).catch((error) => {
+      writeChunkedResponse(stream, chunks).catch((error) => {
         stream.destroy(error);
       });
     });
@@ -199,15 +199,30 @@ async function main(): Promise<void> {
   }, config.statsIntervalMs ?? 1000);
   statsInterval.unref();
 
-  process.on('SIGTERM', async () => {
-    clearInterval(statsInterval);
-    await server.close();
-    await sleep(100);
-    emitJson(snapshot('summary'));
-    process.exit(0);
+  process.on('SIGTERM', () => {
+    // process.on() never awaits/tracks its listener's return value, so an
+    // async listener that throws becomes an unhandled rejection at the
+    // exact moment we're trying to shut down cleanly — catch explicitly
+    // and still force an exit rather than leaving shutdown to hang or
+    // crash unpredictably.
+    (async (): Promise<void> => {
+      clearInterval(statsInterval);
+      await server.close();
+      await sleep(100);
+      emitJson(snapshot('summary'));
+    })().then(
+      () => { process.exit(0); },
+      (err: unknown) => {
+        console.error('error during SIGTERM shutdown:', err);
+        process.exit(1);
+      },
+    );
   });
 
   process.stdin.resume();
 }
 
-void main();
+main().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});

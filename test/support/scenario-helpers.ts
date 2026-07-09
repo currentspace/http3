@@ -244,7 +244,9 @@ function routeHandler(stream: ServerHttp3Stream, headers: IncomingHeaders, flags
     const sse = createSseStream(stream);
     let i = 0;
     const interval = setInterval(() => {
-      void sse.send({ event: 'update', data: `event-${i}` });
+      sse.send({ event: 'update', data: `event-${i}` }).catch((err: unknown) => {
+        stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
       i++;
       if (i >= 5) {
         clearInterval(interval);

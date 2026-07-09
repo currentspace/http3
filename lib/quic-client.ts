@@ -1,15 +1,18 @@
 import { EventEmitter } from 'node:events';
-import { EVENT_SHUTDOWN_COMPLETE, binding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
-import type { NativeEvent, NativeQuicClientBinding } from './event-loop.js';
-import type { ConnectionEndpoint } from './endpoint.js';
+import { EVENT_SHUTDOWN_COMPLETE, getBinding, streamSendOutcomeBytes, waitForShutdownOrTimeout } from './event-loop.js';
+import type { NativeEvent, NativeBinding, NativeQuicClientBinding } from './event-loop.js';
+import { createClientEventLoop, resolveWasmArtifactPath } from './client-event-loop-factory.js';
+import type { ConnectionEndpoint, DnsLookupFn } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import { toSessionError } from './error-map.js';
+import { toNativeEvents, toNativeKeylogLine } from './wasm-event-bridge.js';
 import { ERR_HTTP3_INVALID_STATE, ERR_HTTP3_SESSION_ERROR, ERR_HTTP3_TLS_CONFIG_ERROR, Http3Error } from './errors.js';
 import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
 import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
+import { DetachedTasks } from './run-detached.js';
 
 const EVENT_NEW_STREAM = 2;
 const EVENT_DATA = 4;
@@ -28,6 +31,8 @@ const EVENT_DATAGRAM = 14;
 export interface QuicConnectOptions {
   /** Abort the connect attempt (DNS lookup + handshake). Audit finding #15. */
   signal?: AbortSignal;
+  /** Override DNS resolution for hostname endpoints. Defaults to `node:dns/promises`'s `lookup`. IP-literal endpoints bypass DNS regardless. */
+  dnsLookup?: DnsLookupFn;
   /** Runtime selection mode. Default: `'auto'`. */
   runtimeMode?: RuntimeOptions['runtimeMode'];
   /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
@@ -171,7 +176,7 @@ export interface QuicClientSession {
  * Obtain an instance via {@link connectQuic} or {@link connectQuicAsync}.
  */
 export class QuicClientSession extends EventEmitter {
-  private _eventLoop: QuicClientEventLoop | null = null;
+  private _eventLoop: QuicClientEventLoopLike | null = null;
   private readonly _streams = new Map<number, QuicStream>();
   private _handshakeComplete = false;
   /** @internal */
@@ -187,6 +192,7 @@ export class QuicClientSession extends EventEmitter {
   private _connectTimer: NodeJS.Timeout | null = null;
   private _closeEmitted = false;
   private _closeInfo: SessionCloseInfo | null = null;
+  private readonly _detachedTasks = new DetachedTasks();
 
   constructor() {
     super();
@@ -194,15 +200,17 @@ export class QuicClientSession extends EventEmitter {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
-    // Swallow unobserved rejections via try/await (project rule: no `.catch`).
-    const readyPromise = this._readyPromise;
-    void (async (): Promise<void> => {
-      try {
-        await readyPromise;
-      } catch {
-        /* unobserved — caller chose event-driven flow */
-      }
-    })();
+    // ready() is optional for event-driven callers; tracking it here
+    // observes (and, since readyPromise is fully driven by _resolveReady/
+    // _rejectReady above, can never itself surface) any rejection, and
+    // close() below waits for it to settle like every other detached task
+    // this session kicks off.
+    this._detachedTasks.run(this._readyPromise, () => { /* unobserved — caller chose event-driven flow */ });
+  }
+
+  /** @internal */
+  _registerDetachedTask(operation: Promise<unknown>, onError: (error: Error) => void): void {
+    this._detachedTasks.run(operation, onError);
   }
 
   /** Whether the QUIC/TLS handshake has completed. */
@@ -285,10 +293,11 @@ export class QuicClientSession extends EventEmitter {
       this._eventLoop = null;
     }
     this._emitClose({ errorCode, reason });
+    await this._detachedTasks.drain();
   }
 
   /** @internal */
-  _setEventLoop(loop_: QuicClientEventLoop | null): void {
+  _setEventLoop(loop_: QuicClientEventLoopLike | null): void {
     this._eventLoop = loop_;
   }
 
@@ -320,13 +329,7 @@ export class QuicClientSession extends EventEmitter {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (loop_) {
-      void (async (): Promise<void> => {
-        try {
-          await loop_.close();
-        } catch {
-          /* best-effort abort cleanup */
-        }
-      })();
+      this._detachedTasks.run(loop_.close(), () => { /* best-effort abort cleanup */ });
     }
     this._emitSessionError(err);
   }
@@ -517,13 +520,10 @@ export class QuicClientSession extends EventEmitter {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (!loop_) return;
-    void (async (): Promise<void> => {
-      try {
-        await loop_.close(info.errorCode, info.reason);
-      } catch {
-        /* native close cleanup is best-effort after SESSION_CLOSE */
-      }
-    })();
+    this._detachedTasks.run(
+      loop_.close(info.errorCode, info.reason),
+      () => { /* native close cleanup is best-effort after SESSION_CLOSE */ },
+    );
   }
 
   private _trackStreamLifecycle(streamId: number, stream: QuicStream): void {
@@ -655,8 +655,8 @@ function toQuicClientConnectError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function getNativeQuicClientConstructor(): typeof binding.NativeQuicClient {
-  const NativeQuicClient = (binding as Partial<typeof binding>).NativeQuicClient;
+function getNativeQuicClientConstructor(): NativeBinding['NativeQuicClient'] {
+  const NativeQuicClient = (getBinding() as Partial<NativeBinding>).NativeQuicClient;
   if (typeof NativeQuicClient !== 'function') {
     throw new Error(
       'The loaded @currentspace/http3 native binding is missing `NativeQuicClient`. '
@@ -713,7 +713,16 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
   const tls = normalizeQuicClientTlsOptions(options);
   const session = new QuicClientSession();
   setPendingRuntimeInfo(session, options);
-  const NativeQuicClient = getNativeQuicClientConstructor();
+  // Pre-flight validation, synchronously, for every mode EXCEPT an explicit
+  // 'wasm' request: this preserves the existing "throws a clear error when
+  // NativeQuicClient is missing" contract (test/release/raw-quic-prebuild-guard.test.ts)
+  // for 'auto'/'fast'/'portable' callers, while a `runtimeMode: 'wasm'`
+  // caller never resolves the native binding at all, at any point
+  // (docs/WASM_CLIENT_PLAN.md §6.6) — 'auto' still validates native here
+  // because auto-selection only ever falls back between 'fast'/'portable',
+  // never to 'wasm', so native is always needed on that path regardless of
+  // which of the two auto ultimately picks.
+  const NativeQuicClient = options?.runtimeMode === 'wasm' ? null : getNativeQuicClientConstructor();
   const shouldAbortConnect = (): boolean => session._closeRequested;
   installQuicConnectAbortHandler(session, options?.signal);
   const authorityString = typeof authority === 'string'
@@ -734,61 +743,120 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
     }, connectTimeoutMs));
   }
 
-  void (async (): Promise<void> => {
+  session._registerDetachedTask((async (): Promise<void> => {
     try {
       const resolved = await resolveConnectionEndpoint(authority, {
         defaultScheme: 'quic',
         defaultPort: 4433,
         signal: options?.signal,
+        dnsLookup: options?.dnsLookup,
       });
       if (shouldAbortConnect()) {
         return;
       }
 
       await runWithRuntimeSelection(session, options, async (runtimeMode) => {
-        const nativeClient = new NativeQuicClient(
-          {
-            ca: tls.ca,
-            cert: tls.cert,
-            key: tls.key,
-            rejectUnauthorized: options?.rejectUnauthorized,
-            alpn: options?.alpn,
-            runtimeMode,
-            maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
-            maxUdpPayloadSize: options?.maxUdpPayloadSize,
-            initialMaxData: options?.initialMaxData,
-            initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
-            initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
-            sessionTicket: options?.sessionTicket,
-            allow0Rtt: options?.allow0RTT,
-            enableDatagrams: options?.enableDatagrams,
-            keylog: options?.keylog,
-            qlogDir: options?.qlogDir,
-            qlogLevel: options?.qlogLevel,
-          },
-          (_err: Error | null, events: NativeEvent[]) => {
-            try {
-              let hasShutdown = false;
-              for (const event of events) {
-                if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-                  hasShutdown = true;
-                }
-              }
-              if (!hasShutdown) {
-                session._dispatchEvents(events);
-              } else {
-                session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-                eventLoop._onShutdownSentinel();
-              }
-            } finally {
-              // Audit #14: release credit on the outstanding-events gauge even
-              // when user event handlers throw during dispatch.
-              nativeClient.ackEventBatch(events.length);
+        const eventLoop = await createClientEventLoop<QuicClientEventLoopLike>(
+          runtimeMode,
+          () => {
+            if (runtimeMode === 'wasm') {
+              // Unreachable: createClientEventLoop never invokes this thunk
+              // for 'wasm' — see docs/WASM_CLIENT_PLAN.md §6.6 ("never pass
+              // 'wasm' to the native binding"). Guarded explicitly rather
+              // than asserted away so a future bug here fails loudly.
+              throw new Http3Error('unreachable: native constructor invoked for wasm runtime mode', ERR_HTTP3_INVALID_STATE);
             }
+            if (!NativeQuicClient) {
+              // Unreachable: `NativeQuicClient` is resolved synchronously
+              // above, at the top of `connectQuic`, whenever
+              // `runtimeMode !== 'wasm'` — exactly the condition guarding
+              // this branch. Guarded explicitly (like the wasm case above)
+              // rather than asserted away so a future bug here fails loudly.
+              throw new Http3Error('unreachable: native constructor unavailable for non-wasm runtime mode', ERR_HTTP3_INVALID_STATE);
+            }
+            const nativeClient = new NativeQuicClient(
+              {
+                ca: tls.ca,
+                cert: tls.cert,
+                key: tls.key,
+                rejectUnauthorized: options?.rejectUnauthorized,
+                alpn: options?.alpn,
+                runtimeMode,
+                maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+                maxUdpPayloadSize: options?.maxUdpPayloadSize,
+                initialMaxData: options?.initialMaxData,
+                initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+                initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+                sessionTicket: options?.sessionTicket,
+                allow0Rtt: options?.allow0RTT,
+                enableDatagrams: options?.enableDatagrams,
+                keylog: options?.keylog,
+                qlogDir: options?.qlogDir,
+                qlogLevel: options?.qlogLevel,
+              },
+              (_err: Error | null, events: NativeEvent[]) => {
+                try {
+                  let hasShutdown = false;
+                  for (const event of events) {
+                    if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                      hasShutdown = true;
+                    }
+                  }
+                  if (!hasShutdown) {
+                    session._dispatchEvents(events);
+                  } else {
+                    session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+                    nativeEventLoop._onShutdownSentinel();
+                  }
+                } finally {
+                  // Audit #14: release credit on the outstanding-events gauge even
+                  // when user event handlers throw during dispatch.
+                  nativeClient.ackEventBatch(events.length);
+                }
+              },
+            );
+
+            const nativeEventLoop = new QuicClientEventLoop(nativeClient);
+            return nativeEventLoop;
+          },
+          async () => {
+            // Lazily dynamic-imported so native-only consumers never load
+            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6). See the
+            // identical note in lib/client.ts: Node-only pieces (`.wasm`
+            // file loading, `node:dgram`) are built here and handed to
+            // `WasmQuicClientEventLoop` as an already-instantiated core +
+            // transport factory (Phase 5, docs/WASM_CLIENT_PLAN.md §9).
+            const { WasmQuicClientEventLoop } = await import('./wasm/quic-client-event-loop.js');
+            const { loadHttp3WasmCoreFromFile } = await import('./wasm/node-core-loader.js');
+            const { connectNodeUdp } = await import('./wasm/node-udp-adapter.js');
+            return new WasmQuicClientEventLoop(
+              {
+                core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
+                transportFactory: connectNodeUdp,
+                ca: tls.ca,
+                cert: tls.cert,
+                key: tls.key,
+                alpn: options?.alpn,
+                rejectUnauthorized: options?.rejectUnauthorized,
+                maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+                maxUdpPayloadSize: options?.maxUdpPayloadSize,
+                initialMaxData: options?.initialMaxData,
+                initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+                initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+                sessionTicket: options?.sessionTicket,
+                allow0RTT: options?.allow0RTT,
+                enableDatagrams: options?.enableDatagrams,
+                keylog: options?.keylog,
+              },
+              (events) => {
+                session._dispatchEvents(toNativeEvents(events));
+              },
+              (line) => {
+                session.emit('keylog', toNativeKeylogLine(line));
+              },
+            );
           },
         );
-
-        const eventLoop = new QuicClientEventLoop(nativeClient);
         session._setEventLoop(eventLoop);
         if (shouldAbortConnect()) {
           await eventLoop.close();
@@ -815,7 +883,12 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
       session._markReadyError(error);
       session._emitSessionError(error);
     }
-  })();
+  })(), (err: Error) => {
+    // Unreachable: the catch above already reports every failure via
+    // session._markReadyError/_emitSessionError without rethrowing. Pure
+    // defensive backstop.
+    console.error('unhandled error establishing raw QUIC connection:', err);
+  });
 
   return session;
 }

@@ -49,12 +49,14 @@ describe('SSE over H3', () => {
         return;
       }
       const sse = createSseStream(stream);
-      void (async () => {
+      (async () => {
         await sse.send({ id: '1', event: 'tick', data: 'one' });
         await sse.send({ id: '2', event: 'tick', data: ['two', 'line2'] });
         await sse.comment('done');
         sse.close();
-      })();
+      })().catch((err: unknown) => {
+        stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
     });
 
     const port = await new Promise<number>((resolve) => {

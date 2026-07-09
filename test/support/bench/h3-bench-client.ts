@@ -568,4 +568,7 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-void main();
+main().catch((err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});

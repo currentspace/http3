@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use napi_derive::napi;
 use serde::Serialize;
 
-use crate::transport::RuntimeDriverKind;
+use crate::datagram::RuntimeDriverKind;
 
 #[cfg_attr(feature = "node-api", napi(object))]
 #[derive(Clone, Debug, Default, Serialize)]
@@ -571,6 +571,7 @@ pub(crate) fn record_event_batch_rx_pause() {
 /// Audit #18: bump the ECN counter that matches the observed code point
 /// on an inbound datagram. Telemetry-only — quiche 0.28 doesn't expose
 /// these through its API.
+#[cfg(feature = "os-runtime")]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn record_ecn_recv(point: crate::transport::socket::EcnCodePoint) {
     use crate::transport::socket::EcnCodePoint;
@@ -1489,6 +1490,7 @@ mod tests {
         assert_eq!(snap.eventBatchSelfHealedTotal, 100);
     }
 
+    #[cfg(feature = "os-runtime")]
     #[test]
     fn test_record_ecn_recv_classification() {
         use crate::transport::socket::EcnCodePoint;

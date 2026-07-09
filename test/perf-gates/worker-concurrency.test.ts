@@ -103,13 +103,23 @@ describe('Worker Concurrency', () => {
     }, (stream, headers, flags) => {
       const path = headers[':path'] as string;
 
-      // Slow handler for tier 4 test
+      // Slow handler for tier 4 test. The handler callback itself isn't
+      // async (the server framework doesn't await it), so this deferred
+      // response can't be a plain `await` — but it still must not become
+      // an unhandled rejection if respond()/end() throw, hence the
+      // explicit rejection handler routing into the stream's own error
+      // reporting instead of a bare `.then(onFulfilled)`.
       if (path.startsWith('/slow')) {
         if (flags.endStream) {
-          delay(1).then(() => {
-            stream.respond({ ':status': '200' });
-            stream.end(path);
-          });
+          delay(1).then(
+            () => {
+              stream.respond({ ':status': '200' });
+              stream.end(path);
+            },
+            (err: unknown) => {
+              stream.destroy(err instanceof Error ? err : new Error(String(err)));
+            },
+          );
           return;
         }
       }

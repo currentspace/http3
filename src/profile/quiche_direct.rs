@@ -421,6 +421,7 @@ fn build_client_config(options: &DirectOptions) -> Result<quiche::Config, String
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
     new_quic_client_config(&client_options).map_err(|err| err.to_string())
 }

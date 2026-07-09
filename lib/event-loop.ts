@@ -439,7 +439,14 @@ export interface LifecycleTraceSnapshot {
   events: LifecycleTraceEvent[];
 }
 
-interface NativeBinding {
+/**
+ * Shape of the loaded native N-API module. Exported (rather than kept
+ * file-private) so callers that need to reference a specific constructor's
+ * type (e.g. `NativeBinding['NativeQuicClient']`) can do so without also
+ * importing the concrete {@link binding} value.
+ * @internal
+ */
+export interface NativeBinding {
   NativeWorkerServer: new (
     options: NativeServerOptions,
     callback: (err: Error | null, events: NativeEvent[]) => void,
@@ -482,11 +489,56 @@ function findBinding(): string {
   );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
-const binding: NativeBinding = require(findBinding());
+let cachedBinding: NativeBinding | null = null;
 
-/** @internal Loaded native N-API binding. */
-export { binding };
+/**
+ * Resolve and cache the native N-API binding.
+ *
+ * The filesystem walk + `require()` only run on the first call, and the
+ * result is memoized for every call after. Merely importing this module (or
+ * anything that transitively imports it) therefore never touches the
+ * filesystem or throws for a missing/unbuildable native binding — only
+ * calling `getBinding()` does. This is the seam a future non-native (e.g.
+ * wasm) runtime needs: it can import shared types/helpers from this module
+ * without requiring a native build to exist, as long as it never calls this
+ * function. Native behavior is unchanged: the first real call still resolves
+ * (and throws on failure) exactly as the old eager `require` did.
+ */
+export function getBinding(): NativeBinding {
+  if (!cachedBinding) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
+    const loaded: NativeBinding = require(findBinding());
+    cachedBinding = loaded;
+    return loaded;
+  }
+  return cachedBinding;
+}
+
+/**
+ * Compatibility alias for {@link getBinding}(). New lib/ code should call
+ * {@link getBinding}() directly; this export exists so pre-existing direct
+ * `binding.*` call sites (tests, benches) keep working unchanged: property
+ * access transparently resolves through {@link getBinding}(), so the
+ * underlying `require` still only happens lazily, on first property access
+ * rather than at module-import time. Every proxied member is either a plain
+ * stateless function or a constructor, so forwarding through `getBinding()`
+ * per access is behaviorally identical to holding a direct reference.
+ * @internal
+ */
+export const binding: NativeBinding = new Proxy({} as NativeBinding, {
+  get(_target, prop) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+    return Reflect.get(getBinding(), prop);
+  },
+  // Forward writes to the real resolved binding too (rather than the
+  // discarded empty proxy target) so tests that stub out a constructor
+  // (e.g. `binding.NativeQuicClient = undefined`) to simulate an
+  // incomplete prebuild keep observing the mutation everywhere, including
+  // through `getBinding()`.
+  set(_target, prop, value) {
+    return Reflect.set(getBinding(), prop, value);
+  },
+});
 
 /** Callback signature for receiving batches of native events. */
 export type EventCallback = (events: NativeEvent[]) => void;
@@ -625,10 +677,41 @@ export class WorkerEventLoop implements ServerEventLoopLike {
 // ----- Client Event Loop (worker mode) -----
 
 /**
+ * Common interface for worker-based client command adapters.
+ *
+ * Extracted from {@link ClientEventLoop} so consumers (`Http3ClientSessionBase`,
+ * `ClientHttp3Stream`) can be typed against a structural contract instead of
+ * the concrete class. `ClientEventLoop` has private fields, so without this
+ * interface TS's class typing would reject any structurally-equivalent
+ * substitute (e.g. a future non-native event loop implementation).
+ */
+export interface ClientEventLoopLike {
+  connect(serverAddr: string, serverName: string): Promise<void>;
+  sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number;
+  streamSend(streamId: number, data: Buffer, fin: boolean): number;
+  streamClose(streamId: number, errorCode: number): boolean;
+  sendDatagram(data: Buffer): boolean;
+  getSessionMetrics(): {
+    packetsIn: number;
+    packetsOut: number;
+    bytesIn: number;
+    bytesOut: number;
+    handshakeTimeMs: number;
+    rttMs: number;
+    cwnd: number;
+    datagramQueueDepth: number;
+  };
+  getRemoteSettings(): Array<{ id: number; value: number }>;
+  ping(): boolean;
+  getQlogPath(): string | null;
+  close(errorCode?: number, reason?: string): Promise<void>;
+}
+
+/**
  * Event loop adapter for the HTTP/3 client in worker-thread mode.
  * Mirrors {@link WorkerEventLoop} but for the client side.
  */
-export class ClientEventLoop {
+export class ClientEventLoop implements ClientEventLoopLike {
   private readonly worker: NativeWorkerClientBinding;
   private closed = false;
   private _shutdownObserved = false;

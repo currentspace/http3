@@ -12,6 +12,9 @@
 #   VERIFY_SKIP_PERF_GATES=1    skip concurrency + load smoke gates
 #   VERIFY_SKIP_SMOKE_INSTALL=1 skip pack-and-install smoke test
 #   VERIFY_SKIP_BUILD=1         assume native + dist already built
+#   VERIFY_SKIP_WASM=1          skip the wasm build+test step (it also
+#                               self-skips whenever WASI_SDK_PATH is unset —
+#                               see docs/WASM_CLIENT_PLAN.md D1b/D2)
 #
 # Flags:
 #   --no-build      same as VERIFY_SKIP_BUILD=1
@@ -75,6 +78,10 @@ step "typecheck (lib + tests)"
 pnpm run typecheck
 mark_done
 
+step "typecheck (workerd tsconfig — lib/wasm/** without @types/node)"
+pnpm run typecheck:workerd
+mark_done
+
 step "Node-API boundary check"
 pnpm run check:napi-boundary
 mark_done
@@ -109,6 +116,29 @@ if [[ "${VERIFY_SKIP_BUILD:-0}" != "1" ]]; then
 
   step "build:dist (lib → dist)"
   pnpm run build:dist
+  mark_done
+fi
+
+# wasm build+test (docs/WASM_CLIENT_PLAN.md D1b): the wasi-sdk toolchain is
+# machine-specific and NOT installed in the verify.yml CI lanes (ubuntu x3
+# Node, macOS, Dockerfile.verify) — the dedicated D2 CI job is the real
+# enforcement point there. This step must never hard-fail just because the
+# toolchain is absent; it self-skips with a clear notice instead.
+if [[ "${VERIFY_SKIP_WASM:-0}" == "1" ]]; then
+  step "wasm build + test (skipped: VERIFY_SKIP_WASM=1)"
+  printf 'VERIFY_SKIP_WASM=1 set — skipping wasm build+test.\n'
+  mark_done
+elif [[ -z "${WASI_SDK_PATH:-}" ]]; then
+  step "wasm build + test (skipped: WASI_SDK_PATH unset)"
+  printf 'WASI_SDK_PATH is not set — skipping wasm build+test (no wasi-sdk toolchain available locally). The dedicated CI wasm job installs wasi-sdk and is the real enforcement point (docs/WASM_CLIENT_PLAN.md D2); this lane self-skips everywhere else by design.\n'
+  mark_done
+else
+  step "wasm build (build:wasm)"
+  pnpm run build:wasm
+  mark_done
+
+  step "wasm test suite (HTTP3_WASM=1 test:wasm)"
+  HTTP3_WASM=1 pnpm run test:wasm
   mark_done
 fi
 

@@ -2,6 +2,27 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { Http3Error, ERR_HTTP3_ENDPOINT_INVALID, ERR_HTTP3_ENDPOINT_RESOLUTION } from './errors.js';
 
+/**
+ * DNS resolver function shape, matching `node:dns/promises`'s
+ * `lookup(hostname, { all: true })` overload. Injectable so a future host
+ * adapter (e.g. a non-Node runtime) can supply a different hostname
+ * resolution strategy without changing default Node behavior — when not
+ * supplied, {@link resolveConnectionEndpoint} defaults to the real
+ * `node:dns/promises` `lookup`. IP-literal endpoints never call this at all
+ * (they bypass DNS entirely).
+ */
+export type DnsLookupFn = (
+  hostname: string,
+  options: { all: true; verbatim?: boolean },
+) => Promise<Array<{ address: string; family: number }>>;
+
+// Typed once here (rather than inline at the call site) so `?? lookup`
+// resolves against a single non-overloaded signature — combining the raw,
+// overloaded `node:dns/promises` `lookup` with `DnsLookupFn` via `??`
+// directly at the call site produces a union across overloads that
+// TypeScript cannot re-collapse to `DnsLookupFn`'s single return shape.
+const defaultDnsLookup: DnsLookupFn = lookup;
+
 export interface HostEndpoint {
   host: string;
   port: number;
@@ -176,7 +197,13 @@ async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined
 
 export async function resolveConnectionEndpoint(
   endpoint: ConnectionEndpoint,
-  options: { defaultScheme: string; defaultPort: number; signal?: AbortSignal },
+  options: {
+    defaultScheme: string;
+    defaultPort: number;
+    signal?: AbortSignal;
+    /** Override DNS resolution. Defaults to `node:dns/promises`'s `lookup`. */
+    dnsLookup?: DnsLookupFn;
+  },
 ): Promise<ResolvedConnectionEndpoint> {
   throwIfAborted(options.signal);
   const parsed = parseConnectionEndpoint(endpoint, options);
@@ -191,9 +218,10 @@ export async function resolveConnectionEndpoint(
     };
   }
 
+  const resolveHost = options.dnsLookup ?? defaultDnsLookup;
   try {
     const resolved = await raceAbort(
-      lookup(parsed.host, { all: true, verbatim: true }),
+      resolveHost(parsed.host, { all: true, verbatim: true }),
       options.signal,
     );
     throwIfAborted(options.signal);

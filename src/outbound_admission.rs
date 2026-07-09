@@ -14,8 +14,15 @@ use crate::reactor_metrics;
 pub(crate) const OUTBOUND_ADMISSION_HIGH_WATER: usize = 4 * 1024 * 1024;
 pub(crate) const OUTBOUND_ADMISSION_LOW_WATER: usize = 2 * 1024 * 1024;
 
+// `pub` (not `pub(crate)`): a direct-call/wasm-abi caller must be able to
+// name this type to construct `Arc<OutboundAdmission>` for
+// `H3ClientHandler::new_direct` / `QuicClientHandler::new_direct` (see
+// `crate::wasm_exports`). Fields and `new` stay crate-private — the only
+// externally-needed construction path is `Default::default()`, which every
+// native call site already uses exclusively (custom watermarks via `new`
+// are exercised only by this module's own unit tests).
 #[derive(Debug)]
-pub(crate) struct OutboundAdmission {
+pub struct OutboundAdmission {
     queued: AtomicUsize,
     high_water: usize,
     low_water: usize,

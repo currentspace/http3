@@ -6,13 +6,14 @@ import {
   WARN_HTTP3_RUNTIME_FALLBACK,
 } from './errors.js';
 
-export type RuntimeMode = 'auto' | 'fast' | 'portable';
+export type RuntimeMode = 'auto' | 'fast' | 'portable' | 'wasm';
 export type SelectedRuntimeMode = Exclude<RuntimeMode, 'auto'>;
 export type FallbackPolicy = 'error' | 'warn-and-fallback';
-export type RuntimeDriver = 'io_uring' | 'poll' | 'kqueue';
+export type RuntimeDriver = 'io_uring' | 'poll' | 'kqueue' | 'wasm';
 export type RuntimeReasonCode =
   | 'requested-fast'
   | 'requested-portable'
+  | 'requested-wasm'
   | 'auto-selected-fast'
   | 'fast-path-unavailable'
   | 'platform-default'
@@ -149,6 +150,10 @@ export function updateRuntimeInfo(
 }
 
 export function driverForMode(mode: SelectedRuntimeMode, platform = process.platform): RuntimeDriver {
+  // wasm is a JS-only pseudo-driver — it never touches an OS transport
+  // driver, so it is not platform-dependent like 'fast'/'portable' are.
+  if (mode === 'wasm') return 'wasm';
+
   if (platform === 'linux') {
     return mode === 'fast' ? 'io_uring' : 'poll';
   }
@@ -421,6 +426,33 @@ export function runWithRuntimeSelectionSync<T>(
 ): T {
   const runtime = normalizeRuntimeOptions(options);
 
+  // This helper's contract is synchronous: `attempt` must produce `T`
+  // without awaiting anything, which is true of every native
+  // construction path (native `.listen()`/`.connect()` calls are
+  // synchronous NAPI calls) but never true of a wasm server bind (binding
+  // a `node:dgram` socket is inherently asynchronous). Servers now DO
+  // support `runtimeMode: 'wasm'` (`Http3SecureServer.listen()` /
+  // `QuicServer.listen()`, `lib/server.ts` / `lib/quic-server.ts`) — but
+  // they branch to the async-safe `runWithRuntimeSelection` below
+  // *before* ever calling this synchronous helper, precisely because of
+  // that mismatch. Reaching this point with `runtimeMode: 'wasm'` would
+  // mean a caller routed wasm through the wrong selection function — a
+  // real internal bug, not a policy rejection — so this stays a loud,
+  // explicit throw rather than silently falling through to the 'auto'
+  // branch below (which would attempt 'fast' then 'portable' instead of
+  // honoring — or rejecting — what was actually requested).
+  if (runtime.runtimeMode === 'wasm') {
+    throw new Http3Error(
+      "runtimeMode 'wasm' cannot be constructed via the synchronous native-runtime " +
+      'selector (runWithRuntimeSelectionSync) — wasm server construction is ' +
+      'asynchronous (binding a node:dgram socket). This indicates an internal ' +
+      'routing bug: the caller should branch to the async runWithRuntimeSelection ' +
+      'bootstrap before ever reaching this function for wasm mode.',
+      ERR_HTTP3_RUNTIME_UNSUPPORTED,
+      { requestedMode: runtime.runtimeMode, reasonCode: 'runtime-error' },
+    );
+  }
+
   const run = (mode: SelectedRuntimeMode, reasonCode: string): T => {
     try {
       const result = attempt(mode);
@@ -537,6 +569,15 @@ export async function runWithRuntimeSelection<T>(
 
   if (runtime.runtimeMode === 'portable') {
     return await run('portable', 'requested-portable');
+  }
+
+  // Early branch mirroring 'portable' above: 'wasm' is fully resolved here
+  // (no auto/fallback dance) — the wasm branch of
+  // lib/client-event-loop-factory.ts's createClientEventLoop is the only
+  // thing `attempt` does in this case, and it never touches the native
+  // binding (docs/WASM_CLIENT_PLAN.md §6.6).
+  if (runtime.runtimeMode === 'wasm') {
+    return await run('wasm', 'requested-wasm');
   }
 
   if (runtime.runtimeMode === 'fast') {

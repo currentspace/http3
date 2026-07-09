@@ -55,7 +55,7 @@ jobs:
           node-version: '24'
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm install --frozen-lockfile
       - name: Audit dependencies
         run: pnpm audit --audit-level high
       - name: Generate dependency inventory

@@ -49,9 +49,12 @@ describe('EventSource over H3', () => {
 
         const sse = createSseStream(stream);
         counter += 1;
-        void sse.send({ id: String(counter), data: `msg-${counter}` }).then(() => {
-          sse.close();
-        });
+        sse.send({ id: String(counter), data: `msg-${counter}` }).then(
+          () => { sse.close(); },
+          (err: unknown) => {
+            stream.destroy(err instanceof Error ? err : new Error(String(err)));
+          },
+        );
       });
 
       const port = await new Promise<number>((resolve) => {

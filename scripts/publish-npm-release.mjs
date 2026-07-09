@@ -170,6 +170,25 @@ function assertRootPackageLayout(rootManifest, nativePackages) {
     'dist/fetch-adapter.d.ts',
     'dist/sse.js',
     'dist/eventsource.js',
+    // wasm runtime (docs/WASM_CLIENT_PLAN.md D3): the compiled artifact plus
+    // its two foundational TS-compiled entries (loader + host-agnostic WASI
+    // shim). A missing wasm binary here means either build:wasm never ran
+    // before publish, or the dist/wasm-wiped-by-build:dist packaging
+    // regression (see scripts/clean-dist.mjs) came back — fail the publish
+    // the same way a missing native binary already does, rather than
+    // shipping a silently incomplete release.
+    'dist/wasm/http3_client.wasm',
+    'dist/wasm/core-loader.js',
+    'dist/wasm/wasi-shim.js',
+    // Phase 5 (docs/WASM_CLIENT_PLAN.md §9): these two are the actual
+    // `"./wasm"` package export targets (`default` and `workerd`/`worker`
+    // conditions respectively, package.json) — unlike the three files
+    // above (representative internals), a missing one of these means the
+    // export literally fails to resolve for a real consumer.
+    'dist/wasm/index.js',
+    'dist/wasm/index.d.ts',
+    'dist/wasm/index.workerd.js',
+    'dist/wasm/index.workerd.d.ts',
     'index.js',
     'index.d.ts',
     ...nativePackages.map((pkg) => pkg.binaryName),

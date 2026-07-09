@@ -1,10 +1,12 @@
 #![cfg(kani)]
 #![deny(unsafe_code)]
 
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
 use crate::cid::{self, SCID_LEN};
 use crate::proof_core::{
-    admission, cid_model, cmsg_cursor, pending_write_model, recv_buf_model::RecvBufModel,
-    ring_layout, stream_tracking,
+    admission, buffer_pool_model, chunk_pool_model, cid_model, cmsg_cursor, pending_write_model,
+    recv_buf_model::RecvBufModel, retry_token_model, ring_layout, stream_tracking,
 };
 use crate::unsafe_boundary::ProvidedBufferId;
 
@@ -295,6 +297,221 @@ fn stream_tracking_open_cleanup_is_noop() {
     model.cleanup_if_closed(target, false);
 
     assert_eq!(model, before);
+}
+
+#[kani::proof]
+fn chunk_pool_bin_for_cap_returns_largest_class_leq_cap() {
+    let cap: usize = kani::any();
+
+    match chunk_pool_model::bin_for_cap(cap) {
+        Some(idx) => {
+            assert!(chunk_pool_model::CHUNK_CLASSES[idx] <= cap);
+            if idx + 1 < chunk_pool_model::NUM_BINS {
+                assert!(chunk_pool_model::CHUNK_CLASSES[idx + 1] > cap);
+            }
+        }
+        None => {
+            // No class fits: either cap is below the smallest class, or
+            // above the largest.
+            assert!(
+                cap < chunk_pool_model::CHUNK_CLASSES[0]
+                    || cap > *chunk_pool_model::CHUNK_CLASSES.last().unwrap()
+            );
+        }
+    }
+}
+
+/// Guards audit finding #28 directly: any buffer allocated at
+/// `CHUNK_CLASSES[bin_for(len)]` must be accepted back into that exact
+/// same bin by `bin_for_cap`, not silently discarded.
+#[kani::proof]
+fn chunk_pool_bin_for_cap_accepts_every_bin_for_allocation() {
+    let len: usize = kani::any();
+
+    if let Some(idx) = chunk_pool_model::bin_for(len) {
+        assert_eq!(
+            chunk_pool_model::bin_for_cap(chunk_pool_model::CHUNK_CLASSES[idx]),
+            Some(idx)
+        );
+    }
+}
+
+#[kani::proof]
+fn buffer_pool_class_for_capacity_returns_largest_class_leq_cap() {
+    let capacity: usize = kani::any();
+
+    match buffer_pool_model::class_for_capacity(capacity) {
+        Some(idx) => {
+            assert!(buffer_pool_model::RIGHT_SIZED_CLASSES[idx] <= capacity);
+            if idx + 1 < buffer_pool_model::RIGHT_SIZED_CLASSES.len() {
+                assert!(buffer_pool_model::RIGHT_SIZED_CLASSES[idx + 1] > capacity);
+            }
+        }
+        None => {
+            // No class fits: either capacity is below the smallest class,
+            // or above the largest.
+            assert!(
+                capacity < buffer_pool_model::RIGHT_SIZED_CLASSES[0]
+                    || capacity > *buffer_pool_model::RIGHT_SIZED_CLASSES.last().unwrap()
+            );
+        }
+    }
+}
+
+/// Same shape as `chunk_pool_bin_for_cap_accepts_every_bin_for_allocation`:
+/// a buffer allocated at the class `class_for_request` picked must be
+/// accepted back into that same class by `class_for_capacity`.
+#[kani::proof]
+fn buffer_pool_class_for_capacity_accepts_every_class_for_request_allocation() {
+    let len: usize = kani::any();
+
+    if let Some(idx) = buffer_pool_model::class_for_request(len) {
+        assert_eq!(
+            buffer_pool_model::class_for_capacity(buffer_pool_model::RIGHT_SIZED_CLASSES[idx]),
+            Some(idx)
+        );
+    }
+}
+
+/// Round-trip correctness: minting then immediately parsing a token for
+/// the same peer/time must recover the exact original ODCID, for both
+/// address families.
+///
+/// Split into two fixed-length harnesses (empty and `SCID_LEN`, the real
+/// quiche connection-ID cap every production call site upholds, and so
+/// the two ends of the range any real ODCID falls in) rather than one
+/// harness with a symbolic *length*, and comparing the recovered ODCID
+/// with an explicit bounded byte-index loop rather than `Vec<u8>`'s
+/// `PartialEq`/`assert_eq!`: both `Vec::extend_from_slice` (inside
+/// `build_token_payload`) and `Vec`'s own equality operator go through a
+/// length-generic comparison path whose loop bound CBMC can't collapse to
+/// a compile-time constant even when every length involved is one at
+/// runtime, which timed out unwinding a `memcmp` loop past 2000+
+/// iterations instead of converging on the handful of bytes actually
+/// compared. A fixed-size array argument plus an explicit `0..LEN` loop
+/// keeps every bound a literal constant instead.
+#[kani::proof]
+fn retry_token_round_trip_recovers_empty_odcid() {
+    const LIFETIME_SECS: u64 = 60;
+
+    let is_v4: bool = kani::any();
+    let port: u16 = kani::any();
+    let now: u64 = kani::any();
+    let odcid: [u8; 0] = [];
+
+    let peer = if is_v4 {
+        let ip: [u8; 4] = kani::any();
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port))
+    } else {
+        let ip: [u8; 16] = kani::any();
+        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip), port, 0, 0))
+    };
+
+    let payload = retry_token_model::build_token_payload(&peer, now, &odcid);
+    let result = retry_token_model::parse_token_payload(&payload, &peer, now, LIFETIME_SECS);
+
+    let Some(actual) = result else {
+        panic!("expected the round-tripped token to parse successfully");
+    };
+    assert!(actual.is_empty());
+}
+
+#[kani::proof]
+fn retry_token_round_trip_recovers_full_length_odcid() {
+    const LIFETIME_SECS: u64 = 60;
+
+    let is_v4: bool = kani::any();
+    let port: u16 = kani::any();
+    let now: u64 = kani::any();
+    let odcid: [u8; SCID_LEN] = kani::any();
+
+    let peer = if is_v4 {
+        let ip: [u8; 4] = kani::any();
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port))
+    } else {
+        let ip: [u8; 16] = kani::any();
+        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip), port, 0, 0))
+    };
+
+    let payload = retry_token_model::build_token_payload(&peer, now, &odcid);
+    let result = retry_token_model::parse_token_payload(&payload, &peer, now, LIFETIME_SECS);
+
+    let Some(actual) = result else {
+        panic!("expected the round-tripped token to parse successfully");
+    };
+    assert!(actual.len() == SCID_LEN);
+    for i in 0..SCID_LEN {
+        assert!(actual[i] == odcid[i]);
+    }
+}
+
+/// The safety property that matters most for this parser: it is called on
+/// bytes from an unauthenticated peer (after HMAC verification, but the
+/// HMAC only proves the bytes weren't tampered with post-mint — it says
+/// nothing about a hostile *implementation* of the minting side, e.g. a
+/// compromised or buggy peer of a federated deployment). No length or
+/// content of `payload` may cause a panic or out-of-bounds index.
+#[kani::proof]
+fn retry_token_parse_never_panics_on_arbitrary_bytes() {
+    const MAX_PAYLOAD: usize = 1 + 16 + 2 + 8 + 1 + SCID_LEN;
+
+    let payload_bytes: [u8; MAX_PAYLOAD] = kani::any();
+    let used_len_byte: u8 = kani::any();
+    kani::assume((used_len_byte as usize) <= MAX_PAYLOAD);
+    let payload = &payload_bytes[..used_len_byte as usize];
+
+    let is_v4: bool = kani::any();
+    let port: u16 = kani::any();
+    let now: u64 = kani::any();
+    let timestamp_hint: u64 = kani::any();
+
+    let peer = if is_v4 {
+        let ip: [u8; 4] = kani::any();
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port))
+    } else {
+        let ip: [u8; 16] = kani::any();
+        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip), port, 0, 0))
+    };
+
+    // `now`/`timestamp_hint` are otherwise unconstrained kani::any() values
+    // (timestamp_hint is never read — its only purpose is nudging kani to
+    // explore the full u64 range for `now` against arbitrary encoded
+    // timestamps inside `payload_bytes` itself, which already cover that).
+    let _ = timestamp_hint;
+    let _ = retry_token_model::parse_token_payload(payload, &peer, now, 60);
+}
+
+/// Audit finding #4's exact regression, proven rather than just
+/// example-tested: a backwards clock jump strictly greater than
+/// `lifetime_secs` must never be accepted, over the *entire* `u64` domain
+/// of `now`/`timestamp` (no escape hatch needed once the skew check uses
+/// `u64::abs_diff` instead of an `i64`-cast-and-`.abs()` — see
+/// `retry_token_model.rs`'s doc comment on `parse_token_payload`, and
+/// `retry_token_parse_never_panics_on_arbitrary_bytes` for the panic that
+/// abs_diff avoids).
+#[kani::proof]
+fn retry_token_rejects_large_backwards_clock_jump() {
+    const LIFETIME_SECS: u64 = 60;
+
+    let port: u16 = kani::any();
+    let ip: [u8; 4] = kani::any();
+    let timestamp: u64 = kani::any();
+    let now: u64 = kani::any();
+    // A "large backwards jump" here means timestamp (the token's claimed
+    // mint time) is far ahead of now (the validator's clock) — i.e. the
+    // validator's clock has jumped backwards relative to when the token
+    // claims to have been minted.
+    kani::assume(timestamp > now);
+    kani::assume(timestamp - now > LIFETIME_SECS);
+
+    let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port));
+    let odcid = [0u8; 4];
+    let payload = retry_token_model::build_token_payload(&peer, timestamp, &odcid);
+
+    assert_eq!(
+        retry_token_model::parse_token_payload(&payload, &peer, now, LIFETIME_SECS),
+        None
+    );
 }
 
 fn checked_cmsg_step_next(

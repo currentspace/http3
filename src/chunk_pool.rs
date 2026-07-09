@@ -12,15 +12,7 @@ use std::sync::Arc;
 #[cfg(feature = "node-api")]
 use std::sync::Mutex;
 
-/// Size classes for pooled chunks.
-///
-/// The top class matches Node's default binary stream high-water mark
-/// (64 KiB), so ordinary writes avoid malloc churn while still copying into
-/// Rust-owned memory before crossing worker-thread boundaries.
-const CHUNK_CLASSES: [usize; 7] = [1024, 2048, 4096, 8192, 16_384, 32_768, 65_536];
-
-/// Number of size-class bins.
-const NUM_BINS: usize = CHUNK_CLASSES.len();
+use crate::proof_core::chunk_pool_model::{CHUNK_CLASSES, NUM_BINS, bin_for, bin_for_cap};
 
 /// Outbound stream-payload chunk pool with size-classed bins.
 ///
@@ -54,30 +46,6 @@ impl ChunkPool {
         (pool, Arc::new(ChunkPoolReturn(tx)), rx)
     }
 
-    /// Find the bin a `len`-byte allocation should be served from on
-    /// checkout: the smallest class that can hold `len`. Returns `None`
-    /// if `len` exceeds every class.
-    fn bin_for(len: usize) -> Option<usize> {
-        CHUNK_CLASSES.iter().position(|&class| len <= class)
-    }
-
-    /// Find the bin a `cap`-capacity Vec should return to on checkin: the
-    /// largest class whose threshold the Vec fully covers. Audit finding
-    /// #28: previously checkin reused `bin_for(cap)` (smallest class >=
-    /// cap) and then required `cap >= CHUNK_CLASSES[bin_idx]`, which only
-    /// retained exact-class capacities. A 1500-byte Vec would map to bin
-    /// 2048 and be rejected. With `bin_for_cap`, that 1500-byte Vec maps
-    /// to the 1024 class and is correctly retained. Vecs larger than the
-    /// largest class are still rejected (avoids stuffing oversized
-    /// allocations into smaller bins, which would waste memory).
-    fn bin_for_cap(cap: usize) -> Option<usize> {
-        let max_class = *CHUNK_CLASSES.last()?;
-        if cap > max_class {
-            return None;
-        }
-        CHUNK_CLASSES.iter().rposition(|&class| class <= cap)
-    }
-
     fn max_entries_for_bin(&self, bin_idx: usize) -> usize {
         if CHUNK_CLASSES[bin_idx] <= 4096 {
             return self.max_per_bin;
@@ -96,7 +64,7 @@ impl ChunkPool {
             return (Vec::new(), false);
         }
 
-        if let Some(bin_idx) = Self::bin_for(len) {
+        if let Some(bin_idx) = bin_for(len) {
             // Search this bin and larger bins for a reusable buffer.
             for idx in bin_idx..NUM_BINS {
                 if let Some(mut buf) = self.bins[idx].pop() {
@@ -128,7 +96,7 @@ impl ChunkPool {
             return (Vec::new(), false);
         }
 
-        if let Some(bin_idx) = Self::bin_for(len) {
+        if let Some(bin_idx) = bin_for(len) {
             for idx in bin_idx..NUM_BINS {
                 if let Some(mut buf) = self.bins[idx].pop() {
                     buf.clear();
@@ -152,7 +120,7 @@ impl ChunkPool {
     /// or if the matching bin is full.
     pub fn checkin(&mut self, buf: Vec<u8>) -> bool {
         let cap = buf.capacity();
-        if let Some(bin_idx) = Self::bin_for_cap(cap) {
+        if let Some(bin_idx) = bin_for_cap(cap) {
             if self.bins[bin_idx].len() < self.max_entries_for_bin(bin_idx) {
                 self.bins[bin_idx].push(buf);
                 return true;

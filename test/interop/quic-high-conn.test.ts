@@ -39,24 +39,36 @@ async function runHighConnTest(
   streamTimeoutMs: number,
 ): Promise<ConnResult[]> {
   const payload = Buffer.alloc(messageSize, 0xcc);
-  const results: ConnResult[] = [];
+  const results: ConnResult[] = new Array(connections);
 
-  // Phase 1: Connect all clients
+  // Phase 1: Connect all clients concurrently — mirrors Phase 2's
+  // per-task try/catch + Promise.all shape below. A strictly sequential
+  // `for...await` loop here means one slow or failing handshake
+  // serializes behind every other connection attempt: connectQuicAsync's
+  // own connectTimeoutMs defaults to 30s, so N sequential failures cost
+  // N * 30s of wall-clock time before the loop even reaches the next
+  // attempt (a run under CI resource contention hit this — 34 stalled
+  // connections cost roughly 34 * 30s = ~17 minutes serialized, versus
+  // at most one connectTimeoutMs cycle when they race concurrently).
   const clients: Array<{ client: QuicClientSession; index: number }> = [];
-  for (let c = 0; c < connections; c++) {
-    const result: ConnResult = { connIndex: c, connected: false, streams: [] };
-    try {
-      const client = await connectQuicAsync(`127.0.0.1:${serverPort}`, {
-        rejectUnauthorized: false,
-        initialMaxStreamsBidi: 50_000,
-      });
-      result.connected = true;
-      clients.push({ client, index: c });
-    } catch (err) {
-      result.connectError = err instanceof Error ? err.message : String(err);
-    }
-    results.push(result);
-  }
+  await Promise.all(
+    Array.from({ length: connections }, (_, c) =>
+      (async () => {
+        const result: ConnResult = { connIndex: c, connected: false, streams: [] };
+        try {
+          const client = await connectQuicAsync(`127.0.0.1:${serverPort}`, {
+            rejectUnauthorized: false,
+            initialMaxStreamsBidi: 50_000,
+          });
+          result.connected = true;
+          clients.push({ client, index: c });
+        } catch (err) {
+          result.connectError = err instanceof Error ? err.message : String(err);
+        }
+        results[c] = result;
+      })(),
+    ),
+  );
 
   // Phase 2: Run streams
   const streamPromises: Promise<void>[] = [];
@@ -186,7 +198,19 @@ describe('QUIC high-connection tests', () => {
     serverPort = addr.port;
   });
 
-  it('50 connections x 5 streams x 4KB', async () => {
+  // Outer timeout must exceed connectQuicAsync's own connectTimeoutMs
+  // default (30s) plus the streamTimeoutMs passed to runHighConnTest
+  // below (also 30s) plus a buffer for connection teardown — the
+  // ambient node:test default (15s, set via --test-timeout in
+  // package.json's test:interop script) is shorter than a single one of
+  // those internal budgets, so it could never have been the real
+  // constraint this test enforces. Worse, node:test's timeout doesn't
+  // cancel the test's own in-flight promise, so hitting it under the old
+  // 15s default let this test's body keep running to completion in the
+  // background — reporting a misleading "test timed out after 15000ms"
+  // long before the real result (a genuine >5% error rate, or a pass)
+  // was known, while burning CI time until it eventually settled.
+  it('50 connections x 5 streams x 4KB', { timeout: 90_000 }, async () => {
     const results = await runHighConnTest(serverPort, 50, 5, 4096, 30_000);
     printDiagnostics('50x5x4KB', results);
 
@@ -201,7 +225,7 @@ describe('QUIC high-connection tests', () => {
     );
   });
 
-  it('100 connections x 1 stream x 1KB (connection establishment)', async () => {
+  it('100 connections x 1 stream x 1KB (connection establishment)', { timeout: 90_000 }, async () => {
     const results = await runHighConnTest(serverPort, 100, 1, 1024, 30_000);
     printDiagnostics('100x1x1KB', results);
 

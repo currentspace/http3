@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { runDetached } from './run-detached.js';
 import type { ServerHttp3Stream, IncomingHeaders, StreamFlags } from './stream.js';
 import type { ServerOptions, StreamListener } from './server.js';
 import { createSecureServer, Http3SecureServer } from './server.js';
@@ -128,7 +129,12 @@ export function createFetchHandler(appOrFetch: FetchApp | FetchHandler): StreamL
     : appOrFetch.fetch.bind(appOrFetch);
 
   return (stream: ServerHttp3Stream, headers: IncomingHeaders, flags: StreamFlags) => {
-    void handleStream(handler, stream, headers, flags);
+    // handleStream() already has its own try/catch/finally (reports
+    // failures via stream.destroy(err)), so this onError is a defensive
+    // backstop, not the primary handling path.
+    runDetached(handleStream(handler, stream, headers, flags), (err) => {
+      console.error('unhandled error in fetch adapter stream handler:', err);
+    });
   };
 }
 
@@ -418,7 +424,11 @@ export function serveFetch(options: ServeFetchOptions): Http3SecureServer {
   const handler = createFetchHandler(appOrFetch);
   const server = createSecureServer(serverOptions, handler);
   server.on('request', (req: IncomingMessage, res: ServerResponse) => {
-    void handleHttp1Request(fetchHandler, req, res);
+    // handleHttp1Request() already has its own try/catch/finally (reports
+    // failures via res.end(...)), so this onError is a defensive backstop.
+    runDetached(handleHttp1Request(fetchHandler, req, res), (err) => {
+      console.error('unhandled error in fetch adapter HTTP/1.1 handler:', err);
+    });
   });
   server.listen(port, host);
   return server;

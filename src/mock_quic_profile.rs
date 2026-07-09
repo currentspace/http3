@@ -122,6 +122,7 @@ impl NativeMockQuicProfiler {
             keylog: Some(false),
             qlog_dir: None,
             qlog_level: None,
+            disable_pacing: None,
         };
         let runner = spawn_mock_quic_profile(
             MockQuicProfileConfig {

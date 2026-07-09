@@ -1,0 +1,27 @@
+[package]
+name = "http3-wasm"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+# cdylib for the wasm32-wasip1 build artifact; rlib so the host-target
+# Rust tests below (and any future integration tests) can link the crate
+# directly instead of loading the compiled .wasm.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies.http3]
+path = "../.."
+default-features = false
+features = ["wasm-abi"]
+
+[dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+quiche.workspace = true
+# Self-signed test cert generation for the lockstep integration test
+# (tests/h3_lockstep.rs) — same crate + pattern already used by this
+# repo's other quiche integration tests (e.g. tests/interop_udp_loopback.rs).
+rcgen.workspace = true

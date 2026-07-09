@@ -115,6 +115,7 @@ fn setup_h3_pair_with_loss(drop_pct: u32) -> H3PairWithLoss {
         reuse_port: false,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        client_auth: ClientAuthMode::None,
     };
 
     let loss = PacketLossConfig::new(drop_pct);

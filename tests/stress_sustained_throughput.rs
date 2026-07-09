@@ -116,6 +116,7 @@ fn setup_quic_pair() -> QuicPair {
         keylog: None,
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let (server_quiche, client_quiche) = {
@@ -259,6 +260,7 @@ fn setup_h3_pair() -> H3Pair {
         reuse_port: false,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        client_auth: ClientAuthMode::None,
     };
 
     let ((client_driver, client_waker), (server_driver, server_waker)) =

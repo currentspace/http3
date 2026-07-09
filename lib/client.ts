@@ -7,9 +7,10 @@ import {
 import { ClientHttp3Stream } from './stream.js';
 import { incomingHeadersToNativeHeaders, nativeHeadersToIncomingHeaders } from './stream.js';
 import type { IncomingHeaders } from './stream.js';
-import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, binding } from './event-loop.js';
-import type { NativeEvent } from './event-loop.js';
-import type { ConnectionEndpoint } from './endpoint.js';
+import { ClientEventLoop, EVENT_SHUTDOWN_COMPLETE, getBinding } from './event-loop.js';
+import type { ClientEventLoopLike, NativeEvent } from './event-loop.js';
+import { createClientEventLoop, resolveWasmArtifactPath } from './client-event-loop-factory.js';
+import type { ConnectionEndpoint, DnsLookupFn } from './endpoint.js';
 import { abortSignalError, resolveConnectionEndpoint, stringifyConnectionEndpoint } from './endpoint.js';
 import {
   Http3Error,
@@ -20,7 +21,9 @@ import {
   ERR_HTTP3_STREAM_ERROR,
 } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
+import { toNativeEvents, toNativeKeylogLine } from './wasm-event-bridge.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
+import { DetachedTasks } from './run-detached.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
 
@@ -89,6 +92,8 @@ function requestRetryDelayMs(attempt: number, deadlineMs: number): number {
 export interface ConnectOptions {
   /** Abort the connect attempt (DNS lookup + handshake). Audit finding #15. */
   signal?: AbortSignal;
+  /** Override DNS resolution for hostname endpoints. Defaults to `node:dns/promises`'s `lookup`. IP-literal endpoints bypass DNS regardless. */
+  dnsLookup?: DnsLookupFn;
   /** Runtime selection mode. Default: `'auto'`. */
   runtimeMode?: RuntimeOptions['runtimeMode'];
   /** Runtime fallback policy. Default: `'warn-and-fallback'`. */
@@ -185,6 +190,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
   private _connectAbortCleanup: (() => void) | null = null;
   private _connectTimer: NodeJS.Timeout | null = null;
   private readonly _requestDrainResolvers = new Set<() => void>();
+  private readonly _detachedTasks = new DetachedTasks();
 
   constructor(authority: string, options?: Pick<ConnectOptions, 'allow0RTT' | 'allowUnsafe0RTTMethods' | 'onEarlyData'>) {
     super();
@@ -196,16 +202,19 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._resolveReady = resolve;
       this._rejectReady = reject;
     });
-    // ready() is optional for event-driven callers; swallow unobserved
-    // rejections via an explicit try/await (project rule: no `.catch`).
-    const readyPromise = this._readyPromise;
-    void (async (): Promise<void> => {
-      try {
-        await readyPromise;
-      } catch {
-        /* unobserved — caller chose event-driven flow */
-      }
-    })();
+    // ready() is optional for event-driven callers; tracking it here
+    // observes (and, since readyPromise itself is fully driven by
+    // _resolveReady/_rejectReady below, can never itself surface) any
+    // rejection so an event-driven caller who never calls ready() doesn't
+    // leave an unhandled promise rejection sitting around — and close()/
+    // destroy() below wait for it to settle like every other detached
+    // task this session kicks off.
+    this._detachedTasks.run(this._readyPromise, () => { /* unobserved — caller chose event-driven flow */ });
+  }
+
+  /** @internal */
+  _registerDetachedTask(operation: Promise<unknown>, onError: (error: Error) => void): void {
+    this._detachedTasks.run(operation, onError);
   }
 
   /** The authority (host:port) this session is connected to. */
@@ -232,6 +241,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._markReadyError(new Http3Error('session closed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
     await super.close(code, reason);
+    await this._detachedTasks.drain();
   }
 
   override async destroy(err?: Error): Promise<void> {
@@ -241,6 +251,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       this._markReadyError(err ?? new Http3Error('session destroyed before handshake completed', ERR_HTTP3_INVALID_STATE));
     }
     await super.destroy(err);
+    await this._detachedTasks.drain();
   }
 
   /** @internal */
@@ -274,13 +285,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (loop_) {
-      void (async (): Promise<void> => {
-        try {
-          await loop_.close();
-        } catch {
-          /* best-effort abort cleanup */
-        }
-      })();
+      this._detachedTasks.run(loop_.close(), () => { /* best-effort abort cleanup */ });
     }
     this._emitSessionError(err);
   }
@@ -466,13 +471,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     const loop_ = this._eventLoop;
     this._eventLoop = null;
     if (!loop_) return;
-    void (async (): Promise<void> => {
-      try {
-        await loop_.close();
-      } catch {
-        /* native close cleanup is best-effort after SESSION_CLOSE */
-      }
-    })();
+    this._detachedTasks.run(loop_.close(), () => { /* native close cleanup is best-effort after SESSION_CLOSE */ });
   }
 
   private _onHeaders(event: NativeEvent): void {
@@ -780,55 +779,107 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
     }, connectTimeoutMs));
   }
 
-  void (async (): Promise<void> => {
+  session._registerDetachedTask((async (): Promise<void> => {
     try {
       const resolved = await resolveConnectionEndpoint(authority, {
         defaultScheme: 'https',
         defaultPort: 443,
         signal: options?.signal,
+        dnsLookup: options?.dnsLookup,
       });
       if (shouldAbortConnect()) {
         return;
       }
 
       await runWithRuntimeSelection(session, options, async (runtimeMode) => {
-        const nativeClient = new binding.NativeWorkerClient({
-          ca: normalizeCaOption(options?.ca),
-          rejectUnauthorized: options?.rejectUnauthorized,
+        const eventLoop = await createClientEventLoop<ClientEventLoopLike>(
           runtimeMode,
-          maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
-          maxUdpPayloadSize: options?.maxUdpPayloadSize,
-          initialMaxData: options?.initialMaxData,
-          initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
-          initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
-          sessionTicket: options?.sessionTicket,
-          allow0Rtt: options?.allow0RTT,
-          keylog: Boolean(keylogPath),
-          enableDatagrams: options?.enableDatagrams,
-          qlogDir: options?.qlogDir,
-          qlogLevel: options?.qlogLevel,
-        }, (_err: Error | null, events: NativeEvent[]) => {
-          try {
-            let hasShutdown = false;
-            for (const event of events) {
-              if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-                hasShutdown = true;
+          () => {
+            if (runtimeMode === 'wasm') {
+              // Unreachable: createClientEventLoop never invokes this thunk
+              // for 'wasm' — see docs/WASM_CLIENT_PLAN.md §6.6 ("never pass
+              // 'wasm' to the native binding"). Guarded explicitly rather
+              // than asserted away so a future bug here fails loudly.
+              throw new Http3Error('unreachable: native constructor invoked for wasm runtime mode', ERR_HTTP3_INVALID_STATE);
+            }
+            const NativeWorkerClient = getBinding().NativeWorkerClient;
+            const nativeClient = new NativeWorkerClient({
+              ca: normalizeCaOption(options?.ca),
+              rejectUnauthorized: options?.rejectUnauthorized,
+              runtimeMode,
+              maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+              maxUdpPayloadSize: options?.maxUdpPayloadSize,
+              initialMaxData: options?.initialMaxData,
+              initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+              initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+              sessionTicket: options?.sessionTicket,
+              allow0Rtt: options?.allow0RTT,
+              keylog: Boolean(keylogPath),
+              enableDatagrams: options?.enableDatagrams,
+              qlogDir: options?.qlogDir,
+              qlogLevel: options?.qlogLevel,
+            }, (_err: Error | null, events: NativeEvent[]) => {
+              try {
+                let hasShutdown = false;
+                for (const event of events) {
+                  if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                    hasShutdown = true;
+                  }
+                }
+                if (!hasShutdown) {
+                  session._dispatchEvents(events);
+                } else {
+                  session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+                  nativeEventLoop._onShutdownSentinel();
+                }
+              } finally {
+                // Audit #14: release credit on the outstanding-events gauge even
+                // when user event handlers throw during dispatch.
+                nativeClient.ackEventBatch(events.length);
               }
-            }
-            if (!hasShutdown) {
-              session._dispatchEvents(events);
-            } else {
-              session._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-              eventLoop._onShutdownSentinel();
-            }
-          } finally {
-            // Audit #14: release credit on the outstanding-events gauge even
-            // when user event handlers throw during dispatch.
-            nativeClient.ackEventBatch(events.length);
-          }
-        });
+            });
 
-        const eventLoop = new ClientEventLoop(nativeClient);
+            const nativeEventLoop = new ClientEventLoop(nativeClient);
+            return nativeEventLoop;
+          },
+          async () => {
+            // Lazily dynamic-imported so native-only consumers never load
+            // any wasm code (docs/WASM_CLIENT_PLAN.md §6.6). Node-only
+            // pieces (`.wasm` file loading, `node:dgram`) are built here,
+            // at this Node-facing call site, and handed to
+            // `WasmH3ClientEventLoop` as an already-instantiated core +
+            // transport factory — that class itself never touches
+            // `node:fs`/`node:dgram` (Phase 5, docs/WASM_CLIENT_PLAN.md §9),
+            // which is what lets it also compile under
+            // `tsconfig.workerd.json` / be reused by a workerd host.
+            const { WasmH3ClientEventLoop } = await import('./wasm/h3-client-event-loop.js');
+            const { loadHttp3WasmCoreFromFile } = await import('./wasm/node-core-loader.js');
+            const { connectNodeUdp } = await import('./wasm/node-udp-adapter.js');
+            return new WasmH3ClientEventLoop(
+              {
+                core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
+                transportFactory: connectNodeUdp,
+                ca: normalizeCaOption(options?.ca),
+                rejectUnauthorized: options?.rejectUnauthorized,
+                maxIdleTimeoutMs: options?.maxIdleTimeoutMs,
+                maxUdpPayloadSize: options?.maxUdpPayloadSize,
+                initialMaxData: options?.initialMaxData,
+                initialMaxStreamDataBidiLocal: options?.initialMaxStreamDataBidiLocal,
+                initialMaxStreamsBidi: options?.initialMaxStreamsBidi,
+                sessionTicket: options?.sessionTicket,
+                allow0RTT: options?.allow0RTT,
+                enableDatagrams: options?.enableDatagrams,
+                keylog: Boolean(keylogPath),
+              },
+              (events) => {
+                session._dispatchEvents(toNativeEvents(events));
+              },
+              (line) => {
+                session.emit('keylog', toNativeKeylogLine(line));
+              },
+            );
+          },
+        );
         session._eventLoop = eventLoop;
         if (shouldAbortConnect()) {
           await eventLoop.close();
@@ -856,7 +907,12 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
       session._markReadyError(error);
       session._emitSessionError(error);
     }
-  })();
+  })(), (err: Error) => {
+    // Unreachable: the catch above already reports every failure via
+    // session._markReadyError/_emitSessionError without rethrowing. Pure
+    // defensive backstop.
+    console.error('unhandled error establishing HTTP/3 connection:', err);
+  });
 
   return session;
 }

@@ -21,6 +21,7 @@ cargo +nightly fuzz run pending_write_state -- -runs=1
 cargo +nightly fuzz run pending_write_ops -- -runs=1
 cargo +nightly fuzz run parse_recv_cmsgs -- -runs=1
 cargo +nightly fuzz run parse_recv_cmsgs_structured -- -runs=1
+cargo +nightly fuzz run retry_token_roundtrip -- -runs=1
 
 step "Kani smoke"
 bash scripts/rust-kani-smoke.sh

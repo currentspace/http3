@@ -29,7 +29,9 @@ describe('SSE heartbeat', () => {
         heartbeatComment: 'ping',
       });
       // Send one event then keep alive via heartbeat
-      void sse.send('hello');
+      sse.send('hello').catch((err: unknown) => {
+        stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
     });
 
     const port = await new Promise<number>((resolve) => {
@@ -81,7 +83,9 @@ describe('SSE heartbeat', () => {
       const sse = createSseStream(stream, {
         heartbeatIntervalMs: 50,
       });
-      void sse.send('initial');
+      sse.send('initial').catch((err: unknown) => {
+        stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      });
       // Close after a short delay
       setTimeout(() => { sse.close(); }, 100);
     });
@@ -127,7 +131,7 @@ describe('SSE heartbeat', () => {
     });
 
     server.on('stream', (stream, _headers) => {
-      void (async () => {
+      (async () => {
         const sse = createSseStream(stream);
         await sse.send('before-close');
         sse.close();

@@ -136,6 +136,13 @@ export interface JsClientOptions {
   keylog?: boolean
   qlogDir?: string
   qlogLevel?: string
+  /**
+   * Disable quiche's send pacing. Sans-IO/wasm callers have no way to
+   * honor sub-ms `SendInfo` release times (A2 task 4) — plumbing exists
+   * here for that profile; native behavior is unaffected unless a
+   * caller explicitly opts in.
+   */
+  disablePacing?: boolean
 }
 
 /**
@@ -230,6 +237,8 @@ export interface JsQuicClientOptions {
   keylog?: boolean
   qlogDir?: string
   qlogLevel?: string
+  /** Disable quiche's send pacing (see `JsClientOptions::disable_pacing`). */
+  disablePacing?: boolean
 }
 
 export interface JsQuicServerOptions {
@@ -398,6 +407,22 @@ export interface JsServerOptions {
   key: ByteBuf
   cert: ByteBuf
   ca?: ByteBuf
+  /**
+   * Client certificate policy. Default: `'require'` when `ca` is set,
+   * otherwise `'none'` (matches `JsQuicServerOptions::client_auth`'s
+   * existing semantics exactly — see `ClientAuthMode::parse`).
+   *
+   * Native's file-based [`Http3Config::new_server_quiche_config`] does
+   * **not** read this field (a pre-existing asymmetry: today's H3
+   * server has no client-certificate verification at all, unlike the
+   * raw QUIC server — mirrors the already-documented client-side
+   * asymmetry, "H3 client mTLS parity — deferred", in
+   * `docs/WASM_CLIENT_PLAN.md`'s decision log). Only the new
+   * [`Http3Config::new_server_quiche_config_in_memory`] (server-side
+   * wasm ABI work) reads it. Purely additive: existing native callers
+   * that never set this field are unaffected either way.
+   */
+  clientAuth?: string
   runtimeMode?: string
   maxIdleTimeoutMs?: number
   maxUdpPayloadSize?: number

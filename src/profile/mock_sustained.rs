@@ -395,6 +395,7 @@ fn run_quic(args: &CliArgs) -> Result<SustainedResult, String> {
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let server_quiche = new_quic_server_config(&server_options).map_err(|e| e.to_string())?;
@@ -573,6 +574,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         key: key_pem.into(),
         cert: cert_pem.into(),
         ca: None,
+        client_auth: None,
         runtime_mode: Some("portable".into()),
         max_idle_timeout_ms: Some(30_000),
         max_udp_payload_size: None,
@@ -610,6 +612,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         keylog: Some(false),
         qlog_dir: None,
         qlog_level: None,
+        disable_pacing: None,
     };
 
     let server_quiche =
@@ -627,6 +630,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         reuse_port: false,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        client_auth: ClientAuthMode::None,
     };
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42_000);

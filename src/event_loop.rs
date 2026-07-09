@@ -22,9 +22,11 @@ use serde::Serialize;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
 use crate::buffer_pool::AdaptiveBufferPool;
+use crate::datagram::TxDatagram;
 use crate::h3_event::JsH3Event;
 use crate::reactor_metrics::{self, WorkerLoopExitCause};
-use crate::transport::{Driver, TxDatagram};
+#[cfg(feature = "os-runtime")]
+use crate::transport::Driver;
 
 /// TSFN type for delivering event batches to the JS main thread.
 /// Uses default const generics: `CalleeHandled=true`, `Weak=false`, `MaxQueueSize=0` (unbounded).
@@ -330,10 +332,11 @@ pub struct EventBatcher {
     stats: EventBatcherStatsHandle,
 }
 
+#[cfg(feature = "os-runtime")]
 pub(crate) fn poll_with_event_backpressure<D: Driver>(
     driver: &mut D,
     deadline: Option<Instant>,
-) -> io::Result<crate::transport::PollOutcome> {
+) -> io::Result<crate::datagram::PollOutcome> {
     let outstanding =
         reactor_metrics::self_heal_event_batch_if_stuck(APP_EVENT_PAUSE_HIGH_WATER, 5_000);
     if outstanding >= APP_EVENT_PAUSE_HIGH_WATER {
@@ -371,6 +374,7 @@ pub(crate) fn push_shutdown_complete(batcher: &mut EventBatcher) {
     batcher.batch.push(JsH3Event::shutdown_complete());
 }
 
+#[cfg(feature = "os-runtime")]
 fn flush_runtime_error<D: Driver, H: ProtocolHandler>(
     batcher: &mut EventBatcher,
     driver: &D,
@@ -406,6 +410,7 @@ fn flush_runtime_error<D: Driver, H: ProtocolHandler>(
     batcher.flush()
 }
 
+#[cfg(feature = "os-runtime")]
 fn record_sink_close_exit<D: Driver>(driver: &D) {
     reactor_metrics::record_worker_loop_exit(WorkerLoopExitCause::SinkClose);
     reactor_metrics::record_lifecycle_trace(
@@ -497,6 +502,7 @@ impl EventBatcher {
 /// The single event loop that drives all four worker variants.
 ///
 /// Blocking.  Runs on the dedicated worker thread until shutdown or TSFN close.
+#[cfg(feature = "os-runtime")]
 pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
     driver: &mut D,
     cmd_rx: Receiver<P::Command>,
@@ -838,14 +844,14 @@ pub(crate) fn run_event_loop<D: Driver, P: ProtocolHandler>(
 }
 
 #[cfg(test)]
+#[cfg(feature = "os-runtime")]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use crate::transport::{
-        Driver, DriverWaker, PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram,
-    };
+    use crate::datagram::{PollOutcome, RuntimeDriverKind, RxDatagram};
+    use crate::transport::{Driver, DriverWaker};
 
     /// Tracks the sizes of each batch delivered via `emit()`.
     type DeliveryLog = Arc<Mutex<Vec<usize>>>;

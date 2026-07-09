@@ -59,3 +59,10 @@ path = "fuzz_targets/pending_write_ops.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "retry_token_roundtrip"
+path = "fuzz_targets/retry_token_roundtrip.rs"
+test = false
+doc = false
+bench = false

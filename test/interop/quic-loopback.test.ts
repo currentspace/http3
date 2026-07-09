@@ -6,6 +6,7 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { X509Certificate } from 'node:crypto';
 import { generateMutualTlsTestCerts, generateTestCerts } from '../support/generate-certs.js';
+import { clientRuntimeMode } from '../support/wasm-test-helpers.js';
 import { createQuicServer, connectQuic, connectQuicAsync } from '../../lib/index.js';
 import type { QuicServerSession } from '../../lib/index.js';
 import type { QuicStream } from '../../lib/quic-stream.js';
@@ -63,6 +64,7 @@ describe('QUIC loopback', () => {
 
     const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
       rejectUnauthorized: false,
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     const stream = client.openStream();
@@ -101,6 +103,14 @@ describe('QUIC loopback', () => {
     });
 
     const addr = await server.listen(0, '127.0.0.1');
+    // Not parameterized by clientRuntimeMode() (C4, docs/WASM_CLIENT_PLAN.md
+    // §7): this test specifically asserts that an explicit `runtimeMode:
+    // 'portable'` request resolves to exactly 'portable' in `runtimeInfo` —
+    // forcing wasm here would just make those assertions fail rather than
+    // exercise a "same scenario, different runtime" interop case. That
+    // explicit-selection behavior already has its own dedicated coverage in
+    // test/core/client-connect-lifecycle.test.ts and
+    // test/interop/quic-edge-cases.test.ts.
     const client = await connectQuicAsync(`https://localhost:${addr.port}`, {
       ca: mtlsCerts.ca.cert,
       cert: mtlsCerts.client.cert,
@@ -149,6 +159,7 @@ describe('QUIC loopback', () => {
       cert: mtlsCerts.client.cert,
       key: mtlsCerts.client.key,
       servername: 'localhost',
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     await client.ready();
@@ -178,6 +189,7 @@ describe('QUIC loopback', () => {
     const client = connectQuic(`https://localhost:${addr.port}`, {
       ca: mtlsCerts.ca.cert,
       servername: 'localhost',
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
     client.on('error', () => {});
 
@@ -215,6 +227,7 @@ describe('QUIC loopback', () => {
     const client = await connectQuicAsync(`https://localhost:${addr.port}`, {
       ca: mtlsCerts.ca.cert,
       servername: 'localhost',
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     assert.deepStrictEqual(await peerCertificate, {
@@ -250,6 +263,7 @@ describe('QUIC loopback', () => {
       cert: otherMtlsCerts.client.cert,
       key: otherMtlsCerts.client.key,
       servername: 'localhost',
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
     client.on('error', () => {});
 
@@ -287,6 +301,7 @@ describe('QUIC loopback', () => {
       cert: mtlsCerts.alternateClient.cert,
       key: mtlsCerts.alternateClient.key,
       servername: 'localhost',
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
     client.on('error', () => {});
 
@@ -312,6 +327,7 @@ describe('QUIC loopback', () => {
     const addr = await server.listen(0, '127.0.0.1');
     const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
       rejectUnauthorized: false,
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     const results = await Promise.all(
@@ -346,6 +362,7 @@ describe('QUIC loopback', () => {
     const addr = await server.listen(0, '127.0.0.1');
     const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
       rejectUnauthorized: false,
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     const payload = Buffer.alloc(256 * 1024, 0xab); // 256KB
@@ -387,6 +404,7 @@ describe('QUIC loopback', () => {
     const addr = await server.listen(0, '127.0.0.1');
     const client = connectQuic(`127.0.0.1:${addr.port}`, {
       rejectUnauthorized: false,
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     // Receive server-initiated stream. Attach this listener before awaiting
@@ -442,7 +460,7 @@ describe('QUIC loopback', () => {
 
     const clients = await Promise.all(
       Array.from({ length: 5 }, () =>
-        connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false }),
+        connectQuicAsync(`127.0.0.1:${addr.port}`, { rejectUnauthorized: false, runtimeMode: clientRuntimeMode() ?? 'portable' }),
       ),
     );
 
@@ -477,6 +495,7 @@ describe('QUIC loopback', () => {
     const addr = await server.listen(0, '127.0.0.1');
     const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
       rejectUnauthorized: false,
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     const stream = client.openStream();
@@ -515,6 +534,7 @@ describe('QUIC loopback', () => {
     const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
       rejectUnauthorized: false,
       alpn: ['my-custom-proto'],
+      runtimeMode: clientRuntimeMode() ?? 'portable',
     });
 
     const stream = client.openStream();

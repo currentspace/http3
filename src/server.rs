@@ -51,6 +51,11 @@ impl StoredServerOptions {
             key: self.key.clone().into(),
             cert: self.cert.clone().into(),
             ca: self.ca.as_ref().map(|ca| ca.clone().into()),
+            // TS `ServerOptions` has no `clientAuth` field today (H3
+            // server clientAuth is a new wasm-ABI-only capability — see
+            // `JsServerOptions::client_auth`'s doc comment); always `None`
+            // on this native construction path.
+            client_auth: None,
             runtime_mode: None,
             max_idle_timeout_ms: self.max_idle_timeout_ms,
             max_udp_payload_size: self.max_udp_payload_size,
