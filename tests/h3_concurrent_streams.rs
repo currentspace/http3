@@ -141,6 +141,7 @@ fn setup_h3_pair() -> H3Pair {
         reuse_port: false,
         cid_encoding: CidEncoding::random(),
         runtime_mode: TransportRuntimeMode::Portable,
+        client_auth: ClientAuthMode::None,
     };
 
     let ((client_driver, client_waker), (server_driver, server_waker)) =

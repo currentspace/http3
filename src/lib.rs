@@ -13,7 +13,6 @@ mod client;
 mod client_topology;
 mod config;
 mod connection;
-#[cfg(feature = "os-runtime")]
 mod connection_map;
 mod datagram;
 mod error;
@@ -35,12 +34,12 @@ mod quic_connection;
 mod quic_server;
 mod quic_worker;
 mod reactor_metrics;
+mod retry_token;
 #[cfg(feature = "node-api")]
 mod server;
 mod server_sharding;
 #[cfg(feature = "os-runtime")]
 mod shared_client_reactor;
-#[cfg(feature = "os-runtime")]
 mod timer_heap;
 #[cfg(feature = "os-runtime")]
 mod transport;
@@ -142,6 +141,19 @@ pub mod wasm_exports {
     pub use crate::quic_worker::QuicClientHandler;
     pub use crate::worker::H3ClientHandler;
 
+    // ── Server protocol handlers (added alongside server-side wasm ABI
+    // support; mirror the client handlers above exactly — `new_direct`
+    // + plain callable methods, no thread/channel/command-enum
+    // plumbing) ───────────────────────────────────────────────────────
+    pub use crate::quic_worker::{QuicServerConfig, QuicServerHandler};
+    pub use crate::worker::H3ServerHandler;
+
+    // ── Connection routing / retry-token maps (a `new_direct` server
+    // constructor builds one of these internally from a caller-supplied
+    // 32-byte key; exported in case a caller needs to construct one
+    // directly, e.g. for tests) ────────────────────────────────────────
+    pub use crate::connection_map::ConnectionMap;
+
     // ── Event system ──────────────────────────────────────────────
     pub use crate::h3_event::{
         EVENT_DATA, EVENT_DATAGRAM, EVENT_DRAIN, EVENT_ERROR, EVENT_FINISHED, EVENT_GOAWAY,
@@ -164,10 +176,15 @@ pub mod wasm_exports {
     // still `os-runtime`-gated inside `config.rs`; only the always-
     // compiled in-memory builders are usable here) ───────────────────
     pub use crate::config::{
-        Http3Config, JsClientOptions, JsQuicClientOptions, effective_pmtud_ceiling,
-        new_quic_client_config_in_memory,
+        ClientAuthMode, Http3Config, JsClientOptions, JsQuicClientOptions, JsQuicServerOptions,
+        JsServerOptions, TransportRuntimeMode, effective_pmtud_ceiling,
+        new_quic_client_config_in_memory, new_quic_server_config_in_memory,
     };
     pub use crate::error::Http3NativeError;
+
+    // ── CID encoding strategy (a `QuicServerConfig`/`Http3Config` field a
+    // direct-call server caller must be able to construct) ────────────
+    pub use crate::cid::CidEncoding;
 
     // ── Lifted datagram value types (A1 task 3) ──────────────────────
     pub use crate::datagram::{PollOutcome, RuntimeDriverKind, RxDatagram, TxDatagram};

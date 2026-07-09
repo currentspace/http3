@@ -15,8 +15,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender};
 #[cfg(feature = "os-runtime")]
-use ring::hmac;
-#[cfg(feature = "os-runtime")]
 use ring::rand::SecureRandom;
 use slab::Slab;
 
@@ -48,9 +46,9 @@ use crate::quic_connection::{QuicConnection, QuicConnectionInit};
 use crate::reactor_metrics::{
     self, RawQuicClientCloseCause, SessionKind, WorkerLoopExitCause, WorkerSpawnKind,
 };
+use crate::retry_token::{self, DeterministicScidSource};
 #[cfg(feature = "os-runtime")]
 use crate::shared_client_reactor;
-#[cfg(feature = "os-runtime")]
 use crate::timer_heap::TimerHeap;
 #[cfg(feature = "os-runtime")]
 use crate::transport::{self, ErasedWaker};
@@ -914,35 +912,65 @@ impl Drop for QuicClientHandle {
 }
 
 // ── Minimal connection map for QUIC ────────────────────────────────
+//
+// Always compiled (see `connection_map.rs`'s module doc comment for the
+// full rationale — this type follows the exact same pattern). `ring` stays
+// confined to the native `new` constructor.
 
-#[cfg(feature = "os-runtime")]
 struct QuicConnectionMap {
     by_dcid: HashMap<Vec<u8>, usize>,
     connections: Slab<QuicConnection>,
-    token_key: hmac::Key,
+    /// HMAC-SHA256 key for minting/validating retry tokens (raw bytes, not
+    /// `ring::hmac::Key` — see `retry_token.rs`).
+    token_key: [u8; 32],
     max_connections: usize,
     cid_encoding: CidEncoding,
+    /// Sans-IO SCID generator for
+    /// [`QuicConnectionMap::generate_scid_direct`] — see
+    /// `retry_token.rs` / `connection_map.rs::ConnectionMap` for the
+    /// identical H3-side pattern this mirrors.
+    scid_source: DeterministicScidSource,
 }
 
-#[cfg(feature = "os-runtime")]
 impl QuicConnectionMap {
+    /// Native constructor: sources the 32-byte HMAC key from `ring`'s
+    /// system RNG. Requires `os-runtime` for the same reason as
+    /// `ConnectionMap::with_max_connections_and_cid`.
+    #[cfg(feature = "os-runtime")]
     fn new(max_connections: usize, cid_encoding: CidEncoding) -> Self {
         let rng = ring::rand::SystemRandom::new();
         let mut key_bytes = [0u8; 32];
         #[allow(clippy::expect_used)]
         rng.fill(&mut key_bytes)
             .expect("system RNG should not fail");
+        Self::with_key_bytes(max_connections, cid_encoding, key_bytes)
+    }
+
+    /// Sans-IO constructor for a direct-call caller (a wasm ABI, or the
+    /// unit tests below): the caller supplies the 32-byte HMAC key
+    /// directly instead of requiring `ring` — mirrors
+    /// `ConnectionMap::with_key_bytes` exactly.
+    fn with_key_bytes(max_connections: usize, cid_encoding: CidEncoding, key_bytes: [u8; 32]) -> Self {
         Self {
             by_dcid: HashMap::new(),
             connections: Slab::new(),
-            token_key: hmac::Key::new(hmac::HMAC_SHA256, &key_bytes),
+            token_key: key_bytes,
             max_connections,
             cid_encoding,
+            scid_source: DeterministicScidSource::new(key_bytes),
         }
     }
 
+    /// Native only: sources entropy from `ring`'s system RNG via `CidEncoding`.
+    #[cfg(feature = "os-runtime")]
     fn generate_scid(&self) -> Result<Vec<u8>, Http3NativeError> {
         self.cid_encoding.generate_scid()
+    }
+
+    /// Sans-IO alternative for the direct-call / wasm server surface — see
+    /// `ConnectionMap::generate_scid_direct`.
+    fn generate_scid_direct(&mut self) -> Result<Vec<u8>, Http3NativeError> {
+        self.scid_source.next_scid(&self.cid_encoding)
     }
 
     fn route_packet(&self, dcid: &[u8]) -> Option<usize> {
@@ -980,8 +1008,8 @@ impl QuicConnectionMap {
         payload.extend_from_slice(&now.to_be_bytes());
         payload.push(odcid.len() as u8);
         payload.extend_from_slice(odcid);
-        let tag = hmac::sign(&self.token_key, &payload);
-        let mut token = tag.as_ref().to_vec();
+        let tag = retry_token::hmac_sha256(&self.token_key, &payload);
+        let mut token = tag.to_vec();
         token.extend_from_slice(&payload);
         token
     }
@@ -991,7 +1019,7 @@ impl QuicConnectionMap {
             return None;
         }
         let (tag_bytes, payload) = token.split_at(32);
-        if hmac::verify(&self.token_key, payload, tag_bytes).is_err() {
+        if !retry_token::hmac_sha256_verify(&self.token_key, payload, tag_bytes) {
             return None;
         }
         let mut pos = 0;
@@ -1114,6 +1142,16 @@ impl QuicConnectionMap {
         buf.extend(self.connections.iter().map(|(handle, _)| handle));
     }
 
+    /// Number of live connections currently tracked (used by the
+    /// direct-call/wasm surface's "is the whole server idle" check).
+    fn len(&self) -> usize {
+        self.connections.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.connections.is_empty()
+    }
+
     fn drain_closed(&mut self) -> Vec<(usize, QuicConnection)> {
         let closed: Vec<usize> = self
             .connections
@@ -1189,7 +1227,9 @@ fn shared_quic_client_command_outbound_bytes(cmd: &SharedQuicClientCommand) -> u
 
 // ── Spawn functions ────────────────────────────────────────────────
 
-#[cfg(feature = "os-runtime")]
+/// Always compiled (needed by `QuicServerHandler::new_direct`, which is
+/// itself always compiled) — none of these fields are `os-runtime`-only
+/// types.
 pub struct QuicServerConfig {
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
@@ -2314,8 +2354,11 @@ fn run_shared_quic_client_event_loop<D: transport::Driver>(
 
 // ── QUIC Server Protocol Handler ────────────────────────────────────
 
-#[cfg(feature = "os-runtime")]
-struct QuicServerHandler {
+/// Raw QUIC server protocol state machine — mirrors `H3ServerHandler`
+/// exactly (see that type's doc comment for the full rationale); a
+/// `QuicConnectionMap` (many connections) + `TimerHeap` instead of H3's
+/// per-stream framing state.
+pub struct QuicServerHandler {
     conn_map: QuicConnectionMap,
     timer_heap: TimerHeap,
     buffer_pool: BufferPool,
@@ -2336,21 +2379,58 @@ struct QuicServerHandler {
     outbound_admission: Arc<OutboundAdmission>,
 }
 
-#[cfg(feature = "os-runtime")]
 impl QuicServerHandler {
+    /// Native constructor: sources the `QuicConnectionMap`'s 32-byte
+    /// HMAC/SCID key from `ring`'s system RNG. Requires `os-runtime` for
+    /// the same reason as `H3ServerHandler::new`.
+    #[cfg(feature = "os-runtime")]
     fn new(
         quiche_config: quiche::Config,
         server_config: QuicServerConfig,
         worker_index: u32,
         outbound_admission: Arc<OutboundAdmission>,
     ) -> Self {
+        let conn_map = QuicConnectionMap::new(
+            server_config.max_connections,
+            server_config.cid_encoding.clone(),
+        );
+        Self::from_parts(
+            quiche_config,
+            server_config,
+            conn_map,
+            server_sharding::handle_offset(worker_index),
+            outbound_admission,
+        )
+    }
+
+    /// Direct-call constructor for a sans-IO caller (a wasm ABI, or the
+    /// unit tests below) — mirrors `H3ServerHandler::new_direct` exactly.
+    /// `handle_offset` is always `0`.
+    pub fn new_direct(
+        quiche_config: quiche::Config,
+        server_config: QuicServerConfig,
+        retry_token_key: [u8; 32],
+        outbound_admission: Arc<OutboundAdmission>,
+    ) -> Self {
+        let conn_map = QuicConnectionMap::with_key_bytes(
+            server_config.max_connections,
+            server_config.cid_encoding.clone(),
+            retry_token_key,
+        );
+        Self::from_parts(quiche_config, server_config, conn_map, 0, outbound_admission)
+    }
+
+    fn from_parts(
+        quiche_config: quiche::Config,
+        server_config: QuicServerConfig,
+        conn_map: QuicConnectionMap,
+        handle_offset: u32,
+        outbound_admission: Arc<OutboundAdmission>,
+    ) -> Self {
         let disable_retry = server_config.disable_retry;
         let (chunk_pool, _chunk_pool_return, chunk_pool_rx) = ChunkPool::with_return_channel(64);
         Self {
-            conn_map: QuicConnectionMap::new(
-                server_config.max_connections,
-                server_config.cid_encoding.clone(),
-            ),
+            conn_map,
             timer_heap: TimerHeap::new(),
             buffer_pool: BufferPool::default(),
             tx_pool: BufferPool::new(256, 65535),
@@ -2361,7 +2441,7 @@ impl QuicServerHandler {
             quiche_config,
             disable_retry,
             last_expired: Vec::new(),
-            handle_offset: server_sharding::handle_offset(worker_index),
+            handle_offset,
             chunk_pool,
             chunk_pool_rx,
             outbound_admission,
@@ -2376,6 +2456,610 @@ impl QuicServerHandler {
     fn release_outbound_admission(&self, units: usize, batch: &mut Vec<JsH3Event>) {
         if self.outbound_admission.release(units) {
             batch.push(JsH3Event::write_ready(0));
+        }
+    }
+
+    /// Soonest quiche timeout deadline across every connection this
+    /// server holds, or `None` — mirrors `H3ServerHandler::soonest_deadline`
+    /// (raw QUIC has no `pending_session_closes` concept, so this is just
+    /// the timer heap).
+    pub fn soonest_deadline(&mut self) -> Option<Instant> {
+        self.timer_heap.next_deadline()
+    }
+
+    /// `true` once there are no live connections — the "is the whole
+    /// server done" direct-call query.
+    pub fn is_idle(&self) -> bool {
+        self.conn_map.is_empty()
+    }
+
+    /// `true` if `conn_handle` refers to a connection that is closed (or
+    /// no longer tracked at all) — mirrors
+    /// `H3ServerHandler::connection_is_closed`.
+    pub fn connection_is_closed(&self, conn_handle: u32) -> bool {
+        self.conn_map
+            .get(conn_handle as usize)
+            .is_none_or(QuicConnection::is_closed)
+    }
+
+    /// Number of live connections currently tracked.
+    pub fn connection_count(&self) -> usize {
+        self.conn_map.len()
+    }
+
+    /// Graceful whole-server shutdown (the `qs_shutdown` direct-call
+    /// operation) — mirrors `H3ServerHandler::shutdown_all_connections`
+    /// exactly (same `WorkerCommand`/`QuicServerCommand::Shutdown` match
+    /// arm body in the native path).
+    pub fn shutdown_all_connections(&mut self) {
+        let mut handles = Vec::new();
+        self.conn_map.fill_handles(&mut handles);
+        for handle in handles {
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                if !conn.quiche_conn.is_closed() && !conn.quiche_conn.is_draining() {
+                    let _ = conn.quiche_conn.close(true, 0, b"server shutdown");
+                }
+            }
+        }
+    }
+
+    /// Direct-call packet routing (the `qs_recv` primitive) — a
+    /// **parallel implementation** of the native
+    /// `ProtocolHandler::process_packet` below, for the identical reason
+    /// `H3ServerHandler::process_inbound_packet` is: fresh SCIDs come from
+    /// [`QuicConnectionMap::generate_scid_direct`] (HMAC-PRF, no `ring`)
+    /// instead of [`QuicConnectionMap::generate_scid`] (`ring`-backed),
+    /// and `top_up_server_scids` (connection-migration SCID issuance,
+    /// itself `ring`-backed) is deliberately not called — see that
+    /// method's doc comment for the full rationale, which applies
+    /// identically here. The client-certificate-required enforcement
+    /// below is **not** new here (unlike the H3 side) — native's raw QUIC
+    /// server already has it; this just carries it over unchanged.
+    pub fn process_inbound_packet(
+        &mut self,
+        buf: &mut [u8],
+        peer: SocketAddr,
+        local: SocketAddr,
+        pending_outbound: &mut Vec<TxDatagram>,
+        app_event_budget: usize,
+        batch: &mut Vec<JsH3Event>,
+    ) {
+        let offset = self.handle_offset;
+        let Ok(hdr) = quiche::Header::from_slice(buf, SCID_LEN) else {
+            return;
+        };
+
+        let handle = if let Some(handle) = self.conn_map.route_packet(hdr.dcid.as_ref()) {
+            handle
+        } else {
+            if hdr.ty != quiche::Type::Initial {
+                return;
+            }
+
+            if self.disable_retry {
+                let Ok(scid) = self.conn_map.generate_scid_direct() else {
+                    return;
+                };
+                let client_dcid = hdr.dcid.to_vec();
+                match self.conn_map.accept_new(
+                    &scid,
+                    None,
+                    peer,
+                    local,
+                    &mut self.quiche_config,
+                    self.server_config.qlog_dir.as_deref(),
+                    self.server_config.qlog_level.as_deref(),
+                ) {
+                    Ok(h) => {
+                        self.conn_map.add_dcid(h, client_dcid);
+                        reactor_metrics::record_session_open(SessionKind::RawQuicServer);
+                        batch.push(JsH3Event::new_session(
+                            offset | (h as u32),
+                            peer.ip().to_string(),
+                            peer.port(),
+                            String::new(),
+                        ));
+                        h
+                    }
+                    Err(_) => return,
+                }
+            } else if let Some(token) = hdr.token.as_ref().filter(|t| !t.is_empty()) {
+                match self.conn_map.validate_token(token, &peer) {
+                    Some(odcid) => {
+                        let scid = hdr.dcid.to_vec();
+                        let odcid_ref = quiche::ConnectionId::from_ref(&odcid);
+                        match self.conn_map.accept_new(
+                            &scid,
+                            Some(&odcid_ref),
+                            peer,
+                            local,
+                            &mut self.quiche_config,
+                            self.server_config.qlog_dir.as_deref(),
+                            self.server_config.qlog_level.as_deref(),
+                        ) {
+                            Ok(h) => {
+                                self.conn_map.add_dcid(h, odcid);
+                                reactor_metrics::record_session_open(SessionKind::RawQuicServer);
+                                batch.push(JsH3Event::new_session(
+                                    offset | (h as u32),
+                                    peer.ip().to_string(),
+                                    peer.port(),
+                                    String::new(),
+                                ));
+                                h
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                    None => return,
+                }
+            } else {
+                let Ok(scid) = self.conn_map.generate_scid_direct() else {
+                    return;
+                };
+                let scid_ref = quiche::ConnectionId::from_ref(&scid);
+                let token = self.conn_map.mint_token(&peer, hdr.dcid.as_ref());
+                let mut out = self.buffer_pool.checkout();
+                if let Ok(len) = quiche::retry(
+                    &hdr.scid,
+                    &hdr.dcid,
+                    &scid_ref,
+                    &token,
+                    hdr.version,
+                    &mut out,
+                ) {
+                    pending_outbound.push(TxDatagram::new(out[..len].to_vec(), len, peer, None));
+                }
+                self.buffer_pool.checkin(out);
+                return;
+            }
+        };
+
+        let recv_info = quiche::RecvInfo {
+            from: peer,
+            to: local,
+        };
+
+        let (timeout, current_scid, needs_dcid_update, retired_scids) = {
+            let Some(conn) = self.conn_map.get_mut(handle) else {
+                return;
+            };
+            if conn.recv(buf, recv_info).is_err() {
+                return;
+            }
+            if conn.quiche_conn.is_established() && !conn.is_established {
+                conn.mark_established();
+            }
+            if conn.quiche_conn.is_established() && !conn.handshake_complete_emitted {
+                if self.server_config.client_auth.require_client_cert()
+                    && conn.quiche_conn.peer_cert().is_none()
+                {
+                    let _ = conn
+                        .quiche_conn
+                        .close(false, 0x0100, b"client certificate required");
+                } else {
+                    let peer_certificate_chain = conn
+                        .quiche_conn
+                        .peer_cert_chain()
+                        .map(|chain| {
+                            chain
+                                .into_iter()
+                                .map(|certificate| certificate.to_vec())
+                                .collect()
+                        })
+                        .or_else(|| {
+                            conn.quiche_conn
+                                .peer_cert()
+                                .map(|certificate| vec![certificate.to_vec()])
+                        });
+                    conn.handshake_complete_emitted = true;
+                    batch.push(JsH3Event::handshake_complete_with_peer_certificate(
+                        offset | (handle as u32),
+                        conn.quiche_conn.peer_cert().is_some(),
+                        peer_certificate_chain,
+                    ));
+                }
+            }
+
+            let current_scid: Vec<u8> = conn.quiche_conn.source_id().into_owned().to_vec();
+            let needs_dcid_update = current_scid.as_slice() != conn.conn_id.as_slice();
+            if needs_dcid_update {
+                conn.conn_id = current_scid.clone();
+            }
+
+            conn.poll_quic_events(offset | (handle as u32), app_event_budget, batch);
+            for duration_ms in conn.poll_ping_acks() {
+                batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
+            }
+
+            let mut retired_scids = Vec::new();
+            while let Some(retired) = conn.quiche_conn.retired_scid_next() {
+                retired_scids.push(retired.into_owned().to_vec());
+            }
+
+            (
+                conn.timeout(),
+                current_scid,
+                needs_dcid_update,
+                retired_scids,
+            )
+        };
+
+        if needs_dcid_update {
+            self.conn_map.add_dcid(handle, current_scid);
+        }
+        for retired_scid in retired_scids {
+            self.conn_map.remove_dcid(&retired_scid);
+        }
+        // Deliberately no `top_up_server_scids` call here — see this
+        // method's doc comment (connection migration deferred).
+
+        self.timer_heap
+            .set_deadline(handle, timeout.map(|timeout| Instant::now() + timeout));
+    }
+
+    /// Expire due timers across every connection (the `qs_on_timeout`
+    /// primitive), sweeping for late FINs on every connection too (raw
+    /// QUIC has no HEADERS-based stream-finished signal — see
+    /// `sweep_finished_streams`). Hoisted from
+    /// `ProtocolHandler::process_timers` below.
+    pub fn expire_timers(&mut self, now: Instant, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
+        self.last_expired = self.timer_heap.pop_expired(now);
+        self.last_expired.sort_unstable();
+        self.last_expired.dedup();
+        for &handle in &self.last_expired {
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                conn.on_timeout();
+                if conn.is_closed() {
+                    reactor_metrics::record_lifecycle_trace(
+                        "quic-server",
+                        "session-close-timeout",
+                        None,
+                        None,
+                        None,
+                        Some(format!(
+                            "conn_handle={} blocked_streams={} known_streams={}",
+                            offset | (handle as u32),
+                            conn.blocked_set.len(),
+                            conn.known_streams.len()
+                        )),
+                    );
+                    reactor_metrics::record_session_close(SessionKind::RawQuicServer);
+                    batch.push(conn.session_close_event(offset | (handle as u32)));
+                } else {
+                    conn.poll_quic_events(offset | (handle as u32), app_event_budget, batch);
+                    for duration_ms in conn.poll_ping_acks() {
+                        batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
+                    }
+                    self.timer_heap
+                        .set_deadline(handle, conn.timeout().map(|timeout| now + timeout));
+                }
+            }
+        }
+        // Sweep ALL connections for late FINs (not just expired ones).
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        for i in 0..self.handles_buf.len() {
+            let handle = self.handles_buf[i];
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                if app_event_budget > 0 {
+                    conn.sweep_finished_streams(offset | (handle as u32), app_event_budget, batch);
+                }
+            }
+        }
+    }
+
+    /// Poll protocol/application events already buffered inside quiche for
+    /// every connection. Hoisted from `ProtocolHandler::poll_app_events`
+    /// below.
+    pub fn collect_app_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
+        if app_event_budget == 0 {
+            return;
+        }
+
+        let offset = self.handle_offset;
+        let mut remaining = app_event_budget;
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        for i in 0..self.handles_buf.len() {
+            if remaining == 0 {
+                break;
+            }
+
+            let handle = self.handles_buf[i];
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                conn.poll_quic_events(offset | (handle as u32), remaining, batch);
+                for duration_ms in conn.poll_ping_acks() {
+                    batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
+                }
+                remaining = app_event_budget.saturating_sub(batch.len());
+            }
+        }
+    }
+
+    /// Write every connection's next outbound datagram, round-robin.
+    /// Hoisted from `ProtocolHandler::flush_sends` below.
+    pub fn flush_all_sends(&mut self, outbound: &mut Vec<TxDatagram>) {
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        if self.handles_buf.is_empty() {
+            return;
+        }
+        // Round-robin: pull one packet from each connection in turn until all
+        // are drained.  This prevents a single busy connection from monopolizing
+        // the socket send buffer under fan-out.
+        let count = self.handles_buf.len();
+        let mut done = vec![false; count];
+        let mut active = count;
+        while active > 0 {
+            for i in 0..count {
+                if done[i] {
+                    continue;
+                }
+                let handle = self.handles_buf[i];
+                let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
+                    conn.drain_outbound_datagrams();
+                    // Write directly into a pool buffer — no intermediate copy.
+                    let mut tx_buf = self.tx_pool.checkout();
+                    if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
+                        let mtu = u16::try_from(conn.quiche_conn.max_send_udp_payload_size()).ok();
+                        outbound.push(TxDatagram::new(tx_buf, len, send_info.to, mtu));
+                        true
+                    } else {
+                        self.tx_pool.checkin(tx_buf);
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !sent {
+                    done[i] = true;
+                    active -= 1;
+                }
+            }
+        }
+        let now = Instant::now();
+        for &handle in &self.handles_buf {
+            let timeout = self
+                .conn_map
+                .get_mut(handle)
+                .and_then(|conn| conn.timeout());
+            self.timer_heap
+                .set_deadline(handle, timeout.map(|timeout| now + timeout));
+        }
+    }
+
+    /// Retry buffered partial stream writes where flow control has
+    /// opened, pushing `drain` events. Hoisted from
+    /// `ProtocolHandler::flush_pending_writes` below.
+    pub fn flush_all_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
+        let flushed = flush_quic_pending_writes(&mut self.conn_map, &mut self.pending_writes);
+        self.release_outbound_admission(flushed.released_units, batch);
+        for (local_handle, stream_id) in flushed {
+            reactor_metrics::record_raw_quic_drain_event();
+            batch.push(JsH3Event::drain(
+                local_handle | self.handle_offset,
+                stream_id,
+            ));
+        }
+    }
+
+    /// Check blocked streams for writability, pushing `drain` events, and
+    /// sweep every connection for late FINs. Hoisted from
+    /// `ProtocolHandler::poll_drain_events` below.
+    pub fn collect_drain_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
+        self.conn_map.fill_handles(&mut self.handles_buf);
+        for i in 0..self.handles_buf.len() {
+            let handle = self.handles_buf[i];
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                // Sweep for FIN events that arrived in a separate packet
+                // after data was already drained.  Run unconditionally —
+                // process_timers doesn't sweep non-expired connections.
+                if app_event_budget > 0 {
+                    conn.sweep_finished_streams(offset | (handle as u32), app_event_budget, batch);
+                }
+            }
+            if self.last_expired.contains(&handle) {
+                continue;
+            }
+            if let Some(conn) = self.conn_map.get_mut(handle) {
+                if !conn.blocked_set.is_empty() {
+                    conn.poll_drain_events(offset | (handle as u32), batch);
+                }
+            }
+        }
+    }
+
+    /// Recycle TX buffers back into this handler's pool. Hoisted from
+    /// `ProtocolHandler::recycle_tx_buffers` below.
+    pub fn recycle_tx_buffers_into_pool(&mut self, buffers: Vec<Vec<u8>>) {
+        reactor_metrics::record_tx_buffers_recycled(buffers.len());
+        for buf in buffers {
+            self.tx_pool.checkin(buf);
+        }
+    }
+
+    /// Remove closed connections, pushing final `session_close` events.
+    /// Hoisted from `ProtocolHandler::cleanup_closed` below.
+    pub fn reap_closed_connections(&mut self, batch: &mut Vec<JsH3Event>) {
+        let offset = self.handle_offset;
+        let closed = self.conn_map.drain_closed();
+        for (handle, conn) in closed {
+            self.timer_heap.remove_connection(handle);
+            self.conn_send_buffers.remove(&handle);
+            // Audit finding #12: emit a reset for every abandoned stream
+            // before dropping its PendingWrite, so JS-side write callbacks
+            // fire (via stream.destroy in _onReset) instead of hanging.
+            let abandoned: Vec<u64> = self
+                .pending_writes
+                .keys()
+                .filter(|&&(ch, _)| ch as usize == handle)
+                .map(|&(_, sid)| sid)
+                .collect();
+            for stream_id in abandoned {
+                batch.push(JsH3Event::reset(
+                    offset | (handle as u32),
+                    stream_id,
+                    0, // raw QUIC: app error 0 — connection-level close
+                ));
+            }
+            let mut removed_bytes = 0;
+            let mut removed_units = 0;
+            self.pending_writes.retain(|&(ch, _), write| {
+                let keep = ch as usize != handle;
+                if !keep {
+                    removed_bytes += write.queued_bytes();
+                    removed_units += write.queued_units();
+                }
+                keep
+            });
+            reactor_metrics::record_outbound_pending_write_removed(removed_bytes);
+            self.release_outbound_admission(removed_units, batch);
+            if !self.last_expired.contains(&handle) {
+                reactor_metrics::record_lifecycle_trace(
+                    "quic-server",
+                    "session-close-cleanup",
+                    None,
+                    None,
+                    None,
+                    Some(format!("conn_handle={}", offset | (handle as u32))),
+                );
+                reactor_metrics::record_session_close(SessionKind::RawQuicServer);
+                batch.push(conn.session_close_event(offset | (handle as u32)));
+            }
+        }
+        self.last_expired.clear();
+    }
+
+    // ── Per-connection direct-call operations ───────────────────────
+    // Mirrors `H3ServerHandler`'s equivalent section exactly — hoisted
+    // from `QuicServerCommand`'s match arms in `dispatch_command` above,
+    // minus the `release_outbound_admission`/`EVENT_WRITE_READY` calls
+    // (native-worker-thread-only concern; see that section's doc comment
+    // for the full rationale).
+
+    /// Queue body bytes (and optionally FIN) for `stream_id` on
+    /// `conn_handle` (the `qs_stream_send` primitive) — returns admitted
+    /// bytes, or `0` if fully backpressured / the connection no longer
+    /// exists. Mirrors `H3ServerHandler::queue_stream_send` (no
+    /// `pending_responses` concept in raw QUIC).
+    pub fn queue_stream_send(
+        &mut self,
+        conn_handle: u32,
+        stream_id: u64,
+        chunk: Chunk,
+        fin: bool,
+        batch: &mut Vec<JsH3Event>,
+    ) -> usize {
+        let event_conn_handle = self.handle_offset | conn_handle;
+        let key = (conn_handle, stream_id);
+        if let Some(pw) = self.pending_writes.get_mut(&key) {
+            reactor_metrics::record_outbound_pending_write_added(pw.push_chunk(chunk));
+            if fin {
+                pw.set_fin();
+            }
+            return 0;
+        }
+        let Some(conn) = self.conn_map.get_mut(conn_handle as usize) else {
+            return 0;
+        };
+        let outbound_units = outbound_payload_units(chunk.remaining_len(), fin);
+        let payload_len = chunk.remaining_len();
+        match conn.stream_send_chunk(stream_id, chunk, fin) {
+            Ok(outcome) => {
+                let released_units = accepted_outbound_payload_units(
+                    payload_len,
+                    fin,
+                    outcome.written,
+                    outcome.fin_accepted,
+                );
+                if let Some(remainder) = outcome.remainder {
+                    insert_pending_write(
+                        &mut self.pending_writes,
+                        key,
+                        PendingWrite::new(remainder, fin),
+                    );
+                    batch.push(JsH3Event::stream_blocked(event_conn_handle, stream_id));
+                }
+                released_units
+            }
+            Err(e) => {
+                batch.push(JsH3Event::error(
+                    event_conn_handle,
+                    stream_id as i64,
+                    0,
+                    format!("stream send failed: {e}"),
+                ));
+                outbound_units
+            }
+        }
+    }
+
+    /// Close `stream_id` on `conn_handle` with `error_code` (the
+    /// `qs_stream_close` primitive).
+    pub fn close_stream(
+        &mut self,
+        conn_handle: u32,
+        stream_id: u64,
+        error_code: u32,
+        batch: &mut Vec<JsH3Event>,
+    ) -> usize {
+        let event_conn_handle = self.handle_offset | conn_handle;
+        let Some(conn) = self.conn_map.get_mut(conn_handle as usize) else {
+            return 0;
+        };
+        match conn.stream_close(stream_id, u64::from(error_code)) {
+            Ok(()) => {
+                let released = remove_pending_write(&mut self.pending_writes, &(conn_handle, stream_id));
+                if released > 0 {
+                    batch.push(JsH3Event::reset(
+                        event_conn_handle,
+                        stream_id,
+                        u64::from(error_code),
+                    ));
+                }
+                released
+            }
+            Err(e) => {
+                log::debug!(
+                    "quic stream_close failed conn_handle={conn_handle} stream_id={stream_id} error_code={error_code}: {e}"
+                );
+                0
+            }
+        }
+    }
+
+    /// Send a QUIC DATAGRAM on `conn_handle`.
+    pub fn send_datagram(&mut self, conn_handle: u32, data: Chunk) -> bool {
+        self.conn_map
+            .get_mut(conn_handle as usize)
+            .is_some_and(|conn| conn.queue_datagram(data).unwrap_or(false))
+    }
+
+    /// Snapshot session metrics for `conn_handle`, or `None` if it no
+    /// longer exists (the `qs_session_metrics` primitive).
+    pub fn session_metrics(&self, conn_handle: u32) -> Option<JsSessionMetrics> {
+        self.conn_map
+            .get(conn_handle as usize)
+            .map(snapshot_quic_metrics)
+    }
+
+    /// Queue a PING on `conn_handle`.
+    pub fn ping(&mut self, conn_handle: u32) -> bool {
+        self.conn_map
+            .get_mut(conn_handle as usize)
+            .is_some_and(|conn| conn.queue_ping().is_ok())
+    }
+
+    /// Immediately close a single connection with a CONNECTION_CLOSE (the
+    /// `qs_close_connection` primitive) — raw QUIC has no GOAWAY concept,
+    /// so (unlike `H3ServerHandler::close_connection`) this is not
+    /// deferred; mirrors `QuicServerCommand::CloseSession`'s match arm
+    /// exactly.
+    pub fn close_connection(&mut self, conn_handle: u32, error_code: u32, reason: &str) {
+        if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+            let _ = conn
+                .quiche_conn
+                .close(true, u64::from(error_code), reason.as_bytes());
         }
     }
 }
@@ -2740,158 +3424,23 @@ impl ProtocolHandler for QuicServerHandler {
         app_event_budget: usize,
         batch: &mut Vec<JsH3Event>,
     ) {
-        let offset = self.handle_offset;
-        self.last_expired = self.timer_heap.pop_expired(now);
-        self.last_expired.sort_unstable();
-        self.last_expired.dedup();
-        for &handle in &self.last_expired {
-            if let Some(conn) = self.conn_map.get_mut(handle) {
-                conn.on_timeout();
-                if conn.is_closed() {
-                    reactor_metrics::record_lifecycle_trace(
-                        "quic-server",
-                        "session-close-timeout",
-                        None,
-                        None,
-                        None,
-                        Some(format!(
-                            "conn_handle={} blocked_streams={} known_streams={}",
-                            offset | (handle as u32),
-                            conn.blocked_set.len(),
-                            conn.known_streams.len()
-                        )),
-                    );
-                    reactor_metrics::record_session_close(SessionKind::RawQuicServer);
-                    batch.push(conn.session_close_event(offset | (handle as u32)));
-                } else {
-                    conn.poll_quic_events(offset | (handle as u32), app_event_budget, batch);
-                    for duration_ms in conn.poll_ping_acks() {
-                        batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
-                    }
-                    self.timer_heap
-                        .set_deadline(handle, conn.timeout().map(|timeout| now + timeout));
-                }
-            }
-        }
-        // Sweep ALL connections for late FINs (not just expired ones).
-        self.conn_map.fill_handles(&mut self.handles_buf);
-        for i in 0..self.handles_buf.len() {
-            let handle = self.handles_buf[i];
-            if let Some(conn) = self.conn_map.get_mut(handle) {
-                if app_event_budget > 0 {
-                    conn.sweep_finished_streams(offset | (handle as u32), app_event_budget, batch);
-                }
-            }
-        }
+        self.expire_timers(now, app_event_budget, batch);
     }
 
     fn poll_app_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
-        if app_event_budget == 0 {
-            return;
-        }
-
-        let offset = self.handle_offset;
-        let mut remaining = app_event_budget;
-        self.conn_map.fill_handles(&mut self.handles_buf);
-        for i in 0..self.handles_buf.len() {
-            if remaining == 0 {
-                break;
-            }
-
-            let handle = self.handles_buf[i];
-            if let Some(conn) = self.conn_map.get_mut(handle) {
-                conn.poll_quic_events(offset | (handle as u32), remaining, batch);
-                for duration_ms in conn.poll_ping_acks() {
-                    batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
-                }
-                remaining = app_event_budget.saturating_sub(batch.len());
-            }
-        }
+        self.collect_app_events(app_event_budget, batch);
     }
 
     fn flush_sends(&mut self, outbound: &mut Vec<TxDatagram>) {
-        self.conn_map.fill_handles(&mut self.handles_buf);
-        if self.handles_buf.is_empty() {
-            return;
-        }
-        // Round-robin: pull one packet from each connection in turn until all
-        // are drained.  This prevents a single busy connection from monopolizing
-        // the socket send buffer under fan-out.
-        let count = self.handles_buf.len();
-        let mut done = vec![false; count];
-        let mut active = count;
-        while active > 0 {
-            for i in 0..count {
-                if done[i] {
-                    continue;
-                }
-                let handle = self.handles_buf[i];
-                let sent = if let Some(conn) = self.conn_map.get_mut(handle) {
-                    conn.drain_outbound_datagrams();
-                    // Write directly into a pool buffer — no intermediate copy.
-                    let mut tx_buf = self.tx_pool.checkout();
-                    if let Ok((len, send_info)) = conn.send(tx_buf.as_mut_slice()) {
-                        let mtu = u16::try_from(conn.quiche_conn.max_send_udp_payload_size()).ok();
-                        outbound.push(TxDatagram::new(tx_buf, len, send_info.to, mtu));
-                        true
-                    } else {
-                        self.tx_pool.checkin(tx_buf);
-                        false
-                    }
-                } else {
-                    false
-                };
-                if !sent {
-                    done[i] = true;
-                    active -= 1;
-                }
-            }
-        }
-        let now = Instant::now();
-        for &handle in &self.handles_buf {
-            let timeout = self
-                .conn_map
-                .get_mut(handle)
-                .and_then(|conn| conn.timeout());
-            self.timer_heap
-                .set_deadline(handle, timeout.map(|timeout| now + timeout));
-        }
+        self.flush_all_sends(outbound);
     }
 
     fn flush_pending_writes(&mut self, batch: &mut Vec<JsH3Event>) {
-        let flushed = flush_quic_pending_writes(&mut self.conn_map, &mut self.pending_writes);
-        self.release_outbound_admission(flushed.released_units, batch);
-        for (local_handle, stream_id) in flushed {
-            reactor_metrics::record_raw_quic_drain_event();
-            batch.push(JsH3Event::drain(
-                local_handle | self.handle_offset,
-                stream_id,
-            ));
-        }
+        self.flush_all_pending_writes(batch);
     }
 
     fn poll_drain_events(&mut self, app_event_budget: usize, batch: &mut Vec<JsH3Event>) {
-        let offset = self.handle_offset;
-        self.conn_map.fill_handles(&mut self.handles_buf);
-        for i in 0..self.handles_buf.len() {
-            let handle = self.handles_buf[i];
-            if let Some(conn) = self.conn_map.get_mut(handle) {
-                // Sweep for FIN events that arrived in a separate packet
-                // after data was already drained.  Run unconditionally —
-                // process_timers doesn't sweep non-expired connections.
-                if app_event_budget > 0 {
-                    conn.sweep_finished_streams(offset | (handle as u32), app_event_budget, batch);
-                }
-            }
-            if self.last_expired.contains(&handle) {
-                continue;
-            }
-            if let Some(conn) = self.conn_map.get_mut(handle) {
-                if !conn.blocked_set.is_empty() {
-                    conn.poll_drain_events(offset | (handle as u32), batch);
-                }
-            }
-        }
+        self.collect_drain_events(app_event_budget, batch);
     }
 
     fn drain_recycled_buffers(&mut self) {
@@ -2905,60 +3454,11 @@ impl ProtocolHandler for QuicServerHandler {
     }
 
     fn recycle_tx_buffers(&mut self, buffers: Vec<Vec<u8>>) {
-        reactor_metrics::record_tx_buffers_recycled(buffers.len());
-        for buf in buffers {
-            self.tx_pool.checkin(buf);
-        }
+        self.recycle_tx_buffers_into_pool(buffers);
     }
 
     fn cleanup_closed(&mut self, batch: &mut Vec<JsH3Event>) {
-        let offset = self.handle_offset;
-        let closed = self.conn_map.drain_closed();
-        for (handle, conn) in closed {
-            self.timer_heap.remove_connection(handle);
-            self.conn_send_buffers.remove(&handle);
-            // Audit finding #12: emit a reset for every abandoned stream
-            // before dropping its PendingWrite, so JS-side write callbacks
-            // fire (via stream.destroy in _onReset) instead of hanging.
-            let abandoned: Vec<u64> = self
-                .pending_writes
-                .keys()
-                .filter(|&&(ch, _)| ch as usize == handle)
-                .map(|&(_, sid)| sid)
-                .collect();
-            for stream_id in abandoned {
-                batch.push(JsH3Event::reset(
-                    offset | (handle as u32),
-                    stream_id,
-                    0, // raw QUIC: app error 0 — connection-level close
-                ));
-            }
-            let mut removed_bytes = 0;
-            let mut removed_units = 0;
-            self.pending_writes.retain(|&(ch, _), write| {
-                let keep = ch as usize != handle;
-                if !keep {
-                    removed_bytes += write.queued_bytes();
-                    removed_units += write.queued_units();
-                }
-                keep
-            });
-            reactor_metrics::record_outbound_pending_write_removed(removed_bytes);
-            self.release_outbound_admission(removed_units, batch);
-            if !self.last_expired.contains(&handle) {
-                reactor_metrics::record_lifecycle_trace(
-                    "quic-server",
-                    "session-close-cleanup",
-                    None,
-                    None,
-                    None,
-                    Some(format!("conn_handle={}", offset | (handle as u32))),
-                );
-                reactor_metrics::record_session_close(SessionKind::RawQuicServer);
-                batch.push(conn.session_close_event(offset | (handle as u32)));
-            }
-        }
-        self.last_expired.clear();
+        self.reap_closed_connections(batch);
     }
 
     fn emit_session_close_for_all_active(&mut self, batch: &mut Vec<JsH3Event>) {
@@ -2973,7 +3473,7 @@ impl ProtocolHandler for QuicServerHandler {
     }
 
     fn next_deadline(&mut self) -> Option<Instant> {
-        self.timer_heap.next_deadline()
+        self.soonest_deadline()
     }
 }
 
@@ -3692,7 +4192,10 @@ impl<T> IntoIterator for PendingWriteFlushEvents<T> {
     }
 }
 
-#[cfg(feature = "os-runtime")]
+/// Always compiled — used by both native's
+/// `ProtocolHandler::flush_pending_writes` (via `flush_all_pending_writes`)
+/// and the direct-call surface, since `QuicConnectionMap` itself no
+/// longer requires `os-runtime`.
 fn flush_quic_pending_writes(
     conn_map: &mut QuicConnectionMap,
     pending: &mut HashMap<(u32, u64), PendingWrite>,
@@ -4239,6 +4742,355 @@ mod tests {
                 "expected at least one NSS-format keylog line after handshake"
             );
             assert!(handler.take_keylog_lines().is_empty());
+        }
+    }
+
+    /// Lockstep tests for the raw-QUIC server-side direct-call surface
+    /// (`QuicServerHandler::new_direct` + `process_inbound_packet` +
+    /// friends), added alongside server-side wasm ABI support. Mirrors
+    /// `direct_call_quic` above's style and `worker.rs`'s
+    /// `direct_call_h3_server` sibling module exactly — two real
+    /// direct-call handlers pumped against each other, no hand-rolled
+    /// `quiche::Connection` or real UDP socket needed.
+    mod direct_call_quic_server {
+        use super::*;
+        use crate::config::{
+            JsQuicClientOptions, JsQuicServerOptions, new_quic_client_config_in_memory,
+            new_quic_server_config_in_memory,
+        };
+        use crate::h3_event::{
+            EVENT_DATA, EVENT_HANDSHAKE_COMPLETE, EVENT_NEW_SESSION, EVENT_NEW_STREAM,
+            EVENT_SESSION_CLOSE,
+        };
+        use std::net::{IpAddr, Ipv4Addr};
+
+        const TEST_SCID_LEN: usize = crate::cid::SCID_LEN;
+
+        fn test_addrs() -> (SocketAddr, SocketAddr) {
+            (
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 44_001), // client
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54_001), // server
+            )
+        }
+
+        fn generate_self_signed_pem() -> (Vec<u8>, Vec<u8>) {
+            use rcgen::{CertificateParams, KeyPair};
+            let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+            let mut params = CertificateParams::new(vec!["localhost".into()]).expect("params");
+            params.distinguished_name = rcgen::DistinguishedName::new();
+            let cert = params.self_signed(&key_pair).expect("self-signed cert");
+            (
+                cert.pem().into_bytes(),
+                key_pair.serialize_pem().into_bytes(),
+            )
+        }
+
+        fn build_server_direct() -> QuicServerHandler {
+            let (cert_pem, key_pem) = generate_self_signed_pem();
+            let options = JsQuicServerOptions {
+                key: key_pem.into(),
+                cert: cert_pem.into(),
+                ca: None,
+                client_auth: None,
+                alpn: None,
+                runtime_mode: None,
+                max_idle_timeout_ms: Some(5_000),
+                max_udp_payload_size: Some(1_350),
+                initial_max_data: Some(1_000_000),
+                initial_max_stream_data_bidi_local: Some(1_000_000),
+                initial_max_streams_bidi: Some(100),
+                disable_active_migration: Some(true),
+                enable_datagrams: None,
+                max_connections: Some(128),
+                disable_retry: Some(true),
+                qlog_dir: None,
+                qlog_level: None,
+                session_ticket_keys: None,
+                keylog: None,
+            };
+            let quiche_config =
+                new_quic_server_config_in_memory(&options).expect("server config");
+            let server_config = QuicServerConfig {
+                qlog_dir: None,
+                qlog_level: None,
+                max_connections: options.max_connections.unwrap_or(10_000) as usize,
+                disable_retry: options.disable_retry.unwrap_or(false),
+                client_auth: ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())
+                    .expect("valid client auth"),
+                cid_encoding: CidEncoding::random(),
+                runtime_mode: TransportRuntimeMode::Portable,
+            };
+            QuicServerHandler::new_direct(
+                quiche_config,
+                server_config,
+                [0x66u8; 32],
+                Arc::new(OutboundAdmission::default()),
+            )
+        }
+
+        fn build_client_direct(scid_byte: u8, client_addr: SocketAddr, server_addr: SocketAddr) -> QuicClientHandler {
+            let client_options = JsQuicClientOptions {
+                ca: None,
+                cert: None,
+                key: None,
+                reject_unauthorized: Some(false),
+                alpn: None,
+                runtime_mode: None,
+                max_idle_timeout_ms: Some(5_000),
+                max_udp_payload_size: Some(1_350),
+                initial_max_data: None,
+                initial_max_stream_data_bidi_local: None,
+                initial_max_streams_bidi: None,
+                session_ticket: None,
+                allow_0rtt: None,
+                enable_datagrams: None,
+                keylog: None,
+                qlog_dir: None,
+                qlog_level: None,
+                disable_pacing: Some(true),
+            };
+            let mut client_config =
+                new_quic_client_config_in_memory(&client_options).expect("client config");
+            QuicClientHandler::new_direct(
+                vec![scid_byte; TEST_SCID_LEN],
+                client_addr,
+                server_addr,
+                "localhost",
+                None,
+                None,
+                None,
+                &mut client_config,
+                Arc::new(OutboundAdmission::default()),
+            )
+            .expect("client new_direct should construct")
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn pump(
+            client: &mut QuicClientHandler,
+            server: &mut QuicServerHandler,
+            client_addr: SocketAddr,
+            server_addr: SocketAddr,
+            client_batch: &mut Vec<JsH3Event>,
+            server_batch: &mut Vec<JsH3Event>,
+        ) -> bool {
+            let mut progressed = false;
+
+            while let Some(pkt) = client.try_send_next() {
+                progressed = true;
+                let mut buf = pkt.payload().to_vec();
+                let mut pending_outbound: Vec<TxDatagram> = Vec::new();
+                server.process_inbound_packet(
+                    &mut buf,
+                    client_addr,
+                    server_addr,
+                    &mut pending_outbound,
+                    usize::MAX,
+                    server_batch,
+                );
+                for reply in pending_outbound {
+                    let mut reply_buf = reply.payload().to_vec();
+                    client.process_packet_for_handle(
+                        &mut reply_buf,
+                        server_addr,
+                        client_addr,
+                        usize::MAX,
+                        client_batch,
+                        0,
+                    );
+                }
+            }
+
+            let mut server_outbound: Vec<TxDatagram> = Vec::new();
+            server.flush_all_sends(&mut server_outbound);
+            for pkt in server_outbound {
+                progressed = true;
+                let mut buf = pkt.payload().to_vec();
+                client.process_packet_for_handle(
+                    &mut buf,
+                    server_addr,
+                    client_addr,
+                    usize::MAX,
+                    client_batch,
+                    0,
+                );
+            }
+
+            if client
+                .next_timer_deadline()
+                .is_some_and(|deadline| deadline <= Instant::now())
+            {
+                client.process_timers_for_handle(Instant::now(), usize::MAX, client_batch, 0);
+                progressed = true;
+            }
+            if server
+                .soonest_deadline()
+                .is_some_and(|deadline| deadline <= Instant::now())
+            {
+                server.expire_timers(Instant::now(), usize::MAX, server_batch);
+                progressed = true;
+            }
+
+            server.collect_drain_events(usize::MAX, server_batch);
+            server.flush_all_pending_writes(server_batch);
+            client.poll_drain_events_for_handle(usize::MAX, client_batch, 0);
+            client.flush_pending_writes_for_handle(client_batch, 0);
+
+            progressed
+        }
+
+        fn pump_until<F>(
+            client: &mut QuicClientHandler,
+            server: &mut QuicServerHandler,
+            client_addr: SocketAddr,
+            server_addr: SocketAddr,
+            client_batch: &mut Vec<JsH3Event>,
+            server_batch: &mut Vec<JsH3Event>,
+            mut done: F,
+        ) where
+            F: FnMut(&[JsH3Event], &[JsH3Event]) -> bool,
+        {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if done(client_batch, server_batch) {
+                    return;
+                }
+                let progressed = pump(client, server, client_addr, server_addr, client_batch, server_batch);
+                if done(client_batch, server_batch) {
+                    return;
+                }
+                if !progressed {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            panic!("pump_until exceeded the 5s deadline without reaching the target condition");
+        }
+
+        #[test]
+        fn new_direct_completes_handshake_stream_echo_and_close() {
+            let (client_addr, server_addr) = test_addrs();
+            let mut server = build_server_direct();
+            let mut client = build_client_direct(0x71, client_addr, server_addr);
+
+            let mut client_batch = Vec::new();
+            let mut server_batch = Vec::new();
+
+            pump_until(
+                &mut client,
+                &mut server,
+                client_addr,
+                server_addr,
+                &mut client_batch,
+                &mut server_batch,
+                |client_batch, server_batch| {
+                    client_batch.iter().any(|e| e.event_type == EVENT_HANDSHAKE_COMPLETE)
+                        && server_batch.iter().any(|e| e.event_type == EVENT_HANDSHAKE_COMPLETE)
+                },
+            );
+
+            assert!(server_batch.iter().any(|e| e.event_type == EVENT_NEW_SESSION));
+            let conn_handle = server_batch
+                .iter()
+                .find(|e| e.event_type == EVENT_NEW_SESSION)
+                .expect("new session event")
+                .conn_handle;
+            assert_eq!(server.connection_count(), 1);
+
+            // --- Client opens a bidi stream and sends data; server echoes it ---
+            let stream_id = client.open_bidi_stream().expect("open_bidi_stream");
+            let released = client.queue_stream_send(
+                stream_id,
+                Chunk::unpooled(b"ping".to_vec()),
+                true,
+                &mut client_batch,
+                0,
+            );
+            assert!(released > 0, "client stream send should be admitted");
+
+            // Raw QUIC coalesces a new stream's first recv into the
+            // `EVENT_NEW_STREAM` event itself (`data` carried right on
+            // it — see `QuicConnection::poll_quic_events`'s "Coalesce
+            // first recv into NEW_STREAM event" comment), so — exactly
+            // like the H3 lockstep test's HEADERS+coalesced-DATA
+            // handling — check `.data` on every event for this stream,
+            // not just `EVENT_DATA`-typed ones.
+            server_batch.clear();
+            pump_until(
+                &mut client,
+                &mut server,
+                client_addr,
+                server_addr,
+                &mut client_batch,
+                &mut server_batch,
+                |_client_batch, server_batch| {
+                    server_batch.iter().any(|e| e.stream_id as u64 == stream_id && e.data.is_some())
+                },
+            );
+
+            assert!(server_batch.iter().any(|e| e.event_type == EVENT_NEW_STREAM));
+            let received: Vec<u8> = server_batch
+                .iter()
+                .filter(|e| e.stream_id as u64 == stream_id)
+                .filter_map(|e| e.data.as_deref())
+                .flatten()
+                .copied()
+                .collect();
+            assert_eq!(received, b"ping");
+
+            let echoed = server.queue_stream_send(
+                conn_handle,
+                stream_id,
+                Chunk::unpooled(b"pong".to_vec()),
+                true,
+                &mut server_batch,
+            );
+            assert!(echoed > 0, "server echo should be admitted");
+
+            client_batch.clear();
+            pump_until(
+                &mut client,
+                &mut server,
+                client_addr,
+                server_addr,
+                &mut client_batch,
+                &mut server_batch,
+                |client_batch, _server_batch| {
+                    client_batch
+                        .iter()
+                        .any(|e| e.event_type == EVENT_DATA && e.stream_id as u64 == stream_id)
+                },
+            );
+            let echoed_body: Vec<u8> = client_batch
+                .iter()
+                .filter(|e| e.event_type == EVENT_DATA && e.stream_id as u64 == stream_id)
+                .filter_map(|e| e.data.as_deref())
+                .flatten()
+                .copied()
+                .collect();
+            assert_eq!(echoed_body, b"pong");
+
+            // --- Close ---
+            server.close_connection(conn_handle, 0, "server done");
+            let close_deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < close_deadline && !server.connection_is_closed(conn_handle) {
+                let progressed = pump(
+                    &mut client,
+                    &mut server,
+                    client_addr,
+                    server_addr,
+                    &mut client_batch,
+                    &mut server_batch,
+                );
+                if !progressed {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            assert!(server.connection_is_closed(conn_handle));
+
+            server.reap_closed_connections(&mut server_batch);
+            assert!(server_batch.iter().any(|e| e.event_type == EVENT_SESSION_CLOSE));
+            assert!(server.is_idle());
+            assert_eq!(server.connection_count(), 0);
         }
     }
 }

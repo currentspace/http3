@@ -211,6 +211,20 @@ pub struct JsServerOptions {
     pub key: ByteBuf,
     pub cert: ByteBuf,
     pub ca: Option<ByteBuf>,
+    /// Client certificate policy. Default: `'require'` when `ca` is set,
+    /// otherwise `'none'` (matches `JsQuicServerOptions::client_auth`'s
+    /// existing semantics exactly — see `ClientAuthMode::parse`).
+    ///
+    /// Native's file-based [`Http3Config::new_server_quiche_config`] does
+    /// **not** read this field (a pre-existing asymmetry: today's H3
+    /// server has no client-certificate verification at all, unlike the
+    /// raw QUIC server — mirrors the already-documented client-side
+    /// asymmetry, "H3 client mTLS parity — deferred", in
+    /// `docs/WASM_CLIENT_PLAN.md`'s decision log). Only the new
+    /// [`Http3Config::new_server_quiche_config_in_memory`] (server-side
+    /// wasm ABI work) reads it. Purely additive: existing native callers
+    /// that never set this field are unaffected either way.
+    pub client_auth: Option<String>,
     pub runtime_mode: Option<String>,
     pub max_idle_timeout_ms: Option<u32>,
     pub max_udp_payload_size: Option<u32>,
@@ -267,6 +281,11 @@ pub struct Http3Config {
     pub reuse_port: bool,
     pub cid_encoding: CidEncoding,
     pub runtime_mode: TransportRuntimeMode,
+    /// Client certificate policy (see `JsServerOptions::client_auth`'s doc
+    /// comment for why native's file-based server config builder doesn't
+    /// read this — only the new in-memory / direct-call server surface
+    /// does, added alongside server-side wasm ABI support).
+    pub client_auth: ClientAuthMode,
 }
 
 impl Http3Config {
@@ -557,6 +576,124 @@ impl Http3Config {
         Ok(config)
     }
 
+    /// In-memory alternative to
+    /// [`Http3Config::new_server_quiche_config`] for a sans-IO /
+    /// `wasm-abi` server caller: loads `cert`/`key` (mandatory — a server
+    /// cannot start without them, unlike a client's optional `ca`) and the
+    /// optional `ca` (for client-certificate verification) via
+    /// BoringSSL's `SslContextBuilder` instead of temp files, exactly
+    /// mirroring [`Http3Config::new_client_quiche_config_in_memory`]'s
+    /// established pattern.
+    ///
+    /// `clientAuth`/`ca` handling: this is a genuinely new capability, not
+    /// a port of existing native behavior — see
+    /// `JsServerOptions::client_auth`'s doc comment for why (native's
+    /// file-based server builder has no client-certificate verification
+    /// at all today). Mirrors `new_quic_server_config`'s
+    /// `ClientAuthMode`-based `verify_peer` handling, which is the one
+    /// existing native precedent for this option.
+    pub fn new_server_quiche_config_in_memory(
+        options: &JsServerOptions,
+    ) -> Result<quiche::Config, Http3NativeError> {
+        let mut tls = boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
+            .map_err(|e| {
+                Http3NativeError::Config(format!("boring SslContextBuilder::new failed: {e}"))
+            })?;
+
+        let cert = boring::x509::X509::from_pem(&options.cert)
+            .map_err(|e| Http3NativeError::Config(format!("invalid server certificate PEM: {e}")))?;
+        tls.set_certificate(&cert)
+            .map_err(|e| Http3NativeError::Config(format!("failed to set server certificate: {e}")))?;
+        let key = boring::pkey::PKey::private_key_from_pem(&options.key)
+            .map_err(|e| Http3NativeError::Config(format!("invalid server private key PEM: {e}")))?;
+        tls.set_private_key(&key)
+            .map_err(|e| Http3NativeError::Config(format!("failed to set server private key: {e}")))?;
+
+        let client_auth =
+            ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
+        if let Some(ca) = options.ca.as_ref() {
+            let ca_cert = boring::x509::X509::from_pem(ca)
+                .map_err(|e| Http3NativeError::Config(format!("invalid ca PEM: {e}")))?;
+            tls.cert_store_mut().add_cert(ca_cert).map_err(|e| {
+                Http3NativeError::Config(format!("failed to add ca cert to store: {e}"))
+            })?;
+        }
+        tls.set_verify(if client_auth.verify_peer() {
+            boring::ssl::SslVerifyMode::PEER
+        } else {
+            boring::ssl::SslVerifyMode::NONE
+        });
+
+        let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls)
+            .map_err(Http3NativeError::Quiche)?;
+
+        config
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .map_err(Http3NativeError::Quiche)?;
+
+        config.set_max_idle_timeout(u64::from(options.max_idle_timeout_ms.unwrap_or(30_000)));
+        config.set_max_recv_udp_payload_size(
+            options
+                .max_udp_payload_size
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+        );
+        config.set_max_send_udp_payload_size(
+            options
+                .max_udp_payload_size
+                .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+        );
+        let initial_max_data = u64::from(
+            options
+                .initial_max_data
+                .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+        );
+        let initial_stream_data_bidi_local = u64::from(
+            options
+                .initial_max_stream_data_bidi_local
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+        );
+        let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+        config.set_initial_max_data(initial_max_data);
+        config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+        config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+        config.set_initial_max_stream_data_uni(initial_stream_data_uni);
+        config.set_initial_max_streams_bidi(u64::from(
+            options
+                .initial_max_streams_bidi
+                .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
+        ));
+        config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
+        config.set_disable_active_migration(options.disable_active_migration.unwrap_or(true));
+
+        if let Some(keys) = options.session_ticket_keys.as_ref() {
+            config
+                .set_ticket_key(keys)
+                .map_err(Http3NativeError::Quiche)?;
+        }
+
+        apply_flow_control_window_tuning(
+            &mut config,
+            initial_max_data,
+            &[
+                initial_stream_data_bidi_local,
+                initial_stream_data_bidi_remote,
+                initial_stream_data_uni,
+            ],
+        );
+        apply_congestion_tuning(&mut config);
+
+        if options.enable_datagrams.unwrap_or(false) {
+            config.enable_dgram(true, 1000, 1000);
+        }
+
+        if options.keylog.unwrap_or(false) {
+            config.log_keys();
+        }
+
+        Ok(config)
+    }
+
     pub fn from_server_options(options: &JsServerOptions) -> Result<Self, Http3NativeError> {
         let quic_lb = options.quic_lb.unwrap_or(false);
         let cid_encoding = if quic_lb {
@@ -574,6 +711,9 @@ impl Http3Config {
             CidEncoding::random()
         };
 
+        let client_auth =
+            ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
+
         Ok(Self {
             qlog_dir: options.qlog_dir.clone(),
             qlog_level: options.qlog_level.clone(),
@@ -584,6 +724,7 @@ impl Http3Config {
             reuse_port: options.reuse_port.unwrap_or(false),
             cid_encoding,
             runtime_mode: TransportRuntimeMode::parse(options.runtime_mode.as_deref())?,
+            client_auth,
         })
     }
 }
@@ -668,6 +809,115 @@ pub fn new_quic_server_config(
             .map_err(Http3NativeError::Quiche)?;
     }
     config.verify_peer(client_auth.verify_peer());
+
+    let default_alpn = vec!["quic".to_string()];
+    let alpn_protos = options.alpn.as_deref().unwrap_or(&default_alpn);
+    let alpn_bytes = alpn_to_bytes(alpn_protos);
+    let alpn_slice = alpn_refs(&alpn_bytes);
+    config
+        .set_application_protos(&alpn_slice)
+        .map_err(Http3NativeError::Quiche)?;
+
+    config.set_max_idle_timeout(u64::from(options.max_idle_timeout_ms.unwrap_or(30_000)));
+    config.set_max_recv_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+    );
+    config.set_max_send_udp_payload_size(
+        options
+            .max_udp_payload_size
+            .unwrap_or(FALLBACK_MAX_UDP_PAYLOAD as u32) as usize,
+    );
+    let initial_max_data = u64::from(
+        options
+            .initial_max_data
+            .unwrap_or(DEFAULT_INITIAL_MAX_DATA as u32),
+    );
+    let initial_stream_data_bidi_local = u64::from(
+        options
+            .initial_max_stream_data_bidi_local
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAM_DATA as u32),
+    );
+    let initial_stream_data_bidi_remote = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    let initial_stream_data_uni = DEFAULT_INITIAL_MAX_STREAM_DATA;
+    config.set_initial_max_data(initial_max_data);
+    config.set_initial_max_stream_data_bidi_local(initial_stream_data_bidi_local);
+    config.set_initial_max_stream_data_bidi_remote(initial_stream_data_bidi_remote);
+    config.set_initial_max_stream_data_uni(initial_stream_data_uni);
+    config.set_initial_max_streams_bidi(u64::from(
+        options
+            .initial_max_streams_bidi
+            .unwrap_or(DEFAULT_INITIAL_MAX_STREAMS_BIDI as u32),
+    ));
+    config.set_initial_max_streams_uni(DEFAULT_INITIAL_MAX_STREAMS_UNI);
+    config.set_disable_active_migration(options.disable_active_migration.unwrap_or(true));
+
+    if let Some(keys) = options.session_ticket_keys.as_ref() {
+        config
+            .set_ticket_key(keys)
+            .map_err(Http3NativeError::Quiche)?;
+    }
+
+    apply_flow_control_window_tuning(
+        &mut config,
+        initial_max_data,
+        &[
+            initial_stream_data_bidi_local,
+            initial_stream_data_bidi_remote,
+            initial_stream_data_uni,
+        ],
+    );
+    apply_congestion_tuning(&mut config);
+
+    if options.enable_datagrams.unwrap_or(false) {
+        config.enable_dgram(true, 1000, 1000);
+    }
+
+    if options.keylog.unwrap_or(false) {
+        config.log_keys();
+    }
+
+    Ok(config)
+}
+
+/// In-memory alternative to [`new_quic_server_config`] for a sans-IO /
+/// `wasm-abi` server caller: loads `cert`/`key` (mandatory) and the
+/// optional `ca`/`clientAuth` via BoringSSL's `SslContextBuilder` instead
+/// of temp files. Unlike the H3 server's in-memory builder, this mirrors
+/// an *existing* native precedent exactly — `new_quic_server_config`
+/// already reads `client_auth` and calls `verify_peer` today.
+pub fn new_quic_server_config_in_memory(
+    options: &JsQuicServerOptions,
+) -> Result<quiche::Config, Http3NativeError> {
+    let mut tls = boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
+        .map_err(|e| Http3NativeError::Config(format!("boring SslContextBuilder::new failed: {e}")))?;
+
+    let cert = boring::x509::X509::from_pem(&options.cert)
+        .map_err(|e| Http3NativeError::Config(format!("invalid server certificate PEM: {e}")))?;
+    tls.set_certificate(&cert)
+        .map_err(|e| Http3NativeError::Config(format!("failed to set server certificate: {e}")))?;
+    let key = boring::pkey::PKey::private_key_from_pem(&options.key)
+        .map_err(|e| Http3NativeError::Config(format!("invalid server private key PEM: {e}")))?;
+    tls.set_private_key(&key)
+        .map_err(|e| Http3NativeError::Config(format!("failed to set server private key: {e}")))?;
+
+    let client_auth = ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
+    if let Some(ca) = options.ca.as_ref() {
+        let ca_cert = boring::x509::X509::from_pem(ca)
+            .map_err(|e| Http3NativeError::Config(format!("invalid ca PEM: {e}")))?;
+        tls.cert_store_mut()
+            .add_cert(ca_cert)
+            .map_err(|e| Http3NativeError::Config(format!("failed to add ca cert to store: {e}")))?;
+    }
+    tls.set_verify(if client_auth.verify_peer() {
+        boring::ssl::SslVerifyMode::PEER
+    } else {
+        boring::ssl::SslVerifyMode::NONE
+    });
+
+    let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls)
+        .map_err(Http3NativeError::Quiche)?;
 
     let default_alpn = vec!["quic".to_string()];
     let alpn_protos = options.alpn.as_deref().unwrap_or(&default_alpn);
@@ -1002,6 +1252,7 @@ mod tests {
             key: vec![1u8].into(),
             cert: vec![2u8].into(),
             ca: None,
+            client_auth: None,
             runtime_mode: None,
             max_idle_timeout_ms: None,
             max_udp_payload_size: None,
@@ -1261,5 +1512,155 @@ mod tests {
         assert!(ceiling > 0);
         #[cfg(not(feature = "os-runtime"))]
         assert_eq!(ceiling, FALLBACK_MAX_UDP_PAYLOAD);
+    }
+
+    // ── Server-side wasm ABI: in-memory server config builders ─────────
+
+    fn base_server_options_in_memory(cert_pem: Vec<u8>, key_pem: Vec<u8>) -> JsServerOptions {
+        JsServerOptions {
+            key: key_pem.into(),
+            cert: cert_pem.into(),
+            ca: None,
+            client_auth: None,
+            runtime_mode: None,
+            max_idle_timeout_ms: None,
+            max_udp_payload_size: None,
+            initial_max_data: None,
+            initial_max_stream_data_bidi_local: None,
+            initial_max_streams_bidi: None,
+            disable_active_migration: None,
+            enable_datagrams: None,
+            qpack_max_table_capacity: None,
+            qpack_blocked_streams: None,
+            recv_batch_size: None,
+            send_batch_size: None,
+            qlog_dir: None,
+            qlog_level: None,
+            session_ticket_keys: None,
+            max_connections: None,
+            disable_retry: None,
+            reuse_port: None,
+            keylog: None,
+            quic_lb: None,
+            server_id: None,
+        }
+    }
+
+    fn base_quic_server_options_in_memory(cert_pem: Vec<u8>, key_pem: Vec<u8>) -> JsQuicServerOptions {
+        JsQuicServerOptions {
+            key: key_pem.into(),
+            cert: cert_pem.into(),
+            ca: None,
+            client_auth: None,
+            alpn: None,
+            runtime_mode: None,
+            max_idle_timeout_ms: None,
+            max_udp_payload_size: None,
+            initial_max_data: None,
+            initial_max_stream_data_bidi_local: None,
+            initial_max_streams_bidi: None,
+            disable_active_migration: None,
+            enable_datagrams: None,
+            max_connections: None,
+            disable_retry: None,
+            qlog_dir: None,
+            qlog_level: None,
+            session_ticket_keys: None,
+            keylog: None,
+        }
+    }
+
+    #[test]
+    fn h3_in_memory_server_config_builds_with_mandatory_cert_and_key() {
+        let (cert_pem, key_pem) = generate_self_signed_pem();
+        let options = base_server_options_in_memory(cert_pem, key_pem);
+        let config = Http3Config::new_server_quiche_config_in_memory(&options);
+        assert!(
+            config.is_ok(),
+            "expected in-memory H3 server config to build: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn h3_in_memory_server_config_rejects_garbage_cert() {
+        let (_, key_pem) = generate_self_signed_pem();
+        let options = base_server_options_in_memory(b"not a cert".to_vec(), key_pem);
+        let err = match Http3Config::new_server_quiche_config_in_memory(&options) {
+            Err(e) => e,
+            Ok(_) => panic!("expected invalid cert PEM to be rejected"),
+        };
+        assert!(err.to_string().contains("invalid server certificate"));
+    }
+
+    #[test]
+    fn h3_in_memory_server_config_with_ca_and_default_client_auth_requires_verification() {
+        // Default (client_auth: None) + ca present => Require (mirrors
+        // `ClientAuthMode::parse`'s documented default), and the config
+        // still builds successfully — proves the `set_verify(PEER)` path
+        // doesn't error out on its own.
+        let (cert_pem, key_pem) = generate_self_signed_pem();
+        let (ca_pem, _) = generate_self_signed_pem();
+        let mut options = base_server_options_in_memory(cert_pem, key_pem);
+        options.ca = Some(ca_pem.into());
+        let config = Http3Config::new_server_quiche_config_in_memory(&options);
+        assert!(
+            config.is_ok(),
+            "expected in-memory H3 server config with ca to build: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn h3_in_memory_server_config_rejects_client_auth_none_with_ca() {
+        let (cert_pem, key_pem) = generate_self_signed_pem();
+        let (ca_pem, _) = generate_self_signed_pem();
+        let mut options = base_server_options_in_memory(cert_pem, key_pem);
+        options.ca = Some(ca_pem.into());
+        options.client_auth = Some("none".to_string());
+        let err = match Http3Config::new_server_quiche_config_in_memory(&options) {
+            Err(e) => e,
+            Ok(_) => panic!("expected clientAuth='none' + ca to be rejected"),
+        };
+        assert!(err.to_string().contains("cannot be combined with ca"));
+    }
+
+    #[test]
+    fn quic_in_memory_server_config_builds_with_mandatory_cert_and_key() {
+        let (cert_pem, key_pem) = generate_self_signed_pem();
+        let options = base_quic_server_options_in_memory(cert_pem, key_pem);
+        let config = new_quic_server_config_in_memory(&options);
+        assert!(
+            config.is_ok(),
+            "expected in-memory QUIC server config to build: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn quic_in_memory_server_config_accepts_request_client_auth_with_ca() {
+        let (cert_pem, key_pem) = generate_self_signed_pem();
+        let (ca_pem, _) = generate_self_signed_pem();
+        let mut options = base_quic_server_options_in_memory(cert_pem, key_pem);
+        options.ca = Some(ca_pem.into());
+        options.client_auth = Some("request".to_string());
+        let config = new_quic_server_config_in_memory(&options);
+        assert!(
+            config.is_ok(),
+            "expected request-mode client auth to build: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn quic_in_memory_server_config_rejects_require_without_ca() {
+        let (cert_pem, key_pem) = generate_self_signed_pem();
+        let mut options = base_quic_server_options_in_memory(cert_pem, key_pem);
+        options.client_auth = Some("require".to_string());
+        let err = match new_quic_server_config_in_memory(&options) {
+            Err(e) => e,
+            Ok(_) => panic!("expected clientAuth='require' without ca to be rejected"),
+        };
+        assert!(err.to_string().contains("requires ca"));
     }
 }
