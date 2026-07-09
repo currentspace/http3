@@ -29,6 +29,7 @@ COPY build.rs Cargo.toml Cargo.lock ./
 COPY benches ./benches
 COPY fuzz ./fuzz
 COPY tools ./tools
+COPY crates ./crates
 COPY src ./src
 COPY lib ./lib
 COPY index.js index.d.ts tsconfig.json ./
