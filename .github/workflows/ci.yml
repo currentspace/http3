@@ -74,6 +74,47 @@ jobs:
       - name: Smoke install from packed artifact
         run: pnpm run smoke:install
 
+  wasm:
+    name: wasm client/server build + tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup Rust with wasm32-wasip1 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo (wasm32-wasip1)
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-wasip1-wasi-sdk-33
+
+      - name: Setup wasi-sdk + binaryen
+        uses: ./.github/actions/setup-wasi-sdk
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --no-optional
+
+      - name: Build wasm client artifact
+        run: pnpm run build:wasm
+
+      - name: Run wasm test suite
+        run: HTTP3_WASM=1 pnpm run test:wasm
+
   docker-runtime-matrix-arm64:
     name: docker runtime arm64 (node ${{ matrix.node-version }})
     runs-on: ubuntu-24.04-arm

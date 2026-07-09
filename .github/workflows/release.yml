@@ -58,6 +58,47 @@ jobs:
           path: "*.node"
           if-no-files-found: error
 
+  build-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Setup Rust with wasm32-wasip1 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-wasip1-wasi-sdk-33
+
+      - name: Setup wasi-sdk + binaryen
+        uses: ./.github/actions/setup-wasi-sdk
+
+      - run: pnpm install --frozen-lockfile --no-optional
+
+      - name: Build wasm client artifact
+        run: pnpm run build:wasm
+
+      - name: Run wasm test suite against the built artifact
+        run: HTTP3_WASM=1 pnpm run test:wasm
+
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-client-artifact
+          path: dist/wasm/http3_client.wasm
+          if-no-files-found: error
+
   validate-prebuilds:
     name: validate (${{ matrix.target }}, node ${{ matrix.node-version }})
     needs: prebuilds
@@ -131,7 +172,7 @@ jobs:
         run: node scripts/smoke-install.mjs
 
   publish:
-    needs: [prebuilds, validate-prebuilds]
+    needs: [prebuilds, validate-prebuilds, build-wasm]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -156,6 +197,12 @@ jobs:
         with:
           pattern: prebuild-*
           merge-multiple: true
+
+      - name: Download wasm artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-client-artifact
+          path: dist/wasm
 
       - name: Verify expected prebuilds
         run: node scripts/verify-prebuilds.mjs

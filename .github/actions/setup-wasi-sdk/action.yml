@@ -1,0 +1,36 @@
+name: Setup wasi-sdk
+description: >-
+  Stages wasi-sdk 33 + cmake/ninja/binaryen for the wasm32-wasip1 cross-build
+  pipeline (docs/WASM_CLIENT_PLAN.md D1a/D2/D3) and exports WASI_SDK_PATH.
+  Linux x86_64 runners only; the wasm32-wasip1 build output itself is
+  architecture-independent, so callers only need one job running this,
+  regardless of how many native prebuild targets the rest of the workflow has.
+
+runs:
+  using: composite
+  steps:
+    - name: Install cmake, ninja, binaryen
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build binaryen
+
+    - name: Download and stage wasi-sdk 33
+      shell: bash
+      run: |
+        set -euo pipefail
+        STAGE_DIR="${RUNNER_TEMP}/wasi-sdk-stage"
+        mkdir -p "$STAGE_DIR"
+        curl -fsSL -o "${RUNNER_TEMP}/wasi-sdk.tar.gz" \
+          "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz"
+        tar -xf "${RUNNER_TEMP}/wasi-sdk.tar.gz" -C "$STAGE_DIR"
+
+        CMAKE_FILE="$(find "$STAGE_DIR" -type f -name wasi-sdk-p1.cmake | head -1)"
+        if [[ -z "$CMAKE_FILE" ]]; then
+          echo "setup-wasi-sdk: wasi-sdk-p1.cmake not found in extracted tarball" >&2
+          exit 1
+        fi
+        WASI_SDK_DIR="${CMAKE_FILE%/share/cmake/wasi-sdk-p1.cmake}"
+        echo "WASI_SDK_PATH=$WASI_SDK_DIR" >> "$GITHUB_ENV"
+        echo "setup-wasi-sdk: staged at $WASI_SDK_DIR"
