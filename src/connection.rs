@@ -471,6 +471,40 @@ impl H3Connection {
                 events.push(JsH3Event::drain(conn_handle, stream_id));
             }
         }
+
+        // stream_writable_next() alone misses one case: a stream popped by a
+        // prior call while blocked purely by connection-level send capacity
+        // (tx_cap == 0) is never re-added to quiche's internal writable set
+        // once that capacity increases via a MAX_DATA update — only a
+        // MAX_STREAM_DATA update does that automatically. quiche's own
+        // stream_writable() doc comment covers exactly this: call it to
+        // re-mark such a stream so it can be found again. Mirrors
+        // QuicConnection::poll_drain_events's identical handling.
+        let pending = self.blocked_queue.len();
+        for _ in 0..pending {
+            let Some(stream_id) = self.blocked_queue.pop_front() else {
+                break;
+            };
+            match self.quiche_conn.stream_writable(stream_id, 1) {
+                Ok(true) => {
+                    self.blocked_set.remove(&stream_id);
+                    events.push(JsH3Event::drain(conn_handle, stream_id));
+                }
+                Err(e) => {
+                    self.blocked_set.remove(&stream_id);
+                    events.push(JsH3Event::error(
+                        conn_handle,
+                        stream_id as i64,
+                        0,
+                        format!("stream_writable failed: {e}"),
+                    ));
+                }
+                Ok(false) => {
+                    // Still blocked — re-enqueue at back.
+                    self.blocked_queue.push_back(stream_id);
+                }
+            }
+        }
     }
 
     fn prune_closed_blocked_streams(&mut self) {
