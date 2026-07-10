@@ -889,6 +889,11 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
         try {
           await eventLoop.connect(resolved.socketAddress, options?.servername ?? resolved.servername);
         } catch (error: unknown) {
+          try {
+            await eventLoop.close();
+          } catch {
+            /* prioritize surfacing the original connect failure below */
+          }
           session._eventLoop = null;
           throw error;
         }

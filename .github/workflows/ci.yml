@@ -109,6 +109,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --no-optional
 
+      - name: Build native addon (debug)
+        run: npx napi build --platform
+
       - name: Build wasm client artifact
         run: pnpm run build:wasm
 

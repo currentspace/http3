@@ -145,16 +145,27 @@ export async function createWasmH3Pair(opts?: WasmH3PairOptions): Promise<WasmH3
 
   const addr = server.listen(0, '127.0.0.1') as { address: string; port: number };
 
-  const client = await connectAsync(`127.0.0.1:${addr.port}`, {
-    rejectUnauthorized: false,
-    runtimeMode: 'wasm',
-    fallbackPolicy: 'error',
-    servername: 'localhost',
-    enableDatagrams: opts?.enableDatagrams ?? false,
-    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
-    ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
-    ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
-  });
+  let client: Http3ClientSession;
+  try {
+    client = await connectAsync(`127.0.0.1:${addr.port}`, {
+      rejectUnauthorized: false,
+      runtimeMode: 'wasm',
+      fallbackPolicy: 'error',
+      servername: 'localhost',
+      enableDatagrams: opts?.enableDatagrams ?? false,
+      ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+      ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
+      ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
+    });
+  } catch (err) {
+    // The native server (and its worker thread) is already listening at this
+    // point — if the wasm client fails to connect, it must still be torn
+    // down here, since a caller whose `await createWasmH3Pair(...)` itself
+    // throws never reaches its own `finally { await pair.cleanup() }`.
+    try { server.requestShutdown(); } catch { /* already shut down */ }
+    try { server.joinWorker(); } catch { /* already joined */ }
+    throw err;
+  }
 
   return {
     server,
@@ -210,14 +221,25 @@ export async function createWasmQuicPair(opts?: WasmQuicPairOptions): Promise<Wa
 
   const addr = server.listen(0, '127.0.0.1') as { address: string; port: number };
 
-  const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
-    rejectUnauthorized: false,
-    runtimeMode: 'wasm',
-    fallbackPolicy: 'error',
-    servername: 'localhost',
-    enableDatagrams: opts?.enableDatagrams ?? false,
-    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
-  });
+  let client: QuicClientSession;
+  try {
+    client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
+      rejectUnauthorized: false,
+      runtimeMode: 'wasm',
+      fallbackPolicy: 'error',
+      servername: 'localhost',
+      enableDatagrams: opts?.enableDatagrams ?? false,
+      ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+    });
+  } catch (err) {
+    // See createWasmH3Pair's identical catch block: the native server is
+    // already listening and must be torn down here, since a caller whose
+    // `await createWasmQuicPair(...)` itself throws never reaches its own
+    // `finally { await pair.cleanup() }`.
+    try { server.requestShutdown(); } catch { /* already shut down */ }
+    try { server.joinWorker(); } catch { /* already joined */ }
+    throw err;
+  }
 
   return {
     server,
@@ -314,18 +336,33 @@ export async function createWasmServerH3Pair(opts?: WasmServerH3PairOptions): Pr
   server.listen(0, '127.0.0.1');
   const serverAddr = await listeningPromise;
 
-  const client = await connectAsync(`127.0.0.1:${serverAddr.port}`, {
-    rejectUnauthorized: false,
-    runtimeMode: opts?.clientRuntimeMode ?? 'portable',
-    fallbackPolicy: 'error',
-    servername: 'localhost',
-    enableDatagrams: opts?.enableDatagrams ?? false,
-    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
-    ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
-    ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
-  });
+  let client: Http3ClientSession;
+  try {
+    client = await connectAsync(`127.0.0.1:${serverAddr.port}`, {
+      rejectUnauthorized: false,
+      runtimeMode: opts?.clientRuntimeMode ?? 'portable',
+      fallbackPolicy: 'error',
+      servername: 'localhost',
+      enableDatagrams: opts?.enableDatagrams ?? false,
+      ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+      ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
+      ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
+    });
+  } catch (err) {
+    // The wasm server is already listening at this point — if the client
+    // fails to connect (e.g. the native addon isn't available in this
+    // environment), it must still be torn down here, since a caller whose
+    // `await createWasmServerH3Pair(...)` itself throws never reaches its
+    // own `finally { await pair.cleanup() }`. Leaving it running is exactly
+    // what previously hung the wasm CI job for an hour after every test had
+    // already reported its result.
+    try { await server.close(); } catch { /* already closed */ }
+    throw err;
+  }
 
   if (!serverSession) {
+    try { await client.close(); } catch { /* already closed */ }
+    try { await server.close(); } catch { /* already closed */ }
     throw new Error('wasm H3 server did not emit a "session" event before the client finished its handshake');
   }
 
@@ -385,16 +422,28 @@ export async function createWasmServerQuicPair(opts?: WasmServerQuicPairOptions)
 
   const serverAddr = await server.listen(0, '127.0.0.1');
 
-  const client = await connectQuicAsync(`127.0.0.1:${serverAddr.port}`, {
-    rejectUnauthorized: false,
-    runtimeMode: opts?.clientRuntimeMode ?? 'portable',
-    fallbackPolicy: 'error',
-    servername: 'localhost',
-    enableDatagrams: opts?.enableDatagrams ?? false,
-    ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
-  });
+  let client: QuicClientSession;
+  try {
+    client = await connectQuicAsync(`127.0.0.1:${serverAddr.port}`, {
+      rejectUnauthorized: false,
+      runtimeMode: opts?.clientRuntimeMode ?? 'portable',
+      fallbackPolicy: 'error',
+      servername: 'localhost',
+      enableDatagrams: opts?.enableDatagrams ?? false,
+      ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+    });
+  } catch (err) {
+    // See createWasmServerH3Pair's identical catch block: the wasm server
+    // is already listening and must be torn down here, since a caller whose
+    // `await createWasmServerQuicPair(...)` itself throws never reaches its
+    // own `finally { await pair.cleanup() }`.
+    try { await server.close(); } catch { /* already closed */ }
+    throw err;
+  }
 
   if (!serverSession) {
+    try { await client.close(); } catch { /* already closed */ }
+    try { await server.close(); } catch { /* already closed */ }
     throw new Error('wasm QUIC server did not emit a "session" event before the client finished its handshake');
   }
 

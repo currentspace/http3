@@ -866,6 +866,11 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
         try {
           await eventLoop.connect(resolved.socketAddress, options?.servername ?? resolved.servername);
         } catch (error: unknown) {
+          try {
+            await eventLoop.close();
+          } catch {
+            /* prioritize surfacing the original connect failure below */
+          }
           session._setEventLoop(null);
           throw error;
         }
