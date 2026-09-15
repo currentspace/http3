@@ -4,6 +4,9 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(feature = "os-runtime")]
+use crate::worker_reply::recv_worker_reply;
+
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{
@@ -186,8 +189,7 @@ impl QuicServerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("quic worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for metrics".into()))
     }
 
@@ -207,9 +209,7 @@ impl QuicServerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("quic worker not running".into()))?;
         let _ = worker.waker.wake();
-        Ok(resp_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or(false))
+        Ok(recv_worker_reply(&resp_rx, Duration::from_secs(2)).unwrap_or(false))
     }
 
     pub fn ping_session(&self, conn_handle: u32) -> Result<bool, Http3NativeError> {
@@ -224,8 +224,7 @@ impl QuicServerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("quic worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for ping".into()))
     }
 
@@ -241,8 +240,7 @@ impl QuicServerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("quic worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for qlog path".into()))
     }
 
@@ -559,8 +557,7 @@ impl QuicClientHandle {
             }
         }
 
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out opening stream".into()))?
     }
 
@@ -691,9 +688,7 @@ impl QuicClientHandle {
                 ));
             }
         }
-        Ok(resp_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or(false))
+        Ok(recv_worker_reply(&resp_rx, Duration::from_secs(2)).unwrap_or(false))
     }
 
     pub fn get_session_metrics(&self) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
@@ -730,8 +725,7 @@ impl QuicClientHandle {
                 ));
             }
         }
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for metrics".into()))
     }
 
@@ -769,8 +763,7 @@ impl QuicClientHandle {
                 ));
             }
         }
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for ping".into()))
     }
 
@@ -808,8 +801,7 @@ impl QuicClientHandle {
                 ));
             }
         }
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for qlog path".into()))
     }
 
@@ -1647,7 +1639,7 @@ fn spawn_shared_quic_client(
         })?;
     worker.wake();
 
-    let session_handle = resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+    let session_handle = recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
         Http3NativeError::InvalidState("timed out waiting for shared quic session".into())
     })??;
     worker.session_count.fetch_add(1, Ordering::AcqRel);
