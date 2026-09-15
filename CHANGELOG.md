@@ -13,6 +13,8 @@
   allocation per HTTP/3 or QUIC client on macOS shared workers.
 - Close concurrency-test clients after failed handshakes or assertions so
   later tests start without leftover connections.
+- Measure event-loop latency over sustained traffic with at least 40 timer
+  samples after warm-up, retaining the existing p95 and maximum-gap limits.
 - Allow up to ten minutes for npm dist-tags to reflect accepted publications.
 
 ## 0.9.1
