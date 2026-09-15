@@ -11,6 +11,6 @@ for i in range(30):
  text=(out/f'concurrency-{i}.log').read_text()
  print(f'RUN {i}: exit={code}, seconds={time.monotonic()-start:.3f}',flush=True)
  for line in text.splitlines():
-  if any(s in line for s in ['Event loop latency:','gate passed','gate failed','AssertionError','DIAGNOSTICS']):print(line,flush=True)
+  if any(s in line for s in ['Event loop latency:','gate passed','gate failed','AssertionError','DIAGNOSTICS','YIELD_PROBE']):print(line,flush=True)
  results.append({'run':i,'exit':code,'seconds':time.monotonic()-start})
 (out/'summary.json').write_text(json.dumps(results,indent=2))
