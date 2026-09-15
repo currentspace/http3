@@ -45,6 +45,8 @@ mod timer_heap;
 mod transport;
 pub mod unsafe_boundary;
 mod worker;
+#[cfg(feature = "os-runtime")]
+mod worker_reply;
 mod write_outcome;
 
 #[cfg(kani)]

@@ -3,6 +3,9 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(feature = "os-runtime")]
+use crate::worker_reply::recv_worker_reply;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{
@@ -383,7 +386,7 @@ impl WorkerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server metrics".into())
         })
     }
@@ -404,9 +407,7 @@ impl WorkerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
         let _ = worker.waker.wake();
-        Ok(resp_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or(false))
+        Ok(recv_worker_reply(&resp_rx, Duration::from_secs(2)).unwrap_or(false))
     }
 
     pub fn get_remote_settings(
@@ -424,7 +425,7 @@ impl WorkerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server settings".into())
         })
     }
@@ -441,8 +442,7 @@ impl WorkerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for server ping".into()))
     }
 
@@ -458,7 +458,7 @@ impl WorkerHandle {
             })
             .map_err(|_| Http3NativeError::InvalidState("server worker not running".into()))?;
         let _ = worker.waker.wake();
-        resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for server qlog path".into())
         })
     }
@@ -845,7 +845,7 @@ impl ClientWorkerHandle {
             }
         }
 
-        match resp_rx.recv_timeout(Duration::from_secs(5)) {
+        match recv_worker_reply(&resp_rx, Duration::from_secs(5)) {
             Ok(Ok(stream_id)) => Ok(stream_id),
             Ok(Err(reason)) => Err(Http3NativeError::InvalidState(reason)),
             Err(_) => Err(Http3NativeError::InvalidState(
@@ -979,9 +979,7 @@ impl ClientWorkerHandle {
                 ));
             }
         }
-        Ok(resp_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or(false))
+        Ok(recv_worker_reply(&resp_rx, Duration::from_secs(2)).unwrap_or(false))
     }
 
     pub fn get_session_metrics(&self) -> Result<Option<JsSessionMetrics>, Http3NativeError> {
@@ -1017,7 +1015,7 @@ impl ClientWorkerHandle {
                 ));
             }
         }
-        resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for client metrics".into())
         })
     }
@@ -1055,7 +1053,7 @@ impl ClientWorkerHandle {
                 ));
             }
         }
-        resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for client settings".into())
         })
     }
@@ -1093,8 +1091,7 @@ impl ClientWorkerHandle {
                 ));
             }
         }
-        resp_rx
-            .recv_timeout(Duration::from_secs(2))
+        recv_worker_reply(&resp_rx, Duration::from_secs(2))
             .map_err(|_| Http3NativeError::InvalidState("timed out waiting for client ping".into()))
     }
 
@@ -1131,7 +1128,7 @@ impl ClientWorkerHandle {
                 ));
             }
         }
-        resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+        recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
             Http3NativeError::InvalidState("timed out waiting for client qlog path".into())
         })
     }
@@ -1426,7 +1423,7 @@ fn spawn_shared_client_worker(
         .map_err(|_| Http3NativeError::InvalidState("shared client worker not running".into()))?;
     worker.wake();
 
-    let session_handle = resp_rx.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+    let session_handle = recv_worker_reply(&resp_rx, Duration::from_secs(2)).map_err(|_| {
         Http3NativeError::InvalidState("timed out waiting for shared h3 session".into())
     })??;
     worker.session_count.fetch_add(1, Ordering::AcqRel);
@@ -3227,7 +3224,9 @@ impl H3ServerHandler {
     #[cfg(feature = "wasm-abi")]
     pub fn has_pending_stream_write(&self, conn_handle: u32, stream_id: u64) -> bool {
         self.pending_writes.contains_key(&(conn_handle, stream_id))
-            || self.pending_responses.contains_key(&(conn_handle, stream_id))
+            || self
+                .pending_responses
+                .contains_key(&(conn_handle, stream_id))
     }
 
     /// Send trailers for `stream_id` on `conn_handle`.
