@@ -1,3 +1,4 @@
+import { DeadlineTimer, drainUntilDone } from './lifecycle.js';
 /**
  * `WasmClientEventLoop` (HTTP/3) — implements `ClientEventLoopLike`
  * (`lib/event-loop.ts`) over the `http3-wasm` core (`core-loader.ts`) and a
@@ -38,35 +39,6 @@ import type { CommonWasmClientOptions } from './wasm-options.js';
 /** Must match `lib/event-loop.ts`'s `EVENT_SHUTDOWN_COMPLETE` sentinel. */
 const EVENT_SHUTDOWN_COMPLETE = 15;
 
-/** Bounded wait for `close()`'s "pump until is_done" step — must comfortably beat `lib/event-loop.ts`'s 5 s `SHUTDOWN_TIMEOUT_MS` fallback. */
-const CLOSE_DRAIN_DEADLINE_MS = 2000;
-const CLOSE_DRAIN_POLL_MS = 5;
-
-/**
- * Feature-detects `unref()` before calling it. `setTimeout`'s return type
- * is host-dependent (`NodeJS.Timeout` under Node's real types, a plain
- * `number` under `@cloudflare/workers-types` — neither declares `unref` on
- * a bare `number`), so the parameter is deliberately typed as whatever
- * `setTimeout` itself returns under whichever tsconfig compiles this file,
- * then narrowed via a runtime-safe cast. Workers has no timer `unref`
- * concept at all (no threads to keep a process alive around); this is a
- * true no-op there, which is correct, not a gap (docs/WASM_CLIENT_PLAN.md
- * §9 C15 is about `nodejs_compat` *polyfill* fidelity — this code path
- * never depends on nodejs_compat, it feature-detects the real platform
- * global directly).
- */
-function unrefIfSupported(timer: ReturnType<typeof setTimeout>): void {
-  const maybeUnrefable = timer as unknown as { unref?: () => void };
-  if (typeof maybeUnrefable.unref === 'function') maybeUnrefable.unref();
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    unrefIfSupported(timer);
-  });
-}
-
 export interface WasmH3ClientEventLoopOptions extends CommonWasmClientOptions {
   /**
    * An already-instantiated wasm core. Node callers build this via
@@ -87,7 +59,7 @@ export interface WasmH3ClientEventLoopOptions extends CommonWasmClientOptions {
    * of `DatagramTransport` once one exists (docs/WASM_CLIENT_PLAN.md §9
    * C1); tests substitute a mock transport.
    */
-  transportFactory: (host: string, port: number) => Promise<DatagramTransport>;
+  transportFactory: (host: string, port: number, options?: { signal?: AbortSignal }) => Promise<DatagramTransport>;
 }
 
 /**
@@ -104,9 +76,9 @@ export class WasmH3ClientEventLoop {
   private handle = 0;
   private transport: DatagramTransport | null = null;
   private outPtrCell = 0;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private armedAbsoluteDeadlineMs: number | null = null;
+  private readonly timer = new DeadlineTimer();
   private closeRequested = false;
+  private readonly startupAbort = new AbortController();
   private closePromise: Promise<void> | null = null;
 
   /**
@@ -135,7 +107,7 @@ export class WasmH3ClientEventLoop {
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
     const { host, port } = parseSocketAddress(serverAddr);
-    const transport = await this.opts.transportFactory(host, port);
+    const transport = await this.opts.transportFactory(host, port, { signal: this.startupAbort.signal });
 
     if (this.closeRequested) {
       // A close() raced connect()'s async transport bind — tear down what
@@ -144,34 +116,40 @@ export class WasmH3ClientEventLoop {
       return;
     }
 
-    this.transport = transport;
-    const local = transport.localAddress();
+    try {
+      this.transport = transport;
+      const local = transport.localAddress();
 
-    const optsJson = {
-      ...buildCommonOptionsJson(this.opts),
-      serverAddr,
-      serverName,
-      localAddr: formatLocalAddr(local.address, local.family, local.port),
-      scidHex: randomScidHex(),
-    };
+      const optsJson = {
+        ...buildCommonOptionsJson(this.opts),
+        serverAddr,
+        serverName,
+        localAddr: formatLocalAddr(local.address, local.family, local.port),
+        scidHex: randomScidHex(),
+      };
 
-    const { ptr, len } = this.core.writeUtf8(JSON.stringify(optsJson));
-    const handle = this.core.exports.h3c_new(ptr, len);
-    this.core.free(ptr, len);
+      const { ptr, len } = this.core.writeUtf8(JSON.stringify(optsJson));
+      let handle: number;
+      try { handle = this.core.exports.h3c_new(ptr, len); }
+      finally { this.core.free(ptr, len); }
 
-    if (handle === 0) {
-      const message = this.core.readLastError(this.core.exports.h3c_last_error, 0);
-      throw new Error(message);
+      if (handle === 0) {
+        const message = this.core.readLastError(this.core.exports.h3c_last_error, 0);
+        throw new Error(message);
+      }
+
+      this.handle = handle;
+      this.outPtrCell = this.core.allocOutPtrCell();
+      transport.onMessage((datagram) => {
+        this.onDatagram(datagram);
+      });
+
+      // Initial pump — flushes the Initial ClientHello.
+      this.pump();
+    } catch (err) {
+      await this.close();
+      throw err;
     }
-
-    this.handle = handle;
-    this.outPtrCell = this.core.allocOutPtrCell();
-    transport.onMessage((datagram) => {
-      this.onDatagram(datagram);
-    });
-
-    // Initial pump — flushes the Initial ClientHello.
-    this.pump();
   }
 
   sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number {
@@ -262,50 +240,39 @@ export class WasmH3ClientEventLoop {
 
   async close(errorCode = 0, reason = 'client close'): Promise<void> {
     this.closeRequested = true;
+    this.startupAbort.abort();
     if (this.closePromise) return this.closePromise;
     this.closePromise = this.doClose(errorCode, reason);
     return this.closePromise;
   }
 
   private async doClose(errorCode: number, reason: string): Promise<void> {
-    if (this.handle !== 0) {
-      const { ptr, len } = this.core.writeUtf8(reason);
-      this.core.exports.h3c_close(this.handle, errorCode, ptr, len);
-      this.core.free(ptr, len);
-      this.pump();
-
-      // Actively drive the close forward each poll tick rather than
-      // passively waiting on whatever timer this.timer happened to have
-      // armed *before* close() started (which could be scheduled far in
-      // the future, e.g. the connection's idle timer) — quiche only
-      // transitions is_closed()/is_reapable() to true from inside
-      // process_timers_for_handle/process_packet_for_handle, so without
-      // forcing an on_timeout check every tick, this loop would just sleep
-      // until CLOSE_DRAIN_DEADLINE_MS and fall through instead of detecting
-      // the real (typically sub-100ms on loopback) closure promptly.
-      // h3c_on_timeout is a safe no-op when quiche's own deadline isn't
-      // due yet.
-      const deadline = Date.now() + CLOSE_DRAIN_DEADLINE_MS;
-      while (this.core.exports.h3c_is_done(this.handle) === 0 && Date.now() < deadline) {
-        await sleep(CLOSE_DRAIN_POLL_MS);
-        this.core.exports.h3c_on_timeout(this.handle);
+    try {
+      if (this.handle !== 0) {
+        const { ptr, len } = this.core.writeUtf8(reason);
+        try { this.core.exports.h3c_close(this.handle, errorCode, ptr, len); }
+        finally { this.core.free(ptr, len); }
         this.pump();
+        await drainUntilDone(
+          () => this.core.exports.h3c_is_done(this.handle) !== 0,
+          () => { this.core.exports.h3c_on_timeout(this.handle); this.pump(); },
+        );
+        this.dispatch([{ eventType: EVENT_SHUTDOWN_COMPLETE, connHandle: this.handle, streamId: -1 }]);
       }
-
-      this.dispatch([{ eventType: EVENT_SHUTDOWN_COMPLETE, connHandle: this.handle, streamId: -1 }]);
-
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
+    } finally {
+      this.timer.cancel();
+      try {
+        if (this.handle !== 0) {
+          this.core.free(this.outPtrCell, 4);
+          this.core.exports.h3c_free(this.handle);
+          this.handle = 0;
+          this.outPtrCell = 0;
+        }
+      } finally {
+        const transport = this.transport;
+        this.transport = null;
+        await transport?.close();
       }
-      this.core.free(this.outPtrCell, 4);
-      this.core.exports.h3c_free(this.handle);
-      this.handle = 0;
-    }
-
-    if (this.transport) {
-      await this.transport.close();
-      this.transport = null;
     }
   }
 
@@ -356,17 +323,7 @@ export class WasmH3ClientEventLoop {
   }
 
   private onTimerFire(): void {
-    this.timer = null;
-    // Must also forget the deadline the just-fired timer was armed for —
-    // otherwise rearmTimer()'s dedup check can compare the *new* deadline
-    // pump() computes against this *stale* (already-consumed) one and
-    // wrongly skip arming a real timer, silently orphaning the connection
-    // with nothing left to ever recheck is_done()/is_closed() again. See
-    // WasmQuicClientEventLoop's identical fix (quic-client-event-loop.ts)
-    // for the full incident writeup — found via C4's
-    // test/interop/quic-loopback.test.ts parameterization
-    // (docs/WASM_CLIENT_PLAN.md §7).
-    this.armedAbsoluteDeadlineMs = null;
+    this.timer.cancel();
     if (this.handle === 0) return;
     this.core.exports.h3c_on_timeout(this.handle);
     this.pump();
@@ -434,28 +391,6 @@ export class WasmH3ClientEventLoop {
 
   private rearmTimer(): void {
     if (this.handle === 0) return;
-    const relativeMs = Number(this.core.exports.h3c_timeout_ms(this.handle));
-
-    if (relativeMs < 0) {
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
-      }
-      this.armedAbsoluteDeadlineMs = null;
-      return;
-    }
-
-    const absoluteDeadlineMs = Date.now() + relativeMs;
-    if (this.armedAbsoluteDeadlineMs !== null && Math.abs(absoluteDeadlineMs - this.armedAbsoluteDeadlineMs) <= 1) {
-      return;
-    }
-
-    if (this.timer) clearTimeout(this.timer);
-    this.armedAbsoluteDeadlineMs = absoluteDeadlineMs;
-    const timer = setTimeout(() => {
-      this.onTimerFire();
-    }, relativeMs);
-    unrefIfSupported(timer);
-    this.timer = timer;
+    this.timer.arm(Number(this.core.exports.h3c_timeout_ms(this.handle)), () => this.onTimerFire());
   }
 }

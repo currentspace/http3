@@ -1,3 +1,4 @@
+import { DeadlineTimer, drainUntilDone } from './lifecycle.js';
 /**
  * `WasmQuicServerEventLoop` — implements `QuicServerEventLoopLike`
  * (`lib/quic-stream.ts`) over the `http3-wasm` core (`core-loader.ts`) and a
@@ -29,23 +30,6 @@ import type { DatagramServerTransport, DatagramServerTransportAddress } from './
 import { buildCommonServerOptionsJson, formatLocalAddr, randomRetryTokenKeyHex } from './wasm-options.js';
 import type { CommonWasmServerOptions } from './wasm-options.js';
 
-/** See `h3-server-event-loop.ts`'s identical constant. */
-const CLOSE_DRAIN_DEADLINE_MS = 2000;
-const CLOSE_DRAIN_POLL_MS = 5;
-
-/** See `h3-client-event-loop.ts`'s identical function. */
-function unrefIfSupported(timer: ReturnType<typeof setTimeout>): void {
-  const maybeUnrefable = timer as unknown as { unref?: () => void };
-  if (typeof maybeUnrefable.unref === 'function') maybeUnrefable.unref();
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    unrefIfSupported(timer);
-  });
-}
-
 export interface WasmQuicServerEventLoopOptions extends CommonWasmServerOptions {
   /** An already-instantiated wasm core — see `WasmH3ServerEventLoopOptions.core`'s identical doc comment. */
   core: Http3WasmCore;
@@ -71,8 +55,7 @@ export class WasmQuicServerEventLoop {
   private handle = 0;
   private transport: DatagramServerTransport | null = null;
   private outPtrCell = 0;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private armedAbsoluteDeadlineMs: number | null = null;
+  private readonly timer = new DeadlineTimer();
   private closed = false;
   private closePromise: Promise<void> | null = null;
 
@@ -85,34 +68,44 @@ export class WasmQuicServerEventLoop {
   /** Bind the server's UDP socket and construct the wasm server handle. Returns the bound local address. */
   async listen(port: number, host: string): Promise<DatagramServerTransportAddress> {
     const transport = await this.opts.transportFactory(port, host);
-    this.transport = transport;
-    const local = transport.localAddress();
-
-    const optsJson: Record<string, unknown> = {
-      ...buildCommonServerOptionsJson(this.opts),
-      ...(this.opts.alpn && { alpn: this.opts.alpn }),
-      localAddr: formatLocalAddr(local.address, local.family, local.port),
-      retryTokenKeyHex: randomRetryTokenKeyHex(),
-    };
-
-    const { ptr, len } = this.core.writeUtf8(JSON.stringify(optsJson));
-    const handle = this.core.exports.qs_new(ptr, len);
-    this.core.free(ptr, len);
-
-    if (handle === 0) {
-      const message = this.core.readLastError(this.core.exports.qs_last_error, 0);
+    if (this.closed) {
       await transport.close();
-      this.transport = null;
-      throw new Error(message);
+      throw new Error('server closed during startup');
     }
+    try {
+      this.transport = transport;
+      const local = transport.localAddress();
 
-    this.handle = handle;
-    this.outPtrCell = this.core.allocOutPtrCell();
-    transport.onMessage((datagram, peerAddr) => {
-      this.onDatagram(datagram, peerAddr);
-    });
+      const optsJson: Record<string, unknown> = {
+        ...buildCommonServerOptionsJson(this.opts),
+        ...(this.opts.alpn && { alpn: this.opts.alpn }),
+        localAddr: formatLocalAddr(local.address, local.family, local.port),
+        retryTokenKeyHex: randomRetryTokenKeyHex(),
+      };
 
-    return local;
+      const { ptr, len } = this.core.writeUtf8(JSON.stringify(optsJson));
+      let handle: number;
+      try { handle = this.core.exports.qs_new(ptr, len); }
+      finally { this.core.free(ptr, len); }
+
+      if (handle === 0) {
+        const message = this.core.readLastError(this.core.exports.qs_last_error, 0);
+        await transport.close();
+        this.transport = null;
+        throw new Error(message);
+      }
+
+      this.handle = handle;
+      this.outPtrCell = this.core.allocOutPtrCell();
+      transport.onMessage((datagram, peerAddr) => {
+        this.onDatagram(datagram, peerAddr);
+      });
+
+      return local;
+    } catch (err) {
+      await this.close();
+      throw err;
+    }
   }
 
   // ---- Per-connection operations (QuicServerEventLoopLike) ----
@@ -191,37 +184,36 @@ export class WasmQuicServerEventLoop {
 
   /** Graceful shutdown of the whole server. See `WasmH3ServerEventLoop.close()`'s identical doc comment. */
   async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
     if (this.closePromise) return this.closePromise;
+    this.closed = true;
     this.closePromise = this.doClose();
     return this.closePromise;
   }
 
   private async doClose(): Promise<void> {
-    if (this.handle !== 0) {
-      this.core.exports.qs_shutdown(this.handle);
-      this.pump();
-
-      const deadline = Date.now() + CLOSE_DRAIN_DEADLINE_MS;
-      while (this.core.exports.qs_is_done(this.handle) === 0 && Date.now() < deadline) {
-        await sleep(CLOSE_DRAIN_POLL_MS);
-        this.core.exports.qs_on_timeout(this.handle);
+    try {
+      if (this.handle !== 0) {
+        this.core.exports.qs_shutdown(this.handle);
         this.pump();
+        await drainUntilDone(
+          () => this.core.exports.qs_is_done(this.handle) !== 0,
+          () => { this.core.exports.qs_on_timeout(this.handle); this.pump(); },
+        );
       }
-
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
+    } finally {
+      this.timer.cancel();
+      try {
+        if (this.handle !== 0) {
+          this.core.free(this.outPtrCell, 4);
+          this.core.exports.qs_free(this.handle);
+          this.handle = 0;
+          this.outPtrCell = 0;
+        }
+      } finally {
+        const transport = this.transport;
+        this.transport = null;
+        await transport?.close();
       }
-      this.core.free(this.outPtrCell, 4);
-      this.core.exports.qs_free(this.handle);
-      this.handle = 0;
-    }
-
-    if (this.transport) {
-      await this.transport.close();
-      this.transport = null;
     }
   }
 
@@ -238,12 +230,7 @@ export class WasmQuicServerEventLoop {
   }
 
   private onTimerFire(): void {
-    this.timer = null;
-    // Must clear the stale deadline *before* rearmTimer()'s dedup check —
-    // see WasmH3ServerEventLoop.onTimerFire()'s identical, more-detailed
-    // comment (the same bug class already found and fixed in both client
-    // event loops).
-    this.armedAbsoluteDeadlineMs = null;
+    this.timer.cancel();
     if (this.handle === 0) return;
     this.core.exports.qs_on_timeout(this.handle);
     this.pump();
@@ -286,28 +273,6 @@ export class WasmQuicServerEventLoop {
 
   private rearmTimer(): void {
     if (this.handle === 0) return;
-    const relativeMs = Number(this.core.exports.qs_timeout_ms(this.handle));
-
-    if (relativeMs < 0) {
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
-      }
-      this.armedAbsoluteDeadlineMs = null;
-      return;
-    }
-
-    const absoluteDeadlineMs = Date.now() + relativeMs;
-    if (this.armedAbsoluteDeadlineMs !== null && Math.abs(absoluteDeadlineMs - this.armedAbsoluteDeadlineMs) <= 1) {
-      return;
-    }
-
-    if (this.timer) clearTimeout(this.timer);
-    this.armedAbsoluteDeadlineMs = absoluteDeadlineMs;
-    const timer = setTimeout(() => {
-      this.onTimerFire();
-    }, relativeMs);
-    unrefIfSupported(timer);
-    this.timer = timer;
+    this.timer.arm(Number(this.core.exports.qs_timeout_ms(this.handle)), () => this.onTimerFire());
   }
 }

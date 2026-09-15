@@ -163,7 +163,7 @@ fn build_quic_quiche_configs(
     server_config.set_initial_max_streams_uni(1_000);
     server_config.set_disable_active_migration(true);
     // Congestion tuning (must match apply_congestion_tuning in config.rs)
-    server_config.set_send_capacity_factor(20.0);
+    server_config.set_send_capacity_factor(1.0);
     server_config.set_initial_congestion_window_packets(1000);
     server_config.discover_pmtu(true);
     server_config.set_pmtud_max_probes(1);
@@ -182,7 +182,7 @@ fn build_quic_quiche_configs(
     client_config.set_initial_max_streams_bidi(10_000);
     client_config.set_initial_max_streams_uni(1_000);
     // Congestion tuning (must match apply_congestion_tuning in config.rs)
-    client_config.set_send_capacity_factor(20.0);
+    client_config.set_send_capacity_factor(1.0);
     client_config.set_initial_congestion_window_packets(1000);
     client_config.discover_pmtu(true);
     client_config.set_pmtud_max_probes(1);

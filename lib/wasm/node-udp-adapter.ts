@@ -14,6 +14,8 @@ import type { DatagramTransport, DatagramTransportAddress } from './datagram-tra
 export interface ConnectNodeUdpOptions {
   /** UDP socket receive buffer size, in bytes. Default: 4 MiB. */
   recvBufferSize?: number;
+  /** Cancel socket startup. */
+  signal?: AbortSignal;
 }
 
 const DEFAULT_RECV_BUFFER_SIZE = 4 * 1024 * 1024;
@@ -25,34 +27,52 @@ const DEFAULT_RECV_BUFFER_SIZE = 4 * 1024 * 1024;
  * `DatagramTransport`'s single-fixed-peer contract.
  */
 export async function connectNodeUdp(host: string, port: number, opts: ConnectNodeUdpOptions = {}): Promise<DatagramTransport> {
+  opts.signal?.throwIfAborted();
   const type = isIP(host) === 6 ? 'udp6' : 'udp4';
   const socket = dgram.createSocket({
     type,
     recvBufferSize: opts.recvBufferSize ?? DEFAULT_RECV_BUFFER_SIZE,
   });
 
-  // Mandatory: an ICMP port-unreachable (the peer isn't listening, or a
-  // path change occurs) surfaces asynchronously as an 'error' event on a
-  // *connected* UDP socket. An EventEmitter with an 'error' event and no
-  // listener throws — crashing the whole process — for a condition that is
-  // routine and already handled at the protocol layer: quiche's own idle
-  // timeout is the real failure signal here (it will emit EVENT_SESSION_CLOSE
-  // once retries are exhausted), not this socket. `DatagramTransport` has no
-  // error-reporting method by design (docs/WASM_CLIENT_PLAN.md §6.5), so
-  // every error is swallowed rather than partially surfaced.
-  socket.on('error', () => {
-    /* swallowed intentionally — see comment above */
-  });
+  // Post-connect UDP errors are handled by QUIC loss recovery. The
+  // startup listener below additionally rejects errors before connect.
+  socket.on('error', () => { /* keep late UDP errors observed */ });
 
   let onMessage: ((datagram: Uint8Array) => void) | null = null;
   socket.on('message', (msg) => {
     onMessage?.(msg);
   });
 
-  await new Promise<void>((resolve) => {
-    socket.connect(port, host, () => {
-      resolve();
-    });
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      socket.off('error', onError);
+      opts.signal?.removeEventListener('abort', onAbort);
+    };
+    const onError = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { socket.close(); } catch { /* socket never reached bind */ }
+      reject(err);
+    };
+    const onAbort = (): void => {
+      const reason: unknown = opts.signal?.reason;
+      onError(reason instanceof Error ? reason : new Error('UDP startup aborted'));
+    };
+    socket.once('error', onError);
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    if (opts.signal?.aborted) { onAbort(); return; }
+    try {
+      socket.connect(port, host, () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      });
+    } catch (err) {
+      onError(err instanceof Error ? err : new Error(String(err)));
+    }
   });
 
   let closed = false;

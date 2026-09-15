@@ -1,4 +1,4 @@
-import { once } from 'node:events';
+import { waitForDrainOrAbort } from './writable-lifecycle.js';
 import { runDetached } from './run-detached.js';
 import type { IncomingHeaders, ServerHttp3Stream } from './stream.js';
 
@@ -79,6 +79,7 @@ export function sseHeaders(extraHeaders?: IncomingHeaders): IncomingHeaders {
 export class ServerSentEventStream {
   private readonly _stream: ServerHttp3Stream;
   private _closed = false;
+  private readonly _abortController = new AbortController();
   private _heartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(stream: ServerHttp3Stream, options?: SseStreamOptions) {
@@ -123,7 +124,7 @@ export class ServerSentEventStream {
   private async _writeFrame(frame: string): Promise<void> {
     if (this._closed || this._stream.destroyed) return;
     if (this._stream.write(frame)) return;
-    await once(this._stream, 'drain');
+    await waitForDrainOrAbort(this._stream, this._abortController.signal);
   }
 
   private _clearHeartbeat(): void {
@@ -133,6 +134,8 @@ export class ServerSentEventStream {
   }
 
   private _cleanup(): void {
+    this._closed = true;
+    this._abortController.abort();
     this._clearHeartbeat();
   }
 }

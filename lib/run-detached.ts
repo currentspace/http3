@@ -26,11 +26,23 @@
  * exists (e.g. a per-request handler with no session-level lifecycle to
  * hook).
  */
+function reportError(err: unknown, onError: (error: Error) => void): void {
+  const error = err instanceof Error ? err : new Error(String(err));
+  try {
+    onError(error);
+  } catch (reporterError) {
+    // Reporting is a terminal path: keep it outside the promise chain.
+    process.emitWarning(new Error('Detached task error reporter failed', {
+      cause: new AggregateError([error, reporterError]),
+    }));
+  }
+}
+
 export function runDetached(operation: Promise<unknown>, onError: (error: Error) => void): void {
   operation.then(
     () => { /* fire-and-forget: success needs no further action */ },
     (err: unknown) => {
-      onError(err instanceof Error ? err : new Error(String(err)));
+      reportError(err, onError);
     },
   );
 }
@@ -54,9 +66,9 @@ export class DetachedTasks {
     const settled: Promise<void> = operation.then(
       () => { /* fire-and-forget: success needs no further action */ },
       (err: unknown) => {
-        onError(err instanceof Error ? err : new Error(String(err)));
+        reportError(err, onError);
       },
-    ).then(() => {
+    ).finally(() => {
       this._pending.delete(settled);
     });
     this._pending.add(settled);

@@ -84,7 +84,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
 
   private _bindH2Events(): void {
     this._h2Stream.on('data', (chunk: Buffer) => {
-      this.push(Buffer.from(chunk));
+      if (!this.push(Buffer.from(chunk))) this._h2Stream.pause();
     });
     this._h2Stream.on('end', () => {
       this.push(null);
@@ -116,6 +116,10 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
       this._h2Closed = true;
       this._closeAdapter();
     });
+  }
+
+  override _read(_size: number): void {
+    if (!this._h2Closed) this._h2Stream.resume();
   }
 
   private _h2WritableClosed(): boolean {

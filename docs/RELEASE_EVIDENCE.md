@@ -1,12 +1,60 @@
 # Release Evidence
 
+`CHANGELOG.md` supplies public release notes. This ledger records validation
+and remaining qualification work for each release candidate.
+
+## 0.9.1
+
+### Scope
+
+- Base: `7f41ad3` on `main`, following release `v0.9.0`.
+- Streaming Fetch uploads, request-size limits, and disconnect cleanup.
+- WASM queued-write correctness, peer-credit enforcement, and prevention of
+  repeated `DATA_BLOCKED`/ACK exchanges.
+- Shared lifecycle helpers, extracted worker modules, and CI consolidation.
+- Version alignment across the root npm package, Rust crate, native sidecars,
+  and lockfiles.
+
+### Local validation — 2026-09-15
+
+Host: macOS ARM64, Node 26.8.1. Final implementation checks:
+
+| Check | Result |
+| --- | --- |
+| Native TypeScript and FFI | 398 passed |
+| Rust unit, mock, Loom, interop, and WASM ABI | 295 passed |
+| WASM runtime suite | 39 passed in each of five consecutive runs |
+| Shared interop with WASM clients | 23 passed |
+| Application end-to-end | 34 passed |
+| Concurrency and load smoke | 14 passed |
+| Lint, typechecks (including workerd), Rust clippy | Passed; existing Rust warnings remain |
+| Native/WASM builds and package installation smoke | Passed |
+
+The WASM upload regressions retain small receive windows and the 64 MiB
+module memory limit. New tests check exact body bytes and FIN, deliberately
+delay the server session event, and bound packet amplification.
+
+Local receipts are retained under the ignored `results/wasm-fixes/` directory:
+`REPORT.md`, `final-results.json`, and `source-and-artifact-sha256.json`.
+The pull request records the additional release-metadata validation.
+
+### Remaining release qualification
+
+Browser, Docker/Linux, longhaul, sanitizer, fuzz, and formal-verification
+suites were not rerun against the final flow-control fixes. The canonical
+local run explicitly skipped browser E2E and its embedded WASM step; WASM
+was built and tested separately. GitHub Actions results and the full publish
+validation remain release gates. Opening this PR does not complete them.
+
+## 0.9.0
+
 This document is the supporting audit ledger for `0.9.0`. It captures the
 release story behind the WASM client/server runtime.
 
 `CHANGELOG.md` is the public release-note source; this file records the working
 evidence behind that release entry.
 
-## Scope
+### Scope
 
 - Base tag: `v0.8.6`
 - Release framing: WASM runtime release (client and server)
@@ -21,7 +69,7 @@ evidence behind that release entry.
   - detached-promise cleanup: `lib/run-detached.ts` and its call sites
   - release metadata: `package.json`, `Cargo.toml`, `npm/*/package.json`, `CHANGELOG.md`
 
-## Release framing
+### Release framing
 
 This delta is best described as a WASM runtime release:
 
@@ -38,9 +86,9 @@ This delta is best described as a WASM runtime release:
   handling, no way for shutdown to wait for background work) was replaced
   with a drainable task registry
 
-## Downstream-visible outcomes
+### Downstream-visible outcomes
 
-### WASM runtime is a first-class `runtimeMode`
+#### WASM runtime is a first-class `runtimeMode`
 
 Evidence:
 
@@ -58,7 +106,7 @@ Outcome:
 - servers remain Node-only by design (N1) — workerd has no inbound-listening-
   socket model, so a "workerd server" isn't a coherent concept
 
-### Verified inside real Cloudflare workerd, not just asserted
+#### Verified inside real Cloudflare workerd, not just asserted
 
 Evidence:
 
@@ -75,7 +123,7 @@ Outcome:
 - real network handshakes are blocked purely by workerd's own missing
   outbound-UDP API (cloudflare/workerd#4463), not by anything in this package
 
-### Server-side retry-token/connection-routing logic is wasm-compatible and proof-covered
+#### Server-side retry-token/connection-routing logic is wasm-compatible and proof-covered
 
 Evidence:
 
@@ -96,7 +144,7 @@ Outcome:
 - the two server implementations' previously-duplicated token parsing logic
   now has one source of truth
 
-### `buffer_pool.rs`'s checkin bucketing bug is fixed and proof-covered
+#### `buffer_pool.rs`'s checkin bucketing bug is fixed and proof-covered
 
 Evidence:
 
@@ -110,7 +158,7 @@ Outcome:
   reusing the checkout-side "smallest class `>=`" classification, which
   filed a buffer into a bucket whose declared capacity it didn't meet
 
-### No promise in `lib/` is fire-and-forget without a rejection handler or a shutdown drain
+#### No promise in `lib/` is fire-and-forget without a rejection handler or a shutdown drain
 
 Evidence:
 
@@ -129,7 +177,7 @@ Outcome:
   this fix it exits in under 10 seconds — the hang was exactly this class of
   bug (a test's own detached background work outliving the test)
 
-## Caveats To Disclose
+### Caveats To Disclose
 
 - Real outbound UDP from Cloudflare Workers/workerd does not exist yet
   (cloudflare/workerd#4463); the workerd verification in this release proves
@@ -146,7 +194,7 @@ Outcome:
   failing outright. The core publish itself uses npm Trusted Publisher
   (OIDC, `--provenance`), unaffected by this.
 
-## Release-Blocking Checks
+### Release-Blocking Checks
 
 - Full local release gate: `npm run release:local-gate`
 - Dry-run publish validation: `npm run release:latest -- --validate-only --dist-tag latest`
@@ -165,7 +213,7 @@ Validated in this release pass:
 - Full GitHub Actions CI on PR #9: 38/38 checks green, including every
   `verify (macos-15-intel, kqueue)` job (previously intermittently flaky)
 
-## 0.8.4 Changelog Entry
+### 0.8.4 Changelog Entry
 
 - Refactored unsafe-adjacent Rust logic into proof-friendly pure models for outbound admission, pending writes, connection IDs, recv-buffer accounting, cmsg cursor walking, and io_uring provided-buffer layout.
 - Added Kani contracts and bounded harnesses for admission accounting, pending-write release accounting, cmsg cursor bounds, recv-buffer capacity, QUIC-LB CID encoding, and provided-buffer range validation.
@@ -177,9 +225,9 @@ Validated in this release pass:
 - Updated the minimum supported Rust version and Clippy MSRV setting to `1.95`.
 - Hardened npm release publishing so the latest/canary dist-tag mirror can use either `NPM_TOKEN` or `NODE_AUTH_TOKEN`.
 
-## Historical 0.6.0 Evidence
+### Historical 0.6.0 Evidence
 
-## 0.6.0 Changelog Entry
+### 0.6.0 Changelog Entry
 
 - Added first-class raw QUIC client mTLS support through the public `connectQuic()` and `connectQuicAsync()` options, including `cert`/`key` validation and explicit `ERR_HTTP3_TLS_CONFIG_ERROR` failures for invalid TLS input.
 - Added raw QUIC server-side client certificate policy control with `clientAuth: 'none' | 'request' | 'require'`, defaulting to `require` whenever a client-verification `ca` is configured.

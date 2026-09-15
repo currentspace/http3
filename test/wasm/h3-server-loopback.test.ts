@@ -66,6 +66,30 @@ function waitForServerStream(pair: WasmServerH3Pair, timeoutMs = 5000): Promise<
 }
 
 describe('wasm H3 SERVER loopback', { skip: wasmSkipReason() }, () => {
+  it('queued response data and FIN cross small windows exactly once', async () => {
+    const pair = await createWasmServerH3Pair({
+      clientRuntimeMode: 'wasm',
+      initialMaxData: 32 * 1024,
+      initialMaxStreamDataBidiLocal: 16 * 1024,
+    });
+    try {
+      const serverStreamPromise = waitForServerStream(pair);
+      const clientStream = pair.client.request({
+        ':method': 'GET', ':path': '/large', ':authority': 'localhost', ':scheme': 'https',
+      }, { endStream: true });
+      const response = waitForResponse(clientStream);
+      const { stream } = await serverStreamPromise;
+      const payload = Buffer.from(Array.from({ length: 256 * 1024 }, (_, i) => i % 251));
+      stream.respond({ ':status': '200' });
+      stream.end(payload);
+      const received = await response;
+      assert.equal(received.status, '200');
+      assert.deepEqual(received.body, payload);
+    } finally {
+      await pair.cleanup();
+    }
+  });
+
   describe('native client x wasm server (matrix cell 5)', () => {
     it('handshake completes, GET request/response, clean close on both sides', async () => {
       const pair = await createWasmServerH3Pair({ clientRuntimeMode: 'portable' });
@@ -184,6 +208,9 @@ describe('wasm H3 SERVER loopback', { skip: wasmSkipReason() }, () => {
         const received = await bodyPromise;
         assert.equal(received.length, payload.length);
         assert.equal(Buffer.compare(received, payload), 0);
+        const metrics = pair.client.getMetrics();
+        assert.ok(metrics);
+        assert.ok(metrics.packetsOut < 5000, `unexpected packet amplification: ${metrics.packetsOut}`);
         assert.equal(sawBackpressure, true, 'expected at least one backpressured write (STREAM_BLOCKED -> DRAIN) for a 256KB body over a 32KB connection window');
 
         serverStream.respondWithBody({ ':status': '200' }, 'ok');

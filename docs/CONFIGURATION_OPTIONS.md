@@ -36,6 +36,7 @@ Used by `createSecureServer()` for server-side TLS material and related helpers.
 
 Used by `createSecureServer()` and `serveFetch()`.
 
+
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the QUIC/H3 worker. |
@@ -62,6 +63,29 @@ Used by `createSecureServer()` and `serveFetch()`.
 | `reusePort` | `boolean` | `false` | Enables `SO_REUSEPORT` on the UDP listener. |
 | `quicLb` | `boolean` | `false` | Enables QUIC-LB plaintext connection ID encoding. |
 | `serverId` | `Buffer \| string` | `none` | Required when `quicLb` is `true`; must be an 8-byte server ID (buffer or 16-digit hex string). |
+
+### Fetch request bodies
+
+`serveFetch({ maxBodyBytes })` and `createFetchHandler(handler, { maxBodyBytes })`
+accept a non-negative integer byte limit, defaulting to **16 MiB**. Declared
+oversized bodies and consumed bodies that exceed this limit receive HTTP 413
+if response headers have not already been sent. Applications may choose a
+larger limit for upload endpoints.
+
+Bodies stream to the handler on HTTP/1, HTTP/2, and HTTP/3. The Web stream
+pauses its Node source at a 64 KiB queue watermark; HTTP/2 also pauses the
+underlying HTTP/2 stream. HTTP/3 native events can continue arriving after
+Node pauses: Fetch requests therefore cap the Node receive buffer plus its
+pending-read queue at **1 MiB**, resetting an overflowing stream with
+`ERR_HTTP3_RECEIVE_BUFFER_LIMIT`. This bounds the JavaScript spill queue;
+it does not provide per-stream transport pause/resume. Raw stream APIs retain
+their existing behavior.
+
+Disconnects abort `Request.signal` and cancel the response reader, including
+a pending read. Async response generators should observe the signal when
+waiting on external work: JavaScript cannot interrupt an arbitrary pending
+`iterator.next()` operation. Unconsumed upload tails are discarded after the
+response finishes.
 
 ## `ConnectOptions`
 

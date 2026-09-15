@@ -47,6 +47,7 @@ done
 
 START_TS=$(date +%s)
 PASSED=()
+SKIPPED=()
 
 step() {
   printf '\n\033[1;36m==> %s\033[0m\n' "$1"
@@ -57,7 +58,24 @@ mark_done() {
   PASSED+=("$CURRENT_STEP")
 }
 
-trap 'rc=$?; if [[ $rc -ne 0 ]]; then printf "\n\033[1;31m✗ FAILED: %s (exit %d)\033[0m\n" "${CURRENT_STEP:-unknown}" "$rc" >&2; fi' EXIT
+skip() {
+  SKIPPED+=("$1")
+  printf '\nSKIP: %s\n' "$1"
+}
+
+report() {
+  local rc=$?
+  trap - EXIT
+  if [[ $rc -ne 0 ]]; then
+    printf '\nFAILED: %s (exit %d)\n' "${CURRENT_STEP:-unknown}" "$rc" >&2
+  fi
+  printf '\nVerification: %d passed, %d failed, %d skipped (%ds)\n' \
+    "${#PASSED[@]}" "$((rc != 0))" "${#SKIPPED[@]}" "$(($(date +%s) - START_TS))"
+  printf '  passed: %s\n' "${PASSED[*]:-none}"
+  printf '  skipped: %s\n' "${SKIPPED[*]:-none}"
+  exit "$rc"
+}
+trap report EXIT
 
 step "tool versions"
 node --version
@@ -110,13 +128,12 @@ pnpm run test:rust:mock:extended
 mark_done
 
 if [[ "${VERIFY_SKIP_BUILD:-0}" != "1" ]]; then
-  step "napi release build"
-  npx napi build --platform --release
+  step "native + dist build"
+  pnpm run build
   mark_done
 
-  step "build:dist (lib → dist)"
-  pnpm run build:dist
-  mark_done
+else
+  skip "native + dist build (VERIFY_SKIP_BUILD=1)"
 fi
 
 # wasm build+test (docs/WASM_CLIENT_PLAN.md D1b): the wasi-sdk toolchain is
@@ -125,13 +142,9 @@ fi
 # enforcement point there. This step must never hard-fail just because the
 # toolchain is absent; it self-skips with a clear notice instead.
 if [[ "${VERIFY_SKIP_WASM:-0}" == "1" ]]; then
-  step "wasm build + test (skipped: VERIFY_SKIP_WASM=1)"
-  printf 'VERIFY_SKIP_WASM=1 set — skipping wasm build+test.\n'
-  mark_done
+  skip "wasm build + test (VERIFY_SKIP_WASM=1)"
 elif [[ -z "${WASI_SDK_PATH:-}" ]]; then
-  step "wasm build + test (skipped: WASI_SDK_PATH unset)"
-  printf 'WASI_SDK_PATH is not set — skipping wasm build+test (no wasi-sdk toolchain available locally). The dedicated CI wasm job installs wasi-sdk and is the real enforcement point (docs/WASM_CLIENT_PLAN.md D2); this lane self-skips everywhere else by design.\n'
-  mark_done
+  skip "wasm build + test (WASI_SDK_PATH unset; dedicated CI lane required)"
 else
   step "wasm build (build:wasm)"
   pnpm run build:wasm
@@ -152,12 +165,14 @@ mark_done
 
 if [[ "${VERIFY_SKIP_BROWSER_E2E:-0}" != "1" ]]; then
   step "playwright browsers (chromium + firefox + webkit)"
-  npx playwright install --with-deps chromium firefox webkit
+  pnpm exec playwright install --with-deps chromium firefox webkit
   mark_done
 
   step "browser e2e"
   pnpm run test:browser:e2e
   mark_done
+else
+  skip "browser e2e (VERIFY_SKIP_BROWSER_E2E=1)"
 fi
 
 if [[ "${VERIFY_SKIP_PERF_GATES:-0}" != "1" ]]; then
@@ -172,17 +187,14 @@ if [[ "${VERIFY_SKIP_PERF_GATES:-0}" != "1" ]]; then
     HTTP3_LOAD_SMOKE_MAX_MS="${HTTP3_LOAD_SMOKE_MAX_MS:-10000}" \
     pnpm run perf:load-smoke-gate
   mark_done
+else
+  skip "performance gates (VERIFY_SKIP_PERF_GATES=1)"
 fi
 
 if [[ "${VERIFY_SKIP_SMOKE_INSTALL:-0}" != "1" ]]; then
   step "smoke install (pack + install)"
   pnpm run smoke:install
   mark_done
+else
+  skip "packed-install smoke (VERIFY_SKIP_SMOKE_INSTALL=1)"
 fi
-
-trap - EXIT
-END_TS=$(date +%s)
-ELAPSED=$((END_TS - START_TS))
-
-printf '\n\033[1;32m✓ ALL VERIFICATION PASSED\033[0m (%d steps in %ds)\n' "${#PASSED[@]}" "$ELAPSED"
-printf '  steps: %s\n' "${PASSED[*]}"

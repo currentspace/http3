@@ -8,8 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use http3::wasm_exports::{
-    Chunk, EVENT_ERROR, EVENT_STREAM_BLOCKED, JsH3Event, OutboundAdmission, QuicClientHandler,
-    new_quic_client_config_in_memory,
+    Chunk, JsH3Event, OutboundAdmission, QuicClientHandler, new_quic_client_config_in_memory,
 };
 
 use crate::abi::{
@@ -19,6 +18,7 @@ use crate::abi::{
 use crate::events::serialize_events;
 use crate::handle::Slots;
 use crate::json_opts::{build_quic_options, parse_connect_params};
+use crate::send::classify_send_outcome;
 
 struct QuicSession {
     handler: QuicClientHandler,
@@ -121,7 +121,11 @@ pub extern "C" fn qc_last_error(handle: u32, buf_ptr: u32, cap: u32) -> i32 {
     let msg = if handle == 0 {
         crate::abi::take_global_error_for_read()
     } else {
-        SESSIONS.with(|s| s.borrow().get(handle).and_then(|sess| sess.last_error.clone()))
+        SESSIONS.with(|s| {
+            s.borrow()
+                .get(handle)
+                .and_then(|sess| sess.last_error.clone())
+        })
     };
     write_out_message(msg, buf_ptr, cap)
 }
@@ -209,11 +213,8 @@ pub extern "C" fn qc_drain_events(handle: u32, out_ptr_ptr: u32) -> i64 {
     with_session_mut(handle, |sess| {
         sess.handler
             .poll_app_events_for_handle(usize::MAX, &mut sess.pending_events, handle);
-        sess.handler.poll_drain_events_for_handle(
-            usize::MAX,
-            &mut sess.pending_events,
-            handle,
-        );
+        sess.handler
+            .poll_drain_events_for_handle(usize::MAX, &mut sess.pending_events, handle);
         sess.handler
             .flush_pending_writes_for_handle(&mut sess.pending_events, handle);
 
@@ -253,27 +254,22 @@ pub extern "C" fn qc_stream_send(handle: u32, stream_id: u64, ptr: u32, len: u32
             Chunk::unpooled(data)
         };
         let before = sess.pending_events.len();
-        let released =
-            sess.handler
-                .queue_stream_send(stream_id, chunk, fin != 0, &mut sess.pending_events, handle);
-        classify_send_outcome(&sess.pending_events[before..], released)
+        let released = sess.handler.queue_stream_send(
+            stream_id,
+            chunk,
+            fin != 0,
+            &mut sess.pending_events,
+            handle,
+        );
+        classify_send_outcome(
+            &sess.pending_events[before..],
+            len as usize,
+            fin != 0,
+            released,
+            sess.handler.has_pending_stream_write(stream_id),
+        )
     })
     .unwrap_or(ERR_INVALID_HANDLE)
-}
-
-fn classify_send_outcome(newly_pushed: &[JsH3Event], released_units: usize) -> i64 {
-    let has_error = newly_pushed.iter().any(|e| e.event_type == EVENT_ERROR);
-    let has_blocked = newly_pushed
-        .iter()
-        .any(|e| e.event_type == EVENT_STREAM_BLOCKED);
-    if has_error {
-        ERR_PROTOCOL
-    } else if released_units == 0 {
-        let _ = has_blocked;
-        ERR_AGAIN
-    } else {
-        released_units as i64
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -302,9 +298,12 @@ pub extern "C" fn qc_send_datagram(handle: u32, ptr: u32, len: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn qc_ping(handle: u32) -> i64 {
-    with_session_mut(handle, |sess| {
-        if sess.handler.ping() { 0i64 } else { ERR_AGAIN }
-    })
+    with_session_mut(
+        handle,
+        |sess| {
+            if sess.handler.ping() { 0i64 } else { ERR_AGAIN }
+        },
+    )
     .unwrap_or(ERR_INVALID_HANDLE)
 }
 

@@ -232,20 +232,12 @@ describe('QUIC protocol verification', () => {
     });
 
     it('connection-level flow control with initialMaxData', async () => {
-      // Connection window exactly fits the data (5×8KB = 40KB). This validates
-      // that connection-level flow control is active and correctly distributes
-      // credits across concurrent streams.
-      //
-      // NOTE: Tight windows requiring MAX_DATA renewal (e.g. 16KB for 40KB
-      // data) cannot be tested end-to-end because our congestion tuning
-      // (IW=1000, send_capacity_factor=20) causes quiche to overshoot the
-      // connection window by ~1 MTU on the first burst, triggering
-      // FLOW_CONTROL_ERROR. MAX_DATA renewal is verified at the Rust level
-      // in tests/transport_quiche_pair.rs::test_connection_level_flow_control where
-      // stream_send is called in small chunks with explicit packet exchange.
+      // Force MAX_DATA renewal: five 8 KiB streams exceed the 16 KiB
+      // connection window. Send-capacity tuning must never inflate peer credit.
       const server = createQuicServer({
         key: certs.key, cert: certs.cert, disableRetry: true,
-        initialMaxData: 40960,
+        runtimeMode: 'portable',
+        initialMaxData: 16384,
         initialMaxStreamDataBidiLocal: 8192,
       });
       server.on('session', (session: QuicServerSession) => {
@@ -255,11 +247,12 @@ describe('QUIC protocol verification', () => {
 
       const client = await connectQuicAsync(`127.0.0.1:${addr.port}`, {
         rejectUnauthorized: false,
-        initialMaxData: 40960,
+        runtimeMode: 'portable',
+        initialMaxData: 16384,
         initialMaxStreamDataBidiLocal: 8192,
       });
 
-      // 5 streams × 8KB = 40KB total, at the connection window boundary.
+      // 5 streams × 8KB = 40KB total, requiring connection credit renewal.
       // Sequential to avoid concurrent streams deadlocking on shared window.
       const payload = Buffer.alloc(8192, 0xcd);
       for (let i = 0; i < 5; i++) {
@@ -370,55 +363,66 @@ describe('QUIC protocol verification', () => {
         rejectUnauthorized: false,
       });
 
-      // First 5 streams should succeed
-      const firstFive = await Promise.all(
-        Array.from({ length: 5 }, async (_, i) => {
-          const stream = client.openStream();
-          stream.end(Buffer.from(`stream-${i}`));
-          const echoed = await collect(stream, 5000);
-          return echoed.toString();
-        }),
-      );
-      assert.deepStrictEqual(firstFive.sort(), ['stream-0', 'stream-1', 'stream-2', 'stream-3', 'stream-4']);
+      try {
+        // First 5 streams should succeed
+        const firstFive = await Promise.all(
+          Array.from({ length: 5 }, async (_, i) => {
+            const stream = client.openStream();
+            stream.end(Buffer.from(`stream-${i}`));
+            const echoed = await collect(stream, 5000);
+            return echoed.toString();
+          }),
+        );
+        assert.deepStrictEqual(firstFive.sort(), ['stream-0', 'stream-1', 'stream-2', 'stream-3', 'stream-4']);
 
-      // 6th stream — should error or block (quiche enforces limit)
-      const stream6 = client.openStream();
-      const sixthResult = await new Promise<string>((resolve) => {
-        let settled = false;
-        let onStream6Error: ((err: Error) => void) | null = null;
-        const settle = (result: string): void => {
-          if (settled) return;
-          settled = true;
-          if (onStream6Error !== null) {
-            stream6.off('error', onStream6Error);
-          }
-          resolve(result);
-        };
-
-        onStream6Error = (err: Error): void => {
-          settle(`error:${err.message}`);
-        };
-        stream6.once('error', onStream6Error);
-
+        // 6th stream — should error or block (quiche enforces limit)
+        let stream6: QuicStream;
         try {
-          stream6.end(Buffer.from('should-fail'));
-        } catch (err: unknown) {
-          settle(`error:${(err as Error).message}`);
+          stream6 = client.openStream();
+        } catch (error) {
+          // Admission can reject before a JS stream exists when MAX_STREAMS
+          // credit from the completed streams has not reached the client yet.
+          assert.match(String(error), /streamlimit|stream limit/i);
           return;
         }
+        const sixthResult = await new Promise<string>((resolve) => {
+          let settled = false;
+          let onStream6Error: ((err: Error) => void) | null = null;
+          const settle = (result: string): void => {
+            if (settled) return;
+            settled = true;
+            if (onStream6Error !== null) {
+              stream6.off('error', onStream6Error);
+            }
+            resolve(result);
+          };
 
-        collect(stream6, 3000).then(
-          (data) => settle(`ok:${data.toString()}`),
-          (err: unknown) => settle(`error:${(err as Error).message}`),
-        );
-      });
+          onStream6Error = (err: Error): void => {
+            settle(`error:${err.message}`);
+          };
+          stream6.once('error', onStream6Error);
 
-      // Stream may error, block, or succeed after previous streams close and credits refresh.
-      // The important thing is no crash.
-      assert.ok(typeof sixthResult === 'string', 'sixth stream should produce a result (no crash)');
+          try {
+            stream6.end(Buffer.from('should-fail'));
+          } catch (err: unknown) {
+            settle(`error:${(err as Error).message}`);
+            return;
+          }
 
-      await client.close();
-      await server.close();
+          collect(stream6, 3000).then(
+            (data) => settle(`ok:${data.toString()}`),
+            (err: unknown) => settle(`error:${(err as Error).message}`),
+          );
+        });
+
+        // Stream may error, block, or succeed after previous streams close and credits refresh.
+        // The important thing is no crash.
+        assert.ok(typeof sixthResult === 'string', 'sixth stream should produce a result (no crash)');
+
+      } finally {
+        await client.close();
+        await server.close();
+      }
     });
 
     it('openStream is rejected before JS mints an over-limit stream id', async () => {

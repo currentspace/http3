@@ -40,6 +40,7 @@ describe('Fetch adapter SSE helper', () => {
       key: certs.key,
       cert: certs.cert,
       disableRetry: true,
+      runtimeMode: 'portable',
       fetch: () => {
         async function* events(): AsyncGenerator<{ data: string }> {
           yield { data: 'first' };
@@ -57,7 +58,7 @@ describe('Fetch adapter SSE helper', () => {
       });
     });
 
-    const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: 'portable' });
     let connected = false;
     session.on('connect', () => { connected = true; });
     await waitFor(() => connected, 3000);
@@ -88,12 +89,7 @@ describe('Fetch adapter SSE helper', () => {
     await server.close();
   });
 
-  // TODO: pre-existing flake — server-side fetch adapter doesn't surface
-  // the client disconnect to the async generator within the test's 3 s
-  // window. Not introduced by the audit rollup; needs its own
-  // investigation of fetch-adapter teardown ordering. Skipping so the
-  // core suite can finish cleanly.
-  it.skip('cancels SSE iterators when clients disconnect', async () => {
+  it('cancels SSE iterators when clients disconnect', async () => {
     let activeClients = 0;
     let cleanupCount = 0;
 
@@ -103,6 +99,7 @@ describe('Fetch adapter SSE helper', () => {
       key: certs.key,
       cert: certs.cert,
       disableRetry: true,
+      runtimeMode: 'portable',
       fetch: () => {
         async function* events(): AsyncGenerator<{ data: string }> {
           activeClients += 1;
@@ -129,7 +126,7 @@ describe('Fetch adapter SSE helper', () => {
       });
     });
 
-    const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: 'portable' });
     let connected = false;
     session.on('connect', () => { connected = true; });
     await waitFor(() => connected, 3000);
@@ -146,10 +143,13 @@ describe('Fetch adapter SSE helper', () => {
       stream.on('error', reject);
     });
 
-    stream.close();
-    await session.close();
-    await waitFor(() => cleanupCount >= 1 && activeClients === 0, 3000);
-
-    await server.close();
+    try {
+      stream.close();
+      await session.close();
+      await waitFor(() => cleanupCount === 1 && activeClients === 0, 3000);
+    } finally {
+      await session.close();
+      await server.close();
+    }
   });
 });

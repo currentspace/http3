@@ -45,9 +45,6 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
-
       - name: Run full verify
         env:
           VERIFY_SKIP_BROWSER_E2E: '1'
@@ -79,9 +76,6 @@ jobs:
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
 
       - name: Run full verify
         run: pnpm verify
