@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Ignore retired EventSource session events so closing the old connection
+  cannot schedule another reconnect and interrupt a slow replacement.
+- Bound SSE heartbeat writes while a client is backpressured, resume on drain,
+  and stop the heartbeat when the underlying writable finishes.
+- Clean up EventSource/SSE test resources even on assertion failures. Emit
+  immediate test failure diagnostics and bound the combined Node test process
+  to five minutes (`HTTP3_NODE_TEST_TIMEOUT_MS` can override the deadline).
+
 ## 0.9.1
 
 ### Streaming and lifecycle fixes

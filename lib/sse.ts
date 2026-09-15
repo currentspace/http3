@@ -81,12 +81,14 @@ export class ServerSentEventStream {
   private _closed = false;
   private readonly _abortController = new AbortController();
   private _heartbeatTimer: NodeJS.Timeout | null = null;
+  private _heartbeatPending = false;
 
   constructor(stream: ServerHttp3Stream, options?: SseStreamOptions) {
     this._stream = stream;
     this._stream.respond(sseHeaders(options?.headers));
     this._stream.once('close', () => this._cleanup());
     this._stream.once('error', () => this._cleanup());
+    this._stream.once('finish', () => this._cleanup());
     if (options?.heartbeatIntervalMs && options.heartbeatIntervalMs > 0) {
       this.heartbeat(options.heartbeatIntervalMs, options.heartbeatComment);
     }
@@ -105,8 +107,15 @@ export class ServerSentEventStream {
   /** Start periodic heartbeat comments. */
   heartbeat(intervalMs = 15000, comment = 'keepalive'): void {
     this._clearHeartbeat();
+    if (this._closed) return;
     this._heartbeatTimer = setInterval(() => {
-      runDetached(this.comment(comment), () => { this.close(); });
+      // A slow reader may stay blocked across many timer ticks. Keep only
+      // one heartbeat in flight so neither frames nor drain listeners grow.
+      if (this._heartbeatPending) return;
+      this._heartbeatPending = true;
+      runDetached(this.comment(comment).finally(() => {
+        this._heartbeatPending = false;
+      }), () => { this.close(); });
     }, intervalMs);
     this._heartbeatTimer.unref();
   }

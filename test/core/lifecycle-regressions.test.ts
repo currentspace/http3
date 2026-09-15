@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import dgram from 'node:dgram';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { Writable } from 'node:stream';
 import { DetachedTasks } from '../../lib/run-detached.js';
 import { ServerSentEventStream } from '../../lib/sse.js';
 import type { ServerHttp3Stream } from '../../lib/stream.js';
@@ -57,6 +58,57 @@ for (const event of ['close', 'error'] as const) {
     assert.equal(stream.listenerCount('drain'), 0);
   });
 }
+
+it('SSE heartbeats stay bounded while the client is backpressured', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let releaseWrite: (() => void) | undefined;
+  let writes = 0;
+  const stream = Object.assign(new Writable({
+    highWaterMark: 1,
+    write(_chunk, _encoding, callback) {
+      writes++;
+      releaseWrite = callback;
+    },
+  }), { respond() {} });
+  const sse = new ServerSentEventStream(stream as unknown as ServerHttp3Stream, {
+    heartbeatIntervalMs: 10,
+  });
+  try {
+    t.mock.timers.tick(10);
+    const firstFrameBytes = stream.writableLength;
+    assert.ok(firstFrameBytes > 0);
+    t.mock.timers.tick(1000);
+    assert.equal(stream.writableLength, firstFrameBytes, 'blocked heartbeats must not queue more frames');
+    assert.equal(stream.listenerCount('drain'), 1);
+    releaseWrite?.();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(stream.writableLength, 0);
+    t.mock.timers.tick(10);
+    assert.equal(writes, 2, 'heartbeats resume once the client drains');
+  } finally {
+    sse.close();
+    stream.destroy();
+  }
+  await Promise.resolve();
+  assert.equal(stream.listenerCount('drain'), 0);
+});
+
+it('SSE heartbeats stop when the underlying writable finishes', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const stream = Object.assign(new EventEmitter(), {
+    destroyed: false, writableEnded: false,
+    respond() {}, write: t.mock.fn(() => true), end() {},
+  });
+  const sse = new ServerSentEventStream(stream as unknown as ServerHttp3Stream, { heartbeatIntervalMs: 10 });
+  try {
+    stream.writableEnded = true;
+    stream.emit('finish');
+    t.mock.timers.tick(100);
+    sse.heartbeat(10);
+    t.mock.timers.tick(100);
+    assert.equal(stream.write.mock.callCount(), 0);
+  } finally { sse.close(); }
+});
 
 it('WASM UDP startup rejects socket errors and closes the socket', async () => {
   let closed = 0;
