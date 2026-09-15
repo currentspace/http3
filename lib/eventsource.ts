@@ -132,20 +132,25 @@ export class Http3EventSource extends EventEmitter {
       if (this._closed as boolean) return;
 
       const authority = `${this._url.hostname}:${this._url.port || '443'}`;
-      this._session = connect(authority, {
+      const session = connect(authority, {
         ...this._options,
         servername: this._options.servername ?? this._url.hostname,
       });
+      this._session = session;
 
-      this._session.once('connect', () => {
-        this._openStream();
+      session.once('connect', () => {
+        if (this._session === session && !this._closed) this._openStream();
       });
-      this._session.on('error', (err: Error) => {
+      session.on('error', (err: Error) => {
+        if (this._session !== session || this._closed) return;
         this._emitError(err);
         this._scheduleReconnect();
       });
-      this._session.on('close', () => {
-        if (!this._closed) {
+      session.on('close', () => {
+        // _closeSession detaches the old session before awaiting close.
+        // Its close event must not schedule a second reconnect that could
+        // interrupt the replacement connection while it is starting.
+        if (this._session === session && !this._closed) {
           this._scheduleReconnect();
         }
       });

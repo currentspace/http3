@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Ignore retired EventSource session events so closing the old connection
+  cannot schedule another reconnect and interrupt a slow replacement.
 - Bound SSE heartbeat writes while a client is backpressured, resume on drain,
   and stop the heartbeat when the underlying writable finishes.
 - Clean up EventSource/SSE test resources even on assertion failures. Emit
