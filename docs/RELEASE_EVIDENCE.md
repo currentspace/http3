@@ -3,6 +3,38 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.2
+
+### Scope and validated source
+
+- Base: merged PR #11, `da7a1c62a2feb1f85b88c63ac31a757c8fb1493f`.
+- Its tree equals validated PR head `0e9537d930c51ca13c03ae675cde3e56628d135a`.
+- Fix retired EventSource sessions scheduling extra reconnects, bounded SSE
+  heartbeat writes, and cleanup after failed lifecycle tests.
+- Release preparation aligns root, Rust, native-package, and lockfile versions.
+- Extend npm dist-tag verification to ten minutes after the 0.9.1 publisher
+  falsely failed its one-minute check during npm processing and CDN propagation.
+
+### Completed implementation validation
+
+- All 29 PR checks passed, including Linux, Docker, macOS ARM64 and Intel,
+  browsers, WASM, interop, and package installation.
+- Full verification: https://github.com/currentspace/http3/actions/runs/35009793316
+- Previously hanging Intel macOS Node 24 job: 19 stages passed, zero failed;
+  its expected embedded WASM skip is covered by dedicated WASM CI.
+- Local native/runtime/interop/release tests: 335 passed; FFI tests: 67 passed.
+- Normal and delayed reconnect cases: ten consecutive successful runs each
+  on Node 24.20.0 and Node 26.8.1.
+- Heartbeat accumulation and failed-assertion cleanup reproduced before fixes.
+  Post-fix regressions, lint, and typechecks passed.
+- Receipts: ignored `results/ci-hang/` directory and PR #11.
+
+### Release qualification
+
+The 0.9.2 dry run, publication build matrix, registry verification, and clean
+published-package install remain gates. Their receipts are retained under
+`results/release-0.9.2/`; version preparation alone does not complete them.
+
 ## 0.9.1
 
 ### Scope

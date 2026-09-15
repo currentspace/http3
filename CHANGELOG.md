@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.2
 
 - Ignore retired EventSource session events so closing the old connection
   cannot schedule another reconnect and interrupt a slow replacement.
@@ -9,6 +9,8 @@
 - Clean up EventSource/SSE test resources even on assertion failures. Emit
   immediate test failure diagnostics and bound the combined Node test process
   to five minutes (`HTTP3_NODE_TEST_TIMEOUT_MS` can override the deadline).
+
+- Allow up to ten minutes for npm dist-tags to reflect accepted publications.
 
 ## 0.9.1
 

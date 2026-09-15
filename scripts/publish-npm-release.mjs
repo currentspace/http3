@@ -203,12 +203,15 @@ function assertRootPackageLayout(rootManifest, nativePackages) {
 }
 
 function verifyDistTag(name, version, distTag) {
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  // npm can accept a publish several minutes before processing and CDN
+  // propagation expose the new version. Do not mistake that delay for a failed upload.
+  const maxAttempts = 120;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const tags = npmViewJson(name, 'dist-tags');
     if (tags && tags[distTag] === version) {
       return;
     }
-    if (attempt < 11) {
+    if (attempt < maxAttempts - 1) {
       sleep(5000);
     } else {
       throw new Error(
