@@ -67,7 +67,28 @@ and remaining qualification work for each release candidate.
   a single 350 ms final stall failed the maximum check. Compilation and lint
   passed. Controls and logs are in the investigation receipt directory.
 
-### Release qualification
+### macOS worker-reply scheduling correction
+
+- The stronger latency test exposed additional ARM64 Node 25 and Intel Node
+  24/25 failures. A matching optimized hosted diagnostic reproduced 119.8 ms
+  p95 and a 243.5 ms maximum: successive synchronous `sendRequest` calls took
+  roughly 10 ms each while CPU use remained low.
+- Crossbeam 0.5.15's bounded `recv_timeout` uses scheduler-yield backoff before
+  parking. A local scheduler-yield interposer captured that exact call path;
+  adding a 10 ms yield delay reproduced 645.2 ms p95 and 649.7 ms maximum.
+- macOS worker reply waits now use Crossbeam `Select`, which registers the
+  receive and parks directly. Existing timeouts, disconnect behavior, queued
+  replies, command queues, and non-macOS receive behavior are preserved.
+- With the same injected yield delay, the corrected optimized addon passed
+  at 8.0 ms p95 and 8.5 ms maximum, with zero main-thread scheduler yields.
+- Five response-semantics tests cover queued replies, delayed replies,
+  sender disconnect, timeout cleanup, and 1000 repeated handoffs. All 276 Rust
+  unit tests, 335 native Node tests, 67 FFI tests, Clippy, and lint passed.
+- Three optimized concurrency runs each on ARM64 Node 24/25/26 and Intel
+  Node 26 passed with unchanged thresholds. Hosted qualification of this
+  correction is still required before publishing.
+
+### Release qualification status
 
 The 0.9.2 dry run, publication build matrix, registry verification, and clean
 published-package install remain gates. Their receipts are retained under
