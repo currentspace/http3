@@ -29,6 +29,27 @@ and remaining qualification work for each release candidate.
   Post-fix regressions, lint, and typechecks passed.
 - Receipts: ignored `results/ci-hang/` directory and PR #11.
 
+### Intel concurrency investigation
+
+- Post-merge Intel Node 26 verification intermittently failed the concurrency
+  gate, first exceeding its time budget and then timing out opening 50 clients.
+  An unchanged-source diagnostic rerun passed in 10526 ms against 12000 ms:
+  https://github.com/currentspace/http3/actions/runs/35013520180/job/104541154652
+- Every H3 and raw QUIC client eagerly allocated 256 packet buffers of 65535
+  bytes, even when its shared worker used a separate pool. Per-client pools
+  now start empty; dedicated and direct/WASM clients allocate on first use.
+- Three alternating x64 runs under Rosetta reduced mean peak memory from
+  1414 MiB to 508 MiB and mean concurrency-suite time from 3971 ms to 3438 ms.
+  This confirms the allocation cost; it does not prove the sole cause of the
+  hosted timeout. Performance budgets and test timeouts are unchanged.
+- Concurrency tests now close clients after failures. Fault injection proved
+  that the next test previously inherited open clients; cleanup preserves the
+  injected failure while removing the leaked-client failure in the next test.
+- Changed-source local validation: 271 Rust unit, 335 native Node, 67 FFI,
+  39 rebuilt WASM, and 13 concurrency tests passed; lint and compilation passed.
+- Receipts and source/artifact hashes:
+  ignored `results/release-0.9.2/investigation/` directory.
+
 ### Release qualification
 
 The 0.9.2 dry run, publication build matrix, registry verification, and clean

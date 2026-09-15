@@ -4071,7 +4071,10 @@ impl H3ClientHandler {
             conn,
             pending_writes: HashMap::new(),
             send_buf: vec![0u8; SEND_BUF_SIZE],
-            tx_pool: BufferPool::new(256, 65535),
+            // Shared clients send from the worker's pool. Keep the per-client
+            // fallback empty until a dedicated or direct caller uses it;
+            // preallocating 256 packets here wastes 16 MiB per shared session.
+            tx_pool: BufferPool::new(0, 65535),
             pending_write_pool: AdaptiveBufferPool::new(
                 PENDING_WRITE_POOL_SIZE,
                 PENDING_WRITE_MIN_CAPACITY,

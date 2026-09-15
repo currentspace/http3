@@ -9,7 +9,10 @@
 - Clean up EventSource/SSE test resources even on assertion failures. Emit
   immediate test failure diagnostics and bound the combined Node test process
   to five minutes (`HTTP3_NODE_TEST_TIMEOUT_MS` can override the deadline).
-
+- Allocate per-client packet buffers on demand, avoiding an unused 16 MiB
+  allocation per HTTP/3 or QUIC client on macOS shared workers.
+- Close concurrency-test clients after failed handshakes or assertions so
+  later tests start without leftover connections.
 - Allow up to ten minutes for npm dist-tags to reflect accepted publications.
 
 ## 0.9.1

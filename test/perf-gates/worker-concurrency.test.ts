@@ -3,7 +3,7 @@
  * All tests share a single echo server to avoid per-test startup overhead.
  */
 
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before, after, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
@@ -14,6 +14,7 @@ import type { ClientHttp3Stream } from '../../lib/stream.js';
 
 const EVENT_LOOP_P95_GAP_MS = Number.parseInt(process.env.HTTP3_EVENT_LOOP_P95_GAP_MS ?? '100', 10);
 const EVENT_LOOP_MAX_GAP_MS = Number.parseInt(process.env.HTTP3_EVENT_LOOP_MAX_GAP_MS ?? '250', 10);
+const activeClients = new Set<Http3ClientSession>();
 
 async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {
   const start = Date.now();
@@ -84,6 +85,7 @@ async function doRequest(
 
 async function connectClient(port: number): Promise<Http3ClientSession> {
   const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+  activeClients.add(session);
   let connected = false;
   session.on('connect', () => { connected = true; });
   await waitFor(() => connected, 15000);
@@ -93,6 +95,16 @@ async function connectClient(port: number): Promise<Http3ClientSession> {
 describe('Worker Concurrency', () => {
   let server: Http3SecureServer;
   let port: number;
+
+  afterEach(async () => {
+    const clients = [...activeClients];
+    activeClients.clear();
+    // Register clients before awaiting their handshake so failed connection
+    // batches are cleaned up too, preserving isolation for subsequent tests.
+    const results = await Promise.allSettled(clients.map(session => session.close()));
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+  });
 
   before(async () => {
     const certs = generateTestCerts();
