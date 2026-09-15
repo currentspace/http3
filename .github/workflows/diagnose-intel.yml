@@ -57,10 +57,11 @@ jobs:
         run: python3 .github/diagnostics/repeat.py
       - name: Inject 10 ms scheduler-yield delay
         env:
-          DYLD_INSERT_LIBRARIES: ${{ github.workspace }}/.github/diagnostics/yield-probe.dylib
           HTTP3_INJECT_YIELD_DELAY: '1'
           HTTP3_CONCURRENCY_MAX_MS: '12000'
-        run: node scripts/concurrency-gate.mjs 2>&1 | tee diagnostics/yield-injected.log
+        run: |
+          DYLD_INSERT_LIBRARIES="$PWD/.github/diagnostics/yield-probe.dylib" node scripts/concurrency-gate.mjs > diagnostics/yield-injected.log 2>&1
+          cat diagnostics/yield-injected.log
       - uses: actions/upload-artifact@v7
         if: always()
         with:
