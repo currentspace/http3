@@ -1,4 +1,4 @@
-name: Diagnose Intel concurrency
+name: Diagnose macOS concurrency
 on:
   push:
     branches: [diagnose/intel-concurrency]
@@ -6,13 +6,29 @@ permissions:
   contents: read
 jobs:
   diagnostic:
-    runs-on: macos-15-intel
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            node: '25'
+            replica: 1
+          - os: macos-14
+            node: '25'
+            replica: 2
+          - os: macos-14
+            node: '25'
+            replica: 3
+          - os: macos-15-intel
+            node: '26'
+            replica: 1
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '26'
+          node-version: ${{ matrix.node }}
       - uses: pnpm/action-setup@v4
         with:
           version: 11.1.2
@@ -24,30 +40,20 @@ jobs:
           rustc --version
           sysctl hw.logicalcpu hw.memsize
           vm_stat
-          df -h .
-      - name: Install locked dependencies
-        timeout-minutes: 5
-        run: pnpm install --frozen-lockfile --no-optional
-      - name: Build native addon and JavaScript
-        timeout-minutes: 8
-        run: pnpm run build:debug
-      - name: Compile tests
-        run: pnpm run build:test
+      - run: pnpm install --frozen-lockfile --no-optional
+      - name: Build native addon and tests
+        run: pnpm run build:debug && pnpm run build:test
       - name: Native Node suite
         timeout-minutes: 6
         run: node scripts/test-node.mjs
       - name: FFI suite
         timeout-minutes: 5
         run: node --test --test-timeout=15000 'dist-test/test/ffi/**/*.test.js'
-      - name: Concurrency gate with native-call timing
-        timeout-minutes: 3
-        env:
-          HTTP3_CONCURRENCY_MAX_MS: '12000'
-        run: |
-          export NODE_OPTIONS="--require=$PWD/.github/diagnostics/native-timing.cjs"
-          node scripts/concurrency-gate.mjs
-      - name: Final resources
+      - name: Repeat concurrency gate with native-call and CPU timing
+        run: python3 .github/diagnostics/repeat.py
+      - uses: actions/upload-artifact@v7
         if: always()
-        run: |
-          vm_stat
-          ps -axo pid,ppid,%cpu,rss,comm | sort -nrk3 | head -20
+        with:
+          name: diagnostics-${{ matrix.os }}-node${{ matrix.node }}-${{ matrix.replica }}
+          path: diagnostics
+          retention-days: 3
