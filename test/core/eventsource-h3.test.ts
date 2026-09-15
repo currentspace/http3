@@ -28,12 +28,27 @@ describe('EventSource over H3', () => {
     certs = generateTestCerts();
   });
 
-  it('reconnects and sends Last-Event-ID', async () => {
+  it('reconnects and sends Last-Event-ID', async (t) => {
     beginLifecycleCapture();
+    let server: ReturnType<typeof createSecureServer> | undefined;
+    let source: ReturnType<typeof createEventSource> | undefined;
+    t.after(async () => {
+      try {
+        if (source) {
+          const closed = once(source, 'close').then(() => undefined);
+          source.close();
+          await withLifecycleTimeout(closed, 3000, 'eventsource-h3/source-close');
+        }
+      } finally {
+        try {
+          if (server) await withLifecycleTimeout(server.close(), 3000, 'eventsource-h3/server-close');
+        } finally { endLifecycleCapture(); }
+      }
+    });
     try {
       let counter = 0;
       const seenLastIds: string[] = [];
-      const server = createSecureServer({
+      server = createSecureServer({
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
@@ -57,17 +72,15 @@ describe('EventSource over H3', () => {
         );
       });
 
-      const port = await new Promise<number>((resolve) => {
-        server.on('listening', () => {
-          const addr = server.address();
-          assert.ok(addr);
-          resolve(addr.port);
-        });
-        server.listen(0, '127.0.0.1');
-      });
+      const listening = once(server, 'listening');
+      server.listen(0, '127.0.0.1');
+      await listening;
+      const address = server.address();
+      assert.ok(address);
+      const port = address.port;
 
       const events: EventSourceMessage[] = [];
-      const source = createEventSource(`https://127.0.0.1:${port}/events`, {
+      source = createEventSource(`https://127.0.0.1:${port}/events`, {
         rejectUnauthorized: false,
         initialRetryMs: 30,
         maxRetryMs: 250,
@@ -75,22 +88,18 @@ describe('EventSource over H3', () => {
       source.on('message', (event: EventSourceMessage) => {
         events.push(event);
       });
+      const errors: Error[] = [];
+      source.on('error', (error) => { errors.push(error); });
 
-      await waitFor(() => events.length >= 2, 5000);
-      const sourceClosed = once(source, 'close').then(() => undefined);
-      source.close();
+      await waitFor(() => errors.length > 0 || events.length >= 2, 5000);
+      if (errors[0]) throw errors[0];
 
       assert.strictEqual(events[0]?.data, 'msg-1');
       assert.strictEqual(events[1]?.data, 'msg-2');
       await waitFor(() => seenLastIds.includes('1'), 2000);
-
-      await withLifecycleTimeout(sourceClosed, 3000, 'eventsource-h3/source-close');
-      await withLifecycleTimeout(server.close(), 3000, 'eventsource-h3/server-close');
     } catch (error: unknown) {
       appendLifecycleArtifacts(error, 'eventsource-h3-last-event-id');
       throw error;
-    } finally {
-      endLifecycleCapture();
     }
   });
 });

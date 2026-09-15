@@ -16,12 +16,14 @@ describe('SSE heartbeat', () => {
     certs = generateTestCerts();
   });
 
-  it('should receive heartbeat comment frames at configured interval', async () => {
+  it('should receive heartbeat comment frames at configured interval', async (t) => {
     const server = createSecureServer({
       key: certs.key,
       cert: certs.cert,
       disableRetry: true,
     });
+
+    t.after(() => server.close());
 
     server.on('stream', (stream, _headers) => {
       const sse = createSseStream(stream, {
@@ -44,6 +46,7 @@ describe('SSE heartbeat', () => {
     });
 
     const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    t.after(() => session.close());
     let connected = false;
     session.on('connect', () => { connected = true; });
     await waitFor(() => connected, 3000);
@@ -72,12 +75,14 @@ describe('SSE heartbeat', () => {
     await server.close();
   });
 
-  it('close() should stop heartbeat and end stream', async () => {
+  it('close() should stop heartbeat and end stream', async (t) => {
     const server = createSecureServer({
       key: certs.key,
       cert: certs.cert,
       disableRetry: true,
     });
+
+    t.after(() => server.close());
 
     server.on('stream', (stream, _headers) => {
       const sse = createSseStream(stream, {
@@ -100,6 +105,7 @@ describe('SSE heartbeat', () => {
     });
 
     const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    t.after(() => session.close());
     let connected = false;
     session.on('connect', () => { connected = true; });
     await waitFor(() => connected, 3000);
@@ -122,13 +128,15 @@ describe('SSE heartbeat', () => {
     await server.close();
   });
 
-  it('send() and comment() should be no-op after close()', async () => {
+  it('send() and comment() should be no-op after close()', async (t) => {
     let postCloseWritesCompleted = false;
     const server = createSecureServer({
       key: certs.key,
       cert: certs.cert,
       disableRetry: true,
     });
+
+    t.after(() => server.close());
 
     server.on('stream', (stream, _headers) => {
       (async () => {
@@ -153,6 +161,7 @@ describe('SSE heartbeat', () => {
     });
 
     const session = connect(`127.0.0.1:${port}`, { rejectUnauthorized: false });
+    t.after(() => session.close());
     let connected = false;
     session.on('connect', () => { connected = true; });
     await waitFor(() => connected, 3000);
