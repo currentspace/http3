@@ -472,20 +472,20 @@ impl H3Connection {
             }
         }
 
-        // stream_writable_next() alone misses one case: a stream popped by a
-        // prior call while blocked purely by connection-level send capacity
-        // (tx_cap == 0) is never re-added to quiche's internal writable set
-        // once that capacity increases via a MAX_DATA update — only a
-        // MAX_STREAM_DATA update does that automatically. quiche's own
-        // stream_writable() doc comment covers exactly this: call it to
-        // re-mark such a stream so it can be found again. Mirrors
-        // QuicConnection::poll_drain_events's identical handling.
+        // Connection-level credit can return without re-marking a stream in
+        // quiche's writable set. Probe capacity without stream_writable():
+        // that mutating call queues DATA_BLOCKED again on every peer ACK,
+        // creating a DATA_BLOCKED/ACK feedback loop while credit is absent.
         let pending = self.blocked_queue.len();
         for _ in 0..pending {
             let Some(stream_id) = self.blocked_queue.pop_front() else {
                 break;
             };
-            match self.quiche_conn.stream_writable(stream_id, 1) {
+            match self
+                .quiche_conn
+                .stream_capacity(stream_id)
+                .map(|capacity| capacity > 0)
+            {
                 Ok(true) => {
                     self.blocked_set.remove(&stream_id);
                     events.push(JsH3Event::drain(conn_handle, stream_id));
@@ -496,7 +496,7 @@ impl H3Connection {
                         conn_handle,
                         stream_id as i64,
                         0,
-                        format!("stream_writable failed: {e}"),
+                        format!("stream_capacity failed: {e}"),
                     ));
                 }
                 Ok(false) => {
@@ -703,6 +703,28 @@ impl H3Connection {
                 written: 0,
                 fin_accepted: true,
                 remainder: None,
+            });
+        }
+
+        // A retry must not ask quiche to advertise DATA_BLOCKED again for
+        // every ACK. Check capacity without side effects before send_body,
+        // including the DATA frame's type and length varints and one byte
+        // of payload (a FIN-only frame needs just its header).
+        let length_bytes = match data_len {
+            0..=63 => 1,
+            64..=16_383 => 2,
+            16_384..=1_073_741_823 => 4,
+            _ => 8,
+        };
+        let required = 1 + length_bytes + usize::from(data_len > 0);
+        if (data_len > 0 || fin) && self.quiche_conn.stream_capacity(stream_id)? < required {
+            if self.blocked_set.insert(stream_id) {
+                self.blocked_queue.push_back(stream_id);
+            }
+            return Ok(SendBodyOutcome {
+                written: 0,
+                fin_accepted: false,
+                remainder: Some(buf),
             });
         }
 

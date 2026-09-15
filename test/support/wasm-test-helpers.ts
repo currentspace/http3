@@ -32,6 +32,7 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { withTimeoutError } from './async-race.js';
 import { loadBinding, generateTestCerts, createEventCollector } from './native-test-helpers.js';
 import type { EventCollector } from './native-test-helpers.js';
 import { connectAsync } from '../../lib/client.js';
@@ -285,7 +286,7 @@ function waitForH3ServerListening(server: Http3SecureServer): Promise<{ address:
 export interface WasmServerH3Pair {
   /** A real `Http3SecureServer` bound with `runtimeMode: 'wasm'` — drive it via the public session/stream API (`server.on('stream', ...)`), not a raw binding. */
   server: Http3SecureServer;
-  /** The server-side session for `client`'s connection — captured eagerly (registered before the client connects) since the 'session' event has already fired by the time this pair resolves (the client only resolves after its own handshake completes, which implies the server-side session already exists). */
+  /** The server-side session, awaited independently of client handshake completion. */
   serverSession: Http3ServerSession;
   serverAddr: { address: string; family: string; port: number };
   client: Http3ClientSession;
@@ -321,16 +322,10 @@ export async function createWasmServerH3Pair(opts?: WasmServerH3PairOptions): Pr
     ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
   });
 
-  // Registered before the client ever starts connecting (not after this
-  // function returns) — the 'session' event fires as soon as the QUIC
-  // handshake begins on the server side, which happens well before
-  // connectAsync's returned promise resolves (that only resolves once the
-  // full handshake completes), so a listener attached only after this
-  // function returns would already have missed it.
-  let serverSession: Http3ServerSession | null = null;
-  server.on('session', (session) => {
-    serverSession = session;
-  });
+  // Either peer can report handshake completion first. Capture the server event eagerly.
+  let onSession!: (session: Http3ServerSession) => void;
+  const sessionReady = new Promise<Http3ServerSession>(resolve => { onSession = resolve; });
+  server.once('session', onSession);
 
   const listeningPromise = waitForH3ServerListening(server);
   server.listen(0, '127.0.0.1');
@@ -356,14 +351,20 @@ export async function createWasmServerH3Pair(opts?: WasmServerH3PairOptions): Pr
     // own `finally { await pair.cleanup() }`. Leaving it running is exactly
     // what previously hung the wasm CI job for an hour after every test had
     // already reported its result.
+    server.off('session', onSession);
     try { await server.close(); } catch { /* already closed */ }
     throw err;
   }
 
-  if (!serverSession) {
+  let serverSession: Http3ServerSession;
+  try {
+    serverSession = await withTimeoutError(sessionReady, 5000, new Error('timed out waiting for the server session'));
+  } catch (err) {
     try { await client.close(); } catch { /* already closed */ }
     try { await server.close(); } catch { /* already closed */ }
-    throw new Error('wasm H3 server did not emit a "session" event before the client finished its handshake');
+    throw err;
+  } finally {
+    server.off('session', onSession);
   }
 
   return {
@@ -381,7 +382,7 @@ export async function createWasmServerH3Pair(opts?: WasmServerH3PairOptions): Pr
 export interface WasmServerQuicPair {
   /** A real `QuicServer` bound with `runtimeMode: 'wasm'` — drive it via the public session/stream API (`server.on('session', ...)`), not a raw binding. */
   server: QuicServer;
-  /** The server-side session for `client`'s connection — captured eagerly (registered before the client connects). Server-side handshake completion (which is what fires QuicServer's 'session' event) always precedes the client's own — the client's HANDSHAKE_DONE arrives only after the server has already processed the client's Finished — so this is reliably populated by the time this pair resolves. */
+  /** The server-side session, awaited independently of client handshake completion. */
   serverSession: QuicServerSession;
   serverAddr: { address: string; family: string; port: number };
   client: QuicClientSession;
@@ -393,6 +394,8 @@ export interface WasmServerQuicPairOptions {
   clientRuntimeMode?: 'portable' | 'wasm';
   enableDatagrams?: boolean;
   maxIdleTimeoutMs?: number;
+  initialMaxData?: number;
+  initialMaxStreamDataBidiLocal?: number;
 }
 
 /**
@@ -411,14 +414,14 @@ export async function createWasmServerQuicPair(opts?: WasmServerQuicPairOptions)
     disableRetry: true,
     enableDatagrams: opts?.enableDatagrams ?? false,
     ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+    ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
+    ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
   });
 
-  // See WasmServerQuicPair.serverSession's doc comment for why eager
-  // registration (before the client connects) reliably captures this.
-  let serverSession: QuicServerSession | null = null;
-  server.on('session', (session) => {
-    serverSession = session;
-  });
+  // Capture before connecting, then wait for both peers independently.
+  let onSession!: (session: QuicServerSession) => void;
+  const sessionReady = new Promise<QuicServerSession>(resolve => { onSession = resolve; });
+  server.once('session', onSession);
 
   const serverAddr = await server.listen(0, '127.0.0.1');
 
@@ -431,20 +434,28 @@ export async function createWasmServerQuicPair(opts?: WasmServerQuicPairOptions)
       servername: 'localhost',
       enableDatagrams: opts?.enableDatagrams ?? false,
       ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
+      ...(opts?.initialMaxData != null && { initialMaxData: opts.initialMaxData }),
+      ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
     });
   } catch (err) {
     // See createWasmServerH3Pair's identical catch block: the wasm server
     // is already listening and must be torn down here, since a caller whose
     // `await createWasmServerQuicPair(...)` itself throws never reaches its
     // own `finally { await pair.cleanup() }`.
+    server.off('session', onSession);
     try { await server.close(); } catch { /* already closed */ }
     throw err;
   }
 
-  if (!serverSession) {
+  let serverSession: QuicServerSession;
+  try {
+    serverSession = await withTimeoutError(sessionReady, 5000, new Error('timed out waiting for the server session'));
+  } catch (err) {
     try { await client.close(); } catch { /* already closed */ }
     try { await server.close(); } catch { /* already closed */ }
-    throw new Error('wasm QUIC server did not emit a "session" event before the client finished its handshake');
+    throw err;
+  } finally {
+    server.off('session', onSession);
   }
 
   return {

@@ -70,14 +70,14 @@ importers:
         version: 4.107.1(@cloudflare/workers-types@5.20260707.1)
     optionalDependencies:
       '@currentspace/http3-darwin-arm64':
-        specifier: 0.9.0
-        version: 0.9.0
+        specifier: 0.9.1
+        version: 0.9.1
       '@currentspace/http3-linux-arm64-gnu':
-        specifier: 0.9.0
-        version: 0.9.0
+        specifier: 0.9.1
+        version: 0.9.1
       '@currentspace/http3-linux-x64-gnu':
-        specifier: 0.9.0
-        version: 0.9.0
+        specifier: 0.9.1
+        version: 0.9.1
 
   examples/express-adapter:
     dependencies:

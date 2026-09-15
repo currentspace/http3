@@ -121,6 +121,8 @@ export interface ServerHttp3Stream {
  * ```
  */
 export class ServerHttp3Stream extends Duplex {
+  /** @internal Fetch adapter receive spill limit; raw streams retain their existing contract. */
+  _maxBufferedReadBytes = Infinity;
   /** @internal */ _connHandle = -1;
   /** @internal */ _streamId = -1;
   /** @internal */ _eventLoop: ServerEventLoopLike | null = null;
@@ -268,7 +270,7 @@ export class ServerHttp3Stream extends Duplex {
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
-    this._bp = pushData(this, this._bp, chunk);
+    this._bp = pushData(this, this._bp, chunk, this._maxBufferedReadBytes);
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -397,6 +399,8 @@ export class ServerHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    if (error && 'code' in error && error.code === 'ERR_HTTP3_RECEIVE_BUFFER_LIMIT') this._eventLoop?.streamClose(this._connHandle, this._streamId, 0x010c);
+
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     this._clearTimeout();
@@ -612,6 +616,7 @@ export class ClientHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     this._clearTimeout();

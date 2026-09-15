@@ -30,6 +30,7 @@ export type DrainCallback = (err?: Error) => void;
 
 export interface BackpressureState {
   pendingReads: Array<Buffer | null>;
+  pendingReadBytes: number;
   readBackpressure: boolean;
   drainCallbacks: Array<DrainCallback>;
 }
@@ -115,6 +116,7 @@ export function rejectNativeWriteWindow(state: NativeWriteWindow, err: Error): v
 function materialize(state: BackpressureState | null): BackpressureState {
   return state ?? {
     pendingReads: [],
+    pendingReadBytes: 0,
     readBackpressure: false,
     drainCallbacks: [],
   };
@@ -137,9 +139,23 @@ export function pushData(
   stream: Duplex,
   state: BackpressureState | null,
   chunk: Buffer | null,
+  maxBufferedBytes = Infinity,
 ): BackpressureState | null {
+  if (stream.destroyed) return state;
+  // Native events can already be in flight when Readable pauses. Bound
+  // that spill queue instead of letting a stalled consumer retain data
+  // indefinitely. This is a failure limit, not transport flow control.
+  const buffered = stream.readableLength + (state?.pendingReadBytes ?? 0);
+  if (chunk !== null && buffered + chunk.length > maxBufferedBytes) {
+    if (state) { state.pendingReads.length = 0; state.pendingReadBytes = 0; }
+    stream.destroy(Object.assign(new Error(`receive buffer exceeded ${maxBufferedBytes} bytes`), {
+      code: 'ERR_HTTP3_RECEIVE_BUFFER_LIMIT',
+    }));
+    return state;
+  }
   if (state !== null && state.readBackpressure) {
     state.pendingReads.push(chunk);
+    state.pendingReadBytes += chunk?.length ?? 0;
     return state;
   }
   if (!stream.push(chunk)) {
@@ -161,6 +177,7 @@ export function drainPendingReads(stream: Duplex, state: BackpressureState | nul
     // shift() within the length check always yields an element; cast to the
     // declared element type rather than a non-null assertion.
     const chunk = state.pendingReads.shift() as Buffer | null;
+    state.pendingReadBytes -= chunk?.length ?? 0;
     if (!stream.push(chunk)) {
       // push(null) returns false too, so the EOF case naturally exits here.
       state.readBackpressure = true;
@@ -209,6 +226,8 @@ export function cancelDrainCallbacks(state: BackpressureState | null): void {
  */
 export function rejectDrainCallbacks(state: BackpressureState | null, err: Error): void {
   if (state === null) return;
+  state.pendingReads.length = 0;
+  state.pendingReadBytes = 0;
   const cbs = state.drainCallbacks.splice(0);
   for (const cb of cbs) {
     cb(err);

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.9.1
+
+### Streaming and lifecycle fixes
+
+- Stream Fetch request bodies across HTTP/1, HTTP/2, and HTTP/3, with
+  backpressure and a configurable `maxBodyBytes` limit (default: 16 MiB).
+  Oversized declared or consumed bodies receive HTTP 413 before response
+  headers are sent. Upload endpoints needing larger bodies should configure
+  a higher limit.
+- Bound unread HTTP/3 Fetch data to 1 MiB across the Node receive buffer and
+  pending-read queue; reset overflowing streams with
+  `ERR_HTTP3_RECEIVE_BUFFER_LIMIT`.
+- Propagate disconnects to `Request.signal` and cancel response readers;
+  discard unconsumed upload tails after responses finish. Clean up SSE
+  drain waits and heartbeats on close or abort.
+- Observe errors thrown by detached-task error reporters, and safely cancel
+  WASM UDP startup when close races with socket setup.
+
+### WASM and flow-control fixes
+
+- Respect peer connection credit when tuning quiche send capacity, preventing
+  `FLOW_CONTROL_ERROR` during uploads through small receive windows.
+- Report queued WASM writes as accepted, preventing duplicate bytes and FIN
+  retries across HTTP/3 and raw QUIC clients and servers.
+- Probe send capacity without repeatedly emitting `DATA_BLOCKED` notifications,
+  preventing an ACK feedback loop that could exhaust WASM memory.
+- Share WASM deadline and bounded-shutdown helpers, and remove handshake-order
+  assumptions from server-pair tests.
+
+### Maintenance and verification
+
+- Extract HTTP/3 and QUIC pending-write helpers and worker unit tests into
+  dedicated modules.
+- Consolidate native CI verification in `verify.yml` and report passed,
+  failed, and skipped verification stages accurately.
+- Add regressions for request-body limits, cancellation, delayed handshakes,
+  queued data and FIN, exact byte delivery, and packet amplification.
+
 ## 0.9.0
 
 ### WASM runtime (client and server)

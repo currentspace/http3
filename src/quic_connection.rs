@@ -402,7 +402,11 @@ impl QuicConnection {
             let Some(stream_id) = self.blocked_queue.pop_front() else {
                 break;
             };
-            match self.quiche_conn.stream_writable(stream_id, 1) {
+            match self
+                .quiche_conn
+                .stream_capacity(stream_id)
+                .map(|capacity| capacity > 0)
+            {
                 Ok(true) => {
                     self.blocked_set.remove(&stream_id);
                     reactor_metrics::record_raw_quic_drain_event();
@@ -414,7 +418,7 @@ impl QuicConnection {
                         conn_handle,
                         stream_id as i64,
                         0,
-                        format!("stream_writable failed: {e}"),
+                        format!("stream_capacity failed: {e}"),
                     ));
                 }
                 Ok(false) => {
@@ -495,6 +499,19 @@ impl QuicConnection {
                 }
                 Err(e) => Err(Http3NativeError::Quiche(e)),
             };
+        }
+
+        // Retrying at zero capacity queues another DATA_BLOCKED frame. Its
+        // ACK would trigger another retry, indefinitely. Wait for fresh credit
+        // using the read-only capacity query before touching quiche's sender.
+        if self.blocked_set.contains(&stream_id)
+            && self.quiche_conn.stream_capacity(stream_id)? == 0
+        {
+            return Ok(StreamSendOutcome {
+                written: 0,
+                fin_accepted: false,
+                remainder: Some(buf),
+            });
         }
 
         let original = buf.clone();

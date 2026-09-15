@@ -22,6 +22,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { QuicStream } from '../../lib/quic-stream.js';
+import { QuicServer } from '../../lib/quic-server.js';
 import { createWasmServerQuicPair, wasmSkipReason } from '../support/wasm-test-helpers.js';
 
 function collect(stream: QuicStream, timeoutMs = 5000): Promise<Buffer> {
@@ -51,6 +52,60 @@ function waitForServerStream(session: { once(event: 'stream', listener: (stream:
 }
 
 describe('wasm QUIC SERVER loopback', { skip: wasmSkipReason() }, () => {
+  it('pair helper waits for a delayed server session event', async (t) => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- restored receiver explicitly with call below
+    const emit = QuicServer.prototype.emit;
+    let delivered = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    t.after(() => clearTimeout(timer));
+    t.mock.method(QuicServer.prototype, 'emit', function (this: QuicServer, event: string | symbol, ...args: unknown[]) {
+      if (event === 'session') {
+        timer = setTimeout(() => {
+          delivered = true;
+          emit.call(this, event, ...args);
+        }, 100);
+        return true;
+      }
+      return emit.call(this, event, ...args);
+    });
+    const pair = await createWasmServerQuicPair({ clientRuntimeMode: 'wasm' });
+    try {
+      assert.equal(delivered, true);
+      assert.equal(pair.client.handshakeComplete, true);
+      assert.ok(pair.serverSession);
+      assert.equal(pair.server.listenerCount('session'), 0);
+    } finally {
+      await pair.cleanup();
+    }
+  });
+
+  it('queued data and FIN cross small windows exactly once in both directions', async () => {
+    const pair = await createWasmServerQuicPair({
+      clientRuntimeMode: 'wasm',
+      initialMaxData: 32 * 1024,
+      initialMaxStreamDataBidiLocal: 16 * 1024,
+    });
+    try {
+      const payload = Buffer.from(Array.from({ length: 256 * 1024 }, (_, i) => i % 251));
+      const serverStreamPromise = waitForServerStream(pair.serverSession);
+      const clientStream = pair.client.openStream();
+      const exchange = serverStreamPromise.then(async (serverStream) => {
+        const received = await collect(serverStream);
+        assert.deepEqual(received, payload);
+        serverStream.end(payload);
+      });
+      const response = collect(clientStream);
+      clientStream.end(payload);
+      const [, received] = await Promise.all([exchange, response]);
+      assert.deepEqual(received, payload);
+      const metrics = pair.client.getMetrics();
+      assert.ok(metrics);
+      assert.ok(metrics.packetsOut < 5000, `unexpected packet amplification: ${metrics.packetsOut}`);
+    } finally {
+      await pair.cleanup();
+    }
+  });
+
   describe('native client x wasm server (matrix cell 6)', () => {
     it('handshake completes, openStream() bidi echo, clean close on both sides', async () => {
       const pair = await createWasmServerQuicPair({ clientRuntimeMode: 'portable' });

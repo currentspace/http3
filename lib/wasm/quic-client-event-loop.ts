@@ -1,3 +1,4 @@
+import { DeadlineTimer, drainUntilDone } from './lifecycle.js';
 /**
  * `WasmClientEventLoop` (raw QUIC) — implements `QuicClientEventLoopLike`
  * (`lib/quic-stream.ts`) over the `http3-wasm` core (`core-loader.ts`) and
@@ -32,29 +33,6 @@ import type { CommonWasmClientOptions } from './wasm-options.js';
 /** Must match `lib/event-loop.ts`'s `EVENT_SHUTDOWN_COMPLETE` sentinel. */
 const EVENT_SHUTDOWN_COMPLETE = 15;
 
-/** Bounded wait for `close()`'s "pump until is_done" step — must comfortably beat `lib/event-loop.ts`'s 5 s `SHUTDOWN_TIMEOUT_MS` fallback. */
-const CLOSE_DRAIN_DEADLINE_MS = 2000;
-const CLOSE_DRAIN_POLL_MS = 5;
-
-/**
- * Feature-detects `unref()` before calling it. See
- * `h3-client-event-loop.ts`'s identical function for why the parameter is
- * typed as `ReturnType<typeof setTimeout>` (host-dependent: `NodeJS.Timeout`
- * vs. a plain `number` under `@cloudflare/workers-types`) rather than
- * `NodeJS.Timeout` directly.
- */
-function unrefIfSupported(timer: ReturnType<typeof setTimeout>): void {
-  const maybeUnrefable = timer as unknown as { unref?: () => void };
-  if (typeof maybeUnrefable.unref === 'function') maybeUnrefable.unref();
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    unrefIfSupported(timer);
-  });
-}
-
 export interface WasmQuicClientEventLoopOptions extends CommonWasmClientOptions {
   /**
    * An already-instantiated wasm core — see
@@ -73,7 +51,7 @@ export interface WasmQuicClientEventLoopOptions extends CommonWasmClientOptions 
    * `WasmH3ClientEventLoopOptions.transportFactory`'s identical doc
    * comment (`h3-client-event-loop.ts`) for why.
    */
-  transportFactory: (host: string, port: number) => Promise<DatagramTransport>;
+  transportFactory: (host: string, port: number, options?: { signal?: AbortSignal }) => Promise<DatagramTransport>;
 }
 
 /**
@@ -90,9 +68,9 @@ export class WasmQuicClientEventLoop {
   private handle = 0;
   private transport: DatagramTransport | null = null;
   private outPtrCell = 0;
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private armedAbsoluteDeadlineMs: number | null = null;
+  private readonly timer = new DeadlineTimer();
   private closeRequested = false;
+  private readonly startupAbort = new AbortController();
   private closePromise: Promise<void> | null = null;
 
   constructor(
@@ -108,44 +86,50 @@ export class WasmQuicClientEventLoop {
 
   async connect(serverAddr: string, serverName: string): Promise<void> {
     const { host, port } = parseSocketAddress(serverAddr);
-    const transport = await this.opts.transportFactory(host, port);
+    const transport = await this.opts.transportFactory(host, port, { signal: this.startupAbort.signal });
 
     if (this.closeRequested) {
       await transport.close();
       return;
     }
 
-    this.transport = transport;
-    const local = transport.localAddress();
+    try {
+      this.transport = transport;
+      const local = transport.localAddress();
 
-    const optsJson = {
-      ...buildCommonOptionsJson(this.opts),
-      ...(this.opts.cert && { cert: new TextDecoder('utf-8').decode(this.opts.cert) }),
-      ...(this.opts.key && { key: new TextDecoder('utf-8').decode(this.opts.key) }),
-      ...(this.opts.alpn && { alpn: this.opts.alpn }),
-      serverAddr,
-      serverName,
-      localAddr: formatLocalAddr(local.address, local.family, local.port),
-      scidHex: randomScidHex(),
-    };
+      const optsJson = {
+        ...buildCommonOptionsJson(this.opts),
+        ...(this.opts.cert && { cert: new TextDecoder('utf-8').decode(this.opts.cert) }),
+        ...(this.opts.key && { key: new TextDecoder('utf-8').decode(this.opts.key) }),
+        ...(this.opts.alpn && { alpn: this.opts.alpn }),
+        serverAddr,
+        serverName,
+        localAddr: formatLocalAddr(local.address, local.family, local.port),
+        scidHex: randomScidHex(),
+      };
 
-    const { ptr, len } = this.core.writeUtf8(JSON.stringify(optsJson));
-    const handle = this.core.exports.qc_new(ptr, len);
-    this.core.free(ptr, len);
+      const { ptr, len } = this.core.writeUtf8(JSON.stringify(optsJson));
+      let handle: number;
+      try { handle = this.core.exports.qc_new(ptr, len); }
+      finally { this.core.free(ptr, len); }
 
-    if (handle === 0) {
-      const message = this.core.readLastError(this.core.exports.qc_last_error, 0);
-      throw new Error(message);
+      if (handle === 0) {
+        const message = this.core.readLastError(this.core.exports.qc_last_error, 0);
+        throw new Error(message);
+      }
+
+      this.handle = handle;
+      this.outPtrCell = this.core.allocOutPtrCell();
+      transport.onMessage((datagram) => {
+        this.onDatagram(datagram);
+      });
+
+      // Initial pump — flushes the Initial ClientHello.
+      this.pump();
+    } catch (err) {
+      await this.close();
+      throw err;
     }
-
-    this.handle = handle;
-    this.outPtrCell = this.core.allocOutPtrCell();
-    transport.onMessage((datagram) => {
-      this.onDatagram(datagram);
-    });
-
-    // Initial pump — flushes the Initial ClientHello.
-    this.pump();
   }
 
   openStream(): number {
@@ -224,43 +208,39 @@ export class WasmQuicClientEventLoop {
 
   async close(errorCode = 0, reason = 'client close'): Promise<void> {
     this.closeRequested = true;
+    this.startupAbort.abort();
     if (this.closePromise) return this.closePromise;
     this.closePromise = this.doClose(errorCode, reason);
     return this.closePromise;
   }
 
   private async doClose(errorCode: number, reason: string): Promise<void> {
-    if (this.handle !== 0) {
-      const { ptr, len } = this.core.writeUtf8(reason);
-      this.core.exports.qc_close(this.handle, errorCode, ptr, len);
-      this.core.free(ptr, len);
-      this.pump();
-
-      // See h3-client-event-loop.ts's identical, more-commented version:
-      // actively force an on_timeout check each poll tick rather than
-      // passively waiting on whatever timer was armed *before* close()
-      // started — qc_on_timeout is a safe no-op when not yet due.
-      const deadline = Date.now() + CLOSE_DRAIN_DEADLINE_MS;
-      while (this.core.exports.qc_is_done(this.handle) === 0 && Date.now() < deadline) {
-        await sleep(CLOSE_DRAIN_POLL_MS);
-        this.core.exports.qc_on_timeout(this.handle);
+    try {
+      if (this.handle !== 0) {
+        const { ptr, len } = this.core.writeUtf8(reason);
+        try { this.core.exports.qc_close(this.handle, errorCode, ptr, len); }
+        finally { this.core.free(ptr, len); }
         this.pump();
+        await drainUntilDone(
+          () => this.core.exports.qc_is_done(this.handle) !== 0,
+          () => { this.core.exports.qc_on_timeout(this.handle); this.pump(); },
+        );
+        this.dispatch([{ eventType: EVENT_SHUTDOWN_COMPLETE, connHandle: this.handle, streamId: -1 }]);
       }
-
-      this.dispatch([{ eventType: EVENT_SHUTDOWN_COMPLETE, connHandle: this.handle, streamId: -1 }]);
-
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
+    } finally {
+      this.timer.cancel();
+      try {
+        if (this.handle !== 0) {
+          this.core.free(this.outPtrCell, 4);
+          this.core.exports.qc_free(this.handle);
+          this.handle = 0;
+          this.outPtrCell = 0;
+        }
+      } finally {
+        const transport = this.transport;
+        this.transport = null;
+        await transport?.close();
       }
-      this.core.free(this.outPtrCell, 4);
-      this.core.exports.qc_free(this.handle);
-      this.handle = 0;
-    }
-
-    if (this.transport) {
-      await this.transport.close();
-      this.transport = null;
     }
   }
 
@@ -305,24 +285,7 @@ export class WasmQuicClientEventLoop {
   }
 
   private onTimerFire(): void {
-    this.timer = null;
-    // Must also forget the deadline the just-fired timer was armed for, not
-    // only the timer handle itself — otherwise rearmTimer()'s dedup check
-    // below can compare the *new* deadline `pump()` computes against this
-    // *stale* (already-consumed) one. Both `process_timers_for_handle` and
-    // `qc_timeout_ms` frequently recompute a fresh deadline whose absolute
-    // value coincides (often to the millisecond, e.g. immediately following
-    // a draining-state transition) with the one that just fired, which used
-    // to make rearmTimer() believe a timer was still armed for it and skip
-    // arming a real one — silently orphaning the connection with no timer
-    // left to ever recheck `is_done()`/`is_closed()` again (found via C4's
-    // `test/interop/quic-loopback.test.ts` parameterization,
-    // docs/WASM_CLIENT_PLAN.md §7: a mismatched/missing client certificate
-    // puts the connection into "draining" before the peer's
-    // CONNECTION_CLOSE is fully recognized as closed, needing exactly one
-    // more timer tick to finish — see the QuicClientEventLoopLike
-    // counterpart in h3-client-event-loop.ts for the identical fix).
-    this.armedAbsoluteDeadlineMs = null;
+    this.timer.cancel();
     if (this.handle === 0) return;
     this.core.exports.qc_on_timeout(this.handle);
     this.pump();
@@ -366,28 +329,6 @@ export class WasmQuicClientEventLoop {
 
   private rearmTimer(): void {
     if (this.handle === 0) return;
-    const relativeMs = Number(this.core.exports.qc_timeout_ms(this.handle));
-
-    if (relativeMs < 0) {
-      if (this.timer) {
-        clearTimeout(this.timer);
-        this.timer = null;
-      }
-      this.armedAbsoluteDeadlineMs = null;
-      return;
-    }
-
-    const absoluteDeadlineMs = Date.now() + relativeMs;
-    if (this.armedAbsoluteDeadlineMs !== null && Math.abs(absoluteDeadlineMs - this.armedAbsoluteDeadlineMs) <= 1) {
-      return;
-    }
-
-    if (this.timer) clearTimeout(this.timer);
-    this.armedAbsoluteDeadlineMs = absoluteDeadlineMs;
-    const timer = setTimeout(() => {
-      this.onTimerFire();
-    }, relativeMs);
-    unrefIfSupported(timer);
-    this.timer = timer;
+    this.timer.arm(Number(this.core.exports.qc_timeout_ms(this.handle)), () => this.onTimerFire());
   }
 }

@@ -45,13 +45,12 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
-
       - name: Run full verify
         env:
           VERIFY_SKIP_BROWSER_E2E: '1'
-        run: pnpm verify
+        # Invoke directly: pnpm 11 auto-installs before running scripts on a
+        # fresh checkout, before verify.sh can omit unpublished prebuilds.
+        run: bash scripts/verify.sh
 
   verify-macos:
     name: verify (${{ matrix.os }}, kqueue, node ${{ matrix.node-version }})
@@ -80,11 +79,10 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
-
       - name: Run full verify
-        run: pnpm verify
+        # Invoke directly: pnpm 11 auto-installs before running scripts on a
+        # fresh checkout, before verify.sh can omit unpublished prebuilds.
+        run: bash scripts/verify.sh
 
   verify-docker:
     name: verify (debian latest, docker, node ${{ matrix.node-version }})

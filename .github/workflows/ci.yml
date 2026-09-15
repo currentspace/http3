@@ -10,70 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: build-and-test (node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: ['24', '25', '26']
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.1.2
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
-
-      - name: Lint TypeScript sources
-        run: pnpm run lint
-
-      - name: Typecheck library and tests
-        run: pnpm run typecheck
-
-      - name: Rust clippy
-        run: |
-          cargo clippy --lib
-          cargo clippy --tests --features bench-internals --no-default-features
-
-      - name: Rust unit tests
-        run: cargo test --lib --no-default-features
-
-      - name: Build native + TypeScript
-        run: pnpm run build
-
-      - name: Run full test suite
-        run: pnpm test
-
-      - name: Run concurrency performance gate
-        env:
-          HTTP3_CONCURRENCY_MAX_MS: '12000'
-        run: pnpm run perf:concurrency-gate
-
-      - name: Run load smoke gate
-        env:
-          HTTP3_LOAD_SMOKE_TOTAL: '150'
-          HTTP3_LOAD_SMOKE_CONCURRENCY: '25'
-          HTTP3_LOAD_SMOKE_MAX_MS: '10000'
-        run: pnpm run perf:load-smoke-gate
-
-      - name: Smoke install from packed artifact
-        run: pnpm run smoke:install
-
+  # Native Node/platform verification is owned by verify.yml.
   wasm:
     name: wasm client/server build + tests
     runs-on: ubuntu-latest

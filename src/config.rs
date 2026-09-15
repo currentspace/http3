@@ -141,7 +141,10 @@ impl ClientAuthMode {
 /// the binary search converges in O(log2(ceiling - 1200)) RTTs with one
 /// loss-detection delay per level instead of three.
 fn apply_congestion_tuning(config: &mut quiche::Config) {
-    config.set_send_capacity_factor(20.0);
+    // quiche scales min(congestion capacity, remaining MAX_DATA credit).
+    // A factor above one therefore also permits writes past the peer's
+    // connection credit, causing FLOW_CONTROL_ERROR on small windows.
+    config.set_send_capacity_factor(1.0);
     config.set_initial_congestion_window_packets(1000);
     config.discover_pmtu(true);
     config.set_pmtud_max_probes(1);

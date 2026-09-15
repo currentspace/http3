@@ -1,3 +1,5 @@
+import { createRequestBody, DEFAULT_MAX_BODY_BYTES, RequestBodyTooLargeError, validateBodyLimit } from './request-body.js';
+import { isWritableClosed, waitForDrainOrAbort } from './writable-lifecycle.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { runDetached } from './run-detached.js';
 import type { ServerHttp3Stream, IncomingHeaders, StreamFlags } from './stream.js';
@@ -18,22 +20,9 @@ function isSseContentType(value: string | null): boolean {
   return typeof value === 'string' && value.toLowerCase().includes('text/event-stream');
 }
 
-type WritableLike = {
-  once(event: 'drain' | 'close' | 'error', listener: (...args: unknown[]) => void): unknown;
-  off?(event: 'drain' | 'close' | 'error', listener: (...args: unknown[]) => void): unknown;
-  removeListener?(event: 'drain' | 'close' | 'error', listener: (...args: unknown[]) => void): unknown;
-  closed?: boolean;
-  destroyed?: boolean;
-  writableEnded?: boolean;
-};
-
 function errorCode(error: unknown): string | undefined {
   const code = (error as { code?: unknown }).code;
   return typeof code === 'string' ? code : undefined;
-}
-
-function isWritableClosed(writable: WritableLike): boolean {
-  return Boolean(writable.closed || writable.destroyed || writable.writableEnded);
 }
 
 function isExpectedWritableCloseError(error: unknown): boolean {
@@ -59,57 +48,6 @@ function isExpectedWritableCloseError(error: unknown): boolean {
   );
 }
 
-function removeWritableListener(
-  writable: WritableLike,
-  event: 'drain' | 'close' | 'error',
-  listener: (...args: unknown[]) => void,
-): void {
-  if (typeof writable.off === 'function') {
-    writable.off(event, listener);
-    return;
-  }
-  if (typeof writable.removeListener === 'function') {
-    writable.removeListener(event, listener);
-  }
-}
-
-async function waitForDrainOrAbort(writable: WritableLike, signal: AbortSignal): Promise<void> {
-  if (signal.aborted || isWritableClosed(writable)) {
-    throw new Error('writable is closed');
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    const cleanup = (): void => {
-      removeWritableListener(writable, 'drain', onDrain);
-      removeWritableListener(writable, 'close', onClose);
-      removeWritableListener(writable, 'error', onError);
-      signal.removeEventListener('abort', onAbort);
-    };
-
-    const onDrain = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onClose = (): void => {
-      cleanup();
-      reject(new Error('writable closed before drain'));
-    };
-    const onError = (err?: unknown): void => {
-      cleanup();
-      reject(err instanceof Error ? err : new Error('writable errored before drain'));
-    };
-    const onAbort = (): void => {
-      cleanup();
-      reject(new Error('request aborted before drain'));
-    };
-
-    writable.once('drain', onDrain);
-    writable.once('close', onClose);
-    writable.once('error', onError);
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
 async function cancelReaderQuietly(reader: ReadableStreamDefaultReader<Uint8Array>, reason: unknown): Promise<void> {
   try {
     await reader.cancel(reason);
@@ -118,51 +56,45 @@ async function cancelReaderQuietly(reader: ReadableStreamDefaultReader<Uint8Arra
   }
 }
 
+function cancelOnAbort(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal): () => void {
+  const abort = (): void => {
+    // cancel() settles pending read() immediately, even if the source's
+    // cooperative cleanup is asynchronous. Always observe that cleanup.
+    runDetached(cancelReaderQuietly(reader, signal.reason), (err) => { console.error(err); });
+  };
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) abort();
+  return () => signal.removeEventListener('abort', abort);
+}
+
 /**
  * Wrap a Fetch API handler (or {@link FetchApp}) as an HTTP/3 {@link StreamListener}.
  * Converts each H3 stream into a `Request`, invokes the handler, and writes the
  * `Response` back to the stream.
  */
-export function createFetchHandler(appOrFetch: FetchApp | FetchHandler): StreamListener {
+export interface FetchHandlerOptions {
+  /** Maximum consumed request body size in bytes. Default: 16 MiB. */
+  maxBodyBytes?: number;
+}
+
+export function createFetchHandler(appOrFetch: FetchApp | FetchHandler, options: FetchHandlerOptions = {}): StreamListener {
+  const maxBodyBytes = validateBodyLimit(options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES);
   const handler: FetchHandler = typeof appOrFetch === 'function'
     ? appOrFetch
     : appOrFetch.fetch.bind(appOrFetch);
 
   return (stream: ServerHttp3Stream, headers: IncomingHeaders, flags: StreamFlags) => {
+    stream._maxBufferedReadBytes = 1024 * 1024;
     // handleStream() already has its own try/catch/finally (reports
     // failures via stream.destroy(err)), so this onError is a defensive
     // backstop, not the primary handling path.
-    runDetached(handleStream(handler, stream, headers, flags), (err) => {
+    runDetached(handleStream(handler, stream, headers, flags, maxBodyBytes), (err) => {
       console.error('unhandled error in fetch adapter stream handler:', err);
     });
   };
 }
 
-function toBufferChunk(chunk: unknown): Buffer {
-  if (Buffer.isBuffer(chunk)) {
-    return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-  }
-  if (typeof chunk === 'string') {
-    return Buffer.from(chunk);
-  }
-  if (chunk instanceof ArrayBuffer) {
-    return Buffer.from(new Uint8Array(chunk));
-  }
-  if (ArrayBuffer.isView(chunk)) {
-    return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-  }
-  throw new TypeError(`unsupported request body chunk type: ${typeof chunk}`);
-}
-
-async function readNodeRequestBody(req: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req as AsyncIterable<unknown>) {
-    chunks.push(toBufferChunk(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
-async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, res: ServerResponse, maxBodyBytes: number): Promise<void> {
   const abortController = new AbortController();
   const abort = (): void => abortController.abort();
   req.once('aborted', abort);
@@ -177,33 +109,37 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
     res.removeListener('error', abort);
   };
 
-  const method = req.method ?? 'GET';
-  const authority = req.headers.host ?? 'localhost';
-  const path = req.url ?? '/';
-  const url = `https://${authority}${path}`;
-
-  const reqHeaders = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (typeof value === 'undefined') continue;
-    if (Array.isArray(value)) {
-      for (const v of value) reqHeaders.append(key, v);
-    } else {
-      reqHeaders.set(key, value);
-    }
-  }
-
-  const hasBody = method !== 'GET' && method !== 'HEAD';
-  const body = hasBody ? new Uint8Array(await readNodeRequestBody(req)) : undefined;
-  const requestInit: RequestInit & { duplex?: 'half' } = {
-    method,
-    headers: reqHeaders,
-    body,
-    duplex: hasBody ? 'half' : undefined,
-    signal: abortController.signal,
-  };
-  const request = new Request(url, requestInit);
-
+  let disposeBody: (() => void) | undefined;
   try {
+    const method = req.method ?? 'GET';
+    const authority = req.headers.host ?? 'localhost';
+    const path = req.url ?? '/';
+    const url = `https://${authority}${path}`;
+
+    const reqHeaders = new Headers();
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (typeof value === 'undefined') continue;
+      if (Array.isArray(value)) {
+        for (const v of value) reqHeaders.append(key, v);
+      } else {
+        reqHeaders.set(key, value);
+      }
+    }
+
+    const hasBody = method !== 'GET' && method !== 'HEAD';
+    if (Number(req.headers['content-length']) > maxBodyBytes) throw new RequestBodyTooLargeError();
+    const requestBody = hasBody ? createRequestBody(req, abortController.signal, maxBodyBytes) : undefined;
+    disposeBody = requestBody?.dispose;
+    const body = requestBody?.body;
+    const requestInit: RequestInit & { duplex?: 'half' } = {
+      method,
+      headers: reqHeaders,
+      body,
+      duplex: hasBody ? 'half' : undefined,
+      signal: abortController.signal,
+    };
+    const request = new Request(url, requestInit);
+
     const response = await handler(request);
     const sseResponse = isSseContentType(response.headers.get('content-type'));
     res.statusCode = response.status;
@@ -228,6 +164,7 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
     }
 
     const reader = response.body.getReader();
+    const stopReading = cancelOnAbort(reader, abortController.signal);
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -243,6 +180,7 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
       }
       throw err;
     } finally {
+      stopReading();
       reader.releaseLock();
     }
     if (!abortController.signal.aborted && !isWritableClosed(res)) {
@@ -253,11 +191,12 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
       return;
     }
     if (!res.headersSent) {
-      res.statusCode = 500;
+      res.statusCode = err instanceof RequestBodyTooLargeError ? 413 : 500;
       res.setHeader('content-type', 'text/plain; charset=utf-8');
     }
     res.end(err instanceof Error ? err.message : String(err));
   } finally {
+    disposeBody?.();
     cleanupAbortHandlers();
   }
 }
@@ -267,6 +206,7 @@ async function handleStream(
   stream: ServerHttp3Stream,
   headers: IncomingHeaders,
   flags: StreamFlags,
+  maxBodyBytes: number,
 ): Promise<void> {
   const abortController = new AbortController();
   const abort = (): void => abortController.abort();
@@ -280,45 +220,40 @@ async function handleStream(
     stream.removeListener('error', abort);
   };
 
-  const method = (headers[':method'] as string | undefined) ?? 'GET';
-  const scheme = (headers[':scheme'] as string | undefined) ?? 'https';
-  const authority = (headers[':authority'] as string | undefined) ?? 'localhost';
-  const path = (headers[':path'] as string | undefined) ?? '/';
-
-  const url = `${scheme}://${authority}${path}`;
-
-  const reqHeaders = new Headers();
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.startsWith(':')) continue;
-    if (Array.isArray(value)) {
-      for (const v of value) reqHeaders.append(key, v);
-    } else {
-      reqHeaders.set(key, value);
-    }
-  }
-
-  const hasBody = method !== 'GET' && method !== 'HEAD' && !flags.endStream;
-  const body = hasBody
-    ? new ReadableStream({
-        start(controller) {
-          stream.on('data', (chunk: Buffer) => { controller.enqueue(new Uint8Array(chunk)); });
-          stream.on('end', () => { controller.close(); });
-          stream.on('close', () => { controller.error(new Error('request stream closed')); });
-          stream.on('error', (err: unknown) => { controller.error(err); });
-        },
-      })
-    : null;
-
-  const request = new Request(url, {
-    method,
-    headers: reqHeaders,
-    body,
-    signal: abortController.signal,
-    // @ts-expect-error duplex is needed for streaming request bodies
-    duplex: hasBody ? 'half' : undefined,
-  });
-
+  let disposeBody: (() => void) | undefined;
   try {
+    const method = (headers[':method'] as string | undefined) ?? 'GET';
+    const scheme = (headers[':scheme'] as string | undefined) ?? 'https';
+    const authority = (headers[':authority'] as string | undefined) ?? 'localhost';
+    const path = (headers[':path'] as string | undefined) ?? '/';
+
+    const url = `${scheme}://${authority}${path}`;
+
+    const reqHeaders = new Headers();
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.startsWith(':')) continue;
+      if (Array.isArray(value)) {
+        for (const v of value) reqHeaders.append(key, v);
+      } else {
+        reqHeaders.set(key, value);
+      }
+    }
+
+    const hasBody = method !== 'GET' && method !== 'HEAD' && !flags.endStream;
+    if (Number(headers['content-length']) > maxBodyBytes) throw new RequestBodyTooLargeError();
+    const requestBody = hasBody ? createRequestBody(stream, abortController.signal, maxBodyBytes) : undefined;
+    disposeBody = requestBody?.dispose;
+    const body = requestBody?.body ?? null;
+
+    const request = new Request(url, {
+      method,
+      headers: reqHeaders,
+      body,
+      signal: abortController.signal,
+      // @ts-expect-error duplex is needed for streaming request bodies
+      duplex: hasBody ? 'half' : undefined,
+    });
+
     const response = await handler(request);
     const sseResponse = isSseContentType(response.headers.get('content-type'));
 
@@ -340,6 +275,7 @@ async function handleStream(
 
     if (response.body) {
       const reader = response.body.getReader();
+      const stopReading = cancelOnAbort(reader, abortController.signal);
       try {
         for (;;) {
           const { done, value } = await reader.read();
@@ -365,6 +301,7 @@ async function handleStream(
         }
         throw err;
       } finally {
+        stopReading();
         reader.releaseLock();
       }
     }
@@ -375,9 +312,23 @@ async function handleStream(
     if (abortController.signal.aborted || isWritableClosed(stream) || isExpectedWritableCloseError(err)) {
       return;
     }
+    if (err instanceof RequestBodyTooLargeError && !stream._headersSent) {
+      stream.respond({ ':status': '413' });
+      stream.end(err.message);
+      return;
+    }
     stream.destroy(err instanceof Error ? err : new Error(String(err)));
   } finally {
-    cleanupAbortHandlers();
+    disposeBody?.();
+    // The response may finish before the peer finishes uploading. Keep
+    // the error guard until close, and discard the unread tail without
+    // retaining it in either the Web queue or the native spill queue.
+    if (!stream.destroyed) {
+      stream.once('close', cleanupAbortHandlers);
+      stream.resume();
+    } else {
+      cleanupAbortHandlers();
+    }
   }
 }
 
@@ -403,7 +354,7 @@ export function createSseFetchResponse(events: AsyncIterable<SseEvent | string>,
 }
 
 /** Options for the {@link serveFetch} convenience function. */
-export interface ServeFetchOptions extends ServerOptions {
+export interface ServeFetchOptions extends ServerOptions, FetchHandlerOptions {
   /** UDP/TCP port to listen on. */
   port: number;
   /** Bind address (default `'0.0.0.0'`). */
@@ -417,16 +368,16 @@ export interface ServeFetchOptions extends ServerOptions {
  * Creates the server, attaches the handler, and starts listening.
  */
 export function serveFetch(options: ServeFetchOptions): Http3SecureServer {
-  const { port, host, fetch: appOrFetch, ...serverOptions } = options;
+  const { port, host, fetch: appOrFetch, maxBodyBytes = DEFAULT_MAX_BODY_BYTES, ...serverOptions } = options;
   const fetchHandler: FetchHandler = typeof appOrFetch === 'function'
     ? appOrFetch
     : appOrFetch.fetch.bind(appOrFetch);
-  const handler = createFetchHandler(appOrFetch);
+  const handler = createFetchHandler(appOrFetch, { maxBodyBytes });
   const server = createSecureServer(serverOptions, handler);
   server.on('request', (req: IncomingMessage, res: ServerResponse) => {
     // handleHttp1Request() already has its own try/catch/finally (reports
     // failures via res.end(...)), so this onError is a defensive backstop.
-    runDetached(handleHttp1Request(fetchHandler, req, res), (err) => {
+    runDetached(handleHttp1Request(fetchHandler, req, res, maxBodyBytes), (err) => {
       console.error('unhandled error in fetch adapter HTTP/1.1 handler:', err);
     });
   });

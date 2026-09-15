@@ -6,10 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use http3::wasm_exports::{
-    Chunk, EVENT_ERROR, EVENT_STREAM_BLOCKED, H3ClientHandler, Http3Config, JsH3Event,
-    OutboundAdmission,
-};
+use http3::wasm_exports::{Chunk, H3ClientHandler, Http3Config, JsH3Event, OutboundAdmission};
 
 use crate::abi::{
     ERR_AGAIN, ERR_BAD_ARGS, ERR_INVALID_HANDLE, ERR_PROTOCOL, RX_TX_BUFFER_LEN, bytes_in,
@@ -18,6 +15,7 @@ use crate::abi::{
 use crate::events::serialize_events;
 use crate::handle::Slots;
 use crate::json_opts::{build_h3_options, parse_connect_params};
+use crate::send::classify_send_outcome;
 
 struct H3Session {
     handler: H3ClientHandler,
@@ -121,7 +119,11 @@ pub extern "C" fn h3c_last_error(handle: u32, buf_ptr: u32, cap: u32) -> i32 {
     let msg = if handle == 0 {
         crate::abi::take_global_error_for_read()
     } else {
-        SESSIONS.with(|s| s.borrow().get(handle).and_then(|sess| sess.last_error.clone()))
+        SESSIONS.with(|s| {
+            s.borrow()
+                .get(handle)
+                .and_then(|sess| sess.last_error.clone())
+        })
     };
     write_out_message(msg, buf_ptr, cap)
 }
@@ -264,7 +266,13 @@ pub extern "C" fn h3c_send_request(
 /// # Safety
 /// `ptr`/`len` must describe a valid, readable byte range.
 #[unsafe(no_mangle)]
-pub extern "C" fn h3c_stream_send(handle: u32, stream_id: u64, ptr: u32, len: u32, fin: i32) -> i64 {
+pub extern "C" fn h3c_stream_send(
+    handle: u32,
+    stream_id: u64,
+    ptr: u32,
+    len: u32,
+    fin: i32,
+) -> i64 {
     let data = unsafe { bytes_in(ptr, len) }.to_vec();
     with_session_mut(handle, |sess| {
         let chunk = if data.is_empty() {
@@ -273,30 +281,22 @@ pub extern "C" fn h3c_stream_send(handle: u32, stream_id: u64, ptr: u32, len: u3
             Chunk::unpooled(data)
         };
         let before = sess.pending_events.len();
-        let released =
-            sess.handler
-                .queue_stream_send(stream_id, chunk, fin != 0, &mut sess.pending_events, handle);
-        classify_send_outcome(&sess.pending_events[before..], released)
+        let released = sess.handler.queue_stream_send(
+            stream_id,
+            chunk,
+            fin != 0,
+            &mut sess.pending_events,
+            handle,
+        );
+        classify_send_outcome(
+            &sess.pending_events[before..],
+            len as usize,
+            fin != 0,
+            released,
+            sess.handler.has_pending_stream_write(stream_id),
+        )
     })
     .unwrap_or(ERR_INVALID_HANDLE)
-}
-
-fn classify_send_outcome(newly_pushed: &[JsH3Event], released_units: usize) -> i64 {
-    let has_error = newly_pushed.iter().any(|e| e.event_type == EVENT_ERROR);
-    let has_blocked = newly_pushed
-        .iter()
-        .any(|e| e.event_type == EVENT_STREAM_BLOCKED);
-    if has_error {
-        ERR_PROTOCOL
-    } else if released_units == 0 {
-        // Either newly blocked (has_blocked) or appended to an
-        // already-blocked stream's backlog (has_blocked false, released 0
-        // either way) — both are backpressure from the caller's view.
-        let _ = has_blocked;
-        ERR_AGAIN
-    } else {
-        released_units as i64
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -325,9 +325,12 @@ pub extern "C" fn h3c_send_datagram(handle: u32, ptr: u32, len: u32) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn h3c_ping(handle: u32) -> i64 {
-    with_session_mut(handle, |sess| {
-        if sess.handler.ping() { 0i64 } else { ERR_AGAIN }
-    })
+    with_session_mut(
+        handle,
+        |sess| {
+            if sess.handler.ping() { 0i64 } else { ERR_AGAIN }
+        },
+    )
     .unwrap_or(ERR_INVALID_HANDLE)
 }
 

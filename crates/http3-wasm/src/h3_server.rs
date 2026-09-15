@@ -16,8 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use http3::wasm_exports::{
-    Chunk, EVENT_ERROR, EVENT_STREAM_BLOCKED, H3ServerHandler, Http3Config, JsH3Event,
-    OutboundAdmission, TxDatagram,
+    Chunk, H3ServerHandler, Http3Config, JsH3Event, OutboundAdmission, TxDatagram,
 };
 
 use crate::abi::{
@@ -27,6 +26,7 @@ use crate::abi::{
 use crate::events::serialize_events;
 use crate::handle::Slots;
 use crate::json_opts::{build_h3_server_options, parse_server_params};
+use crate::send::classify_send_outcome;
 
 struct H3ServerSession {
     handler: H3ServerHandler,
@@ -159,7 +159,11 @@ pub extern "C" fn hs_last_error(handle: u32, buf_ptr: u32, cap: u32) -> i32 {
     let msg = if handle == 0 {
         crate::abi::take_global_error_for_read()
     } else {
-        SESSIONS.with(|s| s.borrow().get(handle).and_then(|sess| sess.last_error.clone()))
+        SESSIONS.with(|s| {
+            s.borrow()
+                .get(handle)
+                .and_then(|sess| sess.last_error.clone())
+        })
     };
     write_out_message(msg, buf_ptr, cap)
 }
@@ -185,7 +189,10 @@ pub extern "C" fn hs_tx_buffer(handle: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn hs_recv(handle: u32, len: u32, peer_addr_ptr: u32, peer_addr_len: u32) -> i64 {
     let Some(peer_addr_str) = (unsafe { str_in(peer_addr_ptr, peer_addr_len) }) else {
-        set_session_error(handle, "[h3:config] peer address is not valid UTF-8".to_string());
+        set_session_error(
+            handle,
+            "[h3:config] peer address is not valid UTF-8".to_string(),
+        );
         return ERR_BAD_ARGS;
     };
     let Ok(peer) = peer_addr_str.parse::<SocketAddr>() else {
@@ -252,7 +259,8 @@ pub extern "C" fn hs_next_send_dest(handle: u32, out_ptr_ptr: u32) -> i64 {
             return 0i64;
         };
         sess.dest_scratch.clear();
-        sess.dest_scratch.extend_from_slice(dest.to_string().as_bytes());
+        sess.dest_scratch
+            .extend_from_slice(dest.to_string().as_bytes());
         write_out_ptr_len(&sess.dest_scratch, out_ptr_ptr)
     })
     .unwrap_or(ERR_INVALID_HANDLE)
@@ -304,13 +312,15 @@ pub extern "C" fn hs_drain_events(handle: u32, out_ptr_ptr: u32) -> i64 {
             .collect_app_events(usize::MAX, &mut sess.pending_events);
         sess.handler
             .collect_drain_events(usize::MAX, &mut sess.pending_events);
-        sess.handler.flush_all_pending_writes(&mut sess.pending_events);
+        sess.handler
+            .flush_all_pending_writes(&mut sess.pending_events);
         // Server-only (no client equivalent): reap connections that
         // closed via a path other than the timer sweep above (e.g. the
         // peer's own CONNECTION_CLOSE arriving in `hs_recv`) so their
         // final `session_close` event isn't lost and the connection map
         // doesn't leak entries forever.
-        sess.handler.reap_closed_connections(&mut sess.pending_events);
+        sess.handler
+            .reap_closed_connections(&mut sess.pending_events);
 
         let events = std::mem::take(&mut sess.pending_events);
         serialize_events(&events, &mut sess.json_scratch, &mut sess.data_scratch);
@@ -388,7 +398,14 @@ pub extern "C" fn hs_stream_send(
             fin != 0,
             &mut sess.pending_events,
         );
-        classify_send_outcome(&sess.pending_events[before..], released)
+        classify_send_outcome(
+            &sess.pending_events[before..],
+            len as usize,
+            fin != 0,
+            released,
+            sess.handler
+                .has_pending_stream_write(conn_handle, stream_id),
+        )
     })
     .unwrap_or(ERR_INVALID_HANDLE)
 }
@@ -438,21 +455,6 @@ pub extern "C" fn hs_send_trailers(
     .unwrap_or(ERR_INVALID_HANDLE)
 }
 
-fn classify_send_outcome(newly_pushed: &[JsH3Event], released_units: usize) -> i64 {
-    let has_error = newly_pushed.iter().any(|e| e.event_type == EVENT_ERROR);
-    let has_blocked = newly_pushed
-        .iter()
-        .any(|e| e.event_type == EVENT_STREAM_BLOCKED);
-    if has_error {
-        ERR_PROTOCOL
-    } else if released_units == 0 {
-        let _ = has_blocked;
-        ERR_AGAIN
-    } else {
-        released_units as i64
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn hs_stream_close(
     handle: u32,
@@ -474,7 +476,10 @@ pub extern "C" fn hs_stream_close(
 pub extern "C" fn hs_send_datagram(handle: u32, conn_handle: u32, ptr: u32, len: u32) -> i64 {
     let data = unsafe { bytes_in(ptr, len) }.to_vec();
     with_session_mut(handle, |sess| {
-        if sess.handler.send_datagram(conn_handle, Chunk::unpooled(data)) {
+        if sess
+            .handler
+            .send_datagram(conn_handle, Chunk::unpooled(data))
+        {
             0i64
         } else {
             ERR_AGAIN
@@ -486,7 +491,11 @@ pub extern "C" fn hs_send_datagram(handle: u32, conn_handle: u32, ptr: u32, len:
 #[unsafe(no_mangle)]
 pub extern "C" fn hs_ping(handle: u32, conn_handle: u32) -> i64 {
     with_session_mut(handle, |sess| {
-        if sess.handler.ping(conn_handle) { 0i64 } else { ERR_AGAIN }
+        if sess.handler.ping(conn_handle) {
+            0i64
+        } else {
+            ERR_AGAIN
+        }
     })
     .unwrap_or(ERR_INVALID_HANDLE)
 }
@@ -496,14 +505,16 @@ pub extern "C" fn hs_ping(handle: u32, conn_handle: u32) -> i64 {
 /// caller's point of view.
 #[unsafe(no_mangle)]
 pub extern "C" fn hs_session_metrics(handle: u32, conn_handle: u32, out_ptr_ptr: u32) -> i64 {
-    with_session_mut(handle, |sess| match sess.handler.session_metrics(conn_handle) {
-        Some(metrics) => {
-            let json = crate::events::metrics_only_json(&metrics);
-            sess.json_scratch.clear();
-            sess.json_scratch.extend_from_slice(json.as_bytes());
-            write_out_ptr_len(&sess.json_scratch, out_ptr_ptr)
+    with_session_mut(handle, |sess| {
+        match sess.handler.session_metrics(conn_handle) {
+            Some(metrics) => {
+                let json = crate::events::metrics_only_json(&metrics);
+                sess.json_scratch.clear();
+                sess.json_scratch.extend_from_slice(json.as_bytes());
+                write_out_ptr_len(&sess.json_scratch, out_ptr_ptr)
+            }
+            None => ERR_INVALID_HANDLE,
         }
-        None => ERR_INVALID_HANDLE,
     })
     .unwrap_or(ERR_INVALID_HANDLE)
 }
@@ -540,7 +551,8 @@ pub extern "C" fn hs_close_connection(
 ) -> i64 {
     let reason = unsafe { str_in(reason_ptr, reason_len) }.unwrap_or("");
     with_session_mut(handle, |sess| {
-        sess.handler.close_connection(conn_handle, code, reason.to_string());
+        sess.handler
+            .close_connection(conn_handle, code, reason.to_string());
         0i64
     })
     .unwrap_or(ERR_INVALID_HANDLE)
