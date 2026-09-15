@@ -42,7 +42,7 @@ jobs:
           vm_stat
       - run: pnpm install --frozen-lockfile --no-optional
       - name: Build native addon and tests
-        run: pnpm run build:debug && pnpm run build:test
+        run: pnpm run build && pnpm run build:test
       - name: Native Node suite
         timeout-minutes: 6
         run: node scripts/test-node.mjs
