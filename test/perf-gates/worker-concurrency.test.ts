@@ -350,39 +350,55 @@ describe('Worker Concurrency', () => {
 
   it('event loop stays responsive under load', { timeout: 25000 }, async () => {
     const session = await connectClient(port);
-    const ticks: number[] = [];
-    const interval = setInterval(() => { ticks.push(performance.now()); }, 5);
-
-    // Do multiple rounds to ensure enough elapsed time for interval ticks
-    for (let round = 0; round < 5; round++) {
+    const runRound = async (round: number): Promise<void> => {
       const results = await Promise.all(
         Array.from({ length: 50 }, (_, i) => doRequest(session, 'GET', `/el-r${round}s${i}`)),
       );
       assert.strictEqual(results.length, 50);
+      for (const result of results) assert.strictEqual(result.status, '200');
+    };
+
+    // Measure steady-state traffic after warming this session's request path.
+    // A fixed five-round run can yield only one or two timer samples, making
+    // its purported p95 little more than a startup/scheduling outlier.
+    for (let round = -2; round < 0; round++) await runRound(round);
+    const gaps: number[] = [];
+    let previousTick = performance.now();
+    const sample = (): void => {
+      const now = performance.now();
+      gaps.push(now - previousTick);
+      previousTick = now;
+    };
+    const interval = setInterval(sample, 5);
+    let rounds = 0;
+    try {
+      for (; rounds < 5 || gaps.length < 40; rounds++) {
+        await runRound(rounds);
+      }
+    } finally {
+      clearInterval(interval);
+      // Include the final interval, even if a synchronous stall prevented the
+      // timer callback from running before the last response completed.
+      sample();
     }
-    clearInterval(interval);
 
-    // Fast worker paths can complete before 2+ ticks fire; require at least one.
-    assert.ok(ticks.length >= 1, `Only got ${ticks.length} interval ticks`);
-
-    const gaps = ticks.slice(1).map((tick, index) => tick - ticks[index]);
-    if (gaps.length > 0) {
-      const steadyStateGaps = gaps.length > 1 ? gaps.slice(1) : gaps;
-      const sortedGaps = [...steadyStateGaps].sort((a, b) => a - b);
-      const p95Gap = sortedGaps[Math.floor((sortedGaps.length - 1) * 0.95)];
-      const maxGap = sortedGaps[sortedGaps.length - 1];
-
-      assert.ok(
-        p95Gap < EVENT_LOOP_P95_GAP_MS,
-        `Event loop p95 gap was ${p95Gap.toFixed(1)}ms ` +
-          `(budget ${EVENT_LOOP_P95_GAP_MS}ms, gaps ${steadyStateGaps.length})`,
-      );
-      assert.ok(
-        maxGap < EVENT_LOOP_MAX_GAP_MS,
-        `Event loop max gap was ${maxGap.toFixed(1)}ms ` +
-          `(budget ${EVENT_LOOP_MAX_GAP_MS}ms, gaps ${steadyStateGaps.length})`,
-      );
-    }
+    const sortedGaps = [...gaps].sort((a, b) => a - b);
+    const p95Gap = sortedGaps[Math.ceil(sortedGaps.length * 0.95) - 1];
+    const maxGap = sortedGaps[sortedGaps.length - 1];
+    console.log(
+      `Event loop latency: ${gaps.length} samples over ${rounds * 50} requests, ` +
+        `p95 ${p95Gap.toFixed(1)}ms, max ${maxGap.toFixed(1)}ms`,
+    );
+    assert.ok(
+      p95Gap < EVENT_LOOP_P95_GAP_MS,
+      `Event loop p95 gap was ${p95Gap.toFixed(1)}ms ` +
+        `(budget ${EVENT_LOOP_P95_GAP_MS}ms, gaps ${gaps.length})`,
+    );
+    assert.ok(
+      maxGap < EVENT_LOOP_MAX_GAP_MS,
+      `Event loop max gap was ${maxGap.toFixed(1)}ms ` +
+        `(budget ${EVENT_LOOP_MAX_GAP_MS}ms, gaps ${gaps.length})`,
+    );
 
     await session.close();
   });

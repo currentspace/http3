@@ -50,6 +50,23 @@ and remaining qualification work for each release candidate.
 - Receipts and source/artifact hashes:
   ignored `results/release-0.9.2/investigation/` directory.
 
+### Event-loop sampling correction
+
+- PR #12 passed all 29 checks. Its Intel Node 24/25/26 concurrency gates took
+  3876/4007/3243 ms against the unchanged 12000 ms limit; an independent Intel
+  Node 26 run also passed. The merged tree exactly matched the PR candidate.
+- Post-merge ARM64 Node 24 then failed the latency test with a p95 computed
+  from only two gaps. All other concurrency cases passed. Publication was
+  canceled before uploads. The old test could also pass with only one tick,
+  discarded its first gap, and omitted an unobserved final interval.
+- The corrected test warms the session, continues 50-request batches until it
+  has at least 40 timer samples, and includes every measured gap, including
+  the final interval. Limits remain 100 ms p95 and 250 ms maximum.
+- Three full concurrency runs each on ARM64 Node 24, ARM64 Node 26, and x64
+  Node 26 passed. Injected persistent 130 ms stalls failed the p95 check;
+  a single 350 ms final stall failed the maximum check. Compilation and lint
+  passed. Controls and logs are in the investigation receipt directory.
+
 ### Release qualification
 
 The 0.9.2 dry run, publication build matrix, registry verification, and clean
