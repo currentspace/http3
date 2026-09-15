@@ -3558,7 +3558,10 @@ impl QuicClientHandler {
             pending_writes: HashMap::new(),
             next_bidi_stream_id: 0,
             send_buf: vec![0u8; SEND_BUF_SIZE],
-            tx_pool: BufferPool::new(256, 65535),
+            // Shared clients send from the worker's pool. Dedicated and direct
+            // callers allocate packet buffers on their first send instead of
+            // reserving 16 MiB for every client at construction time.
+            tx_pool: BufferPool::new(0, 65535),
             timer_deadline,
             session_closed_emitted: false,
             chunk_pool,
