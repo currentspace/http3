@@ -167,9 +167,8 @@ JS (lib/)  ──NAPI──>  Rust worker threads (src/)  ──quiche──>  U
 | `crates/http3-wasm/src/{h3,quic}.rs` | `h3c_*`/`qc_*` extern-C ABI exports (wasm32-wasip1 client-only build) |
 | `lib/wasm/index.workerd.ts` | Workers/workerd entry point (`"./wasm"` export's `workerd`/`worker` conditions); no `@types/node`, no Buffer, no `node:*` |
 | `lib/wasm-event-bridge.ts` | Node-only: wraps wasm `Uint8Array` event payloads in real `Buffer`s at the `lib/client.ts`/`lib/quic-client.ts` boundary |
-| `scripts/build-wasm.mjs` | Orchestrates `pnpm run build:wasm` (bssl + quiche patch + cargo + wasm-opt) |
+| `scripts/build-wasm.mjs` | Orchestrates `pnpm run build:wasm` (bssl + locked cargo + wasm-opt) |
 | `scripts/build-bssl-wasi.sh` | Builds BoringSSL for wasm32-wasip1 from boring-sys's vendored source |
-| `scripts/prepare-quiche-wasm-patch.sh` | Vendors + patches quiche's wasm FFI fix into `target/quiche-wasm-patched/` |
 
 ## Conventions
 

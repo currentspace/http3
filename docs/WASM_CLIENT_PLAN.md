@@ -1,5 +1,12 @@
 # WASM Client Plan — QUIC + HTTP/3 client core compiled to WebAssembly
 
+> October 2026 dependency refresh: the build sections below describe the
+> original July implementation. The current build uses quiche 0.30, boring 5.3,
+> and WASI SDK 33 with one [BoringSSL FFI correction](../vendor/quiche/PATCHES.md).
+> The standalone spike shares the
+> workspace lockfile. See [WASM_RUNTIME.md](WASM_RUNTIME.md) for current commands
+> and [DEPENDENCY_UPDATE.md](DEPENDENCY_UPDATE.md) for validation evidence.
+
 **Status:** planned (feasibility PROVEN by spike, 2026-07-08)
 **Owner:** implementation by agents; this document is the source of truth
 **Companion artifacts:** `spikes/quiche-wasm-wasip1/` (proven build spike + quiche patch)

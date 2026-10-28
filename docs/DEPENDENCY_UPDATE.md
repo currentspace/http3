@@ -113,7 +113,39 @@ recorded here before each commit.
   post-update audit remain required.
 - Cross-platform, browser, safety, packaging, and performance qualification: pending.
 
-Known integration risks: quiche 0.29.2 WASM FFI patch; exact boring 4.22.0 pin;
-BoringSSL source-layout-dependent WASI build; spike manifest with absolute temp
-patch path; Node 26 types with Node >=24 support; floating CI Rust versus Docker
-1.96.0; runtime acme.sh installer; existing security workflow lacks Rust audit.
+## QUIC/TLS and WASM stage
+
+- Updated quiche to 0.30.0, boring/boring-sys to 5.3.0, and the remaining
+  compatible Rust transitive graph. Rust audit now reports zero vulnerabilities;
+  `paste` 1.0.15 remains unmaintained through latest tikv-jemalloc-ctl 0.7.0.
+- Removed the old AES/ChaCha FFI patch and BoringSSL source surgery. boring 5
+  supports socket exclusion and WASI entropy directly. The BSSL cache now keys
+  on the SDK/compiler and complete build recipe, including no-exception flags.
+- Found a different upstream FFI mismatch: quiche's `ERR_error_string_n`
+  declaration returns void, while BoringSSL 5 returns a pointer. Vendored the
+  checksum-verified quiche release with only that call changed to use generated
+  boring-sys bindings; see `vendor/quiche/PATCHES.md`. All builds share the
+  same source and lockfile. WASM linker warnings are now fatal.
+- SDK 34 failed the standalone spike link with Rust 1.99.1's startup objects
+  (`__wasi_init_tp`). Retain checksum-verified SDK 33 pending stable Rust >=1.100
+  and rerun spike/artifact/runtime checks at that point. No stub masks the skew.
+- The standalone spike is now a workspace member with a working shared build
+  command. It emitted a 1200-byte Initial and approximately 995 ms PTO.
+- Fixed the direct-quiche test harness to preserve a connection across split
+  Initial packets; BoringSSL 5's larger ClientHello exposed its prior reset bug.
+- Final native fast verification: 14 passed, 0 failed, 4 explicitly skipped
+  stages (99 s); the corrected direct handshake test passed. WASM suite: all
+  39 tests passed on Node 26, both WASM links passed with fatal warnings, and
+  Cargo.lock remained unchanged. Local workerd fixture passed all three checks.
+- Earlier updated-stack run: performance concurrency gate 969 ms (10 s budget),
+  event-loop p95 8.4 ms over 3800 requests; load smoke passed. Host WASM Rust
+  tests (18 unit + 3 integration) and UDP interoperability passed. An initial
+  Node run had one EADDRINUSE port collision; the full rerun and final native
+  verification passed. These do not replace pending Linux/browser qualification.
+- Storage after this stage: 56.40% project / 91.93% system, approximately
+  72.4 GiB system free. No Docker builds or pruning performed yet.
+
+Remaining integration work: safety-tool pins and proof/sanitizer runs,
+containers and OS/tool dependencies, CI Actions, runtime certificate installer,
+Rust license/audit integration, full platform/browser/package qualification,
+SBOMs and automated update configuration.

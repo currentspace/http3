@@ -68,5 +68,10 @@ refreshed through lockfile resolution and audited separately.
   a TypeScript 7 compiler alias plus the TypeScript 6 compatibility API alias.
   Remove the compatibility alias when the linter and napi generator support
   the stable TypeScript 7 API. Recheck with each tooling update.
-- quiche 0.30 accepts boring >=4.19,<6, so boring 5.3 is eligible for validation.
-  Its WASI build and custom FFI patch still require source inspection and tests.
+- quiche 0.30 + boring 5.3 require one generated-binding correction for
+  `ERR_error_string_n`; the source and provenance are committed in
+  [vendor/quiche](../vendor/quiche/PATCHES.md), shared by native and WASM.
+- WASI SDK 34 fails the command-module link with stable Rust 1.99.1
+  (`__wasi_init_tp` missing). Retain checksum-verified SDK 33 until Rust >=1.100
+  is stable, then retry both the spike and production artifact suites.
+  See [upstream ABI report](https://github.com/napi-rs/napi-rs/issues/3491).

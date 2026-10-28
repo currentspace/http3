@@ -30,6 +30,8 @@ COPY benches ./benches
 COPY fuzz ./fuzz
 COPY tools ./tools
 COPY crates ./crates
+COPY spikes/quiche-wasm-wasip1 ./spikes/quiche-wasm-wasip1
+COPY vendor ./vendor
 COPY src ./src
 COPY lib ./lib
 COPY index.js index.d.ts tsconfig.json ./
