@@ -1,0 +1,62 @@
+[
+  {
+    "id": 12845837133,
+    "name": "prebuild-aarch64-apple-darwin",
+    "size_in_bytes": 2411574,
+    "digest": "sha256:a4c722d7a9480e5d97203c9aa14de1115908bc4397ad150072ede59fe179e3af",
+    "created_at": "2026-10-28T19:35:48Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40755081567,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "release-candidate-v0.9.3-abi-20261028",
+      "head_sha": "84335c235df9e4ffa1fc518cfde46d87517d487d"
+    }
+  },
+  {
+    "id": 12845233376,
+    "name": "prebuild-x86_64-unknown-linux-gnu",
+    "size_in_bytes": 22723143,
+    "digest": "sha256:71673fd6350869c221ec0e7e0e8f2844fea7c6bf444aef88086faac624a8dde1",
+    "created_at": "2026-10-28T19:35:31Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40755081567,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "release-candidate-v0.9.3-abi-20261028",
+      "head_sha": "84335c235df9e4ffa1fc518cfde46d87517d487d"
+    }
+  },
+  {
+    "id": 12844814198,
+    "name": "prebuild-aarch64-unknown-linux-gnu",
+    "size_in_bytes": 20769336,
+    "digest": "sha256:716f2abae7b196e5635843414cfe54406e792f7f83b6ec08ea5198a9bc3ab090",
+    "created_at": "2026-10-28T19:34:21Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40755081567,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "release-candidate-v0.9.3-abi-20261028",
+      "head_sha": "84335c235df9e4ffa1fc518cfde46d87517d487d"
+    }
+  },
+  {
+    "id": 12844768876,
+    "name": "wasm-client-artifact",
+    "size_in_bytes": 760762,
+    "digest": "sha256:3e43e360b202b00a7dff44834d4a6ee1b7b6ffa8abb89c99c862623a692e339f",
+    "created_at": "2026-10-28T19:38:07Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40755081567,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "release-candidate-v0.9.3-abi-20261028",
+      "head_sha": "84335c235df9e4ffa1fc518cfde46d87517d487d"
+    }
+  }
+]

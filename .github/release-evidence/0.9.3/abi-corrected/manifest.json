@@ -1,0 +1,46 @@
+{
+  "artifactSource": "84335c235df9e4ffa1fc518cfde46d87517d487d",
+  "capturedAt": "2026-10-28",
+  "files": [
+    {
+      "path": "comparison.json",
+      "sha256": "e9e32ab7ec5a0c7c3f212f62c279b40503aaac3c2e67bd32d5d4b18ec75f798c",
+      "size": 506
+    },
+    {
+      "path": "glibc-check.txt",
+      "sha256": "557697337f35228899c1db90835d94624b9eab210d786923dc985667e7fbd602",
+      "size": 301
+    },
+    {
+      "path": "hosted-artifacts.json",
+      "sha256": "1c7a42fc27704447c8aed961357bf6a6242a2f2f73fab5f7c9009f267505b880",
+      "size": 2048
+    },
+    {
+      "path": "hosted-file-checksums.json",
+      "sha256": "1640614877e952c62b14ea31c9686f8edf7d5c19366179eb3c82e7694b5605f5",
+      "size": 886
+    },
+    {
+      "path": "hosted-release-run.json",
+      "sha256": "7ae8fb09953dd242889d43efea2b8db65e31a18bdf33f0d5dee79cbf7d6d72d9",
+      "size": 3760
+    },
+    {
+      "path": "local-package-checksums.json",
+      "sha256": "283d2bcacf287707a6bce59ae32e5dda1c7997e52167821f713fff144368e184",
+      "size": 2088
+    },
+    {
+      "path": "packed-consumer-node24.log",
+      "sha256": "796e04e39a255843ca123aa778729a940e86e02ed7148c94e9878c17c86ff0bc",
+      "size": 103
+    },
+    {
+      "path": "packed-consumer-node26.log",
+      "sha256": "470cc9b552e49b1aa1e8852736b8a190c25e8c27a86c34182cb21a80d12f5dba",
+      "size": 103
+    }
+  ]
+}

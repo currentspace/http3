@@ -1,11 +1,16 @@
 {
-  "source": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979",
+  "artifactSource": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979",
   "capturedAt": "2026-10-28",
   "files": [
     {
       "path": "README.md",
-      "sha256": "6f7d704cfeb09ff7ee627840af9c57b7ed73c72c91855af9394c041384906149",
-      "size": 3236
+      "sha256": "089ea3f1b9f6c13101cd830b89b461bcbf4e3622f671d26e3927efc2ead2e524",
+      "size": 3842
+    },
+    {
+      "path": "codeql-triage-readback.json",
+      "sha256": "6064da69a0cfd1ae08c11209211c398b079e354819fdbc41053a0072d26a0f30",
+      "size": 8351
     },
     {
       "path": "curl-manual-http2.txt",

@@ -2,7 +2,13 @@
 
 Source: `c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979`. Rust SARIF analysis: `2048074373`.
 
-All 17 source locations and SARIF flow endpoints were reviewed. Proposed disposition: **false positive**. No alerts have been dismissed; repository approval is pending. Security queries remain enabled.
+All 17 source locations and SARIF flow endpoints were reviewed. Brian explicitly
+approved the **false positive** dispositions on 2026-10-28. Alerts #32–48 were
+dismissed through `brianathere`, with individual explanations; all 17 were
+independently read back as dismissed on PR #14. Security queries remain enabled.
+The runtime source is unchanged in the subsequent ABI-build correction.
+
+[GitHub disposition receipts](../../../.github/release-evidence/0.9.3/codeql-triage-readback.json).
 
 | Alert | Location | Evidence |
 | --- | --- | --- |

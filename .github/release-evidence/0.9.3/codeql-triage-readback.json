@@ -1,0 +1,138 @@
+[
+  {
+    "number": 32,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This is the public QUIC v1 Initial salt mandated by RFC 9001 section 5.2, not a credential/private key. Randomizing it breaks interoperability. Review: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:04Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/32"
+  },
+  {
+    "number": 33,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:06Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/33"
+  },
+  {
+    "number": 34,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:07Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/34"
+  },
+  {
+    "number": 35,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:08Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/35"
+  },
+  {
+    "number": 36,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:09Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/36"
+  },
+  {
+    "number": 37,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:10Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/37"
+  },
+  {
+    "number": 38,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:11Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/38"
+  },
+  {
+    "number": 39,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:12Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/39"
+  },
+  {
+    "number": 40,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:14Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/40"
+  },
+  {
+    "number": 41,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:15Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/41"
+  },
+  {
+    "number": 42,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:16Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/42"
+  },
+  {
+    "number": 43,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:18Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/43"
+  },
+  {
+    "number": 44,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:20Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/44"
+  },
+  {
+    "number": 45,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:21Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/45"
+  },
+  {
+    "number": 46,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This VecDeque push_back/remove changes an in-memory protocol queue. The reported sink does not perform logging or file I/O. Source and SARIF reviewed. Details: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:23Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/46"
+  },
+  {
+    "number": 47,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This test prints recv() Ok(n), a usize byte count, and handshake-state booleans. No secret buffer/key/payload is formatted. SARIF incorrectly taints the byte count. Review: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:24Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/47"
+  },
+  {
+    "number": 48,
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "Approved by Brian: false positive. This test prints recv() Ok(n), a usize byte count, and handshake-state booleans. No secret buffer/key/payload is formatted. SARIF incorrectly taints the byte count. Review: docs/release-evidence/0.9.3/CODEQL_TRIAGE.md.",
+    "dismissed_at": "2026-10-28T19:44:25Z",
+    "html_url": "https://github.com/currentspace/http3/security/code-scanning/48"
+  }
+]

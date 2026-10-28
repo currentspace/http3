@@ -1,10 +1,19 @@
 # 0.9.3 release preparation receipts
 
-Implementation source: `c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979`.
-Evidence captured on 2026-10-28. This is the first functional qualification run.
-Subsequent inspection found a glibc compatibility regression in its Linux x64
-binary. That binary is not approved for publication; see the release ledger for
-the corrected build environment and replacement qualification.
+Evidence captured on 2026-10-28. Qualified release source:
+`84335c235df9e4ffa1fc518cfde46d87517d487d`.
+
+The [abi-corrected receipts](abi-corrected/) identify the qualified four-artifact
+set from [run 40755081567](https://github.com/currentspace/http3/actions/runs/40755081567),
+which passed all 11 jobs. Both Linux binaries require at most GLIBC_2.34, and clean
+root/native-sidecar installs passed on Node 24 and 26. `comparison.json` proves
+that only the Linux x64 binary changed from the first run.
+
+Files in this directory's root retain the first functional qualification at
+`c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979`. Its x64 binary raised the glibc floor
+to 2.38 and is not approved for publication. The corrected x64 build uses Ubuntu
+22.04 and an enforced ELF symbol-version gate; the earlier receipts remain for
+the audit trail.
 
 ## Hosted artifacts and package qualification
 
@@ -52,4 +61,6 @@ Its temporary sources and full logs are retained locally under
 
 See [the release ledger](../../../docs/RELEASE_EVIDENCE.md) and
 [individual CodeQL triage](../../../docs/release-evidence/0.9.3/CODEQL_TRIAGE.md).
+Brian approved the 17 false-positive dismissals; `codeql-triage-readback.json`
+records their application and independent GitHub readback.
 No publication, tag creation, main merge, or production deployment occurred.
