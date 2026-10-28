@@ -1,11 +1,16 @@
 """Qualify the final 0.9.3 prebuild with real stable Safari and trusted TLS."""
 import base64
+import faulthandler
 import json
 import os
 import pathlib
 import subprocess
 import time
 import urllib.request
+
+faulthandler.enable()
+faulthandler.dump_traceback_later(45, repeat=True)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 root = pathlib.Path('artifacts/safari-latest').resolve()
 ca = str(root / 'ca.pem')
@@ -18,14 +23,19 @@ def save(name, value):
     (root / name).write_text(json.dumps(value, indent=2))
 
 def wd(method, path, data=None):
+    print('WebDriver:', method, path, flush=True)
     body = None if data is None else json.dumps(data).encode()
     req = urllib.request.Request('http://127.0.0.1:4444' + path, data=body, method=method,
                                  headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=60) as response:
+    with opener.open(req, timeout=45) as response:
         value = json.load(response)['value']
     if isinstance(value, dict) and 'error' in value:
         raise RuntimeError(value)
     return value
+
+def run(args, **kwargs):
+    print('Running:', args[:3], flush=True)
+    return subprocess.run(args, timeout=40, **kwargs)
 
 def command(method, path, data=None):
     return wd(method, '/session/' + session + path, data)
@@ -41,23 +51,25 @@ try:
         assert server.poll() is None, 'Fixture exited before listening'
         time.sleep(.2)
     endpoint = json.loads((root / 'endpoint.json').read_text())['url']
-    subprocess.run(['sudo', 'security', 'add-trusted-cert', '-d', '-r', 'trustRoot',
+    run(['sudo', 'security', 'add-trusted-cert', '-d', '-r', 'trustRoot',
                     '-k', '/Library/Keychains/System.keychain', ca], check=True)
     trusted = True
     fingerprint = subprocess.check_output(['openssl', 'x509', '-in', ca, '-noout', '-fingerprint', '-sha1'], text=True).strip().split('=')[-1].replace(':', '')
     (root / 'ca-fingerprint.txt').write_text(fingerprint)
-    subprocess.run(['sudo', 'safaridriver', '--enable'], check=True)
-    subprocess.run(['defaults', 'write', 'com.apple.Safari', 'IncludeDevelopMenu', '-bool', 'true'], check=True)
+    run(['sudo', 'safaridriver', '--enable'], check=True)
+    run(['defaults', 'write', 'com.apple.Safari', 'IncludeDevelopMenu', '-bool', 'true'], check=True)
     driver = subprocess.Popen(['/usr/bin/safaridriver', '-p', '4444'],
                               stdout=(root / 'safaridriver.log').open('w'), stderr=subprocess.STDOUT)
-    for _ in range(60):
+    for _ in range(5):
         try:
             wd('GET', '/status')
             break
-        except Exception:
+        except Exception as error:
+            print('Waiting for driver:', error, flush=True)
+            assert driver.poll() is None, 'SafariDriver exited'
             time.sleep(.5)
     value = wd('POST', '/session', {'capabilities': {'alwaysMatch': {
-        'browserName': 'safari', 'acceptInsecureCerts': False, 'safari:automaticInspection': True}}})
+        'browserName': 'safari', 'acceptInsecureCerts': False}}})
     save('safari-session.json', value)
     session = value['sessionId']
     assert value['capabilities']['browserVersion'].startswith('27.2'), value
@@ -114,6 +126,7 @@ end tell'''
     save('inspector-capture-status.json', {'uiExit': ui.returncode, 'screenshotExit': shot.returncode,
                                           'requiresVisualReview': True})
 finally:
+    run(['screencapture', '-x', str(root / 'final-desktop.png')], check=False)
     if session:
         try:
             wd('DELETE', '/session/' + session)
@@ -128,7 +141,7 @@ finally:
                 proc.kill()
                 proc.wait()
     if trusted:
-        subprocess.run(['sudo', 'security', 'remove-trusted-cert', '-d', ca], check=True)
-        subprocess.run(['sudo', 'security', 'delete-certificate', '-Z', fingerprint,
+        run(['sudo', 'security', 'remove-trusted-cert', '-d', ca], check=True)
+        run(['sudo', 'security', 'delete-certificate', '-Z', fingerprint,
                         '/Library/Keychains/System.keychain'], check=True)
         save('trust-cleanup.json', {'temporaryTrustRemoved': True, 'certificateRemoved': True})

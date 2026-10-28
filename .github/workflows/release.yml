@@ -53,6 +53,7 @@ jobs:
           echo "QUALIFICATION_CURL=$(brew --prefix curl)/bin/curl" >> "$GITHUB_ENV"
           "$(brew --prefix curl)/bin/curl" --version
       - name: Validate trusted loopback with real Safari
+        timeout-minutes: 6
         run: python3 .github/safari-validation/validate.py
       - name: Save qualification receipts
         if: always()
