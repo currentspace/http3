@@ -16,26 +16,30 @@ step() {
 install_cargo_tool() {
   local binary="$1"
   local crate="$2"
-  if [[ "$FORCE_TOOL_INSTALL" == "1" || ! -x "$(command -v "$binary" 2>/dev/null || true)" ]]; then
-    cargo install --locked "$crate" --force
+  local version="$3"
+  local installed="$("$binary" --version 2>/dev/null || true)"
+  if [[ "$installed" != *" $version"* || "$FORCE_TOOL_INSTALL" == "1" || ! -x "$(command -v "$binary" 2>/dev/null || true)" ]]; then
+    cargo install --locked "$crate" --version "=$version" --force
   else
     printf '%s already installed; set HTTP3_SAFETY_FORCE_TOOL_INSTALL=1 to refresh it.\n' "$binary"
   fi
 }
 
-step "stable Rust"
-rustup update stable
+step "pinned stable Rust"
+rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
+rustup component add llvm-tools-preview --toolchain 1.99.1
 rustc --version
 cargo --version
 
-step "latest nightly with Miri and rust-src"
-rustup toolchain install nightly --profile minimal --component miri --component rust-src
-cargo +nightly --version
-cargo +nightly miri setup
+step "pinned nightly with Miri and rust-src"
+rustup toolchain install nightly-2026-10-28 --profile minimal --component miri --component rust-src
+cargo +nightly-2026-10-28 --version
+cargo +nightly-2026-10-28 miri setup
 
 step "cargo safety tools"
-install_cargo_tool cargo-fuzz cargo-fuzz
-install_cargo_tool cargo-kani kani-verifier
+install_cargo_tool cargo-fuzz cargo-fuzz 0.13.2
+install_cargo_tool cargo-kani kani-verifier 0.68.0
+install_cargo_tool cargo-llvm-cov cargo-llvm-cov 0.9.1
 cargo fuzz --version
 cargo kani --version
 
@@ -44,7 +48,7 @@ cargo kani setup
 
 step "toolchain summary"
 printf 'stable:  %s\n' "$(rustc --version)"
-printf 'nightly: %s\n' "$(rustc +nightly --version)"
+printf 'nightly: %s\n' "$(rustc +nightly-2026-10-28 --version)"
 printf 'cargo:   %s\n' "$(cargo --version)"
 printf 'fuzz:    %s\n' "$(cargo fuzz --version)"
 printf 'kani:    %s\n' "$(cargo kani --version)"

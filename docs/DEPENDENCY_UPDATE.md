@@ -162,3 +162,24 @@ SBOMs and automated update configuration.
   removes macOS deny-delete ACLs only inside the test-created Firefox home.
   Final test exit was successful and the two earlier residual fixtures were
   removed.
+
+## Safety tools and CI actions
+
+- Pinned nightly 2026-10-28, cargo-fuzz 0.13.2, Kani 0.68.0, cargo-llvm-cov
+  0.9.1, and Verus release/0.2026.10.26.d17fbd0. Verus downloads are checked
+  against the release asset SHA-256 before extraction. Its launcher requires
+  Rust 1.95.0, which bootstrap now installs separately from the project compiler.
+- Safety bootstrap no longer updates a floating stable/nightly channel. Kani
+  incompatibility/proof failures are fatal by default. Its fallback workspace
+  copy excludes artifacts and package caches to avoid recursive disk growth.
+- Miri: 6/6 boundary tests; AddressSanitizer: 6/6; seven fuzz smoke targets ran;
+  Kani: 19/19 harnesses verified; Verus: 11 proofs verified, zero errors.
+  Smoke fuzz runs are setup checks, not sustained fuzz qualification.
+- cargo-llvm-cov ran all 223 Rust unit tests: 72.69% line coverage, 73.31% region
+  coverage, 72.26% function coverage. Coverage artifacts remain under target.
+- Updated all external GitHub Actions to verified release commits, including
+  checkout 7.0.1, setup-node 7.1.0, pnpm setup 6.1.0, dependency-review 5.0.0,
+  download-artifact 8.0.2, upload-artifact 7.0.2, rust-cache 2.9.3, Docker build
+  7.4.0/buildx setup 4.4.1, CodeQL action 4.39.1. The CodeQL bundle release
+  tag is deliberately not used as an action version. actionlint passed.
+- Storage: approximately 56.72% project / 92.31% system (69 GiB free).
