@@ -183,3 +183,25 @@ SBOMs and automated update configuration.
   7.4.0/buildx setup 4.4.1, CodeQL action 4.39.1. The CodeQL bundle release
   tag is deliberately not used as an action version. actionlint passed.
 - Storage: approximately 56.72% project / 92.31% system (69 GiB free).
+
+## Dependency audit and SBOM automation
+
+- Updated cargo-deny 0.20.2 configuration without relaxing the default license
+  policy; build/dev dependencies are included. First-party Cargo manifests now
+  declare the repository's existing MIT license. Added a foldhash 0.2.0-only
+  Zlib allowance after inspecting its permissive license.
+- Full cargo-deny advisory/license/source checks pass with one explicitly
+  documented exception: RUSTSEC-2024-0436 (`paste` 1.0.15). The latest
+  tikv-jemalloc-ctl 0.7.0 still depends on this compile-time macro. A separate
+  guard rejects any new parent/version or use after 2026-11-28; both rejection
+  paths were exercised. No vulnerability advisory is ignored. Maintainers must
+  remove the exception when the allocator drops paste, or review it by expiry.
+- Security CI now runs pinned Rust audit/deny tools and the exception guard,
+  and publishes JavaScript and source CycloneDX SBOMs. Syft 1.55.0 installation
+  verifies release archive checksums; pnpm 12 generates the JavaScript SBOM.
+- Generated source SBOM includes every one of 228 resolved Cargo packages.
+  JavaScript SBOM contains 437 components. Added BoringSSL's actual bundled
+  source commit (`427ec40cc8edc545253289232e885708c409e5ea`) and license text,
+  resolved from boring-sys 5.3.0's repository submodule at its published commit.
+  Patched quiche provenance remains explicit. Container OS inventories follow
+  after image qualification.
