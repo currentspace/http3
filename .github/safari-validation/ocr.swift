@@ -16,6 +16,7 @@ let rows: [[String: Any]] = (request.results ?? []).compactMap { observation in
     guard let candidate = observation.topCandidates(1).first else { return nil }
     let box = observation.boundingBox
     return ["text": candidate.string, "x": Double(box.midX) * Double(image.width),
+            "left": Double(box.minX) * Double(image.width),
             "y": (1 - Double(box.midY)) * Double(image.height)]
 }
 let data = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])

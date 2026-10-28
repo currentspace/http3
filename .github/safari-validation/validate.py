@@ -123,16 +123,20 @@ try:
     def keys(script):
         run(['osascript', '-e', 'tell application "System Events" to tell process "Safari"\nset frontmost to true\n' + script + '\nend tell'], check=True)
 
-    def click_text(rows, text, contains=False):
+    def click_text(rows, text, contains=False, checkbox=False):
         matches = [r for r in rows if (text.lower() in r['text'].lower() if contains else r['text'].lower() == text.lower())]
+        if text == 'Advanced' and len(matches) > 1:
+            matches = [max(matches, key=lambda r: r['x'])]  # toolbar, not window title
         assert len(matches) == 1, (text, matches, rows)
         row = matches[0]
-        keys('click at {' + str(round(row['x'])) + ',' + str(round(row['y'])) + '}')
+        # The checkbox label is a separate AX group; press the square immediately left.
+        x = row['left'] - 13 if checkbox else row['x']
+        keys('click at {' + str(round(x)) + ',' + str(round(row['y'])) + '}')
 
     deadline = time.monotonic() + 40
     while True:
         rows = capture('safari-manual-page')
-        if any('Functional checks' in r['text'] for r in rows):
+        if any('Functional checks' in r['text'] for r in rows) and sum('PASS' in r['text'] for r in rows) >= 2:
             break
         assert time.monotonic() < deadline, 'Normal Safari page did not paint'
         time.sleep(2)
@@ -144,7 +148,7 @@ try:
         time.sleep(3)
         click_text(capture('settings-general-' + str(attempt)), 'Advanced')
         time.sleep(2)
-        click_text(capture('settings-advanced-' + str(attempt)), 'web developers', contains=True)
+        click_text(capture('settings-advanced-' + str(attempt)), 'web developers', contains=True, checkbox=True)
         time.sleep(1)
         keys('keystroke "w" using command down')
         time.sleep(1)
