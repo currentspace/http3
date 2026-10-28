@@ -38,8 +38,8 @@ it('drain includes tasks registered by settling tasks', async () => {
   const tasks = new DetachedTasks();
   let completed = false;
   tasks.run(Promise.resolve().then(() => {
-    tasks.run(new Promise<void>(resolve => setImmediate(() => { completed = true; resolve(); })), assert.fail);
-  }), assert.fail);
+    tasks.run(new Promise<void>(resolve => setImmediate(() => { completed = true; resolve(); })), error => assert.fail(error));
+  }), error => assert.fail(error));
   await tasks.drain();
   assert.equal(completed, true);
   assert.equal(tasks.size, 0);

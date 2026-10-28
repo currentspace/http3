@@ -49,8 +49,7 @@ jobs:
       - name: Run full verify
         env:
           VERIFY_SKIP_BROWSER_E2E: '1'
-        # Invoke directly: pnpm 11 auto-installs before running scripts on a
-        # fresh checkout, before verify.sh can omit unpublished prebuilds.
+        # Invoke directly so verify.sh controls dependency installation.
         run: bash scripts/verify.sh
 
   verify-macos:
@@ -82,8 +81,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run full verify
-        # Invoke directly: pnpm 11 auto-installs before running scripts on a
-        # fresh checkout, before verify.sh can omit unpublished prebuilds.
+        # Invoke directly so verify.sh controls dependency installation.
         run: bash scripts/verify.sh
 
   verify-docker:

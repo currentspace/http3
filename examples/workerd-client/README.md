@@ -1,5 +1,11 @@
 # workerd client example / C7 smoke harness
 
+Dependency refresh (2026-10-28): Wrangler 4.154.0 and workerd 1.20261028.1
+passed the three local fixture checks below with both compatibility dates
+2026-07-08 and 2026-10-28. The configuration now uses 2026-10-28; local
+`wrangler deploy --dry-run` bundling also passed. This preserves the same narrow
+mock-transport scope described below; it is not a deployed-network test.
+
 Status: **instantiation + export-shape + in-memory-mock-transport smoke test,
 real and passing under `wrangler dev` and `wrangler deploy --dry-run` on this
 machine.** Not a real network handshake — workerd has no outbound UDP client

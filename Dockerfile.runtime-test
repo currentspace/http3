@@ -29,7 +29,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY examples/hono/package.json ./examples/hono/package.json
 COPY examples/express-adapter/package.json ./examples/express-adapter/package.json
 RUN --mount=type=cache,id=http3-runtime-pnpm-${TARGETPLATFORM},target=/pnpm/store \
-  pnpm install --frozen-lockfile --ignore-scripts --no-optional --store-dir /pnpm/store
+  pnpm install --frozen-lockfile --ignore-scripts --store-dir /pnpm/store
 
 COPY build.rs Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY benches ./benches

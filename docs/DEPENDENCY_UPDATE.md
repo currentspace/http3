@@ -72,7 +72,31 @@ recorded here before each commit.
   dependencies in a separate lockfile document.
 - Latest storage check: 55.83% project, 91.73% system; approximately 74.3 GiB
   system space available. No unrelated Docker resources removed.
-- JavaScript/Rust/WASM/container upgrades: pending.
+- JavaScript update: TypeScript compiler 7.0.2 with the official TypeScript 6
+  compatibility API alias for ESLint/napi; Node 24 types; latest stable direct
+  dependencies and refreshed transitives across all four workspace packages.
+  Source installs now keep optional compiler/runtime binaries while excluding
+  only first-party native prebuilds. pnpm recorded version-specific release-age
+  exceptions for the explicitly selected current Workers releases; Wrangler's
+  own dependency is miniflare 5.20261023.1-beta (not an independently selected
+  prerelease). Revisit the compatibility alias with each linter/napi update.
+- Updated ESLint required retaining HTTP/2 method receivers and explicit
+  single-argument assertion callbacks. Existing lifecycle and protocol tests
+  cover these changes. Regenerated napi loader/types with CLI 3.10.9.
+- JavaScript validation: Node 24 fast verification 14/14 enabled stages passed
+  (85 s); Node 26 core/runtime/interop/release 335 passed, FFI 67 passed, WASM
+  39 passed; c8 12 FFI coverage command passed. No npm audit findings remain
+  across the updated workspace graph (451 reported dependencies).
+- Packed install passed on Node 24.22.1 and 26.12.1 with the regenerated loader.
+- Updated Wrangler/workerd local smoke: passed all three fixture checks with
+  both the old and 2026-10-28 compatibility dates. Adopted the latter. Dry-run
+  bundling passed. These checks cover instantiation, exports, and generated
+  Initial packets through a mock transport, not a live Workers UDP handshake.
+  Tested both Wrangler's bundled workerd 1.20261023.1 and the directly declared
+  1.20261028.1 binary via Miniflare's runtime-path override.
+- Playwright 1.64.1 browsers installed on the project volume. macOS browser
+  trust needs further validation: `sudo -n true` reports a password is required.
+- Rust/WASM/container upgrades: pending.
 - Cross-platform, browser, safety, packaging, and performance qualification: pending.
 
 Known integration risks: quiche 0.29.2 WASM FFI patch; exact boring 4.22.0 pin;

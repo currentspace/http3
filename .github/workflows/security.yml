@@ -90,6 +90,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - uses: github/codeql-action/analyze@v4

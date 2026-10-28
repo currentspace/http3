@@ -8,7 +8,7 @@
   // network handshake.
   "name": "http3-wasm-workerd-example",
   "main": "worker.ts",
-  "compatibility_date": "2026-07-08",
+  "compatibility_date": "2026-10-28",
   // Deliberately NOT set: this worker's import graph
   // (dist/wasm/index.workerd.js and everything it pulls in) is
   // host-agnostic by construction and does not use Buffer/node:*/any

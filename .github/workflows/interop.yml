@@ -39,7 +39,7 @@ jobs:
           toolchain: 1.99.1
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
+        run: pnpm install --frozen-lockfile
 
       - name: Build native + tests
         run: pnpm run build && pnpm run build:test

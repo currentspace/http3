@@ -22,7 +22,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY examples/hono/package.json ./examples/hono/package.json
 COPY examples/express-adapter/package.json ./examples/express-adapter/package.json
 
-RUN pnpm install --frozen-lockfile --no-optional
+RUN pnpm install --frozen-lockfile
 
 # Keep the native+TS build cache stable when only example app files change.
 COPY build.rs Cargo.toml Cargo.lock rust-toolchain.toml ./

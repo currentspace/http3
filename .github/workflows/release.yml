@@ -48,7 +48,7 @@ jobs:
         with:
           toolchain: 1.99.1
 
-      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm install --frozen-lockfile
 
       - name: Build native prebuild
         run: pnpm exec napi build --release --platform --target ${{ matrix.target }}
@@ -87,7 +87,7 @@ jobs:
       - name: Setup wasi-sdk + binaryen
         uses: ./.github/actions/setup-wasi-sdk
 
-      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm install --frozen-lockfile
 
       - name: Build native addon (debug)
         run: npx napi build --platform
@@ -143,7 +143,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm install --frozen-lockfile
 
       - name: Download prebuild artifacts
         uses: actions/download-artifact@v8
@@ -187,7 +187,7 @@ jobs:
           cache: pnpm
           registry-url: "https://registry.npmjs.org"
 
-      - run: pnpm install --frozen-lockfile --no-optional
+      - run: pnpm install --frozen-lockfile
 
       - name: Download prebuild artifacts
         uses: actions/download-artifact@v8
