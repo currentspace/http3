@@ -131,7 +131,7 @@ try:
         row = matches[0]
         # The checkbox label is a separate AX group; press the square immediately left.
         x = row['left'] - 13 if checkbox else row['x']
-        keys('click at {' + str(round(x)) + ',' + str(round(row['y'])) + '}')
+        run(['artifacts/safari-ocr', '--click', str(round(x)), str(round(row['y']))], check=True)
 
     deadline = time.monotonic() + 40
     while True:

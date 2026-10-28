@@ -1,6 +1,20 @@
 import Foundation
+import CoreGraphics
 import ImageIO
 import Vision
+
+if CommandLine.arguments[1] == "--click" {
+    guard CGPreflightPostEventAccess() else {
+        fputs("Mouse-event permission is unavailable\n", stderr)
+        exit(1)
+    }
+    let point = CGPoint(x: Double(CommandLine.arguments[2])!, y: Double(CommandLine.arguments[3])!)
+    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
+    CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
+    usleep(100_000)
+    CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
+    exit(0)
+}
 
 // Read real screenshots to locate visible Safari controls when AX names are absent.
 let url = URL(fileURLWithPath: CommandLine.arguments[1])
