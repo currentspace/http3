@@ -88,6 +88,7 @@ try:
             time.sleep(.5)
         result.update(phase=phase, userAgent=evaluate('return navigator.userAgent'),
                       secureContext=evaluate('return isSecureContext'))
+        result['layout'] = evaluate("return {text:document.body.innerText,scrollX,scrollY,width:innerWidth,height:innerHeight,children:[...document.body.children].filter(e=>e.tagName!=='SCRIPT').map(e=>({tag:e.tagName,rect:e.getBoundingClientRect().toJSON(),color:getComputedStyle(e).color,display:getComputedStyle(e).display,visibility:getComputedStyle(e).visibility}))}")
         save('safari-' + phase + '.json', result)
         time.sleep(2)
         (root / ('safari-' + phase + '.png')).write_bytes(base64.b64decode(command('GET', '/screenshot')))
@@ -113,6 +114,7 @@ try:
     time.sleep(2)
     run(['open', '-a', 'Safari', endpoint], check=True)
     time.sleep(5)
+    run(['screencapture', '-x', str(root / 'safari-manual-page.png')], check=True)
     script = '''tell application "System Events"
 tell process "Safari"
 set frontmost to true
@@ -131,7 +133,9 @@ try
 set labelText to labelText & " " & description of element as text
 end try
 if labelText contains "web developers" then
-if value of element is 0 then click element
+if value of element is 1 then click element
+delay 0.5
+click element
 end if
 end if
 end try
