@@ -1,0 +1,281 @@
+{
+  "functionalPassed": true,
+  "endpoint": "https://127.0.0.1:60908",
+  "results": [
+    {
+      "events": [
+        {
+          "data": "sse-ok-1",
+          "lastEventId": "1"
+        },
+        {
+          "data": "sse-ok-2",
+          "lastEventId": "2"
+        }
+      ],
+      "fetch": true,
+      "errors": [],
+      "loads": 1,
+      "token": "14045dee-9f41-4b84-be02-5f235fba0c00",
+      "complete": true,
+      "observed": [
+        {
+          "path": "/api/hello?token=14045dee-9f41-4b84-be02-5f235fba0c00",
+          "time": "2026-10-28T21:11:33.452Z",
+          "protocol": "h2"
+        },
+        {
+          "path": "/events?token=14045dee-9f41-4b84-be02-5f235fba0c00",
+          "time": "2026-10-28T21:11:33.509Z",
+          "protocol": "h2"
+        },
+        {
+          "path": "/events?token=14045dee-9f41-4b84-be02-5f235fba0c00",
+          "time": "2026-10-28T21:11:33.958Z",
+          "protocol": "h2"
+        }
+      ],
+      "network": [
+        {
+          "status": null,
+          "protocol": "h2",
+          "name": "/api/hello",
+          "initiator": "fetch",
+          "duration": 186
+        },
+        {
+          "status": null,
+          "protocol": "h2",
+          "name": "/events",
+          "initiator": "eventsource",
+          "duration": 101
+        },
+        {
+          "status": null,
+          "protocol": "h2",
+          "name": "/favicon.ico",
+          "initiator": "icon",
+          "duration": 66
+        },
+        {
+          "status": null,
+          "protocol": "h2",
+          "name": "/observed",
+          "initiator": "fetch",
+          "duration": 37
+        }
+      ],
+      "phase": "initial",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Safari/605.1.15",
+      "secureContext": true,
+      "layout": {
+        "scrollX": 0,
+        "text": "HTTP/3 0.9.3 \u00b7 Safari release validation\n\nhttps://127.0.0.1:60908/\n\nFunctional checks\n\nPASS \u00b7 Fetch returned 200 and expected JSON\n\nPASS \u00b7 SSE delivered two messages across automatic reconnect (Last-Event-ID resumed)\n\nPage loads in this session: 1\n\nSecure context: true \u00b7 certificate errors are NOT bypassed\n\nBrowser network evidence\n\nLive Safari Resource Timing entries and server-observed protocols.\n\nRequest\tInitiator\tProtocol\tStatus\tDuration\n/api/hello\tfetch\th2\tundefined\t186.0 ms\n/events\teventsource\th2\tundefined\t101.0 ms\n/favicon.ico\ticon\th2\tundefined\t66.0 ms\n/observed\tfetch\th2\tundefined\t37.0 ms\n[\n  {\n    \"time\": \"2026-10-28T21:11:33.452Z\",\n    \"path\": \"/api/hello?token=14045dee-9f41-4b84-be02-5f235fba0c00\",\n    \"protocol\": \"h2\"\n  },\n  {\n    \"time\": \"2026-10-28T21:11:33.509Z\",\n    \"path\": \"/events?token=14045dee-9f41-4b84-be02-5f235fba0c00\",\n    \"protocol\": \"h2\"\n  },\n  {\n    \"time\": \"2026-10-28T21:11:33.958Z\",\n    \"path\": \"/events?token=14045dee-9f41-4b84-be02-5f235fba0c00\",\n    \"protocol\": \"h2\"\n  }\n]",
+        "scrollY": 0,
+        "width": 1000,
+        "children": [
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 35,
+              "bottom": 75,
+              "y": 40,
+              "width": 905,
+              "left": 40,
+              "top": 40,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "H1",
+            "color": "rgb(22, 43, 52)"
+          },
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 21,
+              "bottom": 116.09375,
+              "y": 95.09375,
+              "width": 905,
+              "left": 40,
+              "top": 95.09375,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "P",
+            "color": "rgb(22, 43, 52)"
+          },
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 278.8125,
+              "bottom": 414.90625,
+              "y": 136.09375,
+              "width": 905,
+              "left": 40,
+              "top": 136.09375,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "SECTION",
+            "color": "rgb(22, 43, 52)"
+          },
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 683.8125,
+              "bottom": 1118.71875,
+              "y": 434.90625,
+              "width": 905,
+              "left": 40,
+              "top": 434.90625,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "SECTION",
+            "color": "rgb(22, 43, 52)"
+          }
+        ],
+        "height": 668
+      }
+    },
+    {
+      "events": [
+        {
+          "data": "sse-ok-1",
+          "lastEventId": "1"
+        },
+        {
+          "data": "sse-ok-2",
+          "lastEventId": "2"
+        }
+      ],
+      "fetch": true,
+      "errors": [],
+      "loads": 2,
+      "token": "8319bb97-4746-4b6f-bf41-96f5ebee4b09",
+      "complete": true,
+      "observed": [
+        {
+          "path": "/api/hello?token=8319bb97-4746-4b6f-bf41-96f5ebee4b09",
+          "time": "2026-10-28T21:11:37.218Z",
+          "protocol": "h2"
+        },
+        {
+          "path": "/events?token=8319bb97-4746-4b6f-bf41-96f5ebee4b09",
+          "time": "2026-10-28T21:11:37.220Z",
+          "protocol": "h2"
+        },
+        {
+          "path": "/events?token=8319bb97-4746-4b6f-bf41-96f5ebee4b09",
+          "time": "2026-10-28T21:11:37.570Z",
+          "protocol": "h2"
+        }
+      ],
+      "network": [
+        {
+          "status": null,
+          "protocol": "h2",
+          "name": "/api/hello",
+          "initiator": "fetch",
+          "duration": 46
+        },
+        {
+          "status": null,
+          "protocol": "h2",
+          "name": "/events",
+          "initiator": "eventsource",
+          "duration": 44
+        },
+        {
+          "status": null,
+          "protocol": "h2",
+          "name": "/observed",
+          "initiator": "fetch",
+          "duration": 17
+        }
+      ],
+      "phase": "reload",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Safari/605.1.15",
+      "secureContext": true,
+      "layout": {
+        "scrollX": 0,
+        "text": "HTTP/3 0.9.3 \u00b7 Safari release validation\n\nhttps://127.0.0.1:60908/\n\nFunctional checks\n\nPASS \u00b7 Fetch returned 200 and expected JSON\n\nPASS \u00b7 SSE delivered two messages across automatic reconnect (Last-Event-ID resumed)\n\nPage loads in this session: 2\n\nSecure context: true \u00b7 certificate errors are NOT bypassed\n\nBrowser network evidence\n\nLive Safari Resource Timing entries and server-observed protocols.\n\nRequest\tInitiator\tProtocol\tStatus\tDuration\n/api/hello\tfetch\th2\tundefined\t46.0 ms\n/events\teventsource\th2\tundefined\t44.0 ms\n/observed\tfetch\th2\tundefined\t17.0 ms\n[\n  {\n    \"time\": \"2026-10-28T21:11:37.218Z\",\n    \"path\": \"/api/hello?token=8319bb97-4746-4b6f-bf41-96f5ebee4b09\",\n    \"protocol\": \"h2\"\n  },\n  {\n    \"time\": \"2026-10-28T21:11:37.220Z\",\n    \"path\": \"/events?token=8319bb97-4746-4b6f-bf41-96f5ebee4b09\",\n    \"protocol\": \"h2\"\n  },\n  {\n    \"time\": \"2026-10-28T21:11:37.570Z\",\n    \"path\": \"/events?token=8319bb97-4746-4b6f-bf41-96f5ebee4b09\",\n    \"protocol\": \"h2\"\n  }\n]",
+        "scrollY": 0,
+        "width": 1000,
+        "children": [
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 35,
+              "bottom": 75,
+              "y": 40,
+              "width": 905,
+              "left": 40,
+              "top": 40,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "H1",
+            "color": "rgb(22, 43, 52)"
+          },
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 21,
+              "bottom": 116.09375,
+              "y": 95.09375,
+              "width": 905,
+              "left": 40,
+              "top": 95.09375,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "P",
+            "color": "rgb(22, 43, 52)"
+          },
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 278.8125,
+              "bottom": 414.90625,
+              "y": 136.09375,
+              "width": 905,
+              "left": 40,
+              "top": 136.09375,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "SECTION",
+            "color": "rgb(22, 43, 52)"
+          },
+          {
+            "visibility": "visible",
+            "rect": {
+              "x": 40,
+              "height": 639.8125,
+              "bottom": 1074.71875,
+              "y": 434.90625,
+              "width": 905,
+              "left": 40,
+              "top": 434.90625,
+              "right": 945
+            },
+            "display": "block",
+            "tag": "SECTION",
+            "color": "rgb(22, 43, 52)"
+          }
+        ],
+        "height": 668
+      }
+    }
+  ],
+  "artifactSource": "19dafa4001851b73a268078b377cd551d78200c7",
+  "artifactRun": 40758754002
+}

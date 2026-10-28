@@ -1,0 +1,7 @@
+HTTP/3 200 
+alt-svc: h3=":60908"; ma=60
+cache-control: no-store
+content-type: application/json
+
+{"ok":true,"version":"0.9.3"}
+HTTP_VERSION=3

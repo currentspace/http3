@@ -1,0 +1,35 @@
+{
+  "releaseSource": "19dafa4001851b73a268078b377cd551d78200c7",
+  "qualificationSource": "a099c14eafc4d95dabfbd8d964780838378b9467",
+  "workflowRun": 40769595741,
+  "status": "passed",
+  "visualReview": {
+    "reviewedBy": "Codex",
+    "reviewedAt": "2026-10-28T21:14:21.387034+00:00",
+    "pageSuccess": true,
+    "actualInspectorNetworkHttp200": true
+  },
+  "nativeSha256": "20868682543a214aa7f933ea9341d15445cbd48a0efb0b2d4660fa507d6434bd",
+  "files": {
+    "README.md": "0e12814a431c3339533f9cf334388780bda4f1b3566d3c68114aa25dc3a7dbb9",
+    "ca-fingerprint.txt": "b0128656586e9e3fc837458650fcf027947e0b692ade84dd851365f38fe1c40b",
+    "codeql-open-alerts.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "curl-http2.txt": "0cb442918ef26dd8879e62ae3fbbdaf7d63caca543f704a7ca5f7f6858da0ee6",
+    "curl-http3-only.txt": "b60ec7b874c46579678bdd24be8b50424d10f04cb137b1d19b218e82d444c757",
+    "inspector-capture-status.json": "a3460583efaaea30e233efb30243fcf2c576097929ac4c4b2ba048d6e8e0a313",
+    "macos-version.txt": "31fd674ddb951680692d7b68cafdeab5baa6b3e82aae843269dad73b53f25fc5",
+    "npm-availability.json": "efc65eff3d600742a37b6b99a3adc264621574972503776623e4e652f6970496",
+    "pr-readback.json": "d18e25f670bed96d14905279cb1d10047f0d9696d4680d6e1d3a2f1a7344126b",
+    "safari-initial.json": "8f49b3a0f1c089477ed4cd0ab6a557e0c626b87844676ef4c2f7091d9bb2a7f4",
+    "safari-inspector-network.png": "bebbc43b9c34ad5b5392ab735d7f9f49f65a0e9e87ee2a871e4e4770739af9a8",
+    "safari-manual-page.png": "113ba51ddc03619bb4a91302ef0539db401bb2c1b58d8f883ca8bfc2f621b30d",
+    "safari-reload.json": "1be535ee7e3e5fc96a764421b73b470931586d61bb7c2452bffb31dfc30ae4f9",
+    "safari-session.json": "2cdb9e64058371fdcb8755e73822477e7fc36298025071775f8509cc4645ad21",
+    "safari-validation.json": "f997218e4d34ad2e86e36b896f6d972cc79dcc2035849f9201b95dc0721c1086",
+    "safari-version.txt": "71aa105f212925686dd7c481985b50f7cf7c1ac8cc142a86ca57f5e86f822c33",
+    "server-requests.jsonl": "61f5d0691cfa98a9e670ad02076e1004106b5659fbf543aa69322fa1baa78e62",
+    "sse-resume.jsonl": "87c63a06aee059384598b13d3f49ed3ec477b85aead7db7223ea4807c6866cd3",
+    "trust-cleanup.json": "71de8af7362b56efb475427d4529488ce68d7174d02af735e90ddb9d1d5ebed7",
+    "workflow-run.json": "071adf96b90caeec4cd857e4f67a88030dc85f8d14a68ee746e40fef47974d55"
+  }
+}

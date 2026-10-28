@@ -1,0 +1,25 @@
+{
+  "checkedAt": "2026-10-28T20:59:04.168022+00:00",
+  "packages": [
+    {
+      "package": "@currentspace/http3",
+      "latest": "0.9.2",
+      "candidateVersionPublished": null
+    },
+    {
+      "package": "@currentspace/http3-darwin-arm64",
+      "latest": "0.9.2",
+      "candidateVersionPublished": null
+    },
+    {
+      "package": "@currentspace/http3-linux-arm64-gnu",
+      "latest": "0.9.2",
+      "candidateVersionPublished": null
+    },
+    {
+      "package": "@currentspace/http3-linux-x64-gnu",
+      "latest": "0.9.2",
+      "candidateVersionPublished": null
+    }
+  ]
+}
