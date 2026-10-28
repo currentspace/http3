@@ -1,0 +1,74 @@
+$ npm run build:test && node --test --test-isolation=none --test-timeout=15000 dist-test/test/wasm/**/*.test.js
+
+> @currentspace/http3@0.9.3 build:test
+> tsc -p tsconfig.test.json
+
+▶ wasm artifact shape (C2)
+  ✔ compiles as a valid WebAssembly module (0.500334ms)
+  ✔ imports only wasi_snapshot_preview1 functions from the frozen allowlist (0.111208ms)
+  ✔ exports the full h3c_*/qc_* ABI table plus wasm_alloc/wasm_free (0.457042ms)
+  ✔ exports the full hs_*/qs_* server ABI table (0.116292ms)
+  ✔ exports a linear memory (0.075791ms)
+✔ wasm artifact shape (C2) (1.970292ms)
+▶ wasm deterministic clock (C5)
+  ✔ fast-forwards an idle timeout via a mocked clock without a real wall-clock wait (338.921291ms)
+✔ wasm deterministic clock (C5) (339.162916ms)
+▶ wasm frozen-clock simulation (C6)
+  ✔ completes a full handshake + GET with a clock frozen except at explicit I/O ticks (68.618583ms)
+✔ wasm frozen-clock simulation (C6) (68.887792ms)
+▶ wasm H3 loopback (C3)
+  ✔ handshake completes via connectAsync with runtimeMode wasm (55.3885ms)
+  ✔ GET request receives a response with a body (45.636084ms)
+  ✔ request body upload exercises backpressure (STREAM_BLOCKED -> DRAIN) (52.568417ms)
+  ✔ trailers arrive as a "trailers" event after the response body (46.775167ms)
+  ✔ GOAWAY from the server is observed as a "goaway" session event (50.352708ms)
+  ✔ RESET from the server destroys the client stream with an error (45.02625ms)
+  ✔ datagram round-trip (client -> server -> client) (46.39975ms)
+  ✔ ping resolves with a duration (43.146916ms)
+  ✔ close() resolves promptly via the shutdown sentinel, not the 5s fallback (43.249917ms)
+✔ wasm H3 loopback (C3) (429.747166ms)
+▶ wasm H3 SERVER loopback
+  ✔ queued response data and FIN cross small windows exactly once (97.643875ms)
+  ▶ native client x wasm server (matrix cell 5)
+    ✔ handshake completes, GET request/response, clean close on both sides (36.598792ms)
+  ✔ native client x wasm server (matrix cell 5) (36.826ms)
+  ▶ wasm client x wasm server (matrix cell 7)
+    ✔ handshake completes on both sides (43.875625ms)
+    ✔ GET request receives a response with a body (46.101584ms)
+    ✔ request body upload exercises backpressure (STREAM_BLOCKED -> DRAIN) (65.702375ms)
+    ✔ trailers arrive as a "trailers" event after the response body (43.331209ms)
+    ✔ datagram round-trip (client -> server -> client) (55.33025ms)
+    ✔ close() resolves promptly on both sides (66.822625ms)
+  ✔ wasm client x wasm server (matrix cell 7) (322.223583ms)
+✔ wasm H3 SERVER loopback (457.300042ms)
+▶ wasm QUIC loopback (C3)
+  ✔ handshake completes via connectQuicAsync with runtimeMode wasm (37.982042ms)
+  ✔ openStream() bidi echo (28.224208ms)
+  ✔ server-initiated stream surfaces as a "stream" event (32.683875ms)
+  ✔ QuicStream write backpressure (STREAM_BLOCKED -> DRAIN) then FIN (78.395167ms)
+  ✔ datagram round-trip (client -> server -> client) (31.333708ms)
+  ✔ close() resolves promptly and destroys open streams (34.186042ms)
+✔ wasm QUIC loopback (C3) (243.700667ms)
+▶ wasm QUIC SERVER loopback
+  ✔ pair helper waits for a delayed server session event (161.983167ms)
+  ✔ queued data and FIN cross small windows exactly once in both directions (87.385917ms)
+  ▶ native client x wasm server (matrix cell 6)
+    ✔ handshake completes, openStream() bidi echo, clean close on both sides (35.720125ms)
+  ✔ native client x wasm server (matrix cell 6) (35.963292ms)
+  ▶ wasm client x wasm server (matrix cell 8)
+    ✔ handshake completes on both sides (47.060958ms)
+    ✔ openStream() bidi echo (49.282208ms)
+    ✔ server-initiated stream surfaces as a "stream" event on the client (48.164958ms)
+    ✔ QuicStream write backpressure (STREAM_BLOCKED -> DRAIN) then FIN (162.206375ms)
+    ✔ datagram round-trip (client -> server -> client) (50.4245ms)
+    ✔ close() resolves promptly and destroys open streams on both sides (48.312792ms)
+  ✔ wasm client x wasm server (matrix cell 8) (406.281792ms)
+✔ wasm QUIC SERVER loopback (692.078208ms)
+ℹ tests 39
+ℹ suites 11
+ℹ pass 39
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2261.661792

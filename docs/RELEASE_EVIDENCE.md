@@ -18,20 +18,53 @@ and remaining qualification work for each release candidate.
 - Stable publishing retains the established OIDC `latest` path. Canary mirroring
   is optional, not a release prerequisite; no new npm token is needed.
 
-### Required qualification (in progress)
+### Completed release qualification
 
-- Full local release gate on the versioned source, with rebuilt native/WASM files.
-- All PR checks, including restored security and Rust safety workflows.
-- Hosted release dry-run for the exact versioned candidate: three native builds,
-  WASM artifact, six native runtime validation jobs, and package dry-run.
-- Real Safari fetch/SSE/reconnect checks and screenshots against a trusted HTTPS
-  loopback server, plus HTTP/3 and HTTP/2 curl checks against that same server.
-  Brian explicitly selected loopback or Docker for the release staging endpoint.
-- Downloaded release artifacts and clean installed-package validation with source
-  and artifact hashes. Local x64 emulation alone is not the release build receipt.
+- Validated implementation source: `c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979`.
+- Versioned local release tests passed: 335 Node tests, 67 FFI tests, three
+  browsers, 223 Rust unit tests plus integration tests, packed install,
+  concurrency (1249 ms / 10000 ms budget), load smoke, and 39 WASM tests.
+  The enclosing storage guard returned 125 at its final check: system usage
+  reached 94.03%, exceeding its conservative 94% threshold after tests completed.
+  This is not an unqualified green wrapper run; the requested 95% ceiling held.
+- [Hosted release dry-run 40750317271](https://github.com/currentspace/http3/actions/runs/40750317271)
+  passed all 11 jobs: native builds on Linux x64, Linux ARM64, macOS ARM64;
+  WASM build/tests; six Node 24/26 native validation jobs with packed installs;
+  and dry-run publication of all four 0.9.3 packages. No registry writes occurred.
+- Downloaded all four CI artifacts. Verified architectures and SHA-256 hashes,
+  then packed the exact candidate with those binaries and checked that every
+  embedded binary/WASM hash matched its downloaded artifact.
+- A clean installed root package loaded native exports and every public subpath,
+  and instantiated WASM on macOS ARM64 with Node 24.22.1 and 26.12.1. All 39
+  WASM tests also passed locally against the downloaded hosted WASM/native files.
+- Real Safari 27.0.1 on macOS 27.0.1 passed trusted loopback HTTPS page, fetch,
+  SSE, automatic Last-Event-ID resumption, and reload checks. Captured the actual
+  Web Inspector Network panel, showing HTTP 200 for document, fetch, and both
+  SSE requests. The second SSE request is red because the fixture intentionally
+  closes EventSource after its second message. Safari used HTTP/2 in this run.
+- Curl HTTP/3-only and HTTP/2 both passed against the same manually inspected
+  endpoint, `https://127.0.0.1:62802`, using `--cacert` without TLS bypass.
+  Brian explicitly selected loopback or Docker staging. Temporary CA trust and
+  the isolated keychain were removed, the original search list was restored,
+  and the staging server/test windows were stopped.
+- Receipts, screenshots, artifact and package hashes:
+  [0.9.3 evidence bundle](../.github/release-evidence/0.9.3/README.md).
+
+### Remaining gate
+
+The separate CodeQL findings check reports 17 Rust alerts, although the Security
+workflow's analysis/audit jobs and Rust Safety workflow completed successfully.
+Each alert was reviewed against its source and SARIF flow: the mandatory public
+QUIC Initial salt, in-memory queue operations incorrectly classified as logging,
+and test diagnostics containing only byte counts/booleans. Proposed dispositions
+and source-specific reasons are in the [CodeQL triage](release-evidence/0.9.3/CODEQL_TRIAGE.md).
+Dismissal requires Brian's explicit approval; no alert has been dismissed and no
+security query has been disabled. PR checks on the final head must also complete.
 
 No publication, release tag, main-branch merge, or production deployment has been
-performed as part of this preparation. Completion requires receipts below.
+performed as part of this preparation. Do not publish while the remaining gate
+is unresolved. Recheck version/tag availability and Trusted Publisher permissions
+at publication time; a dry-run does not exercise registry write authorization.
 
 ## 0.9.2
 

@@ -1,0 +1,4 @@
+subject=CN=http3-test-ca
+notBefore=Oct 28 19:11:43 2026 GMT
+notAfter=Oct 29 19:11:43 2026 GMT
+sha256 Fingerprint=72:B9:2D:D0:76:88:46:0D:6F:8A:50:D4:3D:D4:3D:1A:F2:25:C9:16:73:BE:70:3B:A1:1B:FF:9A:48:1F:57:8A

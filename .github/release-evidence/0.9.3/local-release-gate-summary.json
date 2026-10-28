@@ -1,0 +1,16 @@
+{
+  "source": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979",
+  "node": "24.22.1",
+  "nativeTests": 335,
+  "ffiTests": 67,
+  "browsers": 3,
+  "rustUnitTests": 223,
+  "wasmTests": 39,
+  "packedInstall": "passed",
+  "concurrencyGateMs": 1249,
+  "concurrencyBudgetMs": 10000,
+  "loadSmoke": "passed",
+  "logSha256": "640427ec7e066207b7d7572d054f6b042d4c8fb8fbbaefb6d330b7cad428c4b6",
+  "storageGuardExit": 125,
+  "storageGuardReason": "Final check observed 94.03% system usage, above the guard 94% threshold; all test commands had completed successfully. User 95% ceiling was not reached."
+}

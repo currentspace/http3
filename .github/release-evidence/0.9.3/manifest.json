@@ -1,0 +1,106 @@
+{
+  "source": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979",
+  "capturedAt": "2026-10-28",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "ded16800065b439ba187b8b069ee9779707a535b92ae26eee9c8d03cd2609514",
+      "size": 3095
+    },
+    {
+      "path": "curl-manual-http2.txt",
+      "sha256": "c8f6e16f23a3bb79af59ead9d7c82f560ae4951fb7feb93da6391b0bdb5c02f2",
+      "size": 177
+    },
+    {
+      "path": "curl-manual-http3-only.txt",
+      "sha256": "94535cd4787f5a5ee56a6e50d92ec31d3a4549e69b03df499739ffdf9e99a225",
+      "size": 141
+    },
+    {
+      "path": "hosted-artifacts.json",
+      "sha256": "b5abffc979aefad26e46bccc55d608aeaf5142b3ceeeff63b575106a30ccfc17",
+      "size": 2028
+    },
+    {
+      "path": "hosted-file-checksums.json",
+      "sha256": "929066c21b249b0d6eaf6f35419ac44ebb117dd11c3c03afd07f574d23ddacde",
+      "size": 886
+    },
+    {
+      "path": "hosted-release-run.json",
+      "sha256": "d4eeb7570197054f22cd8533b70d3ee1e1b817cb875bc36260834208c384501d",
+      "size": 3760
+    },
+    {
+      "path": "hosted-wasm-tests.log",
+      "sha256": "0db5ae2370d12061f63e32b6b11033b2110520cf5a1fc8bfcbe9e6fecc535d23",
+      "size": 4225
+    },
+    {
+      "path": "local-package-checksums.json",
+      "sha256": "1f9a3816d7171564d5979e5dc9c19faecd215418ab8b35f83da6f8737e3131bc",
+      "size": 2175
+    },
+    {
+      "path": "local-release-gate-summary.json",
+      "sha256": "25bf032f24b9baa13355b0622519d8dc9143b16536ca1cc9205d9a432da19333",
+      "size": 585
+    },
+    {
+      "path": "macos-version.txt",
+      "sha256": "4ef10a0fc370704ea84699cf3851e51488598c5f1ab35cb572eb6b96278a8e5c",
+      "size": 66
+    },
+    {
+      "path": "manual-ca-certificate.txt",
+      "sha256": "278a00cb280ad13866da622351dc17d5a2743aee5bac2674a6e8703cd8d7da41",
+      "size": 209
+    },
+    {
+      "path": "packed-consumer-node24.log",
+      "sha256": "796e04e39a255843ca123aa778729a940e86e02ed7148c94e9878c17c86ff0bc",
+      "size": 103
+    },
+    {
+      "path": "packed-consumer-node26.log",
+      "sha256": "470cc9b552e49b1aa1e8852736b8a190c25e8c27a86c34182cb21a80d12f5dba",
+      "size": 103
+    },
+    {
+      "path": "safari-initial.json",
+      "sha256": "ce3dbb36fa4b5d1dcbe9556ba3830152e946876dd7ce6d30f97feb8af26a67fc",
+      "size": 1474
+    },
+    {
+      "path": "safari-manual-window.png",
+      "sha256": "7901b1bc5c8961fdcd8e48133caaec07e90bc21ffc161a66db5e77e44e6f74e4",
+      "size": 790407
+    },
+    {
+      "path": "safari-reload.json",
+      "sha256": "8d2f5a68d9237c4f14b5f1d181a813abda7324125e163fb47a580aad562fd55d",
+      "size": 1337
+    },
+    {
+      "path": "safari-session.json",
+      "sha256": "66ce138ff3dca41d2c9c2b43136bae492fbc69b2884df8ad7c477b1e06bc68d8",
+      "size": 766
+    },
+    {
+      "path": "safari-version.txt",
+      "sha256": "cce6eacf8fe4381795877bb6649de9479ff495ba8113a2fc586091365486987a",
+      "size": 47
+    },
+    {
+      "path": "safari-web-inspector-network.png",
+      "sha256": "9b626ae51196e049d345468640dfa3d9c2ddfe1d52df5b82de6121e80530a27a",
+      "size": 714756
+    },
+    {
+      "path": "trust-cleanup.json",
+      "sha256": "1ee47655f094e4cd4f63db508f1342d82e439073e74bcec7cb8980a6b9c56165",
+      "size": 141
+    }
+  ]
+}
