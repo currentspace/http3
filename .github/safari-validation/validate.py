@@ -111,7 +111,7 @@ try:
     session = None
     run(['osascript', '-e', 'tell application "Safari" to quit'], check=True)
     time.sleep(2)
-    run(['osascript', '-e', 'tell application "Safari"\nactivate\nmake new document with properties {URL:"' + endpoint + '"}\nend tell'], check=True)
+    run(['open', '-a', 'Safari', endpoint], check=True)
     time.sleep(5)
     script = '''tell application "System Events"
 tell process "Safari"
