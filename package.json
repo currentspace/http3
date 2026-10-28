@@ -4,7 +4,7 @@
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
-  "packageManager": "pnpm@11.1.2",
+  "packageManager": "pnpm@12.16.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/currentspace/http3.git"

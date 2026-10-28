@@ -1,4 +1,4 @@
-ARG NODE_MAJOR=24
+ARG NODE_MAJOR=24.22.1
 FROM node:${NODE_MAJOR}-bookworm AS native-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,9 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   git \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.99.1
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN npm install -g pnpm@11.1.2
+RUN npm install -g pnpm@12.16.1
 
 WORKDIR /app
 
@@ -25,7 +25,7 @@ COPY examples/express-adapter/package.json ./examples/express-adapter/package.js
 RUN pnpm install --frozen-lockfile --no-optional
 
 # Keep the native+TS build cache stable when only example app files change.
-COPY build.rs Cargo.toml Cargo.lock ./
+COPY build.rs Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY benches ./benches
 COPY fuzz ./fuzz
 COPY tools ./tools
@@ -39,7 +39,7 @@ RUN pnpm prune --prod
 
 FROM node:${NODE_MAJOR}-bookworm AS hono-deps
 
-RUN npm install -g pnpm@11.1.2
+RUN npm install -g pnpm@12.16.1
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./

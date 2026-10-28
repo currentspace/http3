@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG NODE_MAJOR=24
+ARG NODE_MAJOR=24.22.1
 FROM node:${NODE_MAJOR}-bookworm
 
 ARG TARGETPLATFORM
@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   strace \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.99.1
 ENV PNPM_HOME="/pnpm"
 ENV PATH="${PNPM_HOME}:/root/.cargo/bin:${PATH}"
-RUN npm install -g pnpm@11.1.2
+RUN npm install -g pnpm@12.16.1
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ COPY examples/express-adapter/package.json ./examples/express-adapter/package.js
 RUN --mount=type=cache,id=http3-runtime-pnpm-${TARGETPLATFORM},target=/pnpm/store \
   pnpm install --frozen-lockfile --ignore-scripts --no-optional --store-dir /pnpm/store
 
-COPY build.rs Cargo.toml Cargo.lock ./
+COPY build.rs Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY benches ./benches
 COPY fuzz ./fuzz
 COPY tools ./tools

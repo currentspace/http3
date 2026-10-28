@@ -11,7 +11,7 @@
 #   (the canonical pnpm scripts do this when HTTP3_INTEROP_DOCKER_IO_URING=1
 #   is set). Without the flag the runtime auto-falls-back to poll, which
 #   is also a valid Linux driver — just not the production-fast path.
-ARG NODE_MAJOR=24
+ARG NODE_MAJOR=24.22.1
 ARG VERIFY_IMAGE=http3-verify:latest
 FROM ${VERIFY_IMAGE} AS build
 

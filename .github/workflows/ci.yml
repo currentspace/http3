@@ -21,18 +21,19 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11.1.2
+          version: 12.16.1
 
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust with wasm32-wasip1 target
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.99.1
           targets: wasm32-wasip1
 
       - name: Cache cargo (wasm32-wasip1)
@@ -62,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['24', '25', '26']
+        node-version: ['24.22.1', '26.12.1']
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -75,7 +76,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11.1.2
+          version: 12.16.1
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -111,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['24', '25', '26']
+        node-version: ['24.22.1', '26.12.1']
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -119,7 +120,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11.1.2
+          version: 12.16.1
 
       - name: Setup Node
         uses: actions/setup-node@v6

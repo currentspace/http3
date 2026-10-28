@@ -49,10 +49,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
         with:
-          version: 11.1.2
+          version: 12.16.1
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
@@ -83,11 +83,13 @@ jobs:
           languages: ${{ matrix.language }}
       - uses: pnpm/action-setup@v4
         with:
-          version: 11.1.2
+          version: 12.16.1
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.22.1'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
       - run: pnpm install --frozen-lockfile --no-optional
       - run: pnpm run build
       - uses: github/codeql-action/analyze@v4

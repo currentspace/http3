@@ -44,11 +44,34 @@ Raw command logs and registry snapshots live in ignored
 `artifacts/dependency-update/`. Summaries and selected version decisions are
 recorded here before each commit.
 
-- Baseline test suite: pending installation/build.
+- Baseline `verify.sh --fast`: 14 stages passed, 0 failed, 4 skipped (233 s).
+  Rust unit: 223 passed; extended protocol tests and Loom passed; Node core/
+  runtime/interop/release: 335 passed; FFI: passed.
+- Baseline WASM SDK 33: 39 tests passed, no skips.
+- Baseline performance and packed install: passed; concurrency 1079 ms, event
+  loop p95 8.3 ms over 3750 requests; load smoke passed.
+- Baseline browser E2E: not yet run.
+- Baseline npm audit: 51 findings (1 critical, 18 high, 27 moderate, 5 low).
+- Baseline WASM build changed Cargo.lock source metadata (registry to patch
+  path). Restored the original lockfile after the run; fix reproducibility in
+  the WASM upgrade stage.
 - Storage guard: three tests passed (APFS/reserve calculation, preflight refusal,
   and cancellation of a running process on threshold crossing); live preflight
   measured 55.50% project / 91.61% system usage.
-- Registry target inventory: in progress.
+- Registry target inventory: [recorded](DEPENDENCY_INVENTORY.md).
+- Toolchain update: pnpm 12.16.1, Rust 1.99.1, Node 24.22.1 / 26.12.1.
+  Keep the existing Rust 1.96 minimum until dependency resolution proves a
+  higher minimum necessary. Node 25 is EOL and removed from CI.
+- Docker internal filesystem: 3% used (23.3 GiB); system volume remains 92%.
+- Toolchain validation: `verify.sh --fast` on Node 24.22.1 passed all 14
+  enabled stages (94 s; same four explicitly skipped stages as baseline).
+  Public API tests on Node 26.12.1 passed 3/3. All seven workflow YAML files
+  parsed. Frozen pnpm 12 install passed after migration: the old lockfile had
+  missing optional-prebuild records; explicit first-party exclusions and
+  `install --fix-lockfile` repaired it. pnpm 12 also records its own binary
+  dependencies in a separate lockfile document.
+- Latest storage check: 55.83% project, 91.73% system; approximately 74.3 GiB
+  system space available. No unrelated Docker resources removed.
 - JavaScript/Rust/WASM/container upgrades: pending.
 - Cross-platform, browser, safety, packaging, and performance qualification: pending.
 
