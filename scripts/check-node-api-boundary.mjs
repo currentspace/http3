@@ -96,7 +96,7 @@ for (const file of scanEntries.flatMap((entry) => collectFiles(entry))) {
 
 if (violations.length > 0) {
   console.error('Node-API boundary check failed.');
-  console.error('The release prebuilds are shared across Node 24/25/26, so native code must not use Node/V8/libuv ABI-bound addon APIs.');
+  console.error('The release prebuilds are shared across Node 24/26, so native code must not use Node/V8/libuv ABI-bound addon APIs.');
   for (const violation of violations) {
     console.error(`- ${violation.file}:${violation.line} ${violation.label}: ${violation.text}`);
   }

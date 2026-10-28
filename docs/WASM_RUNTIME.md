@@ -56,40 +56,28 @@ scripts/build-bssl-wasi.sh.
 `pnpm run build:wasm` (`scripts/build-wasm.mjs`) runs the whole pipeline in
 one step — you do not need to run anything else first:
 
-1. Stages BoringSSL for `wasm32-wasip1` (`pnpm run build:bssl-wasi` /
-   `scripts/build-bssl-wasi.sh`), cached under `target/bssl-wasi/<boring-sys
-   version>/` — a no-op on repeat runs unless the pinned `boring-sys`
-   version changes. `build:bssl-wasi` is exposed as its own script only so
-   CI (or you) can warm/diagnose that step in isolation; it is not a
-   required separate manual step.
-2. Vendors and applies the 2-line quiche wasm-FFI patch
-   (`scripts/prepare-quiche-wasm-patch.sh`) into a git-ignored
-   `target/quiche-wasm-patched/<version>/` directory — scoped to this one
-   build invocation via a `--config patch.crates-io.quiche.path=...`
-   override, never written into the committed `Cargo.toml` (a plain `cargo
-   build --release` is unaffected whether or not this has ever run).
-3. Cross-compiles `crates/http3-wasm` for `wasm32-wasip1` in release mode.
-4. Runs `wasm-opt -Oz --strip-debug` (skipped with a warning, copying the
-   unoptimized build instead, if `wasm-opt`/binaryen isn't on `PATH`) and
-   copies the result to `dist/wasm/http3_client.wasm`.
+1. Stages BoringSSL from locked boring-sys 5.3.0 for `wasm32-wasip1`
+   (`scripts/build-bssl-wasi.sh`). Archives are cached under
+   `target/bssl-wasi/<version>/<recipe-hash>/`; the key includes SDK/compiler,
+   CMake, and the build recipe. Upstream `OPENSSL_NO_SOCK` and `getentropy`
+   replace the previous source edits and RNG/socket shim. C++ exceptions and
+   RTTI are disabled to match the SDK's `noeh` libraries.
+2. Cross-compiles `crates/http3-wasm` with `cargo --locked`. quiche 0.30
+   includes the former AES/ChaCha WASM FFI fixes upstream. One new BoringSSL 5
+   signature correction is recorded in [vendor/quiche/PATCHES.md](../vendor/quiche/PATCHES.md).
+   Native and WASM share that source and lockfile; linker warnings are fatal.
+3. Runs `wasm-opt -Oz --strip-debug` (or copies the unoptimized artifact if
+   binaryen is unavailable) to `dist/wasm/http3_client.wasm`.
 
-Real output from a from-scratch run on this machine (macOS arm64):
+SDK 34 is deferred until stable Rust includes its WASI startup ABI: Rust 1.99
+fails to link the standalone spike with `undefined symbol: __wasi_init_tp`.
+See [upstream compatibility evidence](https://github.com/napi-rs/napi-rs/issues/3491).
+The standalone
+Initial-packet spike uses the same build environment:
 
+```bash
+node scripts/build-wasm.mjs --spike
 ```
-build-wasm: staging BoringSSL for wasm32-wasip1 (scripts/build-bssl-wasi.sh)...
-build-wasm: bssl staged at .../target/bssl-wasi/4.22.0
-build-wasm: preparing patched quiche source (scripts/prepare-quiche-wasm-patch.sh)...
-build-wasm: patched quiche at .../target/quiche-wasm-patched/0.29.2
-build-wasm: cross-compiling crates/http3-wasm for wasm32-wasip1 (this can take a while on a cold cache)...
-build-wasm: built .../target/wasm32-wasip1/release/http3_wasm.wasm (10.00 MiB pre-opt)
-build-wasm: running wasm-opt -Oz --strip-debug...
-build-wasm: wasm-opt: 10.00 MiB -> 1.47 MiB
-build-wasm: ready: .../dist/wasm/http3_client.wasm (1503 KiB)
-```
-
-Measured artifact size on this build: 1.47 MiB raw, ~618 KiB gzip-9 —
-comfortably under the 10 MB paid-Workers bundle limit referenced in the plan
-(§9 C8), if/when this ships in a Worker.
 
 `dist/wasm/http3_client.wasm` is produced by this separate cargo/wasm-opt
 pipeline, not by `tsc`. See

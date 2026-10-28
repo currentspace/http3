@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install or refresh the latest Verus binary release for standalone proofs.
+# Install or refresh the pinned Verus binary release for standalone proofs.
 
 set -euo pipefail
 
@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 VERUS_HOME="${HTTP3_VERUS_HOME:-$HOME/.local/share/http3-verus}"
-VERSION="${HTTP3_VERUS_VERSION:-latest}"
+VERSION="${HTTP3_VERUS_VERSION:-release/0.2026.10.26.d17fbd0}"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) ASSET_PATTERN='(arm|aarch64).*macos|macos.*(arm|aarch64)' ;;
@@ -45,6 +45,22 @@ fi
 
 zip="$tmp/verus.zip"
 curl --fail --show-error --silent --location "$asset_url" -o "$zip"
+python3 - "$metadata" "$asset_url" "$zip" <<'PYVERIFY'
+import hashlib, json, sys
+metadata, url, archive = sys.argv[1:]
+with open(metadata) as f:
+    asset = next(a for a in json.load(f)['assets'] if a['browser_download_url'] == url)
+expected = asset.get('digest', '')
+if not expected.startswith('sha256:'):
+    raise SystemExit('Verus release asset has no SHA-256 digest')
+h = hashlib.sha256()
+with open(archive, 'rb') as f:
+    for block in iter(lambda: f.read(1024 * 1024), b''):
+        h.update(block)
+if 'sha256:' + h.hexdigest() != expected:
+    raise SystemExit('Verus archive checksum mismatch')
+print('Verified Verus archive SHA-256:', h.hexdigest())
+PYVERIFY
 unzip -q "$zip" -d "$tmp/extract"
 
 verus_bin="$(find "$tmp/extract" -type f -name verus -perm -111 | head -n 1)"
@@ -70,4 +86,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 fi
 
 printf 'Installed Verus to %s\n' "$VERUS_HOME"
+# This release's launcher selects 1.95.0 even though its build metadata names
+# a newer compiler. Install the launcher's required sysroot explicitly.
+rustup toolchain install "${HTTP3_VERUS_RUST_VERSION:-1.95.0}" --profile minimal
 "$VERUS_HOME/verus" --version || "$VERUS_HOME/verus"

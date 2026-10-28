@@ -16,27 +16,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 11.1.2
+          version: 12.16.1
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust with wasm32-wasip1 target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: 1.99.1
           targets: wasm32-wasip1
 
       - name: Cache cargo (wasm32-wasip1)
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: wasm32-wasip1-wasi-sdk-33
 
@@ -44,7 +45,7 @@ jobs:
         uses: ./.github/actions/setup-wasi-sdk
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
+        run: pnpm install --frozen-lockfile
 
       - name: Build native addon (debug)
         run: npx napi build --platform
@@ -62,39 +63,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['24', '25', '26']
+        node-version: ['24.22.1', '26.12.1']
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 11.1.2
+          version: 12.16.1
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Resolve pinned Node image
+        id: node-image
+        run: echo "image=$(node scripts/node-container-image.mjs '${{ matrix.node-version }}')" >> "$GITHUB_OUTPUT"
 
       - name: Build Linux arm64 Docker runtime image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.runtime-test
           platforms: linux/arm64
           build-args: |
-            NODE_MAJOR=${{ matrix.node-version }}
+            NODE_IMAGE=${{ steps.node-image.outputs.image }}
           load: true
           tags: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
           cache-from: type=gha,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-arm64
           cache-to: type=gha,mode=max,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-arm64
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
+        run: pnpm install --frozen-lockfile
 
       - name: Run Linux arm64 Docker runtime matrix
         env:
@@ -111,37 +116,41 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['24', '25', '26']
+        node-version: ['24.22.1', '26.12.1']
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
-          version: 11.1.2
+          version: 12.16.1
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --no-optional
+        run: pnpm install --frozen-lockfile
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Resolve pinned Node image
+        id: node-image
+        run: echo "image=$(node scripts/node-container-image.mjs '${{ matrix.node-version }}')" >> "$GITHUB_OUTPUT"
 
       - name: Build Linux amd64 Docker runtime image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.runtime-test
           platforms: linux/amd64
           build-args: |
-            NODE_MAJOR=${{ matrix.node-version }}
+            NODE_IMAGE=${{ steps.node-image.outputs.image }}
           load: true
           tags: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
           cache-from: type=gha,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-amd64

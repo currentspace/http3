@@ -43,6 +43,7 @@ interface ObservedRequest {
 
 interface UserKeychainTrust {
   readonly mode: 'user-keychain';
+  readonly caPath: string;
   readonly keychainPath: string;
   readonly originalSearchList: readonly string[];
 }
@@ -143,7 +144,7 @@ function installTemporaryMacUserTrust(caPath: string, tempDir: string): UserKeyc
     run('security', ['set-keychain-settings', keychainPath]);
     run('security', ['list-keychains', '-d', 'user', '-s', keychainPath, ...originalSearchList]);
     run('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', keychainPath, caPath]);
-    return { mode: 'user-keychain', keychainPath, originalSearchList };
+    return { mode: 'user-keychain', caPath, keychainPath, originalSearchList };
   } catch (err: unknown) {
     try {
       run('security', ['list-keychains', '-d', 'user', '-s', ...originalSearchList]);
@@ -252,12 +253,12 @@ function restoreBrowserTrust(trust: BrowserCertificateTrust | null): void {
   }
 
   try {
-    run('security', ['list-keychains', '-d', 'user', '-s', ...trust.originalSearchList]);
+    run('security', ['remove-trusted-cert', trust.caPath]);
   } finally {
     try {
+      run('security', ['list-keychains', '-d', 'user', '-s', ...trust.originalSearchList]);
+    } finally {
       run('security', ['delete-keychain', trust.keychainPath]);
-    } catch {
-      // Best-effort cleanup; the keychain is in the test temp directory.
     }
   }
 }
@@ -346,6 +347,15 @@ async function runBrowserCase(
 ): Promise<BrowserRunResult> {
   const profileDir = join(tempDir, browserCase.name);
   browserCase.prepareProfile?.(profileDir, caPath, port);
+  let browserEnv: Record<string, string | undefined> | undefined;
+  if (process.platform === 'darwin' && browserCase.name === 'firefox') {
+    // Firefox 157 also reads app data outside -profile. Keep automation out of
+    // the user's Firefox directory (Playwright #42768; fixed in Firefox 158).
+    const appDataHome = join(tempDir, 'firefox-app-data');
+    mkdirSync(appDataHome, { recursive: true });
+    browserEnv = { ...process.env, CFFIXED_USER_HOME: appDataHome };
+    importCaIntoNssProfile(profileDir, caPath);
+  }
 
   if (browserCase.primeAltSvcBeforeLaunch) {
     await primeAltSvc(browserCase, port, profileDir);
@@ -354,6 +364,7 @@ async function runBrowserCase(
   const context: BrowserContext = await browserCase.launcher.launchPersistentContext(profileDir, {
     headless: true,
     ignoreHTTPSErrors: false,
+    ...(browserEnv ? { env: browserEnv } : {}),
     ...browserCase.launchOptions(port),
   });
 
@@ -481,7 +492,15 @@ describe('browser HTTP/3 compatibility', { skip: !ENABLED && 'set HTTP3_BROWSER_
       try {
         restoreBrowserTrust(trust);
       } finally {
-        if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+        if (tempDir) {
+          const appDataHome = join(tempDir, 'firefox-app-data');
+          if (process.platform === 'darwin' && existsSync(appDataHome)) {
+            // macOS adds deny-delete ACLs to Library/Downloads in this new
+            // test-only home. Remove those ACLs before deleting our fixture.
+            run('chmod', ['-RN', appDataHome]);
+          }
+          rmSync(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+        }
       }
     }
   });

@@ -1,16 +1,16 @@
 # Node 26 Compatibility And HTTP/3 Alignment
 
-**Last updated:** 2026-05-20
+**Last updated:** 2026-10-28
 
 ## Runtime Facts
 
 - Node.js 26.0.0 was first released on 2026-05-05 and is in Current status.
-- The latest Node 26 line observed for this update is Node.js 26.2.0.
+- Validated toolchain targets are Node.js 24.22.1 and 26.12.1.
 - Node 26 reports `NODE_MODULE_VERSION` 147, but this package uses `napi-rs`
   with stable Node-API feature levels (`napi4`, `napi6`, `napi8`), so release
   prebuilds are shared across supported Node majors.
-- CI must test Node 24, 25, and 26 before claiming Node 26 support. Node 24
-  remains the LTS baseline; Node 26 is the forward-compatibility target.
+- CI tests Node 24 and 26. Node 25 is end-of-life and removed from the matrix.
+  Node 24 remains the minimum supported major.
 
 Official references:
 
@@ -20,8 +20,7 @@ Official references:
 
 ## CI Coverage
 
-The Node 26 support check is intentionally the same workload as Node 24 and
-Node 25:
+The Node 26 support check uses the same workload as Node 24:
 
 - native addon build plus TypeScript build
 - lint and typecheck
@@ -32,10 +31,14 @@ Node 25:
 - distribution packaging and packed-install smoke
 
 The release prebuild workflow builds one N-API binary per supported
-OS/arch/libc target; Node 24/25/26 compatibility is proven by loading and smoke
+OS/arch/libc target; Node 24/26 compatibility is proven by loading and smoke
 testing the same package under each Node major in CI.
 
 ## Node Core QUIC/HTTP3 Alignment
+
+The following design notes describe the May 2026 review; they are not a current
+claim about Node core API availability. This dependency refresh keeps quiche as
+the protocol implementation.
 
 Node.js 26 includes QUIC commits from nodejs/node#62387, but the public Node
 26.2.0 API docs do not expose a stable QUIC or HTTP/3 module. Treat Node core

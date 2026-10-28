@@ -1,10 +1,10 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
-  "packageManager": "pnpm@11.1.2",
+  "packageManager": "pnpm@12.16.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/currentspace/http3.git"
@@ -146,8 +146,8 @@
     "test:rust:stress": "cargo test --test stress_udp_quic --features bench-internals --no-default-features -- --ignored",
     "test:rust:stress:all": "cargo test --test stress_udp_quic --test stress_sustained_throughput --test stress_memory_stability --test stress_connection_churn --test stress_timer_accuracy --features bench-internals --no-default-features -- --ignored",
     "test:rust:loom": "cargo test --test unsafe_wrappers_loom --test buffer_recycler_loom --no-default-features",
-    "test:rust:miri": "cargo +nightly miri test --lib --no-default-features unsafe_boundary",
-    "test:rust:fuzz:smoke": "cargo +nightly fuzz run unsafe_wrappers -- -runs=1 && cargo +nightly fuzz run unsafe_wrappers_structured -- -runs=1 && cargo +nightly fuzz run pending_write_state -- -runs=1 && cargo +nightly fuzz run pending_write_ops -- -runs=1 && cargo +nightly fuzz run parse_recv_cmsgs -- -runs=1 && cargo +nightly fuzz run parse_recv_cmsgs_structured -- -runs=1",
+    "test:rust:miri": "cargo +nightly-2026-10-28 miri test --lib --no-default-features unsafe_boundary",
+    "test:rust:fuzz:smoke": "cargo +nightly-2026-10-28 fuzz run unsafe_wrappers -- -runs=1 && cargo +nightly-2026-10-28 fuzz run unsafe_wrappers_structured -- -runs=1 && cargo +nightly-2026-10-28 fuzz run pending_write_state -- -runs=1 && cargo +nightly-2026-10-28 fuzz run pending_write_ops -- -runs=1 && cargo +nightly-2026-10-28 fuzz run parse_recv_cmsgs -- -runs=1 && cargo +nightly-2026-10-28 fuzz run parse_recv_cmsgs_structured -- -runs=1",
     "rust:safety:bootstrap": "bash scripts/rust-safety-bootstrap.sh",
     "test:rust:kani:preflight": "HTTP3_KANI_LIST_ONLY=1 bash scripts/rust-kani-smoke.sh",
     "test:rust:kani:smoke": "bash scripts/rust-kani-smoke.sh",
@@ -188,12 +188,12 @@
     "safari:checklist": "node scripts/safari-validation-checklist.mjs",
     "verify": "bash scripts/verify.sh",
     "verify:fast": "bash scripts/verify.sh --fast",
-    "verify:docker": "docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.verify -t http3-verify . && docker run --rm http3-verify",
-    "verify:docker:io-uring": "docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.verify -t http3-verify . && docker run --rm --security-opt seccomp=unconfined --cap-add=NET_ADMIN http3-verify",
-    "docker:interop:build": "docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.verify -t http3-verify . && docker build --build-arg NODE_MAJOR=${NODE_MAJOR:-24} -f Dockerfile.interop -t http3-interop .",
+    "verify:docker": "docker build --build-arg NODE_IMAGE=$(node scripts/node-container-image.mjs) -f Dockerfile.verify -t http3-verify . && docker run --rm http3-verify",
+    "verify:docker:io-uring": "docker build --build-arg NODE_IMAGE=$(node scripts/node-container-image.mjs) -f Dockerfile.verify -t http3-verify . && docker run --rm --security-opt seccomp=unconfined --cap-add=NET_ADMIN http3-verify",
+    "docker:interop:build": "docker build --build-arg NODE_IMAGE=$(node scripts/node-container-image.mjs) -f Dockerfile.verify -t http3-verify . && docker build --build-arg NODE_IMAGE=$(node scripts/node-container-image.mjs) -f Dockerfile.interop -t http3-interop .",
     "test:interop:cross-platform": "HTTP3_INTEROP_DOCKER=1 node --test --test-isolation=none --test-timeout=60000 dist-test/test/interop/cross-platform.test.js",
     "test:interop:cross-platform:io-uring": "HTTP3_INTEROP_DOCKER=1 HTTP3_INTEROP_DOCKER_IO_URING=1 node --test --test-isolation=none --test-timeout=60000 dist-test/test/interop/cross-platform.test.js",
-    "sbom": "npm sbom --omit=dev > sbom.spdx.json",
+    "sbom": "bash scripts/generate-sboms.sh",
     "release:check": "npm run check:napi-boundary && npm run lint && npm run typecheck && npm test && npm run test:browser:e2e && npm run perf:concurrency-gate && npm run perf:load-smoke-gate && npm run test:rust",
     "release:local-gate": "npm run release:check && npm run smoke:install",
     "release:publish:npm": "node scripts/publish-npm-release.mjs",
@@ -210,21 +210,22 @@
     "load:rust:h3": "cargo run --release --manifest-path tools/rust-h3-load/Cargo.toml -- --addr 127.0.0.1:8443 --host localhost --path / --clients 10 --requests-per-client 20"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260707.1",
+    "@cloudflare/workers-types": "^5.20261028.1",
     "@eslint/js": "catalog:",
     "@napi-rs/cli": "catalog:",
     "@types/node": "catalog:",
+    "@typescript/native": "catalog:",
     "c8": "catalog:",
     "eslint": "catalog:",
     "playwright": "catalog:",
     "typescript": "catalog:",
     "typescript-eslint": "catalog:",
-    "workerd": "^1.20260707.1",
-    "wrangler": "^4.107.1"
+    "workerd": "^1.20261028.1",
+    "wrangler": "^4.154.0"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.9.2",
-    "@currentspace/http3-linux-arm64-gnu": "0.9.2",
-    "@currentspace/http3-linux-x64-gnu": "0.9.2"
+    "@currentspace/http3-darwin-arm64": "0.9.3",
+    "@currentspace/http3-linux-arm64-gnu": "0.9.3",
+    "@currentspace/http3-linux-x64-gnu": "0.9.3"
   }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Orchestrates the `pnpm run build:wasm` pipeline (docs/WASM_CLIENT_PLAN.md
-// D1a): stage BoringSSL for wasm32-wasip1, vendor+patch quiche, cross-build
+// D1a): stage BoringSSL for wasm32-wasip1, cross-build
 // `crates/http3-wasm`, optionally run wasm-opt, and copy the artifact to
 // dist/wasm/http3_client.wasm.
 //
@@ -10,11 +10,15 @@
 // hand-typed on a command line, never committed to .cargo/config.toml
 // (which cannot interpolate them; see docs/WASM_CLIENT_PLAN.md A5).
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+const spike = process.argv.slice(2).includes('--spike');
+if (process.argv.slice(2).some((arg) => arg !== '--spike')) {
+  throw new Error('Usage: node scripts/build-wasm.mjs [--spike]');
+}
 
 function log(msg) {
   console.log(`build-wasm: ${msg}`);
@@ -55,34 +59,23 @@ log('staging BoringSSL for wasm32-wasip1 (scripts/build-bssl-wasi.sh)...');
 const bsslOutDir = run('bash', [join(root, 'scripts/build-bssl-wasi.sh')]);
 log(`bssl staged at ${bsslOutDir}`);
 
-// 2. Vendor + patch quiche (cached; fast no-op on repeat runs).
-log('preparing patched quiche source (scripts/prepare-quiche-wasm-patch.sh)...');
-const patchedQuicheDir = run('bash', [join(root, 'scripts/prepare-quiche-wasm-patch.sh')]);
-log(`patched quiche at ${patchedQuicheDir}`);
-
-// 3. Resolve boring-sys's vendored include dir (ABI-matched headers for the
-// libs staged in step 1) via cargo metadata — same technique as
-// build-bssl-wasi.sh, so this never guesses a registry cache layout.
-// `cargo metadata`'s output is multiple MB (the full dependency graph) —
-// piped through execFileSync's stdout capture that reliably hits ENOBUFS
-// on macOS, so redirect to a temp file instead and read it back.
-const metadataTmpFile = join(root, 'target/.build-wasm-cargo-metadata.json');
-runInherit('bash', [
-  '-c',
-  `cargo metadata --format-version=1 --manifest-path "${join(root, 'Cargo.toml')}" > "${metadataTmpFile}"`,
-]);
-const metadata = JSON.parse(readFileSync(metadataTmpFile, 'utf8'));
+// Resolve the ABI-matched headers from the locked dependency graph. A larger
+// buffer accommodates metadata for all workspace crates without a shell or
+// shared temporary file. quiche 0.30 contains the WASM FFI fixes upstream.
+const metadata = JSON.parse(run('cargo', [
+  'metadata', '--locked', '--format-version=1', '--manifest-path', join(root, 'Cargo.toml'),
+], { maxBuffer: 32 * 1024 * 1024 }));
 const boringSys = metadata.packages.find((p) => p.name === 'boring-sys');
 if (!boringSys) {
   die('boring-sys not found in cargo metadata output');
 }
 const boringSysDir = dirname(boringSys.manifest_path);
-const boringIncludePath = join(boringSysDir, 'deps/boringssl/src/include');
+const boringIncludePath = join(boringSysDir, 'deps/boringssl/include');
 if (!existsSync(boringIncludePath)) {
   die(`expected boring-sys include dir not found: ${boringIncludePath}`);
 }
 
-// 4. Build the machine-specific env for the wasm32-wasip1 cargo invocation.
+// Build the machine-specific env for the wasm32-wasip1 cargo invocation.
 const sysroot = join(wasiSdkPath, 'share/wasi-sysroot');
 const bsslLibDir = join(bsslOutDir, 'lib');
 if (!existsSync(join(bsslLibDir, 'libcrypto.a')) || !existsSync(join(bsslLibDir, 'libssl.a'))) {
@@ -109,6 +102,8 @@ const rustflags = [
   'link-arg=-lc++abi',
   '-C',
   'link-arg=--max-memory=67108864',
+  '-C',
+  'link-arg=--fatal-warnings', // signature mismatches otherwise become runtime traps
 ].join(' ');
 
 const wasmEnv = {
@@ -120,26 +115,30 @@ const wasmEnv = {
   CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: rustflags,
 };
 
-// 5. Cross-build crates/http3-wasm. The quiche FFI patch is applied via a
-// `--config` override scoped to *this one invocation* — never written to
-// the committed Cargo.toml — so a plain `cargo build --release` (native)
-// is completely unaffected regardless of whether this script has ever run
-// (see docs/WASM_CLIENT_PLAN.md A4 decision log).
+// Build directly from the workspace lockfile: native and WASM use the same
+// quiche source and this invocation must not rewrite Cargo.lock.
 log('cross-compiling crates/http3-wasm for wasm32-wasip1 (this can take a while on a cold cache)...');
 runInherit(
   'cargo',
   [
     'build',
     '-p',
-    'http3-wasm',
+    spike ? 'quiche-wasm-test' : 'http3-wasm',
     '--target',
     'wasm32-wasip1',
     '--release',
-    '--config',
-    `patch.crates-io.quiche.path="${patchedQuicheDir}"`,
+    '--locked',
   ],
   { env: wasmEnv },
 );
+
+if (spike) {
+  runInherit(process.execPath, [
+    join(root, 'spikes/quiche-wasm-wasip1/run-wasi.mjs'),
+    join(root, 'target/wasm32-wasip1/release/quiche-wasm-test.wasm'),
+  ]);
+  process.exit(0);
+}
 
 const builtWasmPath = join(root, 'target/wasm32-wasip1/release/http3_wasm.wasm');
 if (!existsSync(builtWasmPath)) {
@@ -148,7 +147,7 @@ if (!existsSync(builtWasmPath)) {
 const preOptSize = statSync(builtWasmPath).size;
 log(`built ${builtWasmPath} (${(preOptSize / 1024 / 1024).toFixed(2)} MiB pre-opt)`);
 
-// 6. wasm-opt -Oz if available; skip gracefully (log only) if not — CI/
+// wasm-opt -Oz if available; skip gracefully (log only) if not — CI/
 // packaging-time enforcement of its presence is a later-phase concern
 // (D1b/D2), not this script's job.
 const distWasmDir = join(root, 'dist/wasm');

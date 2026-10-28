@@ -1,0 +1,60 @@
+{
+  "events": [
+    {
+      "data": "sse-ok-1",
+      "lastEventId": "1"
+    },
+    {
+      "data": "sse-ok-2",
+      "lastEventId": "2"
+    }
+  ],
+  "fetch": true,
+  "errors": [],
+  "loads": 2,
+  "token": "6fa4d5bf-5656-4b7b-8bed-fe2f4669249c",
+  "complete": true,
+  "observed": [
+    {
+      "path": "/api/hello?token=6fa4d5bf-5656-4b7b-8bed-fe2f4669249c",
+      "time": "2026-10-28T19:04:51.202Z",
+      "protocol": "h2"
+    },
+    {
+      "path": "/events?token=6fa4d5bf-5656-4b7b-8bed-fe2f4669249c",
+      "time": "2026-10-28T19:04:51.203Z",
+      "protocol": "h2"
+    },
+    {
+      "path": "/events?token=6fa4d5bf-5656-4b7b-8bed-fe2f4669249c",
+      "time": "2026-10-28T19:04:51.507Z",
+      "protocol": "h2"
+    }
+  ],
+  "network": [
+    {
+      "status": null,
+      "protocol": "h2",
+      "name": "/api/hello",
+      "initiator": "fetch",
+      "duration": 2
+    },
+    {
+      "status": null,
+      "protocol": "h2",
+      "name": "/events",
+      "initiator": "eventsource",
+      "duration": 2
+    },
+    {
+      "status": null,
+      "protocol": "h2",
+      "name": "/observed",
+      "initiator": "fetch",
+      "duration": 1
+    }
+  ],
+  "phase": "reload",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+  "secureContext": true
+}

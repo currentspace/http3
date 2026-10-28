@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.7
-ARG NODE_MAJOR=24
-FROM node:${NODE_MAJOR}-bookworm
+# syntax=docker/dockerfile:1.28.0@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+ARG NODE_IMAGE=node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
+FROM ${NODE_IMAGE}
 
 ARG TARGETPLATFORM
 
@@ -18,28 +18,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   strace \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.99.1
 ENV PNPM_HOME="/pnpm"
 ENV PATH="${PNPM_HOME}:/root/.cargo/bin:${PATH}"
-RUN npm install -g pnpm@11.1.2
+ENV CARGO_BUILD_JOBS=8
+RUN npm install -g pnpm@12.16.1
 
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY examples/hono/package.json ./examples/hono/package.json
 COPY examples/express-adapter/package.json ./examples/express-adapter/package.json
+COPY examples/workerd-client/package.json ./examples/workerd-client/package.json
 RUN --mount=type=cache,id=http3-runtime-pnpm-${TARGETPLATFORM},target=/pnpm/store \
-  pnpm install --frozen-lockfile --ignore-scripts --no-optional --store-dir /pnpm/store
+  pnpm install --frozen-lockfile --ignore-scripts --store-dir /pnpm/store
 
-COPY build.rs Cargo.toml Cargo.lock ./
+COPY build.rs Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY benches ./benches
 COPY fuzz ./fuzz
 COPY tools ./tools
 COPY crates ./crates
+COPY spikes/quiche-wasm-wasip1 ./spikes/quiche-wasm-wasip1
+COPY vendor ./vendor
 COPY src ./src
 COPY lib ./lib
 COPY scripts ./scripts
 COPY test ./test
+COPY tests ./tests
 COPY index.js index.d.ts tsconfig.json tsconfig.test.json ./
 
 RUN --mount=type=cache,id=http3-runtime-cargo-registry-${TARGETPLATFORM},target=/root/.cargo/registry \

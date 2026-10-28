@@ -9,10 +9,28 @@ allowBuilds:
 
 catalog:
   '@eslint/js': ^10.0.1
-  '@napi-rs/cli': ^3.7.2
-  '@types/node': ^26.0.1
-  c8: ^11.0.0
-  eslint: ^10.6.0
-  playwright: ^1.61.1
-  typescript: ^6.0.3
-  typescript-eslint: ^8.62.1
+  '@napi-rs/cli': ^3.10.9
+  '@types/node': ^24.19.2
+  c8: ^12.0.0
+  eslint: ^10.13.0
+  playwright: ^1.64.1
+  '@typescript/native': npm:typescript@^7.0.2
+  typescript: npm:@typescript/typescript6@^6.0.2
+  typescript-eslint: ^8.72.1
+
+# Source builds use local native artifacts, not previously published prebuilds.
+ignoredOptionalDependencies:
+  - "@currentspace/http3-darwin-arm64"
+  - "@currentspace/http3-linux-arm64-gnu"
+  - "@currentspace/http3-linux-x64-gnu"
+
+minimumReleaseAgeExclude:
+  - '@cloudflare/workerd-darwin-64@1.20261028.1'
+  - '@cloudflare/workerd-darwin-arm64@1.20261028.1'
+  - '@cloudflare/workerd-linux-64@1.20261028.1'
+  - '@cloudflare/workerd-linux-arm64@1.20261028.1'
+  - '@cloudflare/workerd-windows-64@1.20261028.1'
+  - '@cloudflare/workers-types@5.20261028.1'
+  - miniflare@5.20261023.1-beta
+  - workerd@1.20261028.1
+  - wrangler@4.154.0

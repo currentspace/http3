@@ -12,16 +12,16 @@ step() {
 }
 
 step "Miri unsafe-boundary tests"
-cargo +nightly miri test --lib --no-default-features unsafe_boundary
+cargo +nightly-2026-10-28 miri test --lib --no-default-features unsafe_boundary
 
 step "cargo-fuzz smoke"
-cargo +nightly fuzz run unsafe_wrappers -- -runs=1
-cargo +nightly fuzz run unsafe_wrappers_structured -- -runs=1
-cargo +nightly fuzz run pending_write_state -- -runs=1
-cargo +nightly fuzz run pending_write_ops -- -runs=1
-cargo +nightly fuzz run parse_recv_cmsgs -- -runs=1
-cargo +nightly fuzz run parse_recv_cmsgs_structured -- -runs=1
-cargo +nightly fuzz run retry_token_roundtrip -- -runs=1
+cargo +nightly-2026-10-28 fuzz run unsafe_wrappers -- -runs=1
+cargo +nightly-2026-10-28 fuzz run unsafe_wrappers_structured -- -runs=1
+cargo +nightly-2026-10-28 fuzz run pending_write_state -- -runs=1
+cargo +nightly-2026-10-28 fuzz run pending_write_ops -- -runs=1
+cargo +nightly-2026-10-28 fuzz run parse_recv_cmsgs -- -runs=1
+cargo +nightly-2026-10-28 fuzz run parse_recv_cmsgs_structured -- -runs=1
+cargo +nightly-2026-10-28 fuzz run retry_token_roundtrip -- -runs=1
 
 step "Kani smoke"
 bash scripts/rust-kani-smoke.sh

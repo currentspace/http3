@@ -9,19 +9,40 @@
 ## Standard Release Flow
 
 1. Prepare the release commit on `main` with the target version and a versioned `CHANGELOG.md` entry, using `docs/RELEASE_EVIDENCE.md` as the working audit ledger behind the notes.
-2. Run `npm run release:latest -- --validate-only --dist-tag <canary|rc|latest>` to execute the full local gate and a GitHub Actions dry-run publish on a candidate branch.
-3. Run `npm run release:latest -- --dist-tag <canary|rc|latest>` to push `main`, publish through `release.yml`, create the Git tag, and create the GitHub release from the matching versioned `CHANGELOG.md` section.
+2. Run `pnpm run release:latest -- --validate-only --dist-tag <canary|rc|latest>` to execute the full local gate and a GitHub Actions dry-run publish on a candidate branch.
+3. Run `pnpm run release:latest -- --dist-tag <canary|rc|latest>` to push `main`, publish through `release.yml`, create the Git tag, and create the GitHub release from the matching versioned `CHANGELOG.md` section.
 4. Confirm npm dist-tags for the root package and each native sidecar package.
-   Stable `latest` releases require the `NPM_TOKEN` GitHub Actions secret so the
-   release workflow can also move each package's `canary` dist-tag to the same
-   version after publish.
+   Stable publication uses the configured npm Trusted Publisher (OIDC) and does
+   not require an `NPM_TOKEN` secret. Canary is an independent channel: the
+   established tokenless release path updates `latest` only. The optional legacy
+   canary-mirroring step runs when `NPM_TOKEN` is configured; it is not a stable
+   release prerequisite. Do not report canary alignment unless registry readback
+   confirms it.
+
+For a candidate PR, first synchronize versions and release notes, then run
+`gh workflow run release.yml --ref <candidate-branch> -f dist_tag=latest -f dry_run=true`.
+The `release:latest` wrapper requires starting from `main`; even `--validate-only`
+pushes a candidate branch and dispatches CI. Neither command publishes when its
+dry-run mode is selected. The candidate version must be unused on npm.
+
+Before merge/publication, complete all hosted checks and the manual Safari gate
+in `SAFARI_VALIDATION_RUNBOOK.md`. A locally trusted loopback HTTPS staging server
+is acceptable when explicitly selected for the release; record its certificate,
+source revision, browser evidence, and matching curl checks.
 
 ## Local Gate
 
-- `npm run release:check`
+Linux prebuilds must pass `scripts/check-linux-prebuild-abi.py` before upload.
+The GLIBC_2.34 symbol limit preserves the published 0.9.2 floor. Build Linux x64
+on the pinned Ubuntu 22.04 runner: newer headers redirect BoringSSL 5's CPU
+environment parsing to `__isoc23_strtoull`, raising the floor to GLIBC_2.38.
+Keep runtime testing on newer Linux versions as well; a green test on a newer
+runner alone does not establish compatibility with older deployed systems.
+
+- `pnpm run release:check`
 - This runs lint, typecheck, the release-blocking TypeScript and Rust lanes, browser checks, and the concurrency/load gates.
-- `npm run release:local-gate`
-- This runs `npm run release:check` plus the packed-install smoke test locally before CI publish.
+- `pnpm run release:local-gate`
+- This runs `pnpm run release:check` plus the packed-install smoke test locally before CI publish.
 
 ## Manual Perf Campaign
 
@@ -29,11 +50,11 @@ Before promoting transport-topology or runtime-selection changes, capture a
 small artifact set and review it with the analyzer:
 
 ```bash
-npm run bench:quic -- --profile smoke --results-dir perf-results --label release-quic-smoke
-npm run bench:h3 -- --profile smoke --results-dir perf-results --label release-h3-smoke
-npm run bench:quic:docker -- --profile smoke --results-dir perf-results --label release-quic-docker
-npm run bench:h3:docker -- --profile smoke --results-dir perf-results --label release-h3-docker
-npm run perf:analyze -- --results-dir perf-results
+pnpm run bench:quic -- --profile smoke --results-dir perf-results --label release-quic-smoke
+pnpm run bench:h3 -- --profile smoke --results-dir perf-results --label release-h3-smoke
+pnpm run bench:quic:docker -- --profile smoke --results-dir perf-results --label release-quic-docker
+pnpm run bench:h3:docker -- --profile smoke --results-dir perf-results --label release-h3-docker
+pnpm run perf:analyze -- --results-dir perf-results
 ```
 
 When deeper Linux or macOS diagnosis is needed, add profiler wrapper runs from
@@ -46,7 +67,7 @@ Do not hard-wire new benchmark gates into CI until the baseline criteria in
 ## One-Time Bootstrap For A New Native Package
 
 - New native sidecar packages must exist on npm before Trusted Publisher can be configured for them.
-- Use a prerelease bootstrap version such as `<version>-bootstrap.0`, publish it with `npm run release:bootstrap:native -- --binary <downloaded-node-file> --version <version>-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm.
+- Use a prerelease bootstrap version such as `<version>-bootstrap.0`, publish it with `pnpm run release:bootstrap:native -- --binary <downloaded-node-file> --version <version>-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm.
 - After Trusted Publisher is saved for the new package, publish the real release version through `release.yml`.
 
 ## Post-Release Validation

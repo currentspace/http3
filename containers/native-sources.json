@@ -1,0 +1,8 @@
+{
+  "boring-sys": "5.3.0",
+  "boringRepositoryCommit": "2bea8245d9b21776bc9f767b4e82dc2a78a5a262",
+  "boringsslCommit": "427ec40cc8edc545253289232e885708c409e5ea",
+  "boringsslRepository": "https://github.com/google/boringssl",
+  "quiche": "0.30.0",
+  "quichePatch": "vendor/quiche/PATCHES.md"
+}

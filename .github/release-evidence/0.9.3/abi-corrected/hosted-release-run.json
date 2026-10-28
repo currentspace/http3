@@ -1,0 +1,97 @@
+{
+  "conclusion": "success",
+  "databaseId": 40755081567,
+  "event": "workflow_dispatch",
+  "headSha": "84335c235df9e4ffa1fc518cfde46d87517d487d",
+  "jobs": [
+    {
+      "databaseId": 123051734702,
+      "name": "prebuilds (ubuntu-24.04-arm, aarch64-unknown-linux-gnu)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:31:42Z",
+      "completedAt": "2026-10-28T19:34:28Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123051734702"
+    },
+    {
+      "databaseId": 123051735060,
+      "name": "build-wasm",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:31:39Z",
+      "completedAt": "2026-10-28T19:38:21Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123051735060"
+    },
+    {
+      "databaseId": 123051735137,
+      "name": "prebuilds (ubuntu-22.04, x86_64-unknown-linux-gnu)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:31:39Z",
+      "completedAt": "2026-10-28T19:35:41Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123051735137"
+    },
+    {
+      "databaseId": 123051735508,
+      "name": "prebuilds (macos-26, aarch64-apple-darwin)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:31:40Z",
+      "completedAt": "2026-10-28T19:36:17Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123051735508"
+    },
+    {
+      "databaseId": 123054170984,
+      "name": "validate (aarch64-apple-darwin, node 26.12.1)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:38:16Z",
+      "completedAt": "2026-10-28T19:39:21Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123054170984"
+    },
+    {
+      "databaseId": 123054171042,
+      "name": "validate (aarch64-unknown-linux-gnu, node 26.12.1)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:36:21Z",
+      "completedAt": "2026-10-28T19:37:02Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123054171042"
+    },
+    {
+      "databaseId": 123054171067,
+      "name": "validate (aarch64-apple-darwin, node 24.22.1)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:37:50Z",
+      "completedAt": "2026-10-28T19:38:56Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123054171067"
+    },
+    {
+      "databaseId": 123054171098,
+      "name": "validate (aarch64-unknown-linux-gnu, node 24.22.1)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:36:21Z",
+      "completedAt": "2026-10-28T19:37:00Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123054171098"
+    },
+    {
+      "databaseId": 123054171113,
+      "name": "validate (x86_64-unknown-linux-gnu, node 26.12.1)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:36:19Z",
+      "completedAt": "2026-10-28T19:37:12Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123054171113"
+    },
+    {
+      "databaseId": 123054171149,
+      "name": "validate (x86_64-unknown-linux-gnu, node 24.22.1)",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:36:20Z",
+      "completedAt": "2026-10-28T19:37:05Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123054171149"
+    },
+    {
+      "databaseId": 123055783094,
+      "name": "publish",
+      "conclusion": "success",
+      "startedAt": "2026-10-28T19:39:24Z",
+      "completedAt": "2026-10-28T19:41:06Z",
+      "url": "https://github.com/currentspace/http3/actions/runs/40755081567/job/123055783094"
+    }
+  ],
+  "url": "https://github.com/currentspace/http3/actions/runs/40755081567"
+}

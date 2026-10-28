@@ -3,6 +3,91 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.3
+
+### Candidate and scope
+
+- PR #14: dependency, native/WASM TLS, compiler, container, and CI refresh.
+- The dependency qualification ledger is `docs/DEPENDENCY_UPDATE.md`.
+- Root npm, three native sidecars, and Rust crate versions are aligned to 0.9.3.
+- Linux x64 release builds and validation use Ubuntu 22.04; ARM64 uses 24.04.
+  An artifact gate prevents either target requiring symbols above GLIBC_2.34,
+  matching the published 0.9.2 native packages.
+- macOS verification now installs NSS and exposes certutil for isolated Firefox
+  profiles. The dependency candidate failed hosted browser tests without it.
+- Restored Security and Rust Safety workflows disabled by GitHub inactivity.
+- Stable publishing retains the established OIDC `latest` path. Canary mirroring
+  is optional, not a release prerequisite; no new npm token is needed.
+
+### Completed release qualification
+
+- Qualified release source: `84335c235df9e4ffa1fc518cfde46d87517d487d`.
+  Runtime code and dependency lockfiles are unchanged from the broader local
+  qualification at `c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979`; the follow-up fixes
+  the x64 build environment and adds an artifact compatibility gate.
+- Versioned local release tests passed: 335 Node tests, 67 FFI tests, three
+  browsers, 223 Rust unit tests plus integration tests, packed install,
+  concurrency (1249 ms / 10000 ms budget), load smoke, and 39 WASM tests.
+  The enclosing storage guard returned 125 at its final check: system usage
+  reached 94.03%, exceeding its conservative 94% threshold after tests completed.
+  This is not an unqualified green wrapper run; the requested 95% ceiling held.
+- [Qualified release dry-run 40755081567](https://github.com/currentspace/http3/actions/runs/40755081567)
+  passed all 11 jobs: native builds on Linux x64, Linux ARM64, macOS ARM64;
+  WASM build/tests; six Node 24/26 native validation jobs with packed installs;
+  and dry-run publication of all four 0.9.3 packages. No registry writes occurred.
+- Downloaded all four CI artifacts. Verified architectures and SHA-256 hashes,
+  then packed the exact candidate with those binaries and checked that every
+  embedded binary/WASM hash matched its downloaded artifact.
+- Clean installed root and native-sidecar packages loaded expected exports and
+  every public subpath, and instantiated WASM on macOS ARM64 with Node 24.22.1
+  and 26.12.1. All 39 WASM tests also passed locally against the hosted artifact;
+  its hash is unchanged in the qualified replacement run.
+- Real Safari 27.0.1 on macOS 27.0.1 passed trusted loopback HTTPS page, fetch,
+  SSE, automatic Last-Event-ID resumption, and reload checks. Captured the actual
+  Web Inspector Network panel, showing HTTP 200 for document, fetch, and both
+  SSE requests. The second SSE request is red because the fixture intentionally
+  closes EventSource after its second message. Safari used HTTP/2 in this run.
+- Curl HTTP/3-only and HTTP/2 both passed against the same manually inspected
+  endpoint, `https://127.0.0.1:62802`, using `--cacert` without TLS bypass.
+  Brian explicitly selected loopback or Docker staging. Temporary CA trust and
+  the isolated keychain were removed, the original search list was restored,
+  and the staging server/test windows were stopped.
+- Receipts, screenshots, artifact and package hashes:
+  [0.9.3 evidence bundle](../.github/release-evidence/0.9.3/README.md).
+
+### Compatibility correction and security triage
+
+Artifact inspection found that the first green dry-run's Linux x64 binary
+required `__isoc23_strtoull@GLIBC_2.38` from BoringSSL 5's CPU environment parser.
+Both published 0.9.2 Linux binaries require at most GLIBC_2.34. The x64 build and
+runtime-validation runner has therefore moved from Ubuntu 24.04 to 22.04, and a
+new release gate checks actual ELF version requirements. The first dry-run's
+x64 artifact is **not approved for publication**. Replacement run 40755081567
+passed the gate and runtime validation on Ubuntu 22.04. Both Linux artifacts now
+require at most GLIBC_2.34. Mac ARM64, Linux ARM64, and WASM hashes are unchanged;
+only Linux x64 was rebuilt differently. The
+[corrected artifact receipts](../.github/release-evidence/0.9.3/abi-corrected/)
+supersede the first run for release packaging.
+
+The Security analysis/audit jobs and Rust Safety workflow passed. CodeQL's 17
+Rust findings were individually reviewed against their source and SARIF flows:
+the mandatory public
+QUIC Initial salt, in-memory queue operations incorrectly classified as logging,
+and test diagnostics containing only byte counts/booleans. Brian explicitly
+approved dismissing alerts #32–48 as false positives; all 17 dispositions were
+applied through `brianathere` and independently read back from GitHub. Reasons and
+receipts are in the [CodeQL triage](release-evidence/0.9.3/CODEQL_TRIAGE.md).
+No security query was disabled. All 27 workflow jobs passed on c97b3d1; check the
+[PR's current checks](https://github.com/currentspace/http3/pull/14/checks) for the
+final evidence-only commit before merging.
+
+No publication, release tag, main-branch merge, or production deployment has been
+performed as part of this preparation. Before publication, require green checks
+on the final PR head, merge through the normal release process, and recheck
+version/tag availability and Trusted Publisher permissions. A dry-run does not
+exercise registry write authorization; the release wrapper performs another
+dry-run from the eventual main-branch release source.
+
 ## 0.9.2
 
 ### Scope and validated source

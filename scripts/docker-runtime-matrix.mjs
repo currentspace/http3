@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { resolveNodeImage } from './node-container-image.mjs';
 
 const composeArgs = ['compose', '-f', 'docker-compose.runtime-tests.yml'];
 const defaultRuntimePlatform = process.env.DOCKER_RUNTIME_PLATFORM ?? inferDockerRuntimePlatform();
@@ -22,6 +23,7 @@ function runDocker(args, env = {}) {
       ...process.env,
       ...(defaultRuntimePlatform ? { DOCKER_RUNTIME_PLATFORM: defaultRuntimePlatform } : {}),
       NODE_MAJOR: nodeMajor,
+      NODE_IMAGE: resolveNodeImage(nodeMajor),
       HTTP3_RUNTIME_IMAGE: runtimeImage,
       ...env,
     },

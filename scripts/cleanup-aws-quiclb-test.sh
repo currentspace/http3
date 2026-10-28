@@ -57,7 +57,7 @@ log() {
 }
 
 if command -v docker >/dev/null 2>&1; then
-  if docker image inspect amazon/aws-cli:latest >/dev/null 2>&1; then
+  if docker image inspect amazon/aws-cli:2.39.0@sha256:6014c77975a4ae237395924cc821333f20bf87c91964a45dd4ed5f3b13b424f5 >/dev/null 2>&1; then
     AWS_CLI_DOCKER=1
   else
     AWS_CLI_DOCKER=0
@@ -188,7 +188,7 @@ delete_nlb_and_target_group() {
           -v "${HOME}/.aws:/root/.aws" \
           -e AWS_PROFILE="${AWS_PROFILE}" \
           -e AWS_REGION="${AWS_REGION}" \
-          amazon/aws-cli:latest \
+          amazon/aws-cli:2.39.0@sha256:6014c77975a4ae237395924cc821333f20bf87c91964a45dd4ed5f3b13b424f5 \
           elbv2 deregister-targets \
           --target-group-arn "${tg_arn}" \
           --targets "${target_args[@]}" >/dev/null || true

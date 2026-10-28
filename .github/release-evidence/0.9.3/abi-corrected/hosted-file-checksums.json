@@ -1,0 +1,26 @@
+{
+  "source": "84335c235df9e4ffa1fc518cfde46d87517d487d",
+  "run": 40755081567,
+  "files": [
+    {
+      "path": "hosted/prebuild-aarch64-apple-darwin/http3.darwin-arm64.node",
+      "sha256": "20868682543a214aa7f933ea9341d15445cbd48a0efb0b2d4660fa507d6434bd",
+      "size": 6851296
+    },
+    {
+      "path": "hosted/prebuild-aarch64-unknown-linux-gnu/http3.linux-arm64-gnu.node",
+      "sha256": "80ca824308126c1fc68753bff1b1b9437ba5039ffff3d63f99d5ad18227f488d",
+      "size": 70935776
+    },
+    {
+      "path": "hosted/prebuild-x86_64-unknown-linux-gnu/http3.linux-x64-gnu.node",
+      "sha256": "527801882f221c7a38dc15a01d168b6065b041f1104aca1e55429c04793d44e5",
+      "size": 70836800
+    },
+    {
+      "path": "hosted/wasm-client-artifact/http3_client.wasm",
+      "sha256": "c2afe6b6a177b774994a26bfe0dc01d28a998ab23410342260fc67aafb3fb7d5",
+      "size": 1913837
+    }
+  ]
+}

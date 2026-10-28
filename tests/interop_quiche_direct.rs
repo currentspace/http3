@@ -5,7 +5,6 @@
 
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};
-use std::collections::HashMap;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -87,7 +86,10 @@ fn test_quiche_direct_server_client() {
     .unwrap();
 
     // Server state
-    let mut server_conns: HashMap<Vec<u8>, quiche::Connection> = HashMap::new();
+    // One client may send a ClientHello across multiple Initial packets (for
+    // example with BoringSSL 5 hybrid key shares). Keep its connection instead
+    // of recreating it for every packet addressed to the original DCID.
+    let mut server_conn: Option<quiche::Connection> = None;
 
     let mut poll = Poll::new().unwrap();
     poll.registry()
@@ -123,34 +125,33 @@ fn test_quiche_direct_server_client() {
                     let pkt_buf = &mut buf[..len];
                     let hdr = quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN).unwrap();
 
-                    let conn = if let Some(conn) = server_conns.get_mut(hdr.dcid.as_ref()) {
-                        conn
-                    } else {
+                    if server_conn.is_none() {
                         if hdr.ty != quiche::Type::Initial {
                             continue;
                         }
                         let server_scid = vec![0xdd; quiche::MAX_CONN_ID_LEN];
                         let server_scid_ref = quiche::ConnectionId::from_ref(&server_scid);
-                        let conn = quiche::accept(
-                            &server_scid_ref,
-                            Some(&hdr.dcid),
-                            server_addr,
-                            from,
-                            &mut config,
-                        )
-                        .unwrap();
-                        server_conns.insert(server_scid, conn);
-                        // Also map by client DCID
-                        server_conns
-                            .get_mut(&vec![0xdd; quiche::MAX_CONN_ID_LEN])
-                            .unwrap()
-                    };
+                        server_conn = Some(
+                            quiche::accept(
+                                &server_scid_ref,
+                                Some(&hdr.dcid),
+                                server_addr,
+                                from,
+                                &mut config,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    let conn = server_conn.as_mut().unwrap();
 
                     let recv_info = quiche::RecvInfo {
                         from,
                         to: server_addr,
                     };
-                    conn.recv(pkt_buf, recv_info).ok();
+                    match conn.recv(pkt_buf, recv_info) {
+                        Ok(_) | Err(quiche::Error::Done) => {}
+                        Err(e) => panic!("server QUIC recv: {e}"),
+                    }
 
                     if conn.is_established() {
                         eprintln!("Server: handshake complete!");
@@ -163,7 +164,7 @@ fn test_quiche_direct_server_client() {
         }
 
         // Send server packets
-        for conn in server_conns.values_mut() {
+        for conn in server_conn.iter_mut() {
             loop {
                 match conn.send(&mut out) {
                     Ok((len, info)) => {
@@ -183,7 +184,10 @@ fn test_quiche_direct_server_client() {
                         from,
                         to: client_addr,
                     };
-                    client_conn.recv(&mut buf[..len], recv_info).ok();
+                    match client_conn.recv(&mut buf[..len], recv_info) {
+                        Ok(_) | Err(quiche::Error::Done) => {}
+                        Err(e) => panic!("client QUIC recv: {e}"),
+                    }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => panic!("client recv: {e}"),

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "America/Los_Angeles",
+  "schedule": [
+    "before 5am on monday"
+  ],
+  "prConcurrentLimit": 3,
+  "automerge": false,
+  "ignorePaths": [
+    "vendor/**",
+    "artifacts/**"
+  ],
+  "lockFileMaintenance": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "matchPackageNames": [
+        "quiche",
+        "boring",
+        "boring-sys"
+      ],
+      "groupName": "QUIC and TLS",
+      "prBodyNotes": [
+        "Review vendor/quiche/PATCHES.md and containers/native-sources.json; run native, WASM, and interoperability gates."
+      ]
+    },
+    {
+      "matchPackageNames": [
+        "napi",
+        "napi-build",
+        "napi-derive",
+        "@napi-rs/cli"
+      ],
+      "groupName": "native bridge"
+    },
+    {
+      "matchPackageNames": [
+        "typescript",
+        "@typescript/native",
+        "@typescript/typescript6",
+        "typescript-eslint",
+        "eslint",
+        "@eslint/js"
+      ],
+      "groupName": "TypeScript and lint tooling"
+    },
+    {
+      "matchPackageNames": [
+        "@types/node"
+      ],
+      "allowedVersions": "/^24\\./"
+    },
+    {
+      "matchPackageNames": [
+        "node"
+      ],
+      "groupName": "Node runtimes"
+    },
+    {
+      "matchPackageNames": [
+        "node"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^containers/node-images\\.json$/",
+        "/^docker-compose\\.runtime-tests\\.yml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>node):(?<currentValue>\\d+\\.\\d+\\.\\d+-trixie-slim)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^scripts/(cleanup-aws-quiclb-test|fast-v0-rollout)\\.sh$/"
+      ],
+      "matchStrings": [
+        "(?<depName>amazon/aws-cli):(?<currentValue>\\d+\\.\\d+\\.\\d+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "events": [
+    {
+      "data": "sse-ok-1",
+      "lastEventId": "1"
+    },
+    {
+      "data": "sse-ok-2",
+      "lastEventId": "2"
+    }
+  ],
+  "fetch": true,
+  "errors": [],
+  "loads": 1,
+  "token": "13d6f681-cf0c-4818-adee-63d2ab370503",
+  "complete": true,
+  "observed": [
+    {
+      "path": "/api/hello?token=13d6f681-cf0c-4818-adee-63d2ab370503",
+      "time": "2026-10-28T19:04:50.576Z",
+      "protocol": "h2"
+    },
+    {
+      "path": "/events?token=13d6f681-cf0c-4818-adee-63d2ab370503",
+      "time": "2026-10-28T19:04:50.581Z",
+      "protocol": "h2"
+    },
+    {
+      "path": "/events?token=13d6f681-cf0c-4818-adee-63d2ab370503",
+      "time": "2026-10-28T19:04:50.886Z",
+      "protocol": "h2"
+    }
+  ],
+  "network": [
+    {
+      "status": null,
+      "protocol": "h2",
+      "name": "/api/hello",
+      "initiator": "fetch",
+      "duration": 2
+    },
+    {
+      "status": null,
+      "protocol": "h2",
+      "name": "/events",
+      "initiator": "eventsource",
+      "duration": 3
+    },
+    {
+      "status": null,
+      "protocol": "h2",
+      "name": "/favicon.ico",
+      "initiator": "icon",
+      "duration": 3
+    },
+    {
+      "status": null,
+      "protocol": "h2",
+      "name": "/observed",
+      "initiator": "fetch",
+      "duration": 2
+    }
+  ],
+  "phase": "initial",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+  "secureContext": true
+}

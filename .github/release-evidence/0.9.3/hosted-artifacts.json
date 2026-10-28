@@ -1,0 +1,62 @@
+[
+  {
+    "id": 12844380267,
+    "name": "prebuild-aarch64-apple-darwin",
+    "size_in_bytes": 2411574,
+    "digest": "sha256:0dee67239ac3b2242e7a110c394ea281a44949d8c6e71330c0cd11b177003124",
+    "created_at": "2026-10-28T19:04:30Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40750317271,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "chore/dependency-refresh-2026-10",
+      "head_sha": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979"
+    }
+  },
+  {
+    "id": 12843932075,
+    "name": "wasm-client-artifact",
+    "size_in_bytes": 760762,
+    "digest": "sha256:7ec5de82158af9365ca0fc8c413d5f7a95058780afedfbbad148b4c69339d64c",
+    "created_at": "2026-10-28T19:04:13Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40750317271,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "chore/dependency-refresh-2026-10",
+      "head_sha": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979"
+    }
+  },
+  {
+    "id": 12843756737,
+    "name": "prebuild-aarch64-unknown-linux-gnu",
+    "size_in_bytes": 20769336,
+    "digest": "sha256:41520140fe6edf2b27b4ac83993dfe36ea9234694253765192263cefe47a0332",
+    "created_at": "2026-10-28T19:03:06Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40750317271,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "chore/dependency-refresh-2026-10",
+      "head_sha": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979"
+    }
+  },
+  {
+    "id": 12842579327,
+    "name": "prebuild-x86_64-unknown-linux-gnu",
+    "size_in_bytes": 22598837,
+    "digest": "sha256:26dd06017442e436a97d98996585d370bb5e9dbaa49e22d54f6d412b8336495f",
+    "created_at": "2026-10-28T19:02:54Z",
+    "expired": false,
+    "workflow_run": {
+      "id": 40750317271,
+      "repository_id": 1174160083,
+      "head_repository_id": 1174160083,
+      "head_branch": "chore/dependency-refresh-2026-10",
+      "head_sha": "c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979"
+    }
+  }
+]

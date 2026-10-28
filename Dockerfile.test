@@ -1,5 +1,5 @@
-ARG NODE_MAJOR=24
-FROM node:${NODE_MAJOR}-bookworm
+ARG NODE_IMAGE=node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
+FROM ${NODE_IMAGE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
@@ -12,25 +12,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   git \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.99.1
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN npm install -g pnpm@11.1.2
+ENV CARGO_BUILD_JOBS=8
+RUN npm install -g pnpm@12.16.1
 
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY examples/hono/package.json ./examples/hono/package.json
 COPY examples/express-adapter/package.json ./examples/express-adapter/package.json
-RUN pnpm install --frozen-lockfile --ignore-scripts --no-optional
+COPY examples/workerd-client/package.json ./examples/workerd-client/package.json
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
-COPY build.rs Cargo.toml Cargo.lock ./
+COPY build.rs Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY benches ./benches
 COPY fuzz ./fuzz
 COPY tools ./tools
 COPY crates ./crates
+COPY spikes/quiche-wasm-wasip1 ./spikes/quiche-wasm-wasip1
+COPY vendor ./vendor
 COPY src ./src
 COPY lib ./lib
+COPY scripts ./scripts
 COPY test ./test
+COPY tests ./tests
 COPY index.js index.d.ts tsconfig.json tsconfig.test.json ./
 
 RUN pnpm run build

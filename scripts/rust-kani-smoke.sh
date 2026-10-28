@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-REQUIRED="${HTTP3_KANI_REQUIRED:-0}"
+REQUIRED="${HTTP3_KANI_REQUIRED:-1}"
 ALLOW_MSRV_SHADOW="${HTTP3_KANI_ALLOW_MSRV_SHADOW:-1}"
 LIST_ONLY="${HTTP3_KANI_LIST_ONLY:-0}"
 DEEP="${HTTP3_KANI_DEEP:-0}"
@@ -98,6 +98,12 @@ make_msrv_shadow() {
   rsync -a --delete \
     --exclude .git \
     --exclude target \
+    --exclude artifacts \
+    --exclude node_modules \
+    --exclude dist \
+    --exclude dist-test \
+    --exclude coverage \
+    --exclude "*.node" \
     "$ROOT/" "$shadow/"
   perl -0pi -e "s/rust-version = \"[0-9]+\\.[0-9]+\"/rust-version = \"$compiler_minor\"/" \
     "$shadow/Cargo.toml"

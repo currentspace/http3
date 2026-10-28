@@ -85,7 +85,7 @@ cargo --version
 mark_done
 
 step "pnpm install (frozen lockfile, no optional prebuilds)"
-pnpm install --frozen-lockfile --no-optional
+pnpm install --frozen-lockfile
 mark_done
 
 step "lint (eslint lib/ test/)"

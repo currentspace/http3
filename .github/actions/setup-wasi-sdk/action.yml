@@ -24,6 +24,7 @@ runs:
         mkdir -p "$STAGE_DIR"
         curl -fsSL -o "${RUNNER_TEMP}/wasi-sdk.tar.gz" \
           "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz"
+        echo "0ba8b5bfaeb2adf3f29bab5841d76cf5318ab8e1642ea195f88baba1abd47bce  ${RUNNER_TEMP}/wasi-sdk.tar.gz" | sha256sum --check
         tar -xf "${RUNNER_TEMP}/wasi-sdk.tar.gz" -C "$STAGE_DIR"
 
         CMAKE_FILE="$(find "$STAGE_DIR" -type f -name wasi-sdk-p1.cmake | head -1)"
