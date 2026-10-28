@@ -81,6 +81,13 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
+      - name: Install Firefox certificate database tools
+        run: |
+          brew install nss
+          nss_bin="$(brew --prefix nss)/bin"
+          test -x "$nss_bin/certutil"
+          echo "$nss_bin" >> "$GITHUB_PATH"
+
       - name: Run full verify
         # Invoke directly so verify.sh controls dependency installation.
         run: bash scripts/verify.sh

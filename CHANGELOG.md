@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.3
+
+- Refresh JavaScript and Rust dependencies, including quiche 0.30, BoringSSL 5,
+  and napi 3, while retaining Node 24+ and Rust 1.96+ compatibility.
+- Use the same patched quiche source for native and WASM builds, remove obsolete
+  TLS patches, and reject WASM linker warnings. Retain WASI SDK 33 for compatibility
+  with the stable Rust toolchain.
+- Update the TypeScript 7 compiler, browsers, Workers tooling, and examples;
+  retain the TypeScript 6 API compatibility package for ESLint and napi.
+- Preserve QUIC test connections across split Initial packets and isolate
+  Firefox certificate/app data during HTTP/3 browser verification.
+- Pin Node 24/26, Rust, pnpm, safety tools, GitHub Actions, and Debian Trixie
+  container inputs. Bundle verified acme.sh and AWS CLI releases in the
+  production image instead of downloading the certificate client at startup.
+- Add dependency audits, complete source/container SBOM tooling, bounded
+  maintenance-advisory handling, automated update configuration, and storage
+  monitoring for local builds.
+
 ## 0.9.2
 
 - Ignore retired EventSource session events so closing the old connection

@@ -3,6 +3,36 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.3
+
+### Candidate and scope
+
+- PR #14: dependency, native/WASM TLS, compiler, container, and CI refresh.
+- The dependency qualification ledger is `docs/DEPENDENCY_UPDATE.md`.
+- Root npm, three native sidecars, and Rust crate versions are aligned to 0.9.3.
+- Native release builds retain Ubuntu 24.04 explicitly, avoiding drift in the
+  glibc baseline through the `ubuntu-latest` runner alias.
+- macOS verification now installs NSS and exposes certutil for isolated Firefox
+  profiles. The dependency candidate failed hosted browser tests without it.
+- Restored Security and Rust Safety workflows disabled by GitHub inactivity.
+- Stable publishing retains the established OIDC `latest` path. Canary mirroring
+  is optional, not a release prerequisite; no new npm token is needed.
+
+### Required qualification (in progress)
+
+- Full local release gate on the versioned source, with rebuilt native/WASM files.
+- All PR checks, including restored security and Rust safety workflows.
+- Hosted release dry-run for the exact versioned candidate: three native builds,
+  WASM artifact, six native runtime validation jobs, and package dry-run.
+- Real Safari fetch/SSE/reconnect checks and screenshots against a trusted HTTPS
+  loopback server, plus HTTP/3 and HTTP/2 curl checks against that same server.
+  Brian explicitly selected loopback or Docker for the release staging endpoint.
+- Downloaded release artifacts and clean installed-package validation with source
+  and artifact hashes. Local x64 emulation alone is not the release build receipt.
+
+No publication, release tag, main-branch merge, or production deployment has been
+performed as part of this preparation. Completion requires receipts below.
+
 ## 0.9.2
 
 ### Scope and validated source
