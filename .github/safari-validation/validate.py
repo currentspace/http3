@@ -158,7 +158,7 @@ try:
     assert any(r['text'] == 'Develop' for r in rows), 'Develop menu did not appear'
     keys('keystroke "i" using {command down, option down}')
     time.sleep(4)
-    click_text(capture('inspector-tabs'), 'Network')
+    click_text(capture('inspector-tabs'), 'Network', contains=True)
     keys('keystroke "r" using command down')
     time.sleep(5)
     rows = capture('safari-inspector-network')
