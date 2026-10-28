@@ -58,6 +58,8 @@ try:
     (root / 'ca-fingerprint.txt').write_text(fingerprint)
     run(['sudo', 'safaridriver', '--enable'], check=True)
     run(['defaults', 'write', 'com.apple.Safari', 'IncludeDevelopMenu', '-bool', 'true'], check=True)
+    for preference in ['WebKitDeveloperExtrasEnabledPreferenceKey', 'com.apple.Safari.ContentPageGroupIdentifier.WebKit2DeveloperExtrasEnabled']:
+        run(['defaults', 'write', 'com.apple.Safari', preference, '-bool', 'true'], check=True)
     driver = subprocess.Popen(['/usr/bin/safaridriver', '-p', '4444'],
                               stdout=(root / 'safaridriver.log').open('w'), stderr=subprocess.STDOUT)
     for _ in range(5):
@@ -74,7 +76,7 @@ try:
     session = value['sessionId']
     assert value['capabilities']['browserVersion'].startswith('27.2'), value
     assert value['capabilities']['acceptInsecureCerts'] is False, value
-    command('POST', '/window/rect', {'width': 1400, 'height': 1100})
+    command('POST', '/window/rect', {'width': 1000, 'height': 720, 'x': 0, 'y': 25})
     results = []
     for phase in ['initial', 'reload']:
         command('POST', '/url', {'url': endpoint}) if phase == 'initial' else command('POST', '/refresh', {})
@@ -87,6 +89,7 @@ try:
         result.update(phase=phase, userAgent=evaluate('return navigator.userAgent'),
                       secureContext=evaluate('return isSecureContext'))
         save('safari-' + phase + '.json', result)
+        time.sleep(2)
         (root / ('safari-' + phase + '.png')).write_bytes(base64.b64decode(command('GET', '/screenshot')))
         assert result.get('complete') and result['secureContext'] and not result['errors'], result
         assert result['loads'] == (1 if phase == 'initial' else 2), result
@@ -103,19 +106,56 @@ try:
     save('safari-validation.json', {'functionalPassed': True, 'endpoint': endpoint, 'results': results,
                                    'artifactSource': '19dafa4001851b73a268078b377cd551d78200c7',
                                    'artifactRun': 40758754002})
-    # Capture the actual Inspector separately; image contents require human/visual review.
+    # Use a normal window for manual Inspector capture after WebDriver assertions.
+    command('DELETE', '')
+    session = None
+    run(['osascript', '-e', 'tell application "Safari" to quit'], check=True)
+    time.sleep(2)
+    run(['osascript', '-e', 'tell application "Safari"\nactivate\nmake new document with properties {URL:"' + endpoint + '"}\nend tell'], check=True)
+    time.sleep(5)
     script = '''tell application "System Events"
 tell process "Safari"
 set frontmost to true
+keystroke "," using command down
+delay 2
+click button "Advanced" of toolbar 1 of front window
+delay 1
+repeat with element in entire contents of front window
+try
+if role of element is "AXCheckBox" then
+set labelText to ""
+try
+set labelText to name of element as text
+end try
+try
+set labelText to labelText & " " & description of element as text
+end try
+if labelText contains "web developers" then
+if value of element is 0 then click element
+end if
+end if
+end try
+end repeat
+keystroke "w" using command down
+delay 1
 keystroke "i" using {command down, option down}
 delay 2
 set descriptions to {}
 repeat with element in entire contents of front window
+set labelText to ""
 try
-set end of descriptions to ((role of element as text) & " | " & (name of element as text) & " | " & (description of element as text))
-if name of element is "Network" then click element
+set labelText to name of element as text
+end try
+try
+set labelText to labelText & " | " & description of element as text
+end try
+set end of descriptions to labelText
+try
+if labelText contains "Network" then click element
 end try
 end repeat
+keystroke "r" using command down
+delay 3
 return descriptions
 end tell
 end tell'''
@@ -141,7 +181,9 @@ finally:
                 proc.kill()
                 proc.wait()
     if trusted:
-        run(['sudo', 'security', 'remove-trusted-cert', '-d', ca], check=True)
         run(['sudo', 'security', 'delete-certificate', '-Z', fingerprint,
                         '/Library/Keychains/System.keychain'], check=True)
-        save('trust-cleanup.json', {'temporaryTrustRemoved': True, 'certificateRemoved': True})
+        certs = subprocess.check_output(['security', 'find-certificate', '-a', '-Z', '/Library/Keychains/System.keychain'], text=True)
+        assert fingerprint not in certs, 'Temporary certificate remains installed'
+        save('trust-cleanup.json', {'certificateRemoved': True, 'verifiedAbsentByFingerprint': True,
+                                   'scope': 'Disposable GitHub-hosted VM; VM teardown removes its admin trust record'})
