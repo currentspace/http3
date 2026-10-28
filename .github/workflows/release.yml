@@ -24,7 +24,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          # BoringSSL 5 CPU probing uses strtoull. Newer glibc headers redirect
+          # it to __isoc23_strtoull (GLIBC_2.38); preserve the 0.9.2 ABI floor.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
@@ -52,6 +54,10 @@ jobs:
 
       - name: Build native prebuild
         run: pnpm exec napi build --release --platform --target ${{ matrix.target }}
+
+      - name: Check Linux glibc compatibility
+        if: runner.os == 'Linux'
+        run: python3 scripts/check-linux-prebuild-abi.py http3.*.node
 
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -112,10 +118,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             node-version: "24.22.1"
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             node-version: "26.12.1"
           - os: ubuntu-24.04-arm

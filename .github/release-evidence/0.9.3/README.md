@@ -1,8 +1,10 @@
 # 0.9.3 release preparation receipts
 
 Implementation source: `c97b3d17e53dbe68a884d0fdc4d8d9b8e1901979`.
-Evidence captured on 2026-10-28. Subsequent evidence/checklist edits do not change
-the implementation, dependency lockfiles, release workflow, or binary inputs.
+Evidence captured on 2026-10-28. This is the first functional qualification run.
+Subsequent inspection found a glibc compatibility regression in its Linux x64
+binary. That binary is not approved for publication; see the release ledger for
+the corrected build environment and replacement qualification.
 
 ## Hosted artifacts and package qualification
 

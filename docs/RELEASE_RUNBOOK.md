@@ -32,6 +32,13 @@ source revision, browser evidence, and matching curl checks.
 
 ## Local Gate
 
+Linux prebuilds must pass `scripts/check-linux-prebuild-abi.py` before upload.
+The GLIBC_2.34 symbol limit preserves the published 0.9.2 floor. Build Linux x64
+on the pinned Ubuntu 22.04 runner: newer headers redirect BoringSSL 5's CPU
+environment parsing to `__isoc23_strtoull`, raising the floor to GLIBC_2.38.
+Keep runtime testing on newer Linux versions as well; a green test on a newer
+runner alone does not establish compatibility with older deployed systems.
+
 - `pnpm run release:check`
 - This runs lint, typecheck, the release-blocking TypeScript and Rust lanes, browser checks, and the concurrency/load gates.
 - `pnpm run release:local-gate`

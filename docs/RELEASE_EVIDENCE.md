@@ -10,8 +10,9 @@ and remaining qualification work for each release candidate.
 - PR #14: dependency, native/WASM TLS, compiler, container, and CI refresh.
 - The dependency qualification ledger is `docs/DEPENDENCY_UPDATE.md`.
 - Root npm, three native sidecars, and Rust crate versions are aligned to 0.9.3.
-- Native release builds retain Ubuntu 24.04 explicitly, avoiding drift in the
-  glibc baseline through the `ubuntu-latest` runner alias.
+- Linux x64 release builds and validation use Ubuntu 22.04; ARM64 uses 24.04.
+  An artifact gate prevents either target requiring symbols above GLIBC_2.34,
+  matching the published 0.9.2 native packages.
 - macOS verification now installs NSS and exposes certutil for isolated Firefox
   profiles. The dependency candidate failed hosted browser tests without it.
 - Restored Security and Rust Safety workflows disabled by GitHub inactivity.
@@ -51,6 +52,15 @@ and remaining qualification work for each release candidate.
   [0.9.3 evidence bundle](../.github/release-evidence/0.9.3/README.md).
 
 ### Remaining gate
+
+Artifact inspection found that the first green dry-run's Linux x64 binary
+required `__isoc23_strtoull@GLIBC_2.38` from BoringSSL 5's CPU environment parser.
+Both published 0.9.2 Linux binaries require at most GLIBC_2.34. The x64 build and
+runtime-validation runner has therefore moved from Ubuntu 24.04 to 22.04, and a
+new release gate checks actual ELF version requirements. The first dry-run's
+x64 artifact is **not approved for publication**. A replacement hosted dry-run
+and artifact qualification are required; the earlier bundle remains historical
+evidence of functional tests, not approval of that binary's compatibility.
 
 The separate CodeQL findings check reports 17 Rust alerts, although the Security
 workflow's analysis/audit jobs and Rust Safety workflow completed successfully.

@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "README.md",
-      "sha256": "ded16800065b439ba187b8b069ee9779707a535b92ae26eee9c8d03cd2609514",
-      "size": 3095
+      "sha256": "6f7d704cfeb09ff7ee627840af9c57b7ed73c72c91855af9394c041384906149",
+      "size": 3236
     },
     {
       "path": "curl-manual-http2.txt",
@@ -36,6 +36,11 @@
       "path": "hosted-wasm-tests.log",
       "sha256": "0db5ae2370d12061f63e32b6b11033b2110520cf5a1fc8bfcbe9e6fecc535d23",
       "size": 4225
+    },
+    {
+      "path": "initial-abi-comparison.json",
+      "sha256": "849b2a4defec60fd2be1d93c2b05969552925d222d3dba71d2e29e41ee8ad9a3",
+      "size": 1614
     },
     {
       "path": "local-package-checksums.json",
