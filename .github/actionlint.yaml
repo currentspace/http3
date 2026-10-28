@@ -1,0 +1,7 @@
+# actionlint 1.7.12 predates this GitHub-hosted label. Its configurable label
+# allowlist is named self-hosted-runner, but this does not change workflow
+# runner selection. Remove once actionlint's built-in catalog includes 26.04.
+# Source: https://github.com/actions/runner-images/blob/main/README.md
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

@@ -266,3 +266,26 @@ and the closing storage inventory remain in progress.
 
 - Dockerfile.test built successfully and all four stress/benchmark suites passed
   on Linux arm64 with io_uring enabled. Its task container was removed.
+
+- Final macOS sustained qualification: all six tests across four suites passed
+  in 600 s, including H3 mixed/sustained traffic, idle retention, QUIC mixed
+  traffic, sustained transfers, and connection churn; no skips. These ran
+  alongside container builds, so their throughput is not an isolated benchmark.
+- Updated verification runners to `macos-26-intel` and `macos-26`; GitHub's
+  [current runner catalog](https://github.com/actions/runner-images/blob/main/README.md)
+  lists both. The prior macOS 14 runner
+  [retires November 2](https://github.com/actions/runner-images/issues/13518).
+  Workflow syntax validation is local; hosted workflow execution remains a
+  separate check after pushing the branch.
+
+- Added Ubuntu 26.04 to native verification alongside Ubuntu 24.04, using
+  labels from the same official runner catalog. Release builds retain the
+  Ubuntu 24.04 baseline to avoid raising the published Linux glibc requirement.
+- Direct x64 Docker build is not qualified: QEMU SIGSEGVs on Rust 1.99.1
+  `rustc -vV` before project compilation. A native arm64-hosted x64 cross-build
+  and separate x64 Node runtime checks are in progress. This is an emulation
+  limitation, not evidence of a successful x64 compiler/runtime lane.
+
+- actionlint 1.7.12 is the latest release but its bundled label list predates
+  Ubuntu 26.04. Added only that official hosted label to its configurable
+  allowlist, with a source link and removal condition. Full actionlint passes.
