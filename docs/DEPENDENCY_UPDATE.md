@@ -102,6 +102,15 @@ recorded here before each commit.
   compatible transitives. `test:rust:full`, UDP/direct-quiche interoperability,
   and `cargo test -p http3-wasm --locked` passed. This stage retains the prior
   napi and QUIC/TLS versions; native addon rebuild follows in the bridge stage.
+- Native bridge/platform updates: napi 3.15.0, napi-build 2.6.0,
+  napi-derive 3.6.13, io-uring 0.7.15, mio 1.2.4, socket2 0.6.5; allocator
+  crates and nix were already current. Node 24 fast verification passed all
+  14 enabled stages (141 s), including the rebuilt addon; FFI stress passed
+  8/8. Linux-specific I/O qualification remains pending the Docker stage.
+- Rust audit tools installed locally: cargo-audit 0.22.2, cargo-deny 0.20.2.
+  Pre-TLS audit found crossbeam-epoch 0.9.18 (RUSTSEC-2026-0204), plus
+  unmaintained paste and proc-macro-error2 warnings. Full transitive refresh and
+  post-update audit remain required.
 - Cross-platform, browser, safety, packaging, and performance qualification: pending.
 
 Known integration risks: quiche 0.29.2 WASM FFI patch; exact boring 4.22.0 pin;
