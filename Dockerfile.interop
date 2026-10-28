@@ -11,7 +11,7 @@
 #   (the canonical pnpm scripts do this when HTTP3_INTEROP_DOCKER_IO_URING=1
 #   is set). Without the flag the runtime auto-falls-back to poll, which
 #   is also a valid Linux driver — just not the production-fast path.
-ARG NODE_MAJOR=24.22.1
+ARG NODE_IMAGE=node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
 ARG VERIFY_IMAGE=http3-verify:latest
 FROM ${VERIFY_IMAGE} AS build
 
@@ -28,7 +28,7 @@ RUN mkdir -p examples/certs \
 
 # The runtime image strips the rust toolchain and crate cache (~1GB) since
 # they're not needed for `node examples/raw-api/server.ts`.
-FROM node:${NODE_MAJOR}-trixie-slim AS runtime
+FROM ${NODE_IMAGE} AS runtime
 
 WORKDIR /workspace
 COPY --from=build /workspace/dist ./dist

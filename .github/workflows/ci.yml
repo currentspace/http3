@@ -81,6 +81,10 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      - name: Resolve pinned Node image
+        id: node-image
+        run: echo "image=$(node scripts/node-container-image.mjs '${{ matrix.node-version }}')" >> "$GITHUB_OUTPUT"
+
       - name: Build Linux arm64 Docker runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -88,7 +92,7 @@ jobs:
           file: Dockerfile.runtime-test
           platforms: linux/arm64
           build-args: |
-            NODE_MAJOR=${{ matrix.node-version }}
+            NODE_IMAGE=${{ steps.node-image.outputs.image }}
           load: true
           tags: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
           cache-from: type=gha,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-arm64
@@ -135,6 +139,10 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      - name: Resolve pinned Node image
+        id: node-image
+        run: echo "image=$(node scripts/node-container-image.mjs '${{ matrix.node-version }}')" >> "$GITHUB_OUTPUT"
+
       - name: Build Linux amd64 Docker runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -142,7 +150,7 @@ jobs:
           file: Dockerfile.runtime-test
           platforms: linux/amd64
           build-args: |
-            NODE_MAJOR=${{ matrix.node-version }}
+            NODE_IMAGE=${{ steps.node-image.outputs.image }}
           load: true
           tags: currentspace/http3-runtime-tests:node${{ matrix.node-version }}-dev
           cache-from: type=gha,scope=http3-runtime-tests-node${{ matrix.node-version }}-linux-amd64

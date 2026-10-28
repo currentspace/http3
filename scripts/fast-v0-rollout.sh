@@ -111,7 +111,7 @@ for attempt in $(seq 1 20); do
   if docker run --rm -v "${HOME}/.aws:/root/.aws" \
     -e AWS_PROFILE="${AWS_PROFILE}" \
     -e AWS_REGION="${AWS_REGION}" \
-    amazon/aws-cli:latest elbv2 register-targets \
+    amazon/aws-cli:2.39.0@sha256:6014c77975a4ae237395924cc821333f20bf87c91964a45dd4ed5f3b13b424f5 elbv2 register-targets \
     --target-group-arn "${TG_ARN}" \
     --targets "Id=${NEW_A_IP},Port=443,QuicServerId=${SERVER_ID_A}" "Id=${NEW_B_IP},Port=443,QuicServerId=${SERVER_ID_B}" >/dev/null 2>&1; then
     break

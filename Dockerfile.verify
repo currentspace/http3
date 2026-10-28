@@ -5,8 +5,8 @@
 # The source tree is baked into the image (no bind mounts) so the host's
 # macOS-built node_modules / target / *.node artifacts don't poison the
 # Linux build. .dockerignore keeps the layer small.
-ARG NODE_MAJOR=24.22.1
-FROM node:${NODE_MAJOR}-trixie-slim
+ARG NODE_IMAGE=node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
+FROM ${NODE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -35,6 +35,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup component add clippy
 
 # Pinned package manager. Node 26 container images do not ship corepack.
+ENV CARGO_BUILD_JOBS=8
 RUN npm install -g pnpm@12.16.1
 
 WORKDIR /workspace
@@ -43,6 +44,7 @@ WORKDIR /workspace
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY examples/hono/package.json ./examples/hono/package.json
 COPY examples/express-adapter/package.json ./examples/express-adapter/package.json
+COPY examples/workerd-client/package.json ./examples/workerd-client/package.json
 RUN pnpm install --frozen-lockfile
 RUN npx playwright install --with-deps chromium firefox webkit
 

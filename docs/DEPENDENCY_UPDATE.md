@@ -205,3 +205,64 @@ SBOMs and automated update configuration.
   resolved from boring-sys 5.3.0's repository submodule at its published commit.
   Patched quiche provenance remains explicit. Container OS inventories follow
   after image qualification.
+
+## Linux arm64 and minimum compiler qualification
+
+- Node 24.22.1 on Debian Trixie: full verification 19 stages passed, no failures
+  (192 s). WASM was explicitly skipped in that container and passed separately
+  on macOS. Linux browser execution passed Firefox; Chromium and WebKit were
+  explicit platform skips, with all three browsers passing on macOS.
+- Linux Rust unit tests: 223 passed; direct/UDP interoperability: four passed;
+  Loom passed. Node core/runtime/interop/release: 335 passed; FFI: 67 passed.
+- All six Linux runtime modes passed, including portable, automatic fallback,
+  expected fast-mode rejection under seccomp, and actual io_uring with relaxed
+  seccomp (including the privileged lane). Concurrency/load gates passed.
+- Node 26.12.1 on Linux arm64 passed the same 335 Node and 67 FFI tests and
+  packed-install smoke using the updated native binary. Final macOS Node 26
+  tests and packed-install smoke also passed.
+- macOS-to-Debian interoperability: 15/15 passed in portable mode and 15/15
+  with io_uring enabled. The updated Dockerfile.interop built successfully.
+- Actual Rust 1.96.0 `cargo check --locked --all-targets --features
+  bench-internals` passed, so the declared minimum stays 1.96. Removed an
+  obsolete AWS-LC environment override; no resolved dependency uses AWS-LC.
+- Highest observed system use so far: 93.97%, below the 94% guard and 95% user
+  ceiling. Removed only completed task containers/images and the 30 exact cache
+  IDs from the interop build; preserved all older default-builder cache.
+
+Production/x64 image qualification, final packaged artifacts, sustained tests,
+and the closing storage inventory remain in progress.
+
+## Containers and update automation
+
+- All five Dockerfiles use Debian Trixie and immutable Node 24.22.1 base
+  digests; Node 26.12.1 is also pinned. CI and local runtime scripts resolve
+  exact requested versions through `containers/node-images.json`, rejecting
+  unsupported/stale versions instead of silently testing a different Node.
+- Production image built and served a successful Hono HTTP/3 response from a
+  macOS client. Its actual tools report Node 24.22.1, AWS CLI 2.39.0, and
+  acme.sh 3.1.6. AWS CLI comes from its pinned official image; operational
+  helper scripts use the same image digest. Those cloud operations were not run.
+- acme.sh is downloaded at build time from a verified commit archive, with
+  its source and GPLv3 license retained in `/opt/acme.sh`. Startup requires the
+  bundled client. Three offline entrypoint tests cover disabled mode, missing
+  client failure, and hydration from a valid mocked secret. No real issuance,
+  DNS mutation, or AWS writes were performed.
+- Updated Dockerfile frontend to stable 1.28.0 with an immutable digest.
+  Runtime and stress images now include the previously missing Rust integration
+  fixture directory. The verified production image is archived locally.
+- Generated a production OS/package CycloneDX SBOM with Syft 1.55.0, then
+  annotated the bundled AWS CLI and acme.sh versions/source pins. Reproduce
+  using `bash scripts/generate-container-sbom.sh IMAGE OUTPUT.json`; retain
+  the source SBOM alongside it for the Rust/BoringSSL dependency graph.
+- Renovate configuration validates against the official schema: weekly Monday
+  PRs, immutable Actions, grouped QUIC/TLS, napi, and TypeScript updates, Node
+  24 type compatibility, and no automerge. Image pins in JSON/Compose and
+  operational scripts have custom managers. Repository-side configuration is
+  ready; no Renovate service/app activation or remote settings change was made.
+- Final npm audit: zero findings. Rust audit: zero vulnerabilities, the one
+  documented `paste` maintenance warning. cargo-deny advisory, ban, license,
+  and source checks passed. An unrelated incomplete Cargo-home advisory cache
+  was left untouched; the successful audit uses this task's local database.
+
+- Dockerfile.test built successfully and all four stress/benchmark suites passed
+  on Linux arm64 with io_uring enabled. Its task container was removed.

@@ -44,13 +44,8 @@ ensure_acme_client() {
   if command -v acme.sh >/dev/null 2>&1; then
     return
   fi
-  log "Installing acme.sh..."
-  curl -fsSL https://get.acme.sh | sh -s "email=${ACME_EMAIL}" --force >/dev/null
-  if [[ ! -x "${HOME}/.acme.sh/acme.sh" ]]; then
-    log "acme.sh installation failed"
-    return 1
-  fi
-  ln -sf "${HOME}/.acme.sh/acme.sh" /usr/local/bin/acme.sh
+  log "acme.sh is missing; rebuild the image with the pinned certificate client"
+  return 1
 }
 
 cert_is_valid() {
@@ -144,7 +139,7 @@ issue_or_renew() {
 }
 
 bootstrap_cert() {
-  ensure_acme_client
+  ensure_acme_client || return 1
 
   if hydrate_cert_from_secret && cert_is_valid; then
     log "Loaded valid certificate from secret ${ACME_CERT_SECRET_ID}"

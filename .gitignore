@@ -14,3 +14,4 @@ report.*.json
 # wrangler dev/deploy local state + generated runtime types (examples/workerd-client/).
 .wrangler/
 worker-configuration.d.ts
+__pycache__/

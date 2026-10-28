@@ -97,13 +97,17 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      - name: Resolve pinned Node image
+        id: node-image
+        run: echo "image=$(node scripts/node-container-image.mjs '${{ matrix.node-version }}')" >> "$GITHUB_OUTPUT"
+
       - name: Build verify image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.verify
           build-args: |
-            NODE_MAJOR=${{ matrix.node-version }}
+            NODE_IMAGE=${{ steps.node-image.outputs.image }}
           tags: http3-verify:node${{ matrix.node-version }}
           load: true
           cache-from: type=gha,scope=http3-verify-node${{ matrix.node-version }}
