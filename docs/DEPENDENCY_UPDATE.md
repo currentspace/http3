@@ -97,6 +97,11 @@ recorded here before each commit.
 - Playwright 1.64.1 browsers installed on the project volume. macOS browser
   trust needs further validation: `sudo -n true` reports a password is required.
 - Rust/WASM/container upgrades: pending.
+- Ordinary Rust updates: refreshed arbitrary/derive_arbitrary, bytes,
+  crossbeam-channel, libc, log, rcgen, serde/core/derive, serde_json and their
+  compatible transitives. `test:rust:full`, UDP/direct-quiche interoperability,
+  and `cargo test -p http3-wasm --locked` passed. This stage retains the prior
+  napi and QUIC/TLS versions; native addon rebuild follows in the bridge stage.
 - Cross-platform, browser, safety, packaging, and performance qualification: pending.
 
 Known integration risks: quiche 0.29.2 WASM FFI patch; exact boring 4.22.0 pin;
