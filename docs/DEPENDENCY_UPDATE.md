@@ -149,3 +149,16 @@ Remaining integration work: safety-tool pins and proof/sanitizer runs,
 containers and OS/tool dependencies, CI Actions, runtime certificate installer,
 Rust license/audit integration, full platform/browser/package qualification,
 SBOMs and automated update configuration.
+
+## Browser qualification
+
+- Playwright 1.64.1 on macOS passed Chromium, Firefox, and WebKit page/fetch/SSE
+  HTTP/3 checks (3/3, no skips) with lint and typecheck passing.
+- Firefox 157 needed isolated app data (`CFFIXED_USER_HOME`) and its own NSS
+  certificate database to avoid reading the user's Firefox directory; upstream
+  Playwright #42768 is fixed in Firefox 158. Revisit on the next browser update.
+- Temporary user-keychain trust was sufficient; no sudo was required. Cleanup
+  explicitly removes trust, restores the search list, deletes the keychain, and
+  removes macOS deny-delete ACLs only inside the test-created Firefox home.
+  Final test exit was successful and the two earlier residual fixtures were
+  removed.
