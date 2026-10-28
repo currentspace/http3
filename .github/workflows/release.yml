@@ -52,6 +52,8 @@ jobs:
           brew install curl
           echo "QUALIFICATION_CURL=$(brew --prefix curl)/bin/curl" >> "$GITHUB_ENV"
           "$(brew --prefix curl)/bin/curl" --version
+      - name: Build screenshot text locator
+        run: swiftc .github/safari-validation/ocr.swift -o artifacts/safari-ocr
       - name: Validate trusted loopback with real Safari
         timeout-minutes: 6
         run: /usr/bin/python3 .github/safari-validation/validate.py

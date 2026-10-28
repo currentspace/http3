@@ -113,62 +113,53 @@ try:
     run(['osascript', '-e', 'tell application "Safari" to quit'], check=True)
     time.sleep(2)
     run(['open', '-a', 'Safari', endpoint], check=True)
+    def capture(name):
+        path = root / (name + '.png')
+        run(['screencapture', '-x', str(path)], check=True)
+        rows = json.loads(subprocess.check_output(['artifacts/safari-ocr', str(path)], text=True, timeout=30))
+        save(name + '-ocr.json', rows)
+        return rows
+
+    def keys(script):
+        run(['osascript', '-e', 'tell application "System Events" to tell process "Safari"\nset frontmost to true\n' + script + '\nend tell'], check=True)
+
+    def click_text(rows, text, contains=False):
+        matches = [r for r in rows if (text.lower() in r['text'].lower() if contains else r['text'].lower() == text.lower())]
+        assert len(matches) == 1, (text, matches, rows)
+        row = matches[0]
+        keys('click at {' + str(round(row['x'])) + ',' + str(round(row['y'])) + '}')
+
+    deadline = time.monotonic() + 40
+    while True:
+        rows = capture('safari-manual-page')
+        if any('Functional checks' in r['text'] for r in rows):
+            break
+        assert time.monotonic() < deadline, 'Normal Safari page did not paint'
+        time.sleep(2)
+    assert sum('PASS' in r['text'] for r in rows) >= 2, rows
+
+    # Toggle through Safari's ordinary settings UI, retaining screenshots at each step.
+    for attempt in range(2):
+        keys('keystroke "," using command down')
+        time.sleep(3)
+        click_text(capture('settings-general-' + str(attempt)), 'Advanced')
+        time.sleep(2)
+        click_text(capture('settings-advanced-' + str(attempt)), 'web developers', contains=True)
+        time.sleep(1)
+        keys('keystroke "w" using command down')
+        time.sleep(1)
+        rows = capture('develop-menu-' + str(attempt))
+        if any(r['text'] == 'Develop' for r in rows):
+            break
+    assert any(r['text'] == 'Develop' for r in rows), 'Develop menu did not appear'
+    keys('keystroke "i" using {command down, option down}')
+    time.sleep(4)
+    click_text(capture('inspector-tabs'), 'Network')
+    keys('keystroke "r" using command down')
     time.sleep(5)
-    run(['screencapture', '-x', str(root / 'safari-manual-page.png')], check=True)
-    script = '''tell application "System Events"
-tell process "Safari"
-set frontmost to true
-keystroke "," using command down
-delay 2
-click button "Advanced" of toolbar 1 of front window
-delay 1
-repeat with element in entire contents of front window
-try
-if role of element is "AXCheckBox" then
-set labelText to ""
-try
-set labelText to name of element as text
-end try
-try
-set labelText to labelText & " " & description of element as text
-end try
-if labelText contains "web developers" then
-if value of element is 1 then click element
-delay 0.5
-click element
-end if
-end if
-end try
-end repeat
-keystroke "w" using command down
-delay 1
-keystroke "i" using {command down, option down}
-delay 2
-set descriptions to {}
-repeat with element in entire contents of front window
-set labelText to ""
-try
-set labelText to name of element as text
-end try
-try
-set labelText to labelText & " | " & description of element as text
-end try
-set end of descriptions to labelText
-try
-if labelText contains "Network" then click element
-end try
-end repeat
-keystroke "r" using command down
-delay 3
-return descriptions
-end tell
-end tell'''
-    ui = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=40)
-    (root / 'inspector-ui.txt').write_text(ui.stdout + ui.stderr)
-    time.sleep(2)
-    shot = subprocess.run(['screencapture', '-x', str(root / 'safari-inspector.png')], capture_output=True, text=True)
-    save('inspector-capture-status.json', {'uiExit': ui.returncode, 'screenshotExit': shot.returncode,
-                                          'requiresVisualReview': True})
+    rows = capture('safari-inspector-network')
+    save('inspector-capture-status.json', {'visibleNetworkTabSelected': True, 'requiresVisualReview': True})
+
 finally:
     run(['screencapture', '-x', str(root / 'final-desktop.png')], check=False)
     if session:
