@@ -1,7 +1,31 @@
 # Dependency refresh, October 2026
 
 Execution branch: `chore/dependency-refresh-2026-10`.
-Baseline: `7fcbda5` (0.9.2). This is an execution ledger, not a completion claim.
+Baseline: `7fcbda5` (0.9.2). Implementation and local qualification are complete.
+This ledger preserves the execution history; earlier pending notes describe the
+state at that stage and are superseded by the later results.
+
+## Final outcome
+
+- Updated JavaScript/Rust dependency graphs, Node/pnpm/Rust toolchains,
+  QUIC/TLS bindings, browsers/Workers tooling, safety/audit tools, containers,
+  certificate tooling, Actions, and update automation in separate commits.
+- Native macOS arm64 and Linux arm64 qualification passed. Linux x64 binaries
+  were cross-built with the pinned compiler and passed unit, Node/FFI, runtime,
+  and package checks under emulation. Hosted CI has not run; its native x64 and
+  Intel macOS lanes remain a release prerequisite.
+- Browser, WASM/workerd, sanitizer/proof/fuzz-smoke, sustained traffic, package,
+  and audit results are detailed below. npm: zero findings; Rust: zero
+  vulnerabilities plus the bounded paste maintenance exception.
+- Retained compatibility choices are explicit: WASI SDK 33, TypeScript 6 API
+  alongside the TypeScript 7 compiler, Node 24 types, and the one quiche FFI
+  correction. See Release follow-up and rollback below.
+- All four packages passed dry-run and are archived locally with checksums.
+  Nothing was pushed, published, or deployed; repository version stays 0.9.2.
+- Highest observed system volume usage: **93.97%**, below the 95% ceiling.
+  Task Docker resources were removed. Original Docker state is restored:
+  10 images (14.99 GB), 63 default cache entries (10.92 GB), no containers or
+  volumes. No unrelated image/cache cleanup was performed.
 
 ## Scope and sequence
 
@@ -289,3 +313,68 @@ and the closing storage inventory remain in progress.
 - actionlint 1.7.12 is the latest release but its bundled label list predates
   Ubuntu 26.04. Added only that official hosted label to its configurable
   allowlist, with a source link and removal condition. Full actionlint passes.
+
+## Linux x64 and release artifact qualification
+
+- QEMU cannot run the pinned x64 Rust compiler (`rustc -vV` SIGSEGV). Native
+  arm64 Rust 1.99.1 plus Debian's x64 GCC/G++ cross-toolchain successfully
+  built the locked x64 addon and Rust test executable. ELF inspection confirms
+  x86-64. The x64 Rust executable passed all 223 unit tests under emulation.
+- x64 Node 24.22.1 passed 326 Node tests, 67 FFI tests, and packed-install
+  smoke. After supplying curl in the temporary runtime image, all nine curl
+  interoperability tests also passed with no skips (335 Node tests in total).
+- All six x64 runtime-selection lanes passed, including portable/fallback,
+  expected seccomp rejection, and io_uring in unconfined/privileged modes.
+- The temporary cross-build runtime initially lacked OpenSSL and curl; those
+  fixture gaps were fixed and affected tests rerun. The committed runtime
+  Dockerfile already installs both. Node 26 additionally needs libatomic,
+  copied from the same pinned official Node 26 x64 image as its executable.
+- Release script dry-run passed for all three native packages and the root
+  package, including native export and WASM layout checks. Packed all four
+  locally with pnpm. Used a temporary `0.9.3-dependency-qualification.20261028`
+  version only in an isolated staging copy; repository versions remain 0.9.2.
+  No package, tag, branch, or image was published or pushed.
+- The final packed root package loaded all public entry points and instantiated
+  WASM on macOS Node 24/26, Linux arm64 Node 26, and Linux x64 Node 24.
+  These checks load from a separate consumer's node_modules, not source paths.
+
+## Release follow-up and rollback
+
+- Keep WASI SDK 33 until stable Rust >=1.100 resolves the demonstrated SDK 34
+  startup incompatibility, then rerun both WASM build variants and runtimes.
+- Keep TypeScript 6's API alias until ESLint/napi accept the stable TypeScript 7
+  API; the compiler itself is already TypeScript 7. Node type declarations stay
+  on latest 24.x to enforce the package's Node 24 support contract.
+- Revisit the single quiche FFI correction when upstream fixes it; retain
+  checksum/provenance and fatal WASM linker warnings until then.
+- Remove or explicitly review the scoped paste maintenance exception before
+  2026-11-28. The guard rejects version/parent drift and expiration.
+- Hosted CI (including native x64 and Intel macOS) must pass after the branch
+  is pushed. Local x64 results use cross-built binaries and emulation; they do
+  not prove a native x64 compiler build or hosted runner behavior.
+- Before an actual release, choose an unused version, synchronize root/native
+  package versions, rebuild the complete artifact set on the release runners,
+  and run the existing release dry-run workflow. Activate Renovate separately
+  if the repository does not already have its service installed.
+- No live deployment changed. For rollback, use baseline commit `7fcbda5` in
+  an isolated checkout and rebuild from its own lockfiles/toolchains. Keep
+  native, JavaScript, and WASM artifacts from the same revision; do not mix an
+  old binary with this update's generated loader or dependency graph. The
+  updated production image is archived under `artifacts/dependency-update/`.
+
+- Final Linux x64 Node 26.12.1: 335 Node tests, 67 FFI tests, packed-install
+  smoke, all public package entry points, and packed WASM instantiation passed.
+  The runtime image was archived before removal. Native unit and Node runtime
+  tests passed under emulation; direct emulated x64 compiler remains unsupported.
+- `artifacts/dependency-update/artifact-manifest.json` records SHA-256 hashes
+  for the final lockfiles, three native binaries, WASM, and four package tarballs.
+
+## Closing storage inventory
+
+After task-only Docker cleanup: project volume 57.12% used (919.3 GiB free),
+system volume 92.50% used (67.1 GiB free). Peak observed system use was 93.97%.
+Docker is back to its starting inventory: 10 original images totaling 14.99 GB,
+63 original default-builder cache entries totaling 10.92 GB, zero containers,
+and zero volumes. The temporary builder and all task images were removed.
+Logs, SBOMs, test toolchains, package tarballs, image archives, and checksums are
+retained on the project volume under `artifacts/dependency-update/`.
