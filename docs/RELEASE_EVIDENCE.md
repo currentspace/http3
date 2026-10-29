@@ -39,21 +39,40 @@ and remaining qualification work for each release candidate.
   concurrency (1,381 ms / 10,000 ms budget), load smoke, 223 Rust unit tests,
   three UDP and one direct interoperability tests, nine QUIC mock and eleven
   H3 mock tests, and native packed-install smoke.
-- The local release wrapper stopped at browser sudo authorization. A separate
-  user-keychain attempt timed out during certificate authorization; its temporary
-  keychain was removed and the original search list restored. These attempts do
-  not qualify the local browser gate or manual Safari gate.
+- After certificate authorization, the local browser gate passed all three
+  Chromium, Firefox and Playwright WebKit page/fetch/SSE tests over H3 on
+  October 29, 2026. Earlier authorization failures remain recorded separately.
 - CodeQL identified disabled certificate validation in a new HTTPS test.
   The follow-up uses a temporary CA and leaves verification enabled for H3, H2
   and HTTPS; all six Node facade tests and ten Fastify fixture tests passed.
-  Final-head hosted checks must confirm the finding is resolved.
+  All 28 hosted PR checks passed at `f0ea679c28e3ee9fc291cf786a8577e2ceba764f`,
+  with no open CodeQL PR findings; the scheduled deep-safety job was skipped.
+- [Release dry-run 40827407812](https://github.com/currentspace/http3/actions/runs/40827407812)
+  passed all 11 jobs at that revision. All native/WASM hashes match the tested
+  artifacts. Actual npm publication was skipped.
+- The versioned Fastify fixture at `0c1956809ffc61a2922c2bea57c73a9e96b9c82d`
+  passed ten tests each on macOS ARM64, Linux ARM64 and native Linux x64, with
+  Node 24.22.1 and 26.12.1. Native x64 evidence is
+  [run 40828705200](https://github.com/currentspace/http3/actions/runs/40828705200).
+  Both fixture server and clients explicitly select portable mode.
+- Real Safari 27.0.1 on macOS 27.0.1 passed trusted loopback page, fetch, SSE
+  reconnect with Last-Event-ID, and reload checks. Safari used H2 fallback.
+  The actual Web Inspector Network panel was captured; curl H3-only and H2
+  both passed against the same endpoint with certificate verification enabled.
+  Evidence is in `artifacts/release-0.9.4/`.
+- The Safari wrapper remains failed: final WebDriver session deletion returned
+  HTTP 404. Functional checks passed and trust cleanup recorded no errors;
+  temporary CA removal, original search-list restoration, and stopped server
+  and driver were verified. The original failure record is preserved.
+- This does not satisfy the latest-stable Safari prerequisite:
+  [Safari 27.2 was released October 26](https://support.apple.com/en-us/149527).
+  This Mac offers macOS 27.2 as a restart-required update; it was not installed.
 
 ### Pending release gates
 
-- Local browser release gate, final-head hosted qualification, and versioned
-  Linux/macOS Fastify integration checks.
-- Manual Safari gate from `SAFARI_VALIDATION_RUNBOOK.md` and any final-head CI
-  checks required before publication.
+- Repeat the manual Safari gate from `SAFARI_VALIDATION_RUNBOOK.md` on the
+  latest stable Safari, including clean orchestration cleanup. Any subsequent
+  source revision must complete its required hosted checks before publication.
 - Clean registry install of the eventual published version before the Fastify
   example can be submitted as installable.
 
