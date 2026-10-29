@@ -32,7 +32,9 @@ TLS_KEY_FILE=/absolute/path/key.pem TLS_CERT_FILE=/absolute/path/cert.pem npm ru
 
 Click the counter to verify hydration, edit its label in `app/counter.jsx` to
 exercise Fast Refresh, and click **About** to exercise RSC client navigation.
-The `POST /api/echo` route echoes the request body as JSON.
+The `POST /api/echo` route echoes a small text body as JSON. It uses
+`request.text()` and buffers that body; use the separate upload example below
+to exercise streaming.
 
 To run the built application:
 
@@ -44,6 +46,48 @@ npm start
 `PORT=4443 npm run dev` changes the port. The example binds only to IPv4 loopback
 (`127.0.0.1`); use the hostname `localhost` in the URL. The `portable` runtime
 avoids requiring Linux io_uring capabilities for this local workflow.
+
+## Streaming file uploads
+
+Choose a file in the **Streaming file upload** form and click **Upload file**.
+The browser sends `file.stream()` with `duplex: 'half'`. The `/api/upload` Node
+route reads `request.body` chunk by chunk and returns the received byte count,
+chunk count, and SHA-256 digest. It retains neither the complete body nor a file
+on disk. The chunk count depends on transport delivery, not the original file's
+chunk boundaries.
+
+The browser request follows this pattern:
+
+```js
+const response = await fetch('/api/upload', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/octet-stream',
+    'X-File-Size': String(file.size),
+  },
+  body: file.stream(),
+  duplex: 'half',
+});
+const { received, sha256 } = await response.json();
+```
+
+`duplex: 'half'` means the response is read after the upload finishes. The route
+still consumes request chunks while the browser is sending the body. This is a
+transport demonstration; adapt the route for storage and your application's
+upload limits before using it as an upload service.
+
+### `ERR_ALPN_NEGOTIATION_FAILED`
+
+HTTPS alone is insufficient for Chromium's streaming fetch requests. In our
+Next 16.4.3 reproduction, `next dev --experimental-https` negotiated HTTP/1.1:
+`file.stream()` failed with `ERR_ALPN_NEGOTIATION_FAILED`, while sending the same
+file as a non-stream body succeeded. Start this custom server with `npm run dev`
+and verify `h2` or `h3` in DevTools. It provides these protocols directly without
+Nginx. This addresses the scenarios in Next.js discussions
+[#19653](https://github.com/vercel/next.js/discussions/19653) and
+[#85001](https://github.com/vercel/next.js/discussions/85001), as tested on Node
+24/26 with Chromium 157.0.8103.15; it does not imply identical behavior in every
+browser or historical Next release.
 
 ## Verify the protocol
 
@@ -75,9 +119,17 @@ NODE_ENV=production HTTP3_TEST_PROTOCOL=h2 npm run smoke
 
 The test verifies initial HTTP/2, the advertised Alt-Svc port, subsequent HTTP/3
 negotiation, compressed responses, hydration, ten client navigations, RSC body
-consumption, POST data, and shutdown. Development mode also checks Fast Refresh
-and its HTTP/1.1 WebSocket handshake. All request failures and browser errors
+consumption, POST data, streaming uploads, and shutdown. Development mode also
+checks Fast Refresh and its HTTP/1.1 WebSocket handshake. All request failures and browser errors
 remain test failures. The H2 control disables QUIC and requires H2 throughout.
+
+Upload checks cover 64 KiB and 8 MiB `File.stream()` bodies, an 8 MiB controlled
+stream, and the file-picker UI. Byte counts and SHA-256 digests must match. The
+controlled stream withholds all data after the first 64 KiB until the server
+confirms consuming a chunk, proving that it does not wait for upload completion
+to read the body. The smoke harness enables `HTTP3_SMOKE_UPLOAD_PROGRESS=1` for
+that observation; ordinary example runs do not emit those test markers. These
+checks run in the example CI's H2/H3 and development/built-app matrix.
 
 For the local H3 test, Chromium receives a certificate public-key pin exception
 and `--origin-to-force-quic-on=localhost:1`. Port **1 is unused**: that flag permits

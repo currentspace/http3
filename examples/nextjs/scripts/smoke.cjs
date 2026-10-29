@@ -29,7 +29,9 @@ async function until(predicate, timeout, description) {
 }
 (async () => {
   const server = spawn(process.execPath, [path.join(appDir, 'server.cjs')], {
-    cwd: appDir, env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: appDir,
+    env: { ...process.env, PORT: String(port), HTTP3_SMOKE_UPLOAD_PROGRESS: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
   let logs = '', exited = false;
   server.stdout.on('data', data => { logs += data; });
@@ -91,6 +93,15 @@ async function until(predicate, timeout, description) {
     }
     assert.deepEqual(await page.evaluate(() => fetch('/api/echo', { method: 'POST', body: 'hello HTTP/3' }).then(r => r.json())),
       { body: 'hello HTTP/3' });
+    report.uploads = await require('./upload-smoke.cjs')(page, async id => {
+      const prefix = 'HTTP3_UPLOAD_PREFIX ';
+      const observed = () => logs.slice(0, logs.lastIndexOf('\n') + 1).split('\n')
+        .filter(line => line.startsWith(prefix))
+        .map(line => JSON.parse(line.slice(prefix.length)))
+        .find(entry => entry.id === id);
+      await until(() => observed(), 15000, 'route consumed upload prefix before EOF');
+      return observed().received;
+    });
     const fullRsc = await page.evaluate(() => fetch('/about', { headers: { rsc: '1' } }).then(r => r.text()));
     assert.ok(fullRsc.includes('Client navigation works'));
     report.rscBytes = Buffer.byteLength(fullRsc);
