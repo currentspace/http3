@@ -3,6 +3,43 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.5 candidate
+
+### Scope and state
+
+- Preserve explicit native UDP limits and bound quiche PMTUD by local and peer
+  transport limits, including discovery restart and revalidation.
+- Fix Node facade header compatibility, static serving, streaming compression,
+  HTTP/1 WebSocket upgrades and shutdown with an active upgraded socket.
+- Add a source-checkout Next.js development example, pinned to Next 16.4.3 and
+  React 19.3.1, without adding runtime framework dependencies to the library.
+- Root, Rust and all three native sidecars are aligned to 0.9.5.
+- Base: `15c413899c14d01e38f22aca2aca942ebf23cbb1` (0.9.4).
+- This is release preparation. No tag or npm publication is authorized by the
+  candidate PR; merge and publication remain separate actions.
+
+### Qualification
+
+- Before the version bump, macOS arm64 / Node 24.22.1 passed 231 core tests,
+  97 interoperability tests, six Next middleware tests, 223 Rust unit tests,
+  20 mock transport tests and 22 PMTUD tests, plus lint and typechecks.
+- Chromium verified hydration, state-preserving Fast Refresh, gzip, POST bodies,
+  full RSC reads, client navigation and bounded shutdown over forced HTTP/3 and
+  an HTTP/2 control. Each run recorded 20 responses and no failed requests or
+  browser errors. This does not qualify automatic Alt-Svc discovery.
+- Versioned macOS arm64 / Node 24.22.1 checks passed: native build, frozen
+  dependency install, lint, typechecks (including workerd), Node-API boundary,
+  349 Node tests, 67 FFI tests, six Next middleware tests, 269 Rust tests,
+  Clippy (warnings only), packed-install smoke, concurrency and load smoke.
+- Versioned Chromium H3 passed. One H2 control run reported an aborted RSC
+  request despite successful same-document navigation and no console errors;
+  subsequent diagnostic runs passed. This intermittent failure remains under
+  investigation; the browser gate still rejects every failed request.
+- Hosted release dry-run results are recorded in the PR. The release workflow now runs Next middleware and Chromium H3/H2
+  checks against each of the three native prebuilds with Node 24 and 26.
+- Latest stable Safari manual qualification remains required by the release
+  runbook before release. Prior 0.9.4 Safari evidence is not a 0.9.5 pass.
+
 ## 0.9.4 candidate
 
 ### Scope and state

@@ -5,14 +5,20 @@ Archive SHA-256: `52b35a721a2a56797347929745fa783fc99e680d9484b80324ce40106b7549
 Upstream commit: `be47c5011215b9f13bad06bd7627d3ae49888a19`.
 The upstream BSD-2-Clause license is preserved in COPYING.
 
-One change in `src/tls/mod.rs`: call `boring_sys::ERR_error_string_n`
+TLS compatibility change in `src/tls/mod.rs`: call `boring_sys::ERR_error_string_n`
 and remove quiche's handwritten declaration. BoringSSL 5 returns `char *`,
 whereas that declaration returns void. The mismatch produces a WASM linker
 warning and a trapping call on the TLS error-reporting path. Using the generated
 binding follows the actual linked BoringSSL version, including boring 4.
 
+PMTUD changes in `src/lib.rs` and `src/pmtud.rs` bound probes and application
+packets by both the configured send limit and the peer's advertised receive
+limit. The negotiated cap persists across discovery restarts and revalidation;
+late failures from larger probes cannot invalidate the new ceiling. Root tests
+`pmtud_peer_limit` and `pmtud_state` cover packet sizes and discovery state.
+
 The workspace uses this source for native, WASM, and the spike. No registry
 cache is modified and no build changes Cargo.lock. Remove this vendored copy
-and the root patch entry when a stable quiche release includes the correction;
+and the root patch entry when a stable quiche release includes both corrections;
 rerun native/WASM error-path tests and require a warning-free WASM link.
 No upstream issue or PR has been submitted by this task.

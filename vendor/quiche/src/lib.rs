@@ -4026,8 +4026,14 @@ impl<F: BufFactory> Connection<F> {
 
         let send_path = self.paths.get_mut(send_pid)?;
 
+        // Bound persistent discovery state as well as this packet. This also
+        // covers paths reconfigured during TLS or PMTUD revalidation.
+        let udp_limit = self.recovery_config.max_send_udp_payload_size
+            .min(self.peer_transport_params.max_udp_payload_size as usize)
+            .min(16383);
         // Increase the maximum datagram size for a PMTUD probe.
         if let Some(pmtud) = send_path.pmtud.as_mut() {
+            pmtud.limit_maximum_mtu(udp_limit);
             if pmtud.should_probe() {
                 let size = if self.handshake_confirmed || self.handshake_completed
                 {
@@ -4042,6 +4048,8 @@ impl<F: BufFactory> Connection<F> {
                     cmp::min(out.len(), send_path.recovery.max_datagram_size());
             }
         }
+
+        left = left.min(udp_limit);
 
         // Limit data sent by the server based on the amount of data received
         // from the client before its address is validated.
@@ -6751,7 +6759,9 @@ impl<F: BufFactory> Connection<F> {
             if self.is_established() {
                 // Cap the packet size at 16,383 bytes so a two-byte varint can
                 // always encode it.
-                return cmp::min(16383, max_datagram_size);
+                return max_datagram_size.min(16383)
+                    .min(self.recovery_config.max_send_udp_payload_size)
+                    .min(self.peer_transport_params.max_udp_payload_size as usize);
             }
         }
 
@@ -8045,6 +8055,9 @@ impl<F: BufFactory> Connection<F> {
         let active_path = self.paths.get_active_mut()?;
 
         active_path.recovery.update_max_ack_delay(max_ack_delay);
+        if let Some(pmtud) = active_path.pmtud.as_mut() {
+            pmtud.limit_maximum_mtu(peer_params.max_udp_payload_size as usize);
+        }
 
         if active_path
             .pmtud

@@ -163,6 +163,10 @@ step "TS test suite (core + runtime + interop + release + ffi)"
 pnpm test
 mark_done
 
+step "Next.js middleware adapter tests"
+pnpm run test:nextjs
+mark_done
+
 if [[ "${VERIFY_SKIP_BROWSER_E2E:-0}" != "1" ]]; then
   step "playwright browsers (chromium + firefox + webkit)"
   pnpm exec playwright install --with-deps chromium firefox webkit

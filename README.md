@@ -182,6 +182,7 @@ integration in the development tree; it requires the next package release.
 - [Raw API example](./examples/raw-api/README.md)
 - [Express adapter example](./examples/express-adapter/README.md)
 - [Hono `serveFetch()` example](./examples/hono/README.md)
+- [Next.js development over HTTP/3](./examples/nextjs/README.md) (requires this checkout)
 
 ## Start Here
 

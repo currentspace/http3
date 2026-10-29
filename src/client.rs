@@ -16,6 +16,7 @@ pub struct NativeWorkerClient {
     handle: Option<crate::worker::ClientWorkerHandle>,
     /// Stored until `connect()` is called, then consumed.
     quiche_config: Option<quiche::Config>,
+    max_udp_payload_size: Option<u32>,
     tsfn: Option<crate::worker::EventTsfn>,
     session_ticket: Option<Vec<u8>>,
     qlog_dir: Option<String>,
@@ -38,6 +39,7 @@ impl NativeWorkerClient {
         Ok(Self {
             handle: None,
             quiche_config: Some(quiche_config),
+            max_udp_payload_size: options.max_udp_payload_size,
             tsfn: Some(callback),
             session_ticket: options.session_ticket.map(|ticket| ticket.to_vec()),
             qlog_dir: options.qlog_dir,
@@ -58,10 +60,15 @@ impl NativeWorkerClient {
             .parse()
             .map_err(|e: std::net::AddrParseError| napi::Error::from_reason(e.to_string()))?;
 
-        let quiche_config = self
+        let mut quiche_config = self
             .quiche_config
             .take()
             .ok_or_else(|| napi::Error::from_reason("already connected"))?;
+        crate::config::apply_runtime_udp_limits(
+            &mut quiche_config,
+            &addr,
+            self.max_udp_payload_size,
+        );
         let tsfn = self
             .tsfn
             .take()

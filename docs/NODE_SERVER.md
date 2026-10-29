@@ -4,9 +4,10 @@ The experimental `@currentspace/http3/node` export connects Node-style request
 handlers to this project's HTTP/3 transport. It also accepts HTTP/2 over TLS on
 the same port and optional HTTP/1.1 fallback. No proxy is involved.
 
-**Release prerequisite:** this export is under development. It is not present in
-published version 0.9.3. The accompanying Fastify draft targets a proposed 0.9.4
-release and must not be submitted as installable until that release is available.
+The export was introduced in 0.9.4. The Next.js compatibility, HTTP/1 upgrade,
+and packet-limit fixes described here are included in the 0.9.5 candidate in this checkout.
+See the [Next.js development example](../examples/nextjs/README.md) for local
+HTTP/3, hydration, compression and Fast Refresh testing.
 
 ```js
 const fs = require('node:fs');
@@ -45,8 +46,9 @@ translation must set the externally reachable port themselves.
   cookies, `writeHead`, `flushHeaders`, `addTrailers`, and body suppression for
   HEAD, 204 and 304. HTTP/1 hop-by-hop response headers are removed on H2/H3.
 - A stream-scoped `socket` facade exposes peer IP/port, encryption/ALPN, timeout
-  and cancellation. Cancelling it resets the request stream, not other requests
-  sharing its QUIC/H2 connection.
+  and cancellation. Readable/writable lifecycle flags reflect the backing stream.
+  Cancelling it resets the request stream, not other requests sharing its QUIC/H2
+  connection.
 
 The H3/H2 objects are facades, not instances of Node's `IncomingMessage`,
 `ServerResponse` or `net.Socket`. The handler signature accepts familiar Node
@@ -54,7 +56,12 @@ handler types for interoperability; that does not promise the entire Node HTTP
 API. Fastify's TypeScript `RawServer` union currently requires a separate type
 integration; the accompanying example is JavaScript.
 
-TCP upgrades/WebSockets, HTTP/3 WebTransport, CONNECT tunnels, raw socket writes,
+With `allowHTTP1: true`, the public `upgrade(request, socket, head)` event forwards
+HTTP/1.1 upgrades from the TLS listener. The application owns the handshake;
+without an upgrade listener the socket is closed. Upgraded sockets remain subject
+to the shutdown deadline. HTTP/2 and HTTP/3 streams do not emit this event.
+
+HTTP/3 WebSockets/WebTransport, CONNECT tunnels, raw QUIC socket writes,
 informational responses (`writeEarlyHints`/`writeContinue`), Unix sockets, server
 re-listening and the complete Node server API are not implemented. Plugins that
 require those APIs or `instanceof` checks need separate qualification. Fastify's

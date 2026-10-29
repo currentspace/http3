@@ -23,6 +23,22 @@ type ByteBuf = Vec<u8>;
 /// 1200 up to this ceiling; on standard Ethernet the first probe succeeds
 /// immediately.
 pub(crate) const FALLBACK_MAX_UDP_PAYLOAD: usize = 1472;
+/// Resolve the automatic path ceiling without overriding an explicit user cap.
+pub(crate) fn apply_runtime_udp_limits(
+    config: &mut quiche::Config,
+    addr: &std::net::SocketAddr,
+    explicit_limit: Option<u32>,
+) {
+    let path_limit = if addr.ip().is_unspecified() {
+        FALLBACK_MAX_UDP_PAYLOAD
+    } else {
+        effective_pmtud_ceiling(addr)
+    };
+    let limit = explicit_limit.map_or(path_limit, |limit| (limit as usize).min(path_limit));
+    config.set_max_send_udp_payload_size(limit);
+    config.set_max_recv_udp_payload_size(limit);
+}
+
 const DEFAULT_INITIAL_MAX_DATA: u64 = 100_000_000;
 const DEFAULT_INITIAL_MAX_STREAM_DATA: u64 = 2_000_000;
 const DEFAULT_INITIAL_MAX_STREAMS_BIDI: u64 = 10_000;
