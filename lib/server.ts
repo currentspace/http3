@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { createSecureServer as createHttp2SecureServer, constants as http2Constants } from 'node:http2';
-import type { Http2SecureServer, Http2Session, IncomingHttpHeaders, ServerHttp2Stream } from 'node:http2';
+import type { Http2SecureServer, Http2Session, Http2ServerRequest, Http2ServerResponse, IncomingHttpHeaders, ServerHttp2Stream } from 'node:http2';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -673,14 +673,15 @@ export class Http3SecureServer extends EventEmitter {
   }
 
   private _attachH2ServerListeners(h2Server: Http2SecureServer): void {
+    const compatibilityResponses = new WeakMap<ServerHttp2Stream, Http2ServerResponse>();
     h2Server.on('error', (err: Error) => {
       if (!this._starting) {
         this.emit('error', err);
       }
     });
-    h2Server.on('request', (req: IncomingMessage, res: ServerResponse) => {
-      if (req.httpVersionMajor !== 1) return;
-      this.emit('request', req, res);
+    h2Server.on('request', (req: IncomingMessage | Http2ServerRequest, res: ServerResponse | Http2ServerResponse) => {
+      if (req.httpVersionMajor === 1) this.emit('request', req, res);
+      else compatibilityResponses.set((req as Http2ServerRequest).stream, res as Http2ServerResponse);
     });
     h2Server.on('session', (session: Http2Session) => {
       this._ensureH2Session(session);
@@ -691,8 +692,9 @@ export class Http3SecureServer extends EventEmitter {
         stream.close(http2Constants.NGHTTP2_INTERNAL_ERROR);
         return;
       }
-      this._ensureH2Session(streamSession);
-      const adapter = new ServerHttp2StreamAdapter(stream);
+      const session = this._ensureH2Session(streamSession);
+      const adapter = new ServerHttp2StreamAdapter(stream, compatibilityResponses.get(stream));
+      adapter.session = session;
       this._trackH2Stream(streamSession, adapter);
 
       const incoming = normalizeIncomingHeaders(headers);
@@ -864,6 +866,7 @@ export class Http3SecureServer extends EventEmitter {
 
     // New stream — create and emit
     const stream = new ServerHttp3Stream();
+    stream.session = this._sessions.get(event.connHandle) ?? null;
     stream._connHandle = event.connHandle;
     stream._streamId = event.streamId;
     stream._eventLoop = this._eventLoop;

@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -27,6 +27,10 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
+    "./node": {
+      "types": "./dist/node-server.d.ts",
+      "default": "./dist/node-server.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -224,8 +228,8 @@
     "wrangler": "^4.154.0"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.9.3",
-    "@currentspace/http3-linux-arm64-gnu": "0.9.3",
-    "@currentspace/http3-linux-x64-gnu": "0.9.3"
+    "@currentspace/http3-darwin-arm64": "0.9.4",
+    "@currentspace/http3-linux-arm64-gnu": "0.9.4",
+    "@currentspace/http3-linux-x64-gnu": "0.9.4"
   }
 }

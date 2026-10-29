@@ -1,5 +1,5 @@
 import { constants as http2Constants } from 'node:http2';
-import type { IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from 'node:http2';
+import type { Http2ServerResponse, IncomingHttpHeaders, OutgoingHttpHeaders, ServerHttp2Stream } from 'node:http2';
 import { ServerHttp3Stream } from './stream.js';
 import type { IncomingHeaders, RespondOptions } from './stream.js';
 import {
@@ -76,7 +76,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
   private _h2Closed = false;
   private _h2Aborted = false;
 
-  constructor(h2Stream: ServerHttp2Stream) {
+  constructor(h2Stream: ServerHttp2Stream, private readonly compatibilityResponse?: Http2ServerResponse) {
     super();
     this._h2Stream = h2Stream;
     this._bindH2Events();
@@ -97,10 +97,12 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
       this.emit('aborted');
       this._closeAdapter();
     });
-    this._h2Stream.on('wantTrailers', () => {
-      this._waitingForTrailers = true;
-      this._flushPendingTrailers();
-    });
+    if (!this.compatibilityResponse) {
+      this._h2Stream.on('wantTrailers', () => {
+        this._waitingForTrailers = true;
+        this._flushPendingTrailers();
+      });
+    }
     this._h2Stream.on('drain', () => {
       this.emit('drain');
     });
@@ -177,7 +179,8 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
 
   override respond(headers: IncomingHeaders, options?: RespondOptions): void {
     if (this._headersSent) return;
-    if (this._h2WritableClosed()) {
+    // Node marks HEAD streams writableEnded before response headers are sent.
+    if (this._h2Closed || this._h2Aborted || this.destroyed || this._h2Stream.closed || this._h2Stream.destroyed) {
       this._headersSent = true;
       this._closeAdapter();
       return;
@@ -185,7 +188,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
     try {
       this._h2Stream.respond(toHttp2OutgoingHeaders(headers), {
         endStream: options?.endStream ?? false,
-        waitForTrailers: true,
+        waitForTrailers: !options?.endStream,
       });
       this._headersSent = true;
     } catch (err: unknown) {
@@ -199,6 +202,13 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
   }
 
   override sendTrailers(trailers: IncomingHeaders): void {
+    // When an HTTP/1 fallback request listener enables Node's compatibility
+    // layer, that response owns wantTrailers. Give it the trailers instead of
+    // racing its listener, which would otherwise send an empty trailer block.
+    if (this.compatibilityResponse) {
+      this.compatibilityResponse.addTrailers(toHttp2OutgoingHeaders(trailers));
+      return;
+    }
     this._pendingTrailers = toHttp2OutgoingHeaders(trailers);
     this._flushPendingTrailers();
   }
@@ -207,7 +217,8 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
     if (!this._waitingForTrailers) return;
     const trailers = this._pendingTrailers ?? {};
     try {
-      if (this._h2WritableClosed()) {
+      // wantTrailers runs after end(), so writableEnded is expected here.
+      if (this._h2Closed || this._h2Aborted || this._h2Stream.closed || this._h2Stream.destroyed) {
         this._closeAdapter();
         return;
       }

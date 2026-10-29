@@ -3,6 +3,50 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.4 candidate
+
+### Scope and state
+
+- Experimental Node-style server factory for Fastify integration, exposed as
+  `@currentspace/http3/node` without adding a framework dependency.
+- Add request stream session metadata and fix shared HTTP/2 HEAD/trailer handling.
+- Root, Rust and three native sidecar package versions are aligned to 0.9.4.
+- Base: `6c4529d3eaddc18768bb2413d900517f633574c1`. No native transport logic or
+  third-party dependencies change in this candidate.
+- Publication is pending. Local implementation checks below do not constitute
+  full release qualification.
+
+### Completed implementation checks
+
+- Lint and typecheck passed; the Node transport suite passed 341 tests.
+- Fastify main at `5df959f3af698823dd582f1c3661f3e80df0b5da` passed its required
+  tests: 2,388 unit tests passed, four skipped, and 1,286 type assertions passed.
+- Ten real-protocol Fastify integration tests passed on macOS arm64 with
+  Node 24.22.1 and 26.12.1, including static SPA hosting and H2/H1 fallback.
+- Chromium 156 verified H3 SPA navigation and API requests with the local packed
+  artifact. The origin was forced to QUIC and its temporary certificate pinned;
+  this is not automatic Alt-Svc discovery evidence.
+- These results used the development artifact before the version bump. Repeat
+  package qualification against the versioned candidate and hosted artifacts.
+
+### Pending release gates
+
+- Full local release gate, hosted native/WASM prebuild and packed-install gates,
+  and Linux/macOS Fastify integration checks.
+- Manual Safari gate from `SAFARI_VALIDATION_RUNBOOK.md` and any final-head CI
+  checks required before publication.
+- Clean registry install of the eventual published version before the Fastify
+  example can be submitted as installable.
+
+### Public limitations
+
+The Node facade is experimental. TCP upgrades, WebSockets, CONNECT,
+informational responses, native-object instanceof compatibility and Fastify's
+TypeScript raw-server union are outside its supported surface. Native H3
+shutdown uses the existing GOAWAY/deferred-close path and provides bounded,
+best-effort draining rather than response acknowledgement guarantees. See
+`NODE_SERVER.md` for the complete supported surface.
+
 ## 0.9.3
 
 ### Candidate and scope

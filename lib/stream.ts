@@ -1,4 +1,5 @@
 import { Duplex } from 'node:stream';
+import type { Http3Session } from './session.js';
 import type { ServerEventLoopLike, ClientEventLoopLike } from './event-loop.js';
 import {
   type BackpressureState,
@@ -121,6 +122,8 @@ export interface ServerHttp3Stream {
  * ```
  */
 export class ServerHttp3Stream extends Duplex {
+  /** The connection that owns this request stream, including peer address metadata. */
+  session: Http3Session | null = null;
   /** @internal Fetch adapter receive spill limit; raw streams retain their existing contract. */
   _maxBufferedReadBytes = Infinity;
   /** @internal */ _connHandle = -1;
