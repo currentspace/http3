@@ -1,6 +1,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { Readable } from 'node:stream';
 import { connect as connectH2 } from 'node:http2';
 import { get as getHttps } from 'node:https';
 import { Http3NodeServer, Http3IncomingMessage, Http3ServerResponse } from '../../lib/node-server.js';
@@ -212,4 +213,24 @@ test('h2: response write callbacks allow safe buffer reuse', { timeout: 10000 },
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(chunk as Buffer);
   assert.deepEqual(Buffer.concat(chunks), expected);
+});
+
+test('piped response data passes through middleware write wrappers', async () => {
+  const wire = new ServerHttp3Stream();
+  const chunks: Buffer[] = [];
+  wire.respond = () => {};
+  wire._write = (chunk, _encoding, callback) => { chunks.push(Buffer.from(chunk)); setImmediate(callback); };
+  wire._final = callback => callback();
+  const req = new Http3IncomingMessage(wire, { ':method': 'GET', ':path': '/' }, { endStream: true });
+  const res = new Http3ServerResponse(req);
+  const write = res.write.bind(res);
+  res.write = ((chunk: Buffer) => write(Buffer.from(chunk.toString().toUpperCase()))) as typeof res.write;
+  let remaining = 4;
+  const source = new Readable({ read() { this.push(remaining-- > 0 ? Buffer.alloc(65536, 'a') : null); } });
+  const finished = once(res, 'finish');
+  source.pipe(res);
+  await finished;
+  assert.deepEqual(Buffer.concat(chunks), Buffer.alloc(4 * 65536, 'A'));
+  assert.equal(source.listenerCount('data'), 0, 'pipe listeners must be removed on completion');
+  req.destroy(); wire.destroy();
 });

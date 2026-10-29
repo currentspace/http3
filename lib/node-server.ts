@@ -128,6 +128,12 @@ export class Http3ServerResponse extends Writable {
     });
     this.on('error', () => {});
     this.once('finish', () => req.resume());
+    // Keep piped data on the public write() path. Node's direct Writable pipe
+    // fast path can otherwise bypass middleware wrappers (e.g. compression).
+    // The extra listener is scoped to the pipe and removed when it unpipes.
+    const observePipeData = (): void => {};
+    this.on('pipe', (source: Readable) => source.on('data', observePipeData));
+    this.on('unpipe', (source: Readable) => source.off('data', observePipeData));
   }
   get socket(): RequestSocket { return this.req.socket; }
   get connection(): RequestSocket { return this.socket; }

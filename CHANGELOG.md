@@ -6,7 +6,8 @@
   startup, and bound PMTUD probes by the peer's receive limit, including restart
   and revalidation.
 - Make the Node facade compatible with Next.js header checks, static file
-  serving and streaming compression, including explicit header flushing.
+  serving and streaming compression, including explicit header flushing and
+  preserving middleware write wrappers when Node 26 pipes response data.
 - Forward HTTP/1 TLS upgrade events and keep upgraded sockets subject to the
   Node facade's shutdown deadline.
 - Wait for HTTP/2 write completion before releasing response buffers, preventing

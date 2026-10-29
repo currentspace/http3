@@ -27,20 +27,26 @@ and remaining qualification work for each release candidate.
   full RSC reads, client navigation and bounded shutdown over forced HTTP/3 and
   an HTTP/2 control. Each run recorded 20 responses and no failed requests or
   browser errors. This does not qualify automatic Alt-Svc discovery.
-- Versioned macOS arm64 / Node 24.22.1 checks passed: native build, frozen
-  dependency install, lint, typechecks (including workerd), Node-API boundary,
-  349 Node tests, 67 FFI tests, six Next middleware tests, 269 Rust tests,
+- Versioned macOS arm64 checks passed native build, frozen dependency install,
+  lint, typechecks (including workerd), Node-API boundary, 269 Rust tests,
   Clippy (warnings only), packed-install smoke, concurrency and load smoke.
-- Versioned Chromium H3 passed. One H2 control run reported an aborted RSC
-  request despite successful same-document navigation and no console errors;
-  subsequent diagnostic runs passed. This intermittent failure remains under
-  investigation; the browser gate still rejects every failed request.
-- Node 26 exposed HTTP/2 write callbacks releasing buffers before transmission.
-  A deterministic buffer-reuse regression failed before the fix and passes after
-  it. The local Next.js harness still reports gzip decoding failures on Node 26;
-  this remains a release blocker under investigation.
-- Hosted release dry-run results are recorded in the PR. The local Next.js
-  harness is kept outside the PR; hosted checks use the existing release workflow.
+- Node 26 exposed two additional compatibility issues: HTTP/2 write callbacks
+  released buffers before transmission, and the Writable pipe fast path bypassed
+  public middleware write wrappers. Focused regressions reproduce these failures
+  and pass with the fixes. Final validation passed 351 Node and 67 FFI tests on both
+  Node 24.22.1 and 26.12.1.
+- Local Next.js browser validation runs outside the PR. The Node 26 gzip failures
+  disappeared after preserving middleware writes. One navigation still reports
+  intermittent Chromium ERR_ABORTED despite successful same-document navigation
+  and no console errors. An HTTP/2 netlog captured a complete 200 response,
+  gzip-decoded body and END_STREAM for that exact navigation, without a server
+  reset or network error. The strict harness result remains recorded separately
+  from the functional and transport results; it is not called a full pass.
+- Final strict Chromium runs passed HTTP/3 on Node 24 and 26, and HTTP/2 on
+  Node 24, each with 20 protocol-verified responses and no failed requests or
+  browser errors. The Node 26 H2 strict result above remains distinct.
+- Hosted checks and the nonpublishing release workflow results are linked in the
+  PR. Earlier runs on superseded revisions do not qualify the final candidate.
 - Latest stable Safari manual qualification remains required by the release
   runbook before release. Prior 0.9.4 Safari evidence is not a 0.9.5 pass.
 
