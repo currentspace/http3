@@ -1,0 +1,21 @@
+{
+  "name": "http3-nextjs-example",
+  "private": true,
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "certs": "node scripts/certs.cjs",
+    "dev": "node server.cjs",
+    "build": "next build",
+    "start": "NODE_ENV=production node server.cjs",
+    "smoke": "node scripts/smoke.cjs"
+  },
+  "dependencies": {
+    "@currentspace/http3": "0.9.5",
+    "next": "16.4.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "playwright": "1.65.0-alpha-2026-10-29"
+  }
+}

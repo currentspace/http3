@@ -1,0 +1,57 @@
+name: Next.js example
+
+on:
+  pull_request:
+    paths:
+      - 'examples/nextjs/**'
+      - '.github/workflows/nextjs-example.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/nextjs/**'
+      - '.github/workflows/nextjs-example.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nextjs-example-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    name: Published-package Next.js (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.22.1', '26.12.1']
+    defaults:
+      run:
+        working-directory: examples/nextjs
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      HTTP3_TEST_NAVIGATION_ROUNDS: '10'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      # npm installs the published 0.9.5 native sidecar. The root pnpm workspace
+      # intentionally omits sidecars because its own tests build from source.
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: npm run certs
+      - name: Development HTTP/3 and HTTP/2 with Fast Refresh
+        run: |
+          npm run smoke
+          HTTP3_TEST_PROTOCOL=h2 npm run smoke
+      - run: npm run build
+      - name: Built application HTTP/3 and HTTP/2
+        env:
+          NODE_ENV: production
+        run: |
+          npm run smoke
+          HTTP3_TEST_PROTOCOL=h2 npm run smoke

@@ -5,7 +5,9 @@ handlers to this project's HTTP/3 transport. It also accepts HTTP/2 over TLS on
 the same port and optional HTTP/1.1 fallback. No proxy is involved.
 
 The export was introduced in 0.9.4. The Next.js compatibility, HTTP/1 upgrade,
-and packet-limit fixes described here are included in the 0.9.5 candidate in this checkout.
+and packet-limit fixes described here are included in 0.9.5. See the
+[Next.js custom-server example](../examples/nextjs/README.md) for local development,
+Fast Refresh, and browser protocol verification.
 
 ```js
 const fs = require('node:fs');
