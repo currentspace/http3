@@ -37,6 +37,7 @@
 ## Examples
 
 - [Next.js custom server with HTTP/3](../examples/nextjs/README.md)
+- [NestJS with Fastify over HTTP/3](../examples/nestjs/README.md)
 - [../examples/raw-api/README.md](../examples/raw-api/README.md)
 - [../examples/express-adapter/README.md](../examples/express-adapter/README.md)
 - [../examples/hono/README.md](../examples/hono/README.md)

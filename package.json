@@ -111,6 +111,11 @@
     "examples/nextjs/app/about/page.jsx",
     "examples/nextjs/app/api/echo/route.js",
     "examples/nextjs/app/api/upload/route.js",
+    "examples/nestjs/README.md",
+    "examples/nestjs/package.json",
+    "examples/nestjs/tsconfig.json",
+    "examples/nestjs/src",
+    "examples/nestjs/scripts",
     "index.js",
     "index.d.ts",
     "*.node"
