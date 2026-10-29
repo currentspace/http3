@@ -1,0 +1,42 @@
+name: NestJS example
+
+on:
+  pull_request:
+    paths:
+      - 'examples/nestjs/**'
+      - '.github/workflows/nestjs-example.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/nestjs/**'
+      - '.github/workflows/nestjs-example.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nestjs-example-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Published-package NestJS (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.22.1', '26.13.0']
+    defaults:
+      run:
+        working-directory: examples/nestjs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      # npm includes the published native sidecar, unlike root source builds.
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run certs
+      - run: npm test

@@ -9,6 +9,10 @@ and packet-limit fixes described here are included in 0.9.5. See the
 [Next.js custom-server example](../examples/nextjs/README.md) for local development,
 Fast Refresh, and browser protocol verification.
 
+The [NestJS example](../examples/nestjs/README.md) uses Nest's `FastifyAdapter`
+with the same factory for controllers, JSON parsing, file streaming, and SSE.
+It runs on published 0.9.5 without a NestJS patch.
+
 ```js
 const fs = require('node:fs');
 const Fastify = require('fastify');
