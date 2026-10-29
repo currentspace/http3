@@ -170,6 +170,9 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 
 ## Compatibility surfaces
 
+The experimental [Node-style server factory](./docs/NODE_SERVER.md) adds Fastify
+integration in the development tree; it requires the next package release.
+
 - `@currentspace/http3` - canonical API.
 - `@currentspace/http3/parity` - http2-style aliases for migrations.
 - `@currentspace/http3/h3` - HTTP/3-specific extension namespace.

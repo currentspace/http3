@@ -3,6 +3,88 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.4 candidate
+
+### Scope and state
+
+- Experimental Node-style server factory for Fastify integration, exposed as
+  `@currentspace/http3/node` without adding a framework dependency.
+- Add request stream session metadata and fix shared HTTP/2 HEAD/trailer handling.
+- Root, Rust and three native sidecar package versions are aligned to 0.9.4.
+- Base: `6c4529d3eaddc18768bb2413d900517f633574c1`. No native transport logic or
+  third-party dependencies change in this candidate.
+- Publication is pending. Local implementation checks below do not constitute
+  full release qualification.
+
+### Completed implementation checks
+
+- Lint and typecheck passed; the Node transport suite passed 341 tests.
+- Fastify main at `5df959f3af698823dd582f1c3661f3e80df0b5da` passed its required
+  tests: 2,388 unit tests passed, four skipped, and 1,286 type assertions passed.
+- Ten real-protocol Fastify integration tests passed on macOS arm64 with
+  Node 24.22.1 and 26.12.1, including static SPA hosting and H2/H1 fallback.
+- Chromium 156 verified H3 SPA navigation and API requests with the local packed
+  artifact. The origin was forced to QUIC and its temporary certificate pinned;
+  this is not automatic Alt-Svc discovery evidence.
+- These results used the development artifact before the version bump. Repeat
+  package qualification against the versioned candidate and hosted artifacts.
+
+### Versioned candidate checks
+
+- Candidate `d80d117fc9ea32239ff6050cfd4d58fcec753fdb` passed
+  [release dry-run 40826266471](https://github.com/currentspace/http3/actions/runs/40826266471):
+  all three native builds, WASM build/tests, six Node 24/26 native validation
+  jobs, packed installs and npm publication dry-run. Actual publication was skipped.
+- Local versioned checks passed lint/typecheck, 341 Node tests, 67 FFI tests,
+  concurrency (1,381 ms / 10,000 ms budget), load smoke, 223 Rust unit tests,
+  three UDP and one direct interoperability tests, nine QUIC mock and eleven
+  H3 mock tests, and native packed-install smoke.
+- After certificate authorization, the local browser gate passed all three
+  Chromium, Firefox and Playwright WebKit page/fetch/SSE tests over H3 on
+  October 29, 2026. Earlier authorization failures remain recorded separately.
+- CodeQL identified disabled certificate validation in a new HTTPS test.
+  The follow-up uses a temporary CA and leaves verification enabled for H3, H2
+  and HTTPS; all six Node facade tests and ten Fastify fixture tests passed.
+  All 28 hosted PR checks passed at `f0ea679c28e3ee9fc291cf786a8577e2ceba764f`,
+  with no open CodeQL PR findings; the scheduled deep-safety job was skipped.
+- [Release dry-run 40827407812](https://github.com/currentspace/http3/actions/runs/40827407812)
+  passed all 11 jobs at that revision. All native/WASM hashes match the tested
+  artifacts. Actual npm publication was skipped.
+- The versioned Fastify fixture at `0c1956809ffc61a2922c2bea57c73a9e96b9c82d`
+  passed ten tests each on macOS ARM64, Linux ARM64 and native Linux x64, with
+  Node 24.22.1 and 26.12.1. Native x64 evidence is
+  [run 40828705200](https://github.com/currentspace/http3/actions/runs/40828705200).
+  Both fixture server and clients explicitly select portable mode.
+- Real Safari 27.0.1 on macOS 27.0.1 passed trusted loopback page, fetch, SSE
+  reconnect with Last-Event-ID, and reload checks. Safari used H2 fallback.
+  The actual Web Inspector Network panel was captured; curl H3-only and H2
+  both passed against the same endpoint with certificate verification enabled.
+  Evidence is in `artifacts/release-0.9.4/`.
+- The Safari wrapper remains failed: final WebDriver session deletion returned
+  HTTP 404. Functional checks passed and trust cleanup recorded no errors;
+  temporary CA removal, original search-list restoration, and stopped server
+  and driver were verified. The original failure record is preserved.
+- This does not satisfy the latest-stable Safari prerequisite:
+  [Safari 27.2 was released October 26](https://support.apple.com/en-us/149527).
+  This Mac offers macOS 27.2 as a restart-required update; it was not installed.
+
+### Pending release gates
+
+- Repeat the manual Safari gate from `SAFARI_VALIDATION_RUNBOOK.md` on the
+  latest stable Safari, including clean orchestration cleanup. Any subsequent
+  source revision must complete its required hosted checks before publication.
+- Clean registry install of the eventual published version before the Fastify
+  example can be submitted as installable.
+
+### Public limitations
+
+The Node facade is experimental. TCP upgrades, WebSockets, CONNECT,
+informational responses, native-object instanceof compatibility and Fastify's
+TypeScript raw-server union are outside its supported surface. Native H3
+shutdown uses the existing GOAWAY/deferred-close path and provides bounded,
+best-effort draining rather than response acknowledgement guarantees. See
+`NODE_SERVER.md` for the complete supported surface.
+
 ## 0.9.3
 
 ### Candidate and scope

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.4
+
+- Add an experimental `@currentspace/http3/node` server factory for Fastify and
+  other Node-style handlers, with HTTP/3, HTTP/2 and optional HTTP/1.1 fallback,
+  bounded request buffering, peer metadata, streaming and bounded shutdown.
+- Fix HTTP/2 HEAD responses and trailer delivery when Node's compatibility
+  response owns the underlying stream's trailer event.
+
 ## 0.9.3
 
 - Refresh JavaScript and Rust dependencies, including quiche 0.30, BoringSSL 5,
