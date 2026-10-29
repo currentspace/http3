@@ -15,6 +15,7 @@ use std::sync::Arc;
 pub struct NativeQuicClient {
     handle: Option<crate::quic_worker::QuicClientHandle>,
     quiche_config: Option<quiche::Config>,
+    max_udp_payload_size: Option<u32>,
     /// Kept alive so the TSFN reference count stays > 0 while the worker
     /// thread is shutting down, ensuring pending callbacks are delivered.
     tsfn: Option<Arc<crate::worker::EventTsfn>>,
@@ -39,6 +40,7 @@ impl NativeQuicClient {
         Ok(Self {
             handle: None,
             quiche_config: Some(quiche_config),
+            max_udp_payload_size: options.max_udp_payload_size,
             tsfn: Some(Arc::new(callback)),
             session_ticket: options.session_ticket.map(|t| t.to_vec()),
             qlog_dir: options.qlog_dir,
@@ -59,10 +61,15 @@ impl NativeQuicClient {
             .parse()
             .map_err(|e: std::net::AddrParseError| napi::Error::from_reason(e.to_string()))?;
 
-        let quiche_config = self
+        let mut quiche_config = self
             .quiche_config
             .take()
             .ok_or_else(|| napi::Error::from_reason("already connected"))?;
+        crate::config::apply_runtime_udp_limits(
+            &mut quiche_config,
+            &addr,
+            self.max_udp_payload_size,
+        );
         let tsfn = self
             .tsfn
             .as_ref()

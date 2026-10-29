@@ -30,6 +30,10 @@ class RequestSocket extends EventEmitter {
   get remoteFamily(): string { return isIP(this.remoteAddress ?? '') === 6 ? 'IPv6' : 'IPv4'; }
   get alpnProtocol(): string { return this.stream.session?.alpnProtocol ?? 'h3'; }
   get destroyed(): boolean { return this.stream.destroyed; }
+  get readable(): boolean { return this.stream.readable; }
+  get writable(): boolean { return this.stream.writable; }
+  get readableEnded(): boolean { return this.stream.readableEnded; }
+  get writableEnded(): boolean { return this.stream.writableEnded; }
   setTimeout(ms: number, callback?: () => void): this {
     if (callback) this.once('timeout', callback);
     this.stream.setTimeout(ms);
@@ -41,7 +45,7 @@ class RequestSocket extends EventEmitter {
 /** Node-style request backed directly by an H3/H2 stream. */
 export class Http3IncomingMessage extends Readable {
   readonly socket: RequestSocket;
-  readonly headers: IncomingHeaders = Object.create(null) as IncomingHeaders;
+  readonly headers: IncomingHeaders = {};
   readonly rawHeaders: string[] = [];
   trailers: IncomingHeaders = {};
   rawTrailers: string[] = [];
@@ -63,7 +67,10 @@ export class Http3IncomingMessage extends Readable {
     this.complete = flags.endStream;
     for (const [name, value] of Object.entries(headers)) {
       if (name.startsWith(':')) continue;
-      this.headers[name] = value;
+      // Define an own property so names such as __proto__ cannot mutate the prototype.
+      Object.defineProperty(this.headers, name.toLowerCase(), {
+        value, writable: true, enumerable: true, configurable: true,
+      });
       for (const item of Array.isArray(value) ? value : [value]) this.rawHeaders.push(name, item);
     }
     if (Object.hasOwn(headers, ':authority')) this.headers.host = headers[':authority'];
@@ -121,6 +128,12 @@ export class Http3ServerResponse extends Writable {
     });
     this.on('error', () => {});
     this.once('finish', () => req.resume());
+    // Keep piped data on the public write() path. Node's direct Writable pipe
+    // fast path can otherwise bypass middleware wrappers (e.g. compression).
+    // The extra listener is scoped to the pipe and removed when it unpipes.
+    const observePipeData = (): void => {};
+    this.on('pipe', (source: Readable) => source.on('data', observePipeData));
+    this.on('unpipe', (source: Readable) => source.off('data', observePipeData));
   }
   get socket(): RequestSocket { return this.req.socket; }
   get connection(): RequestSocket { return this.socket; }
@@ -152,11 +165,17 @@ export class Http3ServerResponse extends Writable {
     this.statusCode = statusCode;
     const values = typeof statusMessageOrHeaders === 'string' ? headers : statusMessageOrHeaders;
     for (const [name, value] of Object.entries(values ?? {})) this.setHeader(name, value);
-    this.flushHeaders();
+    this.commitHeaders();
     return this;
   }
+  /** Compatibility hooks used by Node middleware such as compression/on-headers. */
+  get _header(): string | null { return this.headersSent ? 'sent' : null; }
+  _implicitHeader(): void { this.writeHead(this.statusCode); }
   flushHeaders(): void {
-    if (this.headersSent) return;
+    // Dispatch through writeHead so middleware gets to prepare headers exactly once.
+    if (!this.headersSent) this._implicitHeader();
+  }
+  private commitHeaders(): void {
     if (!Number.isInteger(this.statusCode) || this.statusCode < 200 || this.statusCode > 599) throw new RangeError('Invalid final status code');
     const headers: IncomingHeaders = { ':status': String(this.statusCode) };
     // Node middleware may produce HTTP/1 hop-by-hop fields. Never transmit these on H2/H3.
@@ -214,7 +233,8 @@ export interface NodeServerOptions extends ServerOptions {
 
 /**
  * Node-style server facade for frameworks with a custom server factory.
- * TCP-only APIs (upgrades, raw socket writes) and informational responses are not supported.
+ * HTTP/1 upgrades are forwarded on the TLS fallback listener. QUIC raw socket
+ * writes and informational responses are not supported.
  */
 export class Http3NodeServer extends EventEmitter {
   private readonly transport;
@@ -255,14 +275,15 @@ export class Http3NodeServer extends EventEmitter {
       }
     });
     this.transport.on('request', (request, response) => {
-      if (!this.http1Sockets.has(request.socket)) {
-        this.http1Sockets.add(request.socket);
-        request.socket.once('close', () => this.http1Sockets.delete(request.socket));
-      }
+      this.trackHttp1Socket(request.socket);
       if (this.closing) { response.writeHead(503); response.end(); return; }
       response.setHeader('alt-svc', `h3=":${this.address()?.port ?? 443}"; ma=60`);
       this.trackResponse(response);
       handler(request, response);
+    });
+    this.transport.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
+      this.trackHttp1Socket(socket);
+      if (this.closing || !this.emit('upgrade', request, socket, head)) socket.destroy();
     });
     this.transport.on('session', session => {
       this.sessions.add(session);
@@ -275,6 +296,11 @@ export class Http3NodeServer extends EventEmitter {
       this.emit('listening');
       if (this.closing) this.drain();
     });
+  }
+  private trackHttp1Socket(socket: Socket): void {
+    if (this.http1Sockets.has(socket)) return;
+    this.http1Sockets.add(socket);
+    socket.once('close', () => this.http1Sockets.delete(socket));
   }
   private trackResponse(response: Writable): void {
     this.active.add(response);
@@ -340,8 +366,8 @@ export class Http3NodeServer extends EventEmitter {
   private closeTransport(): void {
     if (this.closeStarted) return;
     this.closeStarted = true;
-    clearTimeout(this.closeTimer);
     void this.transport.close(error => {
+      clearTimeout(this.closeTimer);
       this.closed = true;
       this.listening = false;
       this.emit('close');

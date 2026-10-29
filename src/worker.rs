@@ -1240,24 +1240,13 @@ impl Drop for ClientWorkerHandle {
 
 // ── Spawn functions ─────────────────────────────────────────────────
 
-/// Cap a client's advertised/accepted UDP payload size to the path MTU.
-/// Always compiled (not `os-runtime`-gated): `effective_pmtud_ceiling`
-/// itself falls back to a constant when the kernel route query is
-/// unavailable, so this stays reachable for a future direct-call/wasm
-/// constructor that has no socket to query.
-fn apply_h3_client_path_mtu_ceiling(config: &mut quiche::Config, server_addr: &SocketAddr) {
-    let ceiling = crate::config::effective_pmtud_ceiling(server_addr);
-    config.set_max_send_udp_payload_size(ceiling);
-    config.set_max_recv_udp_payload_size(ceiling);
-}
-
 // --- Node-API-dependent spawn functions (use EventTsfn / shared workers) ---
 #[cfg(feature = "os-runtime")]
 #[cfg(feature = "node-api")]
 /// Spawn a client worker thread that owns UDP I/O and QUIC/H3 processing.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_client_worker(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
@@ -1266,8 +1255,6 @@ pub fn spawn_client_worker(
     runtime_mode: TransportRuntimeMode,
     tsfn: EventTsfn,
 ) -> Result<ClientWorkerHandle, Http3NativeError> {
-    apply_h3_client_path_mtu_ceiling(&mut quiche_config, &server_addr);
-
     if default_h3_client_socket_strategy(runtime_mode) == ClientSocketStrategy::SharedPerFamily {
         return spawn_shared_client_worker(
             quiche_config,
@@ -2079,12 +2066,17 @@ pub fn spawn_worker(
     let mut config_slot = Some(quiche_config);
     spawn_worker_sharded(
         move || {
-            if let Some(config) = config_slot.take() {
-                return Ok(config);
-            }
-            // Workers 1..N: rebuild config from the stored snapshot
-            // which preserves all original options (datagrams, TLS, etc).
-            Http3Config::new_server_quiche_config(&stored_options.to_js_server_options())
+            let options = stored_options.to_js_server_options();
+            let mut config = match config_slot.take() {
+                Some(config) => config,
+                None => Http3Config::new_server_quiche_config(&options)?,
+            };
+            crate::config::apply_runtime_udp_limits(
+                &mut config,
+                &bind_addr,
+                options.max_udp_payload_size,
+            );
+            Ok(config)
         },
         http3_config,
         bind_addr,
@@ -2128,22 +2120,13 @@ where
     // Divide max_connections across workers so the total stays correct.
     let per_worker_max_connections = (http3_config.max_connections + num_workers - 1) / num_workers;
 
-    // Query path MTU once for all workers on this address.
-    let ceiling = if !local_addr.ip().is_unspecified() {
-        crate::config::effective_pmtud_ceiling(&local_addr)
-    } else {
-        crate::config::FALLBACK_MAX_UDP_PAYLOAD
-    };
-
     let tsfn = Arc::new(tsfn);
     let mut workers = Vec::with_capacity(num_workers);
 
     // Worker 0 uses the already-bound first socket.
     {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-        let mut config = make_quiche_config()?;
-        config.set_max_send_udp_payload_size(ceiling);
-        config.set_max_recv_udp_payload_size(ceiling);
+        let config = make_quiche_config()?;
         let (driver, waker) =
             transport::create_platform_driver(first_socket, http3_config.runtime_mode)?;
         let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
@@ -2198,15 +2181,13 @@ where
         }
         let _ = transport::socket::set_socket_buffers(&socket, 2 * 1024 * 1024);
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-        let mut config = match make_quiche_config() {
+        let config = match make_quiche_config() {
             Ok(config) => config,
             Err(err) => {
                 shutdown_spawned_h3_server_workers(&mut workers);
                 return Err(err);
             }
         };
-        config.set_max_send_udp_payload_size(ceiling);
-        config.set_max_recv_udp_payload_size(ceiling);
         let (driver, waker) =
             match transport::create_platform_driver(socket, http3_config.runtime_mode) {
                 Ok(driver_and_waker) => driver_and_waker,
@@ -2308,7 +2289,7 @@ where
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "os-runtime")]
 pub fn spawn_h3_client_on_driver<D>(
-    mut quiche_config: quiche::Config,
+    quiche_config: quiche::Config,
     server_addr: SocketAddr,
     server_name: String,
     session_ticket: Option<Vec<u8>>,
@@ -2325,8 +2306,6 @@ where
     D: transport::Driver + Send + 'static,
     D::Waker: Send + Sync + Clone + 'static,
 {
-    apply_h3_client_path_mtu_ceiling(&mut quiche_config, &server_addr);
-
     let waker_arc: Arc<dyn ErasedWaker> = Arc::new(waker);
     let waker_clone = waker_arc.clone();
     let outbound_admission = Arc::new(OutboundAdmission::default());

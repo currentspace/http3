@@ -79,6 +79,15 @@ impl Pmtud {
         }
     }
 
+    /// Permanently lower the probe ceiling to a negotiated transport limit.
+    /// Restarting or revalidating PMTUD must never restore a larger ceiling.
+    pub fn limit_maximum_mtu(&mut self, limit: usize) {
+        if limit < self.maximum_supported_mtu {
+            self.maximum_supported_mtu = limit;
+            self.restart_pmtud();
+        }
+    }
+
     /// Indicates whether probing should continue on the connection.
     ///
     /// Checks there are no probes in flight, that a PMTU has not been
@@ -183,6 +192,12 @@ impl Pmtud {
 
     /// Records a failed probe
     pub fn failed_probe(&mut self, probe_size: usize) {
+        // A probe sent before a lower peer limit was learned says nothing
+        // about whether the newly permitted size is deliverable.
+        if probe_size > self.maximum_supported_mtu {
+            self.in_flight = false;
+            return;
+        }
         // Treat errant probes as if they failed at the minimum supported MTU
         let probe_size = std::cmp::max(probe_size, MIN_PLPMTU);
         self.probe_failure_count += 1;
@@ -260,6 +275,26 @@ impl std::fmt::Debug for Pmtud {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn negotiated_limit_survives_restart_revalidation_and_late_probes() {
+        let mut pmtud = Pmtud::new(16356, 1);
+        pmtud.set_in_flight(true);
+        pmtud.limit_maximum_mtu(1350);
+        pmtud.failed_probe(16356);
+        assert_eq!(pmtud.get_probe_size(), 1350);
+        assert!(pmtud.should_probe());
+        pmtud.successful_probe(16356);
+        assert_eq!(pmtud.get_pmtu(), Some(1350));
+        pmtud.revalidate_pmtu();
+        assert_eq!(pmtud.get_probe_size(), 1350);
+        pmtud.failed_probe(1350);
+        assert!(pmtud.get_probe_size() <= 1350);
+        pmtud.restart_pmtud();
+        assert_eq!(pmtud.get_probe_size(), 1350);
+        pmtud.limit_maximum_mtu(1472);
+        assert_eq!(pmtud.get_probe_size(), 1350);
+    }
 
     #[test]
     fn pmtud_initial_state() {

@@ -260,9 +260,14 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
       this._finishExpectedClose(callback);
       return;
     }
-    let written: boolean;
     try {
-      written = this._h2Stream.write(chunk);
+      // A true return value only means the queue is below its high-water mark.
+      // Producers may reuse chunk after our callback, so wait until Node has
+      // finished writing it (not merely until it accepts the buffer).
+      this._h2Stream.write(chunk, (error?: Error | null) => {
+        if (error && isExpectedH2CloseError(error)) this._finishExpectedClose(callback);
+        else callback(error);
+      });
     } catch (err: unknown) {
       if (isExpectedH2CloseError(err)) {
         this._finishExpectedClose(callback);
@@ -271,11 +276,6 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
       callback(err instanceof Error ? err : new Error(String(err)));
       return;
     }
-    if (written) {
-      callback();
-      return;
-    }
-    this._waitForH2Drain(callback);
   }
 
   override _final(callback: (error?: Error | null) => void): void {

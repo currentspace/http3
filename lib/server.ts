@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createSecureServer as createHttp2SecureServer, constants as http2Constants } from 'node:http2';
 import type { Http2SecureServer, Http2Session, Http2ServerRequest, Http2ServerResponse, IncomingHttpHeaders, ServerHttp2Stream } from 'node:http2';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -146,6 +147,7 @@ export interface Http3SecureServer {
   on(event: 'session', listener: (session: Http3ServerSession) => void): this;
   on(event: 'stream', listener: StreamListener): this;
   on(event: 'request', listener: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void): this;
+  on(event: 'upgrade', listener: (req: IncomingMessage, socket: Socket, head: Buffer) => void): this;
   on(event: 'close', listener: () => void): this;
   on(event: string, listener: (...args: any[]) => void): this;
 }
@@ -682,6 +684,9 @@ export class Http3SecureServer extends EventEmitter {
     h2Server.on('request', (req: IncomingMessage | Http2ServerRequest, res: ServerResponse | Http2ServerResponse) => {
       if (req.httpVersionMajor === 1) this.emit('request', req, res);
       else compatibilityResponses.set((req as Http2ServerRequest).stream, res as Http2ServerResponse);
+    });
+    h2Server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
+      if (!this.emit('upgrade', request, socket, head)) socket.destroy();
     });
     h2Server.on('session', (session: Http2Session) => {
       this._ensureH2Session(session);

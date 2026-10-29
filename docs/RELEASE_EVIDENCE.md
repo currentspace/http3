@@ -3,6 +3,53 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.5 candidate
+
+### Scope and state
+
+- Preserve explicit native UDP limits and bound quiche PMTUD by local and peer
+  transport limits, including discovery restart and revalidation.
+- Fix Node facade header compatibility, static serving, streaming compression,
+  HTTP/1 WebSocket upgrades and shutdown with an active upgraded socket.
+- Fix HTTP/2 response buffer ownership so producers can safely reuse buffers
+  after write completion. Next.js examples and dependencies are excluded.
+- Root, Rust and all three native sidecars are aligned to 0.9.5.
+- Base: `15c413899c14d01e38f22aca2aca942ebf23cbb1` (0.9.4).
+- This is release preparation. No tag or npm publication is authorized by the
+  candidate PR; merge and publication remain separate actions.
+
+### Qualification
+
+- Before the version bump, macOS arm64 / Node 24.22.1 passed 231 core tests,
+  97 interoperability tests, six Next middleware tests, 223 Rust unit tests,
+  20 mock transport tests and 22 PMTUD tests, plus lint and typechecks.
+- Chromium verified hydration, state-preserving Fast Refresh, gzip, POST bodies,
+  full RSC reads, client navigation and bounded shutdown over forced HTTP/3 and
+  an HTTP/2 control. Each run recorded 20 responses and no failed requests or
+  browser errors. This does not qualify automatic Alt-Svc discovery.
+- Versioned macOS arm64 checks passed native build, frozen dependency install,
+  lint, typechecks (including workerd), Node-API boundary, 269 Rust tests,
+  Clippy (warnings only), packed-install smoke, concurrency and load smoke.
+- Node 26 exposed two additional compatibility issues: HTTP/2 write callbacks
+  released buffers before transmission, and the Writable pipe fast path bypassed
+  public middleware write wrappers. Focused regressions reproduce these failures
+  and pass with the fixes. Final validation passed 351 Node and 67 FFI tests on both
+  Node 24.22.1 and 26.12.1.
+- Local Next.js browser validation runs outside the PR. The Node 26 gzip failures
+  disappeared after preserving middleware writes. One navigation still reports
+  intermittent Chromium ERR_ABORTED despite successful same-document navigation
+  and no console errors. An HTTP/2 netlog captured a complete 200 response,
+  gzip-decoded body and END_STREAM for that exact navigation, without a server
+  reset or network error. The strict harness result remains recorded separately
+  from the functional and transport results; it is not called a full pass.
+- Final strict Chromium runs passed HTTP/3 on Node 24 and 26, and HTTP/2 on
+  Node 24, each with 20 protocol-verified responses and no failed requests or
+  browser errors. The Node 26 H2 strict result above remains distinct.
+- Hosted checks and the nonpublishing release workflow results are linked in the
+  PR. Earlier runs on superseded revisions do not qualify the final candidate.
+- Latest stable Safari manual qualification remains required by the release
+  runbook before release. Prior 0.9.4 Safari evidence is not a 0.9.5 pass.
+
 ## 0.9.4 candidate
 
 ### Scope and state

@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -138,7 +138,7 @@
     "test:concurrency": "npm run build:test && node --test dist-test/test/perf-gates/worker-concurrency.test.js",
     "test:load-smoke": "npm run build:test && node --test dist-test/test/perf-gates/load-smoke.test.js",
     "test:rust:unit": "cargo test --lib --no-default-features",
-    "test:rust:interop": "cargo test --test interop_udp_loopback && cargo test --test interop_quiche_direct",
+    "test:rust:interop": "cargo test --test interop_udp_loopback && cargo test --test interop_quiche_direct && cargo test --test pmtud_peer_limit --test pmtud_state",
     "test:rust:mock": "cargo test --test quic_mock_pair --test h3_mock_pair --features bench-internals --no-default-features",
     "test:rust:mock:extended": "cargo test --test quic_mock_pair --test h3_mock_pair --test quic_timeout_and_idle --test h3_timeout_and_idle --test quic_flow_control --test h3_flow_control --test quic_shutdown --test h3_shutdown --test quic_rapid_connect_disconnect --test h3_concurrent_streams --test error_propagation --features bench-internals --no-default-features",
     "test:rust:diagnostics": "cargo test --test transport_quiche_pair && cargo test --test release_curl_standalone",
@@ -228,8 +228,8 @@
     "wrangler": "^4.154.0"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.9.4",
-    "@currentspace/http3-linux-arm64-gnu": "0.9.4",
-    "@currentspace/http3-linux-x64-gnu": "0.9.4"
+    "@currentspace/http3-darwin-arm64": "0.9.5",
+    "@currentspace/http3-linux-arm64-gnu": "0.9.5",
+    "@currentspace/http3-linux-x64-gnu": "0.9.5"
   }
 }
