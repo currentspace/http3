@@ -195,3 +195,21 @@ test('HTTP/1 upgrade without an owner closes the socket', async t => {
   client.write('GET /hmr HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
   await closed;
 });
+
+test('h2: response write callbacks allow safe buffer reuse', { timeout: 10000 }, async t => {
+  const expected = Buffer.alloc(8192, 42);
+  const server = new Http3NodeServer({ ...tls, runtimeMode: 'portable', allowHTTP1: true }, (_req, res) => {
+    const buffer = Buffer.from(expected);
+    res.write(buffer, () => { buffer.fill(255); res.end(); });
+  });
+  let session: ReturnType<typeof connectH2> | undefined;
+  t.after(async () => { session?.destroy(); await close(server); });
+  server.listen({ port: 0, host: '127.0.0.1' });
+  await once(server, 'listening');
+  session = connectH2(`https://127.0.0.1:${server.address()!.port}`, { ca });
+  await once(session, 'connect');
+  const request = session.request({ ':path': '/' });
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(chunk as Buffer);
+  assert.deepEqual(Buffer.concat(chunks), expected);
+});

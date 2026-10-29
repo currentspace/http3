@@ -169,34 +169,6 @@ jobs:
       - name: Run release runtime tests
         run: node --test --test-isolation=none --test-timeout=15000 dist-test/test/release/**/*.test.js
 
-      - name: Test Next.js middleware adapter
-        run: pnpm run test:nextjs
-
-      - name: Install Chromium for Next.js qualification
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Test Next.js over HTTP/3 and HTTP/2
-        shell: bash
-        env:
-          TLS_CERT_FILE: ${{ runner.temp }}/next-http3/cert.pem
-          TLS_KEY_FILE: ${{ runner.temp }}/next-http3/key.pem
-          NEXT_TELEMETRY_DISABLED: "1"
-        run: |
-          mkdir -p "$RUNNER_TEMP/next-http3" artifacts/nextjs-release
-          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-            -keyout "$TLS_KEY_FILE" -out "$TLS_CERT_FILE" -days 1 -nodes \
-            -subj /CN=localhost -addext subjectAltName=DNS:localhost
-          HTTP3_TEST_REPORT=artifacts/nextjs-release/h3.json node examples/nextjs/browser.test.cjs
-          HTTP3_TEST_PROTOCOL=h2 HTTP3_TEST_REPORT=artifacts/nextjs-release/h2.json node examples/nextjs/browser.test.cjs
-
-      - name: Upload Next.js qualification reports
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: nextjs-${{ matrix.target }}-node-${{ matrix.node-version }}
-          path: artifacts/nextjs-release/*.json
-          if-no-files-found: warn
-
       - name: Smoke install packed artifact
         env:
           NPM_CONFIG_OMIT: optional

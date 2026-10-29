@@ -11,8 +11,8 @@ and remaining qualification work for each release candidate.
   transport limits, including discovery restart and revalidation.
 - Fix Node facade header compatibility, static serving, streaming compression,
   HTTP/1 WebSocket upgrades and shutdown with an active upgraded socket.
-- Add a source-checkout Next.js development example, pinned to Next 16.4.3 and
-  React 19.3.1, without adding runtime framework dependencies to the library.
+- Fix HTTP/2 response buffer ownership so producers can safely reuse buffers
+  after write completion. Next.js examples and dependencies are excluded.
 - Root, Rust and all three native sidecars are aligned to 0.9.5.
 - Base: `15c413899c14d01e38f22aca2aca942ebf23cbb1` (0.9.4).
 - This is release preparation. No tag or npm publication is authorized by the
@@ -35,8 +35,12 @@ and remaining qualification work for each release candidate.
   request despite successful same-document navigation and no console errors;
   subsequent diagnostic runs passed. This intermittent failure remains under
   investigation; the browser gate still rejects every failed request.
-- Hosted release dry-run results are recorded in the PR. The release workflow now runs Next middleware and Chromium H3/H2
-  checks against each of the three native prebuilds with Node 24 and 26.
+- Node 26 exposed HTTP/2 write callbacks releasing buffers before transmission.
+  A deterministic buffer-reuse regression failed before the fix and passes after
+  it. The local Next.js harness still reports gzip decoding failures on Node 26;
+  this remains a release blocker under investigation.
+- Hosted release dry-run results are recorded in the PR. The local Next.js
+  harness is kept outside the PR; hosted checks use the existing release workflow.
 - Latest stable Safari manual qualification remains required by the release
   runbook before release. Prior 0.9.4 Safari evidence is not a 0.9.5 pass.
 

@@ -9,8 +9,8 @@
   serving and streaming compression, including explicit header flushing.
 - Forward HTTP/1 TLS upgrade events and keep upgraded sockets subject to the
   Node facade's shutdown deadline.
-- Add an opt-in Next.js development example and adapter/browser regressions
-  for hydration, compression, Fast Refresh, POST bodies and RSC navigation.
+- Wait for HTTP/2 write completion before releasing response buffers, preventing
+  corruption when streaming producers reuse their buffers.
 
 ## 0.9.4
 
