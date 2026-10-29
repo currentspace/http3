@@ -1,0 +1,73 @@
+name: Fastify candidate qualification
+
+on:
+  push:
+    branches: [qualification/fastify-http3-f0ea679]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native-x64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.22.1', '26.12.1']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: f0ea679c28e3ee9fc291cf786a8577e2ceba764f
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: prebuild-x86_64-unknown-linux-gnu
+          run-id: 40827407812
+          github-token: ${{ github.token }}
+      - run: pnpm run patch:native-loader && pnpm run build:dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: wasm-client-artifact
+          path: dist/wasm
+          run-id: 40827407812
+          github-token: ${{ github.token }}
+      - name: Pack the release candidate
+        run: |
+          mkdir -p artifacts
+          npm pack --ignore-scripts --pack-destination artifacts
+          sha256sum http3.linux-x64-gnu.node dist/wasm/http3_client.wasm artifacts/currentspace-http3-0.9.4.tgz | tee artifacts/hashes.txt
+          node -p 'JSON.stringify({node:process.version,arch:process.arch,platform:process.platform})' | tee artifacts/runtime.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: brianathere/fastify
+          ref: 2f22a67f69db7b75b1ac981011a9d2ff4b2bdf3b
+          path: artifacts/fastify
+          persist-credentials: false
+      - name: Install the Fastify fixture and candidate
+        run: |
+          npm install --prefix artifacts/fastify --omit=dev --ignore-scripts --no-audit --no-fund
+          npm install --prefix artifacts/fastify/examples/http3 "$PWD/artifacts/currentspace-http3-0.9.4.tgz" --no-save --package-lock=false --omit=optional --ignore-scripts --no-audit --no-fund
+      - name: Run unchanged Fastify protocol tests on native x64
+        run: npm test --prefix artifacts/fastify/examples/http3 | tee artifacts/protocol-tests.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: fastify-native-x64-node-${{ matrix.node }}
+          path: |
+            artifacts/hashes.txt
+            artifacts/runtime.json
+            artifacts/protocol-tests.log
