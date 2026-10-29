@@ -6,10 +6,15 @@ import { get as getHttps } from 'node:https';
 import { Http3NodeServer, Http3IncomingMessage, Http3ServerResponse } from '../../lib/node-server.js';
 import { ServerHttp3Stream } from '../../lib/stream.js';
 import { connectAsync } from '../../lib/client.js';
-import { generateTestCerts } from '../support/generate-certs.js';
+import { generateMutualTlsTestCerts } from '../support/generate-certs.js';
 
-let tls: ReturnType<typeof generateTestCerts>;
-before(() => { tls = generateTestCerts(); });
+let tls: { key: Buffer; cert: Buffer };
+let ca: Buffer;
+before(() => {
+  const certs = generateMutualTlsTestCerts();
+  tls = certs.server;
+  ca = certs.ca.cert;
+});
 const close = (server: Http3NodeServer): Promise<void> => new Promise((resolve, reject) => {
   server.close(error => error ? reject(error) : resolve());
 });
@@ -55,8 +60,8 @@ for (const protocol of ['h3', 'h2']) {
     server.listen({ port: 0, host: '127.0.0.1' });
     await once(server, 'listening');
     const authority = `https://127.0.0.1:${server.address()!.port}`;
-    const session = protocol === 'h3' ? await connectAsync(authority, { rejectUnauthorized: false })
-      : connectH2(authority, { rejectUnauthorized: false });
+    const session = protocol === 'h3' ? await connectAsync(authority, { ca, servername: 'localhost' })
+      : connectH2(authority, { ca });
     if (protocol === 'h2') await once(session, 'connect');
     t.after(async () => { await session.close(); });
     for (const [method, path, status, body] of [
@@ -100,7 +105,7 @@ test('Node facade bounds shutdown of a stalled HTTP/1 request', async t => {
   t.after(() => close(server));
   server.listen({ port: 0, host: '127.0.0.1' });
   await once(server, 'listening');
-  const req = getHttps({ host: '127.0.0.1', port: server.address()!.port, rejectUnauthorized: false, agent: false });
+  const req = getHttps({ host: '127.0.0.1', port: server.address()!.port, ca, agent: false });
   req.on('error', () => {});
   t.after(() => req.destroy());
   await entered;

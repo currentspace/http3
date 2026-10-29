@@ -29,10 +29,29 @@ and remaining qualification work for each release candidate.
 - These results used the development artifact before the version bump. Repeat
   package qualification against the versioned candidate and hosted artifacts.
 
+### Versioned candidate checks
+
+- Candidate `d80d117fc9ea32239ff6050cfd4d58fcec753fdb` passed
+  [release dry-run 40826266471](https://github.com/currentspace/http3/actions/runs/40826266471):
+  all three native builds, WASM build/tests, six Node 24/26 native validation
+  jobs, packed installs and npm publication dry-run. Actual publication was skipped.
+- Local versioned checks passed lint/typecheck, 341 Node tests, 67 FFI tests,
+  concurrency (1,381 ms / 10,000 ms budget), load smoke, 223 Rust unit tests,
+  three UDP and one direct interoperability tests, nine QUIC mock and eleven
+  H3 mock tests, and native packed-install smoke.
+- The local release wrapper stopped at browser sudo authorization. A separate
+  user-keychain attempt timed out during certificate authorization; its temporary
+  keychain was removed and the original search list restored. These attempts do
+  not qualify the local browser gate or manual Safari gate.
+- CodeQL identified disabled certificate validation in a new HTTPS test.
+  The follow-up uses a temporary CA and leaves verification enabled for H3, H2
+  and HTTPS; all six Node facade tests and ten Fastify fixture tests passed.
+  Final-head hosted checks must confirm the finding is resolved.
+
 ### Pending release gates
 
-- Full local release gate, hosted native/WASM prebuild and packed-install gates,
-  and Linux/macOS Fastify integration checks.
+- Local browser release gate, final-head hosted qualification, and versioned
+  Linux/macOS Fastify integration checks.
 - Manual Safari gate from `SAFARI_VALIDATION_RUNBOOK.md` and any final-head CI
   checks required before publication.
 - Clean registry install of the eventual published version before the Fastify
