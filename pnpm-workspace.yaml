@@ -34,3 +34,6 @@ minimumReleaseAgeExclude:
   - miniflare@5.20261023.1-beta
   - workerd@1.20261028.1
   - wrangler@4.154.0
+  - '@currentspace/http3@0.9.5'
+  - playwright-core@1.65.0-alpha-2026-10-29
+  - playwright@1.65.0-alpha-2026-10-29

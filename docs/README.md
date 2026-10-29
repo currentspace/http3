@@ -36,6 +36,7 @@
 
 ## Examples
 
+- [Next.js custom server with HTTP/3](../examples/nextjs/README.md)
 - [../examples/raw-api/README.md](../examples/raw-api/README.md)
 - [../examples/express-adapter/README.md](../examples/express-adapter/README.md)
 - [../examples/hono/README.md](../examples/hono/README.md)

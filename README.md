@@ -170,8 +170,9 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 
 ## Compatibility surfaces
 
-The experimental [Node-style server factory](./docs/NODE_SERVER.md) adds Fastify
-integration in the development tree; it requires the next package release.
+The experimental [Node-style server factory](./docs/NODE_SERVER.md), introduced
+in 0.9.4, supports Fastify integration. Version 0.9.5 adds the compatibility fixes
+used by the [Next.js custom-server example](./examples/nextjs/README.md).
 
 - `@currentspace/http3` - canonical API.
 - `@currentspace/http3/parity` - http2-style aliases for migrations.
@@ -182,6 +183,7 @@ integration in the development tree; it requires the next package release.
 - [Raw API example](./examples/raw-api/README.md)
 - [Express adapter example](./examples/express-adapter/README.md)
 - [Hono `serveFetch()` example](./examples/hono/README.md)
+- [Next.js custom server with HTTP/3 and Fast Refresh](./examples/nextjs/README.md)
 
 ## Start Here
 
