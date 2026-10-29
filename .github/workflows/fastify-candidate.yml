@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: brianathere/fastify
-          ref: 2f22a67f69db7b75b1ac981011a9d2ff4b2bdf3b
+          ref: 0c1956809ffc61a2922c2bea57c73a9e96b9c82d
           path: artifacts/fastify
           persist-credentials: false
       - name: Install the Fastify fixture and candidate
