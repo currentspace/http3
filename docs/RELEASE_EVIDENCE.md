@@ -25,8 +25,13 @@ and remaining qualification work for each release candidate.
 - macOS's administrative trust-removal API hung on hosted runners. The CLI's
   macOS untrust operation instead applies an explicit deny policy to the generated
   CA; it retains the keychain entry and documents manual deletion. Trust settings
-  are changed only by explicit trust/untrust commands. Browser verification of
-  this final operation remains a hosted Distribution gate.
+  are changed only by explicit trust/untrust commands. Hosted Distribution run
+  `40995937710` passed all four Linux/macOS and Node 24/26 jobs, including browser
+  rejection after untrust, automatic H3 negotiation and recovery after idle.
+- Native and WASM deterministic startup tests cover TCP collisions after UDP
+  ephemeral binding, bounded retries, explicit-port errors and released sockets.
+  The doctor TCP probe uses a plain connection; TLS trust is checked separately
+  with verification enabled.
 - Windows browser trust and manual Safari qualification remain unverified. Doctor
   is read-only and does not clear Chrome state. Artifacts: `artifacts/consumer-feedback/`.
 

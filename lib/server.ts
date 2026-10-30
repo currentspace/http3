@@ -168,6 +168,7 @@ export class Http3SecureServer extends EventEmitter {
   private _h2Server: Http2SecureServer | null = null;
   private _address: AddressInfo | null = null;
   private _starting = false;
+  private _startupGeneration = 0;
   private _keylogPath: string | null = null;
   /** @internal */
   _runtimeInfo: RuntimeInfo | null = null;
@@ -207,6 +208,10 @@ export class Http3SecureServer extends EventEmitter {
     const { port, host: listenHost, callback: onListening } = parseListenArgs(portOrOptions, hostOrCallback, callback);
     validateListenPort(port);
     if (onListening) this.once('listening', onListening);
+    return this._startListening(port, listenHost, ++this._startupGeneration, 0);
+  }
+
+  private _startListening(port: number, listenHost: string, generation: number, attempt: number): this {
     const { key, cert } = this._resolveNativeTlsCreds();
     const ca = this._getNativeCa();
     const serverId = this._resolveServerId();
@@ -233,7 +238,7 @@ export class Http3SecureServer extends EventEmitter {
       // _listenWasm() already has its own try/catch routing failures
       // through _abortStartup (which itself never rejects — see its own
       // try/catch/finally), so this onError is a defensive backstop.
-      this._detachedTasks.run(this._listenWasm(port, listenHost, { key, cert, ca, serverId }), (err) => {
+      this._detachedTasks.run(this._listenWasm(port, listenHost, { key, cert, ca, serverId }, generation, attempt), (err) => {
         console.error('unhandled error starting wasm listener:', err);
       });
       return this;
@@ -337,7 +342,7 @@ export class Http3SecureServer extends EventEmitter {
     this._attachH2ServerListeners(h2Server);
 
     const onH2BindError = (err: Error): void => {
-      this._detachedTasks.run(this._abortStartup(err), (abortErr) => {
+      this._detachedTasks.run(this._handleBindError(err, port, listenHost, generation, attempt), (abortErr) => {
         console.error('unhandled error aborting server startup:', abortErr);
       });
     };
@@ -380,6 +385,8 @@ export class Http3SecureServer extends EventEmitter {
     port: number,
     listenHost: string,
     tls: { key: Buffer; cert: Buffer; ca?: Buffer; serverId?: Buffer },
+    generation: number,
+    attempt: number,
   ): Promise<void> {
     let eventLoop: WasmH3ServerEventLoop;
     let addrInfo: { address: string; family: string; port: number };
@@ -470,7 +477,7 @@ export class Http3SecureServer extends EventEmitter {
     this._attachH2ServerListeners(h2Server);
 
     const onH2BindError = (err: Error): void => {
-      this._detachedTasks.run(this._abortStartup(err), (abortErr) => {
+      this._detachedTasks.run(this._handleBindError(err, port, listenHost, generation, attempt), (abortErr) => {
         console.error('unhandled error aborting server startup:', abortErr);
       });
     };
@@ -487,6 +494,7 @@ export class Http3SecureServer extends EventEmitter {
 
   /** Gracefully shut down the server, closing all sessions and sockets. */
   async close(cb?: (err?: Error) => void): Promise<void> {
+    ++this._startupGeneration;
     try {
       this._starting = false;
       this._destroyH2Sessions();
@@ -812,12 +820,22 @@ export class Http3SecureServer extends EventEmitter {
   }
 
   private _isServerNotRunning(err: Error): boolean {
-    return err.name === 'ERR_SERVER_NOT_RUNNING';
+    return (err as NodeJS.ErrnoException).code === 'ERR_SERVER_NOT_RUNNING';
   }
 
-  private async _abortStartup(err: unknown): Promise<void> {
+  private async _handleBindError(err: Error, port: number, host: string, generation: number, attempt: number): Promise<void> {
+    // UDP and TCP have independent ephemeral-port allocators. A free UDP port
+    // can already be occupied by TCP. Retry only OS-assigned ports, never a
+    // caller's explicit port, and fully release the partial listener first.
+    const retry = port === 0 && (err as NodeJS.ErrnoException).code === 'EADDRINUSE' && attempt < 8;
+    await this._abortStartup(err, !retry);
+    if (!retry || generation !== this._startupGeneration) return;
+    try { this._startListening(0, host, generation, attempt + 1); }
+    catch (error) { await this._abortStartup(error); }
+  }
+
+  private async _abortStartup(err: unknown, emitError = true): Promise<void> {
     const error = err instanceof Error ? err : new Error(String(err));
-    this._starting = false;
     this._address = null;
     try {
       if (this._eventLoop) {
@@ -838,7 +856,8 @@ export class Http3SecureServer extends EventEmitter {
       this._streams.clear();
       this._keylogPath = null;
     }
-    process.nextTick(() => this.emit('error', error));
+    this._starting = false;
+    if (emitError) process.nextTick(() => this.emit('error', error));
   }
 
   private _onNewSession(event: NativeEvent): void {

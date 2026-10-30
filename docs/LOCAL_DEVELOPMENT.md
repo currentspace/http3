@@ -150,7 +150,7 @@ npx @currentspace/http3 doctor https://localhost:3443 --ca .certs/ca.pem
 HTTP3_DEBUG=1 npm run dev
 ```
 
-Doctor reports TCP/TLS and UDP/H3 reachability separately for IPv4/IPv6 localhost,
+Doctor reports TCP and UDP/H3 reachability separately for IPv4/IPv6 localhost,
 system trust as seen by Node, a certificate-verified H3 request, Alt-Svc over H2,
 and whether the installed curl supports and completes `--http3-only`. These are
 active probes, not an enumeration of OS socket ownership. The reachability probes

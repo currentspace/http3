@@ -17,7 +17,8 @@
 - Add chainable `setKeepAlive`, `setNoDelay` and `setTimeout` no-ops to H2/H3 request sockets
   for framework compatibility, including older Nest SSE implementations.
 - Accept positional and object `listen` arguments on both HTTP servers; validate
-  arguments before native startup. Default omitted hosts to dual-stack `::`
+  arguments before native startup. Retry UDP/TCP port collisions for `listen(0)`
+  with a bounded attempt count; explicit ports retain their bind errors. Default omitted hosts to dual-stack `::`
   (all interfaces), update the Next/Nest examples, and fix IPv6 URL parsing.
 - Add `http3 dev-cert` with constrained localhost certificates, explicit trust
   and untrust commands, and Node/Chromium local-development instructions.

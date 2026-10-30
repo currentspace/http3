@@ -62,6 +62,7 @@ test('proxy streams bodies, cookies and forwarding metadata across h1/h2/h3', as
     res.setHeader('x-hop', 'must disappear');
     res.setHeader('alt-svc', 'h3=":1"; ma=60');
     res.setHeader('set-cookie', ['a=1; Path=/', 'b=2; Path=/']);
+    res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ path: req.url, headers: req.headers, body: Buffer.concat(chunks).toString() }));
   });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');

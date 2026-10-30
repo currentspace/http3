@@ -1,5 +1,5 @@
 /** Read-only local transport diagnostics. Never changes OS trust or browser profiles. */
-import { connect as connectTls } from 'node:tls';
+import { connect as connectTcp } from 'node:net';
 import { connect as connectH2 } from 'node:http2';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -41,11 +41,11 @@ export async function doctor(input: string | URL, options: DoctorOptions = {}): 
   };
   const local = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
   for (const host of local ? ['127.0.0.1', '::1'] : [hostname]) {
-    await check(`TCP/TLS reachability ${host}`, async () => new Promise<string>((resolve, reject) => {
-      const socket = connectTls({ host, port, servername: hostname, rejectUnauthorized: false });
-      const timer = setTimeout(() => socket.destroy(new Error('TCP/TLS probe timed out')), timeoutMs);
+    await check(`TCP reachability ${host}`, async () => new Promise<string>((resolve, reject) => {
+      const socket = connectTcp({ host, port });
+      const timer = setTimeout(() => socket.destroy(new Error('TCP probe timed out')), timeoutMs);
       socket.once('error', reject);
-      socket.once('secureConnect', () => { resolve('TLS handshake reached the listener; certificate trust checked separately'); socket.destroy(); });
+      socket.once('connect', () => { resolve('TCP connection reached the listener; TLS and certificate trust checked separately'); socket.destroy(); });
       socket.once('close', () => clearTimeout(timer));
     }));
     await check(`UDP/H3 reachability ${host}`, async () => {

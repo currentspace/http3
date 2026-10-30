@@ -17,7 +17,7 @@ test('doctor probes dual-stack transport and explicit CA without changing trust'
   server.listen(0); await once(server, 'listening');
   t.after(async () => new Promise<void>(resolve => server.close(() => resolve())));
   const result = await doctor(`https://localhost:${server.address()!.port}`, { ca, timeoutMs: 2000 });
-  for (const name of ['TCP/TLS reachability 127.0.0.1', 'TCP/TLS reachability ::1', 'UDP/H3 reachability 127.0.0.1', 'UDP/H3 reachability ::1', 'Verified H3 request', 'Alt-Svc over H2']) {
+  for (const name of ['TCP reachability 127.0.0.1', 'TCP reachability ::1', 'UDP/H3 reachability 127.0.0.1', 'UDP/H3 reachability ::1', 'Verified H3 request', 'Alt-Svc over H2']) {
     const check = result.checks.find(item => item.name === name);
     assert.equal(check?.status, 'pass', JSON.stringify(check));
   }
