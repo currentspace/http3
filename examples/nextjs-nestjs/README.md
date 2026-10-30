@@ -5,16 +5,26 @@ The shared listener serves HTTP/3 over UDP and HTTP/2 or HTTP/1.1 over TCP at
 `https://localhost:3443`. It does not start a second backend listener or proxy
 process. Nest allocates its usual internal server object, but never binds it.
 
-This example requires the **unreleased changes in this checkout**. Published
-`@currentspace/http3@0.9.5` does not contain `createExpressHandler` or the split
-Cookie fix. Nest and Next themselves are unmodified.
+This example requires **`@currentspace/http3` 0.9.6 or later**. Version 0.9.5 does
+not contain `createExpressHandler` or the split Cookie fix. Nest and Next
+themselves are unmodified.
 
-## Run from this repository
+## Run with the released package
+
+Copy this example directory to a project outside the library's pnpm workspace:
+
+```sh
+npm install --ignore-scripts --no-audit --no-fund
+npm run certs
+npm run dev
+```
+
+## Run a source candidate from this repository
 
 Use Node 24+ on a supported native platform. From the repository root, install
 dependencies and build the library, then install its candidate tarball in the
-example. The package.json baseline is 0.9.5; the local tarball override below is
-required until these changes are released. A tarball also avoids a package
+example. The local tarball override below tests this checkout, including before
+the next version is on npm. A tarball also avoids a package
 symlink outside Turbopack's example root.
 
 ```sh
@@ -22,8 +32,7 @@ pnpm install --frozen-lockfile
 pnpm run build
 npm pack --ignore-scripts
 cd examples/nextjs-nestjs
-npm install --ignore-scripts --no-audit --no-fund
-npm install --no-save --package-lock=false --ignore-scripts ../../currentspace-http3-0.9.5.tgz
+npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund ../../currentspace-http3-0.9.6.tgz
 npm run certs
 npm run dev
 ```

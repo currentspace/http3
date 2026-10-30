@@ -3,11 +3,10 @@
 Demonstrates running Express middleware and route handlers over HTTP/3 using `createExpressAdapter`.
 
 For `createNodeServerFactory`, use `createExpressHandler(app)` from
-`@currentspace/http3/express`. This checkout's bridge preserves stream methods
+`@currentspace/http3/express` (0.9.6+). The bridge preserves stream methods
 when Express replaces request/response prototypes, including mounted apps. See
 the [combined Next.js/NestJS example](../nextjs-nestjs/README.md) for a complete
-Express-based server with H3, H2, and HTTP/1.1 fallback. The new bridge is not in
-published 0.9.5.
+Express-based server with H3, H2, and HTTP/1.1 fallback.
 
 ## Setup
 

@@ -311,8 +311,8 @@ importers:
   examples/nextjs-nestjs:
     dependencies:
       '@currentspace/http3':
-        specifier: 0.9.5
-        version: 0.9.5
+        specifier: 0.9.6
+        version: link:../..
       '@nestjs/common':
         specifier: 12.3.2
         version: 12.3.2(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@10.2.2)

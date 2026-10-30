@@ -15,8 +15,8 @@ It runs on published 0.9.5 without a NestJS patch.
 
 The [combined Next.js/NestJS example](../examples/nextjs-nestjs/README.md) uses
 Nest's `ExpressAdapter` and Next in one process on the same listener. It requires
-the unreleased `createExpressHandler` bridge and Cookie normalization changes in
-this checkout; these are not part of published 0.9.5.
+the `createExpressHandler` bridge and Cookie normalization changes introduced in
+0.9.6; these are not part of 0.9.5.
 
 ```js
 const fs = require('node:fs');
