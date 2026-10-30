@@ -265,20 +265,27 @@ describe('Worker Edge Cases', () => {
       // Write after end should emit an error
       stream.write('too late');
     });
-    const session = await connectClient(port);
+    let session: Http3ClientSession | undefined;
+    try {
+      session = await connectClient(port);
+      const reqStream = session.request({
+        ':method': 'GET', ':path': '/writeafterend', ':authority': 'localhost', ':scheme': 'https',
+      }, { endStream: true });
 
-    const reqStream = session.request({
-      ':method': 'GET', ':path': '/writeafterend', ':authority': 'localhost', ':scheme': 'https',
-    }, { endStream: true });
+      let complete = false;
+      reqStream.on('data', () => {});
+      reqStream.on('end', () => { complete = true; });
+      // Server destruction can cancel the response before its queued FIN arrives.
+      reqStream.on('error', (error: NodeJS.ErrnoException) => {
+        assert.strictEqual(error.code, 'ERR_HTTP3_STREAM_ERROR');
+        complete = true;
+      });
 
-    let complete = false;
-    reqStream.on('data', () => {});
-    reqStream.on('end', () => { complete = true; });
-
-    await waitFor(() => complete, 3000);
-    assert.ok(gotWriteError, 'server should see write-after-end error');
-
-    await session.close();
-    await server.close();
+      await waitFor(() => complete && gotWriteError, 3000);
+      assert.ok(gotWriteError, 'server should see write-after-end error');
+    } finally {
+      await session?.close();
+      await server.close();
+    }
   });
 });
