@@ -20,6 +20,37 @@ const close = (server: Http3NodeServer): Promise<void> => new Promise((resolve, 
   server.close(error => error ? reject(error) : resolve());
 });
 
+for (const protocol of ['h3', 'h2']) {
+  test(`${protocol}: split Cookie fields become a Node-compatible string`, async t => {
+    const server = new Http3NodeServer({ ...tls, runtimeMode: 'portable' }, (req, res) => {
+      res.setHeader('set-cookie', ['first=one; Path=/', 'second=two; Path=/']);
+      res.end(JSON.stringify({ cookie: req.headers.cookie, rawHeaders: req.rawHeaders }));
+    });
+    server.listen({ port: 0, host: '127.0.0.1' });
+    await once(server, 'listening');
+    const origin = `https://127.0.0.1:${server.address()!.port}`;
+    const session = protocol === 'h3'
+      ? await connectAsync(origin, { ca, servername: 'localhost', runtimeMode: 'portable' })
+      : connectH2(origin, { ca, servername: 'localhost' });
+    if (protocol === 'h2') await once(session, 'connect');
+    t.after(async () => { await session.close(); await close(server); });
+    const stream = session.request({ ':method': 'GET', ':path': '/', cookie: ['first=one', 'second=two'] }, { endStream: true });
+    const response = once(stream, 'response');
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(chunk as Buffer);
+    const result = JSON.parse(Buffer.concat(chunks).toString()) as { cookie: unknown; rawHeaders: string[] };
+    assert.equal(result.cookie, 'first=one; second=two');
+    assert.deepEqual((await response)[0]['set-cookie'], ['first=one; Path=/', 'second=two; Path=/']);
+    if (protocol === 'h3') {
+      const cookies: string[] = [];
+      for (let i = 0; i < result.rawHeaders.length; i += 2) {
+        if (result.rawHeaders[i] === 'cookie') cookies.push(result.rawHeaders[i + 1]!);
+      }
+      assert.deepEqual(cookies, ['first=one', 'second=two']);
+    }
+  });
+}
+
 test('Node response validates headers and excludes hop-by-hop fields', async () => {
   const stream = new ServerHttp3Stream();
   let transmitted: unknown;

@@ -69,7 +69,10 @@ export class Http3IncomingMessage extends Readable {
       if (name.startsWith(':')) continue;
       // Define an own property so names such as __proto__ cannot mutate the prototype.
       Object.defineProperty(this.headers, name.toLowerCase(), {
-        value, writable: true, enumerable: true, configurable: true,
+        // RFC 9114 section 4.2.1 permits split Cookie fields. Node middleware
+        // expects their joined form, while rawHeaders must retain each field.
+        value: name.toLowerCase() === 'cookie' && Array.isArray(value) ? value.join('; ') : value,
+        writable: true, enumerable: true, configurable: true,
       });
       for (const item of Array.isArray(value) ? value : [value]) this.rawHeaders.push(name, item);
     }
