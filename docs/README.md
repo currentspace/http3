@@ -6,6 +6,7 @@
 - Configuration options: [CONFIGURATION_OPTIONS.md](./CONFIGURATION_OPTIONS.md)
 - Runtime modes: [RUNTIME_MODES.md](./RUNTIME_MODES.md)
 - Error handling: [ERROR_HANDLING.md](./ERROR_HANDLING.md)
+- Consumer types and public exports: [PUBLIC_TYPES.md](./PUBLIC_TYPES.md)
 - HTTP/2 parity matrix: [HTTP2_PARITY_MATRIX.md](./HTTP2_PARITY_MATRIX.md)
 - Support matrix: [SUPPORT_MATRIX.md](./SUPPORT_MATRIX.md)
 - Protocol feature status: [PROTOCOL_FEATURE_STATUS.md](./PROTOCOL_FEATURE_STATUS.md)

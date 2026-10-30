@@ -107,8 +107,9 @@ export const ERR_HTTP3_ENDPOINT_RESOLUTION = 'ERR_HTTP3_ENDPOINT_RESOLUTION';
 export const ERR_HTTP3_FAST_PATH_UNAVAILABLE = 'ERR_HTTP3_FAST_PATH_UNAVAILABLE';
 /** The requested runtime configuration is unsupported in the current environment. */
 export const ERR_HTTP3_RUNTIME_UNSUPPORTED = 'ERR_HTTP3_RUNTIME_UNSUPPORTED';
-/** A WASM payload allocation was rejected before the bytes were admitted. */
-export const ERR_HTTP3_WASM_MEMORY_LIMIT = 'ERR_HTTP3_WASM_MEMORY_LIMIT';
+export { ERR_HTTP3_WASM_MEMORY_LIMIT } from './wasm/memory-error.js';
+/** The bounded JavaScript receive buffer was exceeded. */
+export const ERR_HTTP3_RECEIVE_BUFFER_LIMIT = 'ERR_HTTP3_RECEIVE_BUFFER_LIMIT';
 /** The runtime selector fell back from the fast path to a portable path. */
 export const ERR_HTTP3_RUNTIME_FALLBACK = 'ERR_HTTP3_RUNTIME_FALLBACK';
 /** Warning code emitted when runtime auto-selection falls back. */

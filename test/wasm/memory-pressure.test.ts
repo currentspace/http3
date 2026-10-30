@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import type { Duplex } from 'node:stream';
 import { loadHttp3WasmCoreFromFile } from '../../lib/wasm/node-core-loader.js';
-import { ERR_HTTP3_WASM_MEMORY_LIMIT } from '../../lib/errors.js';
+import { WasmMemoryError, ERR_HTTP3_WASM_MEMORY_LIMIT } from '../../lib/index.js';
+import { WasmMemoryError as WasmEntryMemoryError } from '../../lib/wasm/index.js';
 import { createWasmServerH3Pair, createWasmServerQuicPair, wasmArtifactPath, wasmSkipReason } from '../support/wasm-test-helpers.js';
 
 function closed(stream: Duplex): Promise<void> {
@@ -11,8 +12,10 @@ function closed(stream: Duplex): Promise<void> {
 }
 
 function assertMemoryError(error: unknown): void {
-  assert.ok(error instanceof Error);
-  assert.equal((error as Error & { code: string }).code, ERR_HTTP3_WASM_MEMORY_LIMIT);
+  assert.ok(error instanceof WasmMemoryError);
+  assert.ok(error instanceof WasmEntryMemoryError);
+  assert.equal(error.code, ERR_HTTP3_WASM_MEMORY_LIMIT);
+  assert.ok(error.requestedBytes > 0);
   assert.equal(error instanceof WebAssembly.RuntimeError, false);
 }
 

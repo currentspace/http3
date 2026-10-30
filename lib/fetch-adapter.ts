@@ -7,6 +7,7 @@ import type { ServerOptions, StreamListener } from './server.js';
 import { createSecureServer, Http3SecureServer } from './server.js';
 import { createSseReadableStream, sseHeaders } from './sse.js';
 import type { SseEvent } from './sse.js';
+export { RequestBodyTooLargeError } from './request-body.js';
 
 /** A Web Fetch API-compatible request handler. */
 export type FetchHandler = (req: Request) => Response | Promise<Response>;
