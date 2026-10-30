@@ -1,6 +1,7 @@
 import { Duplex } from 'node:stream';
 import {
   type BackpressureState,
+  BoundedStreamWrite,
   createBackpressureState,
   ensureBackpressureState,
   createNativeWriteWindow,
@@ -29,6 +30,8 @@ const EMPTY_BUFFER = Buffer.alloc(0);
  * @internal
  */
 export interface QuicServerEventLoopLike {
+  /** Internal Node stream admission slice size; absent for native transports. */
+  readonly maxStreamSendBytes?: number;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number;
   streamClose(connHandle: number, streamId: number, errorCode: number): void;
   closeSession(connHandle: number, errorCode: number, reason: string): void;
@@ -55,6 +58,8 @@ export interface QuicServerEventLoopLike {
  * @internal
  */
 export interface QuicClientEventLoopLike {
+  /** Internal Node stream admission slice size; absent for native transports. */
+  readonly maxStreamSendBytes?: number;
   connect(serverAddr: string, serverName: string): Promise<void>;
   openStream(): number;
   streamSend(streamId: number, data: Buffer, fin: boolean): number;
@@ -85,6 +90,8 @@ export class QuicStream extends Duplex {
   /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
   /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   private _finalChunk: Buffer | null = null;
+  private _boundedWrite: BoundedStreamWrite | null = null;
+  private _closeSent = false;
 
   constructor(opts?: { highWaterMark?: number }) {
     super(opts?.highWaterMark != null ? { highWaterMark: opts.highWaterMark } : undefined);
@@ -102,14 +109,24 @@ export class QuicStream extends Duplex {
    */
   close(code?: number): void {
     if (this.destroyed) return;
-    const errorCode = code ?? 0;
-    if (this._serverLoop) {
-      this._serverLoop.streamClose(this._connHandle, this._streamId, errorCode);
-    } else if (this._clientLoop) {
-      this._clientLoop.streamClose(this._streamId, errorCode);
-    }
+    this._closeTransport(code ?? 0);
     rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this.destroy();
+  }
+
+  /** @internal — cancel both transport directions once, preserving explicit codes. */
+  _closeTransport(errorCode: number): void {
+    if (this._closeSent) return;
+    this._closeSent = true;
+    if (this._serverLoop) this._serverLoop.streamClose(this._connHandle, this._streamId, errorCode);
+    else this._clientLoop?.streamClose(this._streamId, errorCode);
+  }
+
+  /** @internal — session teardown owns transport cleanup; do not send resets. */
+  _detachTransport(): void {
+    this._closeSent = true;
+    this._serverLoop = null;
+    this._clientLoop = null;
   }
 
   /** @internal — called by event dispatcher when flow control window opens */
@@ -174,7 +191,23 @@ export class QuicStream extends Duplex {
     return super.end(finalCallback);
   }
 
+  private _writeBounded(chunk: Buffer, limit: number, fin: boolean, callback: (error?: Error | null) => void): void {
+    this._boundedWrite = new BoundedStreamWrite(chunk, limit, fin,
+      (slice, final, next) => {
+        if (final) this._writeFinalChunk(slice, next);
+        else this._writeChunk(slice, next);
+      }, error => {
+        this._boundedWrite = null;
+        callback(error);
+      });
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const limit = (this._serverLoop ?? this._clientLoop)?.maxStreamSendBytes;
+    if (limit && chunk.length > limit) {
+      this._writeBounded(chunk, limit, false, callback);
+      return;
+    }
     if (this._blocked) {
       this._bp = ensureBackpressureState(this._bp);
       this._bp.drainCallbacks.push((err) => {
@@ -203,6 +236,11 @@ export class QuicStream extends Duplex {
   }
 
   private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const limit = (this._serverLoop ?? this._clientLoop)?.maxStreamSendBytes;
+    if (limit && chunk.length > limit) {
+      this._writeBounded(chunk, limit, true, callback);
+      return;
+    }
     let written: number;
     try {
       written = this._blocked ? 0 : this._doSend(chunk, true);
@@ -250,6 +288,11 @@ export class QuicStream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    // Successful local finish is admission, not delivery. Keep queued FIN/data
+    // alive after both halves complete; cancellation must notify the peer.
+    if (!this.readableEnded || !this.writableFinished) this._closeTransport(0);
+    this._boundedWrite?.cancel(error ?? new Error('stream destroyed'));
+    this._finalChunk = null;
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     callback(error);

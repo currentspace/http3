@@ -561,6 +561,8 @@ export type EventCallback = (events: NativeEvent[]) => void;
 
 /** Common interface for worker-based server command adapters. */
 export interface ServerEventLoopLike {
+  /** Internal Node stream admission slice size; absent for native transports. */
+  readonly maxStreamSendBytes?: number;
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): void;
   sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): void;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number;
@@ -705,6 +707,8 @@ export class WorkerEventLoop implements ServerEventLoopLike {
  * substitute (e.g. a future non-native event loop implementation).
  */
 export interface ClientEventLoopLike {
+  /** Internal Node stream admission slice size; absent for native transports. */
+  readonly maxStreamSendBytes?: number;
   connect(serverAddr: string, serverName: string): Promise<void>;
   sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number;
   streamSend(streamId: number, data: Buffer, fin: boolean): number;

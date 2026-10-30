@@ -255,8 +255,10 @@ for (const variant of variants) {
   });
 
   if (variant !== 'h2') {
-    test(`${variant}: respondWithBody finishes locally without cancelling queued transport bytes`, { timeout: 15000 }, async t => {
-      const payload = Buffer.alloc(20 * 1024 * 1024, 0x62);
+    test(`${variant}: respondWithBody shortcut finishes locally without cancelling queued transport bytes`, { timeout: 15000 }, async t => {
+      // WASM now streams bodies above its 64 KiB admission bound. Exercise the
+      // shortcut here; large-writes.test.ts covers its backpressured path.
+      const payload = Buffer.alloc(variant === 'wasm-h3' ? 64 * 1024 : 20 * 1024 * 1024, 0x62);
       let serverClosed!: Promise<unknown[]>;
       const { session, tracked } = await fixture(t, variant, stream => {
         serverClosed = once(stream, 'close');

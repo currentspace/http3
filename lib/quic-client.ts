@@ -429,6 +429,7 @@ export class QuicClientSession extends EventEmitter {
   private _onReset(event: NativeEvent): void {
     const stream = this._streams.get(event.streamId);
     if (stream) {
+      stream._closeTransport(event.meta?.errorCode ?? 0);
       stream.destroy(new Error(`stream reset: ${event.meta?.errorCode ?? 0}`));
       this._streams.delete(event.streamId);
     }
@@ -497,6 +498,7 @@ export class QuicClientSession extends EventEmitter {
 
   private _cleanupStreams(err = new Error('session closed')): void {
     for (const stream of [...this._streams.values()]) {
+      stream._detachTransport();
       if (stream.listenerCount('error') > 0) {
         stream.destroy(err);
       } else {

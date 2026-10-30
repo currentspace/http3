@@ -275,6 +275,7 @@ export class QuicServerSession extends EventEmitter {
   _cleanup(): void {
     const err = new Error('session closed');
     for (const stream of [...this._streams.values()]) {
+      stream._detachTransport();
       if (stream.listenerCount('error') > 0) {
         stream.destroy(err);
       } else {
@@ -646,6 +647,7 @@ export class QuicServer extends EventEmitter {
     if (!session) return;
     const stream = session._streams.get(event.streamId);
     if (stream) {
+      stream._closeTransport(event.meta?.errorCode ?? 0);
       stream.destroy(new Error(`stream reset: ${event.meta?.errorCode ?? 0}`));
       session._streams.delete(event.streamId);
     }
