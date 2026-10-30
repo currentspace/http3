@@ -3,6 +3,40 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.6 candidate
+
+### Scope and state
+
+- Include the split Cookie correction (`a1c7fa5`) and Express bridge with the
+  combined Next.js/NestJS Express example (`8519a8e`).
+- Root, Rust, and all three native sidecars are aligned to 0.9.6. The combined
+  example requires 0.9.6 and is included in the root package tarball.
+- The user authorized release of 0.9.6 with the example and both fixes.
+- Publication is not complete. npm still reports latest 0.9.5 and no 0.9.6.
+
+### Implementation qualification before the version bump
+
+- macOS arm64: 240 core tests passed on Node 24.22.1 and 26.13.0, including
+  mixed H1/H2/H3 requests to one Express app, redirects, and streamed proxy
+  uploads through http-proxy-middleware 4.2.1.
+- The full Node/FFI run passed 357 Node and 67 FFI tests before the additional
+  proxy regression; that regression then passed on both Node versions.
+- Eight Chromium 157.0.8103.15 combinations passed: Node 24/26, development
+  and production, H3 and H2. Each H3 run observed two separate Cookie fields
+  and verified values through Nest, Next, SSR, and Next-to-BFF H3 calls.
+- H3/H2/H1 API tests, Rust tests, lint, typechecks, workflow validation, and
+  the canonical Clippy lanes passed. Clippy retains existing warnings.
+- Artifacts are under `artifacts/nestjs-investigation/`. These checks used
+  the source candidate still labeled 0.9.5, not a published release artifact.
+
+### Remaining release qualification
+
+- Validate the versioned candidate and packed sample, local release gates,
+  final hosted checks, and the nonpublishing native/WASM release workflow.
+- Complete current Safari qualification with matching curl H3/H2 evidence.
+- Publish all four packages, create the matching tag and GitHub release, then
+  verify registry dist-tags and a clean installed 0.9.6 sample.
+
 ## 0.9.5 candidate
 
 ### Scope and state

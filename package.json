@@ -1,6 +1,6 @@
 {
   "name": "@currentspace/http3",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "HTTP/3 server and client for Node.js, powered by Cloudflare quiche",
   "author": "brianathere <brian@current.space>",
   "license": "MIT",
@@ -116,6 +116,14 @@
     "examples/nestjs/tsconfig.json",
     "examples/nestjs/src",
     "examples/nestjs/scripts",
+    "examples/nextjs-nestjs/README.md",
+    "examples/nextjs-nestjs/package.json",
+    "examples/nextjs-nestjs/tsconfig.json",
+    "examples/nextjs-nestjs/src",
+    "examples/nextjs-nestjs/scripts",
+    "examples/nextjs-nestjs/web/app",
+    "examples/nextjs-nestjs/web/lib",
+    "examples/nextjs-nestjs/web/next.config.mjs",
     "index.js",
     "index.d.ts",
     "*.node"
@@ -236,10 +244,13 @@
     "@cloudflare/workers-types": "^5.20261028.1",
     "@eslint/js": "catalog:",
     "@napi-rs/cli": "catalog:",
+    "@types/express": "5.0.6",
     "@types/node": "catalog:",
     "@typescript/native": "catalog:",
     "c8": "catalog:",
     "eslint": "catalog:",
+    "express": "5.3.0",
+    "http-proxy-middleware": "4.2.1",
     "playwright": "catalog:",
     "typescript": "catalog:",
     "typescript-eslint": "catalog:",
@@ -247,8 +258,8 @@
     "wrangler": "^4.154.0"
   },
   "optionalDependencies": {
-    "@currentspace/http3-darwin-arm64": "0.9.5",
-    "@currentspace/http3-linux-arm64-gnu": "0.9.5",
-    "@currentspace/http3-linux-x64-gnu": "0.9.5"
+    "@currentspace/http3-darwin-arm64": "0.9.6",
+    "@currentspace/http3-linux-arm64-gnu": "0.9.6",
+    "@currentspace/http3-linux-x64-gnu": "0.9.6"
   }
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.6
+
+- Join split HTTP/3 Cookie fields with `; ` in the Node request facade, matching
+  the string expected by cookie-parser and Next.js. Preserve the original raw
+  fields and separate response `Set-Cookie` values.
+- Add `createExpressHandler` under `@currentspace/http3/express` to preserve
+  facade transport methods when Express replaces request/response prototypes.
+  Support mounted apps and request bodies without Content-Length, and reuse
+  the same bridge in the stream-level Express adapter.
+- Add a Next.js and NestJS Express example sharing one Node process and one
+  HTTP/3, HTTP/2, and HTTP/1.1 listener, with SSR-to-BFF H3 calls, cookies,
+  Server Actions, streamed uploads, SSE, Fast Refresh, and browser verification.
+- Add regressions for mixed-protocol Express requests, redirects, and streaming
+  through http-proxy-middleware, plus candidate-package CI for the combined app.
+
 ## 0.9.5
 
 - Preserve explicit native UDP payload limits through H3 and raw QUIC worker

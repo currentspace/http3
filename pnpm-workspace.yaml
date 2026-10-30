@@ -2,6 +2,10 @@ packages:
   - .
   - examples/*
 
+# A same-version example uses the source package before that version is on npm.
+# Candidate browser tests install a packed copy, avoiding external symlinks.
+linkWorkspacePackages: true
+
 allowBuilds:
   esbuild: true
   sharp: true
