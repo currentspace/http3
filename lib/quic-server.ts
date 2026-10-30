@@ -437,6 +437,7 @@ export class QuicServer extends EventEmitter {
             cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
             ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
             alpn: opts.alpn,
+            clientAuth,
             maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
             maxUdpPayloadSize: opts.maxUdpPayloadSize,
             initialMaxData: opts.initialMaxData,

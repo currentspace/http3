@@ -36,8 +36,8 @@ import {
 } from './errors.js';
 import { toSessionError, toStreamError } from './error-map.js';
 import { prepareKeylogFile, subscribeKeylog } from './keylog.js';
-import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
-import { normalizeRuntimeMode, runWithRuntimeSelection, runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
+import type { RuntimeInfo, RuntimeOptions, RuntimeSelectionDecision } from './runtime.js';
+import { resolveRuntimeSelection, runWithRuntimeSelection, runWithRuntimeSelectionSync, setPendingRuntimeInfo } from './runtime.js';
 
 // Event type constants (must match Rust EventType enum)
 const EVENT_NEW_SESSION = 1;
@@ -224,22 +224,11 @@ export class Http3SecureServer extends EventEmitter {
     }
     this._keylogPath = prepareKeylogFile(this._options.keylog);
 
-    // wasm construction (binding a node:dgram socket) is inherently
-    // asynchronous, unlike every native path below (a synchronous NAPI
-    // call) — branch out to a dedicated async bootstrap *before* ever
-    // calling the synchronous runWithRuntimeSelectionSync, which cannot
-    // (and, per its own guard, must not) be asked to run 'wasm'. This
-    // keeps the native path below byte-for-byte unchanged: native binding
-    // resolution (`getBinding()`) happens only inside its own thunk, never
-    // eagerly, exactly like `lib/client-event-loop-factory.ts`'s pattern —
-    // this is the fix for the same bug class as
-    // "connectQuic() unconditionally resolved the native binding".
-    if (normalizeRuntimeMode(this._options.runtimeMode) === 'wasm') {
+    const selection = resolveRuntimeSelection(this, this._options);
+    // Keep native startup synchronous; a WASM decision must defer the UDP bind.
+    if (selection.wasm) {
       this._starting = true;
-      // _listenWasm() already has its own try/catch routing failures
-      // through _abortStartup (which itself never rejects — see its own
-      // try/catch/finally), so this onError is a defensive backstop.
-      this._detachedTasks.run(this._listenWasm(port, listenHost, { key, cert, ca, serverId }, generation, attempt), (err) => {
+      this._detachedTasks.run(this._listenWasm(port, listenHost, { key, cert, ca, serverId }, generation, attempt, selection), (err) => {
         console.error('unhandled error starting wasm listener:', err);
       });
       return this;
@@ -253,15 +242,7 @@ export class Http3SecureServer extends EventEmitter {
     try {
       quicStart = runWithRuntimeSelectionSync(this, this._options, (runtimeMode) => {
         if (runtimeMode === 'wasm') {
-          // Unreachable in two independent ways: the outer `if
-          // (normalizeRuntimeMode(...) === 'wasm')` branch above already
-          // diverted every wasm request to `_listenWasm` before this call,
-          // and `runWithRuntimeSelectionSync` itself also rejects 'wasm'
-          // before ever invoking this callback. Kept as an explicit,
-          // narrow-failing guard (matching `connectQuic()`'s identical
-          // pattern) rather than asserted away — this also narrows
-          // `runtimeMode`'s type to `'fast' | 'portable'` for
-          // `NativeServerOptions.runtimeMode` below.
+          // The preflight decision routes WASM to the deferred bootstrap above.
           throw new Http3Error('unreachable: wasm runtime mode reached native server construction', ERR_HTTP3_RUNTIME_UNSUPPORTED);
         }
         const NativeWorkerServer = getBinding().NativeWorkerServer;
@@ -314,7 +295,7 @@ export class Http3SecureServer extends EventEmitter {
         const eventLoop = new WorkerEventLoop(workerServer);
         const addrInfo = workerServer.listen(port, listenHost, 64 * 1024);
         return { workerServer, eventLoop, addrInfo };
-      });
+      }, selection);
     } catch (err: unknown) {
       this._keylogPath = null;
       throw err;
@@ -388,21 +369,20 @@ export class Http3SecureServer extends EventEmitter {
     tls: { key: Buffer; cert: Buffer; ca?: Buffer; serverId?: Buffer },
     generation: number,
     attempt: number,
+    selection: RuntimeSelectionDecision,
   ): Promise<void> {
-    let eventLoop: WasmH3ServerEventLoop;
-    let addrInfo: { address: string; family: string; port: number };
     try {
-      const result = await runWithRuntimeSelection(this, this._options, async (runtimeMode) => {
+      await runWithRuntimeSelection(this, this._options, async (runtimeMode) => {
+        if (this._options.sessionTicketKeys !== undefined || this._options.reusePort === true) {
+          throw new Http3Error(
+            "WASM servers do not support sessionTicketKeys or reusePort; use a native runtime for these options",
+            ERR_HTTP3_RUNTIME_UNSUPPORTED, { reasonCode: 'wasm-option-unsupported' },
+          );
+        }
         const loop = await createServerEventLoop<WasmH3ServerEventLoop>(
           runtimeMode,
           () => {
-            // Unreachable: `_listenWasm` is only ever called when
-            // `normalizeRuntimeMode(this._options.runtimeMode) === 'wasm'`,
-            // and `runWithRuntimeSelection`'s own early 'wasm' branch never
-            // attempts anything else — guarded explicitly (matching
-            // connectQuic()'s identical pattern) so a future bug here
-            // fails loudly instead of silently resolving the native
-            // binding for a wasm request.
+            // This bootstrap consumes only an explicit or fallback WASM decision.
             throw new Http3Error(
               'unreachable: native constructor invoked for wasm runtime mode',
               ERR_HTTP3_RUNTIME_UNSUPPORTED,
@@ -453,44 +433,50 @@ export class Http3SecureServer extends EventEmitter {
             );
           },
         );
-        const addr = await loop.listen(port, listenHost);
-        return { loop, addr };
-      });
-      eventLoop = result.loop;
-      addrInfo = { address: result.addr.address, family: result.addr.family, port: result.addr.port };
+        let addr: AddressInfo;
+        try {
+          addr = await loop.listen(port, listenHost);
+          if (generation !== this._startupGeneration) {
+            throw new Http3Error('server startup cancelled', ERR_HTTP3_INVALID_STATE);
+          }
+        } catch (error) {
+          await loop.close();
+          throw error;
+        }
+        this._eventLoop = loop;
+        this._workerServer = null;
+        this._address = addr;
+        const h2Server = this._createH2Server();
+        this._h2Server = h2Server;
+        this._attachH2ServerListeners(h2Server);
+        await new Promise<void>((resolve, reject) => {
+          const cleanup = (): void => { h2Server.off('error', onError); h2Server.off('close', onClose); };
+          const onError = (error: Error): void => { cleanup(); reject(error); };
+          const onClose = (): void => { cleanup(); reject(new Http3Error('server startup cancelled', ERR_HTTP3_INVALID_STATE)); };
+          h2Server.once('error', onError);
+          h2Server.once('close', onClose);
+          h2Server.listen(addr.port, listenHost, () => {
+            cleanup();
+            resolve();
+          });
+        });
+        if (generation !== this._startupGeneration) {
+          throw new Http3Error('server startup cancelled', ERR_HTTP3_INVALID_STATE);
+        }
+      }, selection);
     } catch (err: unknown) {
-      this._keylogPath = null;
-      await this._abortStartup(err);
+      if (generation !== this._startupGeneration) {
+        await this._abortStartup(err, false);
+      } else {
+        await this._handleBindError(err instanceof Error ? err : new Error(String(err)), port, listenHost, generation, attempt);
+      }
       return;
     }
-
-    this._eventLoop = eventLoop;
-    this._workerServer = null;
-    this._address = addrInfo;
-
-    let h2Server: Http2SecureServer;
-    try {
-      h2Server = this._createH2Server();
-    } catch (err: unknown) {
-      await this._abortStartup(err);
-      return;
-    }
-    this._h2Server = h2Server;
-    this._attachH2ServerListeners(h2Server);
-
-    const onH2BindError = (err: Error): void => {
-      this._detachedTasks.run(this._handleBindError(err, port, listenHost, generation, attempt), (abortErr) => {
-        console.error('unhandled error aborting server startup:', abortErr);
-      });
-    };
-    h2Server.once('error', onH2BindError);
-    h2Server.listen(addrInfo.port, listenHost, () => {
-      h2Server.off('error', onH2BindError);
-      this._starting = false;
-      process.nextTick(() => {
-        debugHttp3('listening', { address: this.address() });
-        this.emit('listening');
-      });
+    this._starting = false;
+    process.nextTick(() => {
+      if (generation !== this._startupGeneration) return;
+      debugHttp3('listening', { address: this.address() });
+      this.emit('listening');
     });
   }
 

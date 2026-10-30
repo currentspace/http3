@@ -10,11 +10,14 @@ module.exports = function nativeBindingError({ platform, arch, musl, override, l
   const prebuilds = Object.keys(manifest.optionalDependencies).filter(name => name.startsWith(`${manifest.name}-`));
   const supported = prebuilds.map(name => name.slice(manifest.name.length + 1)).join(', ');
   let message;
+  let category;
 
   if (override) {
+    category = 'override';
     message = `Cannot load the native binding for ${platformLabel} from NAPI_RS_NATIVE_LIBRARY_PATH=${override}. ` +
       'Check that the configured file exists and is compatible with this platform. See cause for the loader errors.';
   } else if (!prebuilds.includes(packageName)) {
+    category = 'unpublished';
     message = `Cannot load the native binding for ${platformLabel}: no prebuilt native package is published for this platform. ` +
       `Published targets: ${supported}. Reinstalling dependencies will not add support. ` +
       "Use runtimeMode: 'wasm' explicitly, or a supported source build with NAPI_RS_NATIVE_LIBRARY_PATH pointing to its .node file. " +
@@ -35,10 +38,12 @@ module.exports = function nativeBindingError({ platform, arch, musl, override, l
       return !missing || !(/^(?:\.\/http3\.[\w.-]+|@currentspace\/http3-[\w-]+)$/u.test(missing));
     });
     if (packageMissing && !bindingFailed) {
+      category = 'missing';
       message = `Cannot load the native binding for ${platformLabel}: the optional platform package ${packageName}@${manifest.version} is missing. ` +
         'Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. ' +
         'Keep the root and platform package versions aligned.';
     } else {
+      category = 'unloadable';
       message = `Cannot load the native binding for ${platformLabel}. Expected platform package: ${packageName}@${manifest.version}. ` +
         'A binding was found but failed to load or resolve; see cause for the original loader errors.';
     }
@@ -46,5 +51,7 @@ module.exports = function nativeBindingError({ platform, arch, musl, override, l
 
   const error = new Error(message, { cause });
   error.code = 'ERR_HTTP3_RUNTIME_UNSUPPORTED';
+  error.reasonCode = 'native-binding-unavailable';
+  error.nativeBinding = { platform, arch, libc: platform === 'linux' ? (musl ? 'musl' : 'glibc') : null, packageName, category, message };
   return error;
 };

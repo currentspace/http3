@@ -59,9 +59,13 @@ describe('native loader diagnostics', () => {
   for (const [platform, arch, musl] of [
     ['darwin', 'x64', false], ['linux', 'x64', true], ['linux', 'arm64', true], ['win32', 'x64', false],
   ] as const) {
+    if (`${manifest.name}-${platform}-${arch}${platform === 'linux' ? (musl ? '-musl' : '-gnu') : ''}` in manifest.optionalDependencies) continue;
     it(`names unpublished target ${platform}-${arch}${musl ? '-musl' : ''}`, () => {
       const error = failure(platform, arch, { musl });
       assert.equal(error.code, 'ERR_HTTP3_RUNTIME_UNSUPPORTED');
+      assert.equal(error.reasonCode, 'native-binding-unavailable');
+      assert.equal(error.nativeBinding.platform, platform);
+      assert.equal(error.nativeBinding.arch, arch);
       assert.ok(error.message.includes(`${platform} ${arch}`));
       if (platform === 'linux') assert.match(error.message, /\(musl\)/u);
       assert.match(error.message, /no prebuilt native package is published/u);
@@ -73,14 +77,15 @@ describe('native loader diagnostics', () => {
     });
   }
 
-  for (const [platform, arch, suffix] of [
-    ['darwin', 'arm64', ''], ['linux', 'x64', '-gnu'], ['linux', 'arm64', '-gnu'],
-  ]) {
+  for (const name of Object.keys(manifest.optionalDependencies)) {
+    const [platform, arch, libc] = name.slice(manifest.name.length + 1).split('-');
+    const suffix = libc ? `-${libc}` : '';
     it(`names the missing package for ${platform}-${arch}`, () => {
-      const error = failure(platform, arch);
+      const error = failure(platform, arch, { musl: libc === 'musl' });
       assert.equal(error.code, 'ERR_HTTP3_RUNTIME_UNSUPPORTED');
       assert.ok(error.message.includes(`@currentspace/http3-${platform}-${arch}${suffix}@${manifest.version} is missing`));
-      if (platform === 'linux') assert.match(error.message, /\(glibc\)/u);
+      assert.equal(error.nativeBinding.category, 'missing');
+      if (platform === 'linux') assert.equal(error.nativeBinding.libc, libc === 'musl' ? 'musl' : 'glibc');
       assert.match(error.message, /npm install --include=optional/u);
       assert.doesNotMatch(error.message, /no prebuilt|package-lock|npm has a bug/u);
     });
@@ -146,9 +151,11 @@ describe('native loader diagnostics', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  for (const runtimeMode of ['auto', 'wasm']) {
-    it(`${runtimeMode} startup from an isolated package without sidecars`, {
-      skip: runtimeMode === 'wasm' && !existsSync(join(root, 'dist/wasm/http3_client.wasm'))
+  for (const requested of ['auto', 'wasm', 'auto:error', 'portable', 'fast']) {
+    const [runtimeMode, fallbackPolicy = 'warn-and-fallback'] = requested.split(':');
+    const succeeds = runtimeMode === 'wasm' || requested === 'auto';
+    it(`${requested} startup from an isolated package without sidecars`, {
+      skip: succeeds && !existsSync(join(root, 'dist/wasm/http3_client.wasm'))
         ? 'build the WASM artifact to exercise explicit WASM startup' : false,
     }, () => {
       const dir = mkdtempSync(join(tmpdir(), 'http3-missing-sidecar-'));
@@ -157,7 +164,7 @@ describe('native loader diagnostics', () => {
         cpSync(join(root, 'bin'), join(dir, 'bin'), { recursive: true });
         cpSync(join(root, 'index.js'), join(dir, 'index.js'));
         cpSync(join(root, 'package.json'), join(dir, 'package.json'));
-        if (runtimeMode === 'wasm') {
+        if (succeeds) {
           cpSync(join(root, 'dist/wasm/http3_client.wasm'), join(dir, 'dist/wasm/http3_client.wasm'));
         }
         const certs = generateTestCerts();
@@ -170,12 +177,12 @@ describe('native loader diagnostics', () => {
           const { createNodeServerFactory } = require('./dist/node-server.js');
           assert.equal(require.cache[require.resolve('./index.js')], undefined, 'import stays lazy');
           const runtimeMode = ${JSON.stringify(runtimeMode)};
-          const server = createNodeServerFactory({ runtimeMode, key: readFileSync('key.pem'), cert: readFileSync('cert.pem') })(() => {});
+          const server = createNodeServerFactory({ runtimeMode, fallbackPolicy: ${JSON.stringify(fallbackPolicy)}, key: readFileSync('key.pem'), cert: readFileSync('cert.pem') })(() => {});
           const timer = setTimeout(() => { throw new Error('startup error not emitted'); }, 5000);
           let returned = false;
           server.once('error', error => {
             clearTimeout(timer);
-            assert.equal(runtimeMode, 'auto', error.message);
+            assert.equal(${succeeds}, false, error.message);
             assert.ok(returned, 'listen error stays asynchronous');
             assert.ok(error instanceof Http3Error);
             assert.equal(error.code, ERR_HTTP3_RUNTIME_UNSUPPORTED);
@@ -186,8 +193,11 @@ describe('native loader diagnostics', () => {
           });
           server.once('listening', () => {
             clearTimeout(timer);
-            assert.equal(runtimeMode, 'wasm', 'native startup should fail without a binding');
-            assert.equal(require.cache[require.resolve('./index.js')], undefined, 'WASM bypasses the native loader');
+            assert.equal(${succeeds}, true, 'strict native startup should fail without a binding');
+            assert.equal(server.runtimeInfo.selectedMode, 'wasm');
+            assert.equal(server.runtimeInfo.fallbackOccurred, runtimeMode === 'auto');
+            if (runtimeMode === 'auto') assert.equal(server.runtimeInfo.reasonCode, 'native-binding-unavailable');
+            else assert.equal(require.cache[require.resolve('./index.js')], undefined, 'explicit WASM bypasses the native loader');
             server.close();
           });
           server.listen(0, '127.0.0.1');
