@@ -11,7 +11,7 @@ import { QuicStream } from './quic-stream.js';
 import type { QuicClientEventLoopLike } from './quic-stream.js';
 import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
-import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
+import { resolveRuntimeSelection, runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
 import { DetachedTasks } from './run-detached.js';
 
 const EVENT_NEW_STREAM = 2;
@@ -713,16 +713,10 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
   const tls = normalizeQuicClientTlsOptions(options);
   const session = new QuicClientSession();
   setPendingRuntimeInfo(session, options);
-  // Pre-flight validation, synchronously, for every mode EXCEPT an explicit
-  // 'wasm' request: this preserves the existing "throws a clear error when
-  // NativeQuicClient is missing" contract (test/release/raw-quic-prebuild-guard.test.ts)
-  // for 'auto'/'fast'/'portable' callers, while a `runtimeMode: 'wasm'`
-  // caller never resolves the native binding at all, at any point
-  // (docs/WASM_CLIENT_PLAN.md §6.6) — 'auto' still validates native here
-  // because auto-selection only ever falls back between 'fast'/'portable',
-  // never to 'wasm', so native is always needed on that path regardless of
-  // which of the two auto ultimately picks.
-  const NativeQuicClient = options?.runtimeMode === 'wasm' ? null : getNativeQuicClientConstructor();
+  // Preserve synchronous validation of incomplete native prebuilds, but first
+  // allow a missing addon to choose the existing asynchronous WASM path.
+  const selection = resolveRuntimeSelection(session, options);
+  const NativeQuicClient = selection.wasm ? null : getNativeQuicClientConstructor();
   const shouldAbortConnect = (): boolean => session._closeRequested;
   installQuicConnectAbortHandler(session, options?.signal);
   const authorityString = typeof authority === 'string'
@@ -879,7 +873,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
           session._setEventLoop(null);
           return;
         }
-      });
+      }, selection);
     } catch (err: unknown) {
       if (shouldAbortConnect()) {
         return;

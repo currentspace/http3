@@ -34,6 +34,10 @@ void listenNest; void proxy; void createDevTls;
 const app = createExpressHandler((_req, res) => res.end('ok'));
 const options: NodeServerOptions = {};
 const server = createNodeServerFactory(options)(app);
+const selectedRuntime: RuntimeInfo | null = server.runtimeInfo;
+void selectedRuntime;
+// @ts-expect-error Runtime selection is exposed as a read-only snapshot getter.
+server.runtimeInfo = null;
 const listen: ListenOptions = { port: 0, host: '::' };
 server.listen(listen);
 server.listen(0, '::', () => {});
