@@ -185,6 +185,7 @@ used by the [Next.js custom-server example](./examples/nextjs/README.md).
 - [Hono `serveFetch()` example](./examples/hono/README.md)
 - [Next.js custom server with HTTP/3 and Fast Refresh](./examples/nextjs/README.md)
 - [NestJS with Fastify over HTTP/3](./examples/nestjs/README.md)
+- [Next.js and NestJS with Express in one process](./examples/nextjs-nestjs/README.md) (requires this checkout's unreleased bridge)
 
 ## Start Here
 
