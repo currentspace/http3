@@ -9,7 +9,7 @@ publication or production qualification. Source requirements are in
 1. [Automatic runtime fallback and installed-consumer checks](https://github.com/currentspace/http3/pull/24).
 2. [Bounded WASM writes, trailer ordering, and cancellation](https://github.com/currentspace/http3/pull/25).
 3. [Native musl/Intel packages, ABI compatibility, and release gates](https://github.com/currentspace/http3/pull/26).
-4. Runtime/platform documentation and consolidated validation evidence (this change).
+4. [Runtime/platform documentation and consolidated validation evidence](https://github.com/currentspace/http3/pull/27).
 
 The PRs form a stack and should be reviewed/merged in that order. Root and
 sidecar versions remain 0.9.9 during review; no new npm package is implied by
@@ -64,6 +64,22 @@ consumer scripts and pre-change artifacts produced:
 These single-host measurements were taken during development, not on an
 isolated benchmark machine. They are regression context, not cross-platform
 performance guarantees.
+
+A follow-up interleaved comparison compiled archived `966c611` and `a812b37`
+independently, used byte-identical native/WASM artifacts, and alternated fresh
+consumer processes after warmup while development builds were idle:
+
+| Workload | Baseline median | Candidate median |
+| --- | --- | --- |
+| Native portable 1,000 GETs, concurrency 50; five runs each | 10,113 requests/s | 10,010 requests/s |
+| WASM streamed 32 MiB; three runs each | 91 MiB/s | 91 MiB/s |
+
+Native ranges overlap (9,876–10,230 versus 9,745–10,736 requests/s); the native
+mean changed by +0.42% and median by -1.02%. This short comparison shows no
+material regression, with the limits of a single shared host. The previously
+failing single-buffer WASM repro completes at 32 and 128 MiB; byte/hash integrity
+is established separately by the stream tests.
+[Full interleaved measurements](../.github/release-evidence/platform-coverage/interleaved-benchmark.json).
 
 ## Hosted and release gates
 

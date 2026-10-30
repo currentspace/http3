@@ -1,0 +1,428 @@
+{
+  "node": "v26.13.0",
+  "host": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "revisions": {
+    "baseline": {
+      "revision": "966c611778b7b176ea202090a80485739b0d0aa1",
+      "source_dir": "/tmp/http3-platform-benchmark-20261030/baseline-source",
+      "consumer_dir": "/tmp/http3-platform-benchmark-20261030/baseline-consumer",
+      "native_sha256": "5bc5fd408df255685e95ffde3a24626244be7057f2570090cdf7e9437c1eab90",
+      "wasm_sha256": "bba2d4f54f068d6bf0a87a3bc698470ac60c5d18fefca80cb7962d2195893af3"
+    },
+    "candidate": {
+      "revision": "a812b37126b60dc11763b42d64273a7b58438662",
+      "source_dir": "/tmp/http3-platform-benchmark-20261030/candidate-source",
+      "consumer_dir": "/tmp/http3-platform-benchmark-20261030/candidate-consumer",
+      "native_sha256": "5bc5fd408df255685e95ffde3a24626244be7057f2570090cdf7e9437c1eab90",
+      "wasm_sha256": "bba2d4f54f068d6bf0a87a3bc698470ac60c5d18fefca80cb7962d2195893af3"
+    }
+  },
+  "started_at": "2026-10-30T23:47:16.251968+00:00",
+  "method": {
+    "order": "baseline then candidate in each interleaved pair",
+    "request_rate": {
+      "command": [
+        "request-rate.cjs",
+        "portable"
+      ],
+      "warmup_pairs": 2,
+      "measured_pairs": 5,
+      "requests_per_process": 1000,
+      "concurrency": 50
+    },
+    "wasm_stream": {
+      "command": [
+        "throughput.cjs",
+        "wasm",
+        "32",
+        "stream"
+      ],
+      "warmup_pairs": 1,
+      "measured_pairs": 3
+    },
+    "notes": [
+      "Fresh isolated consumer directories resolving archived, equally compiled TS sources.",
+      "Baseline original native binary and rebuilt candidate binary are byte-identical by SHA-256; WASM artifacts are also byte-identical.",
+      "Loopback on one macOS arm64 host, fresh Node process per run.",
+      "No CPU-heavy agent work was scheduled during measurements; this is not an isolated benchmark host.",
+      "Consumer repro throughput is descriptive only; byte integrity is separately covered by the library tests."
+    ]
+  },
+  "runs": [
+    {
+      "label": "baseline",
+      "workload": "request_rate",
+      "warmup": true,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:16.252169+00:00",
+      "wall_seconds": 0.552014333079569,
+      "returncode": 0,
+      "stdout": "portable: 10371 req/s, rss 142 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10371,
+      "rss_mib": 142
+    },
+    {
+      "label": "candidate",
+      "workload": "request_rate",
+      "warmup": true,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:16.804680+00:00",
+      "wall_seconds": 0.37232870794832706,
+      "returncode": 0,
+      "stdout": "portable: 10330 req/s, rss 142 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10330,
+      "rss_mib": 142
+    },
+    {
+      "label": "baseline",
+      "workload": "request_rate",
+      "warmup": true,
+      "pair": 2,
+      "started_at": "2026-10-30T23:47:17.177509+00:00",
+      "wall_seconds": 0.20449108292814344,
+      "returncode": 0,
+      "stdout": "portable: 10311 req/s, rss 142 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10311,
+      "rss_mib": 142
+    },
+    {
+      "label": "candidate",
+      "workload": "request_rate",
+      "warmup": true,
+      "pair": 2,
+      "started_at": "2026-10-30T23:47:17.382447+00:00",
+      "wall_seconds": 0.21106441703159362,
+      "returncode": 0,
+      "stdout": "portable: 9954 req/s, rss 143 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 9954,
+      "rss_mib": 143
+    },
+    {
+      "label": "baseline",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:17.593990+00:00",
+      "wall_seconds": 0.20741129200905561,
+      "returncode": 0,
+      "stdout": "portable: 10230 req/s, rss 144 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10230,
+      "rss_mib": 144
+    },
+    {
+      "label": "candidate",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:17.801894+00:00",
+      "wall_seconds": 0.20998295908793807,
+      "returncode": 0,
+      "stdout": "portable: 9951 req/s, rss 143 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 9951,
+      "rss_mib": 143
+    },
+    {
+      "label": "baseline",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 2,
+      "started_at": "2026-10-30T23:47:18.012368+00:00",
+      "wall_seconds": 0.20473233400844038,
+      "returncode": 0,
+      "stdout": "portable: 10145 req/s, rss 142 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10145,
+      "rss_mib": 142
+    },
+    {
+      "label": "candidate",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 2,
+      "started_at": "2026-10-30T23:47:18.217568+00:00",
+      "wall_seconds": 0.20286099996883422,
+      "returncode": 0,
+      "stdout": "portable: 10736 req/s, rss 143 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10736,
+      "rss_mib": 143
+    },
+    {
+      "label": "baseline",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 3,
+      "started_at": "2026-10-30T23:47:18.420792+00:00",
+      "wall_seconds": 0.20469525002408773,
+      "returncode": 0,
+      "stdout": "portable: 10113 req/s, rss 144 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10113,
+      "rss_mib": 144
+    },
+    {
+      "label": "candidate",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 3,
+      "started_at": "2026-10-30T23:47:18.625989+00:00",
+      "wall_seconds": 0.20794745802413672,
+      "returncode": 0,
+      "stdout": "portable: 10010 req/s, rss 142 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10010,
+      "rss_mib": 142
+    },
+    {
+      "label": "baseline",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 4,
+      "started_at": "2026-10-30T23:47:18.834443+00:00",
+      "wall_seconds": 0.20615874999202788,
+      "returncode": 0,
+      "stdout": "portable: 10057 req/s, rss 143 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10057,
+      "rss_mib": 143
+    },
+    {
+      "label": "candidate",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 4,
+      "started_at": "2026-10-30T23:47:19.041048+00:00",
+      "wall_seconds": 0.2031854580854997,
+      "returncode": 0,
+      "stdout": "portable: 10190 req/s, rss 143 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 10190,
+      "rss_mib": 143
+    },
+    {
+      "label": "baseline",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 5,
+      "started_at": "2026-10-30T23:47:19.244741+00:00",
+      "wall_seconds": 0.20743895799387246,
+      "returncode": 0,
+      "stdout": "portable: 9876 req/s, rss 142 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 9876,
+      "rss_mib": 142
+    },
+    {
+      "label": "candidate",
+      "workload": "request_rate",
+      "warmup": false,
+      "pair": 5,
+      "started_at": "2026-10-30T23:47:19.452631+00:00",
+      "wall_seconds": 0.21113775006961077,
+      "returncode": 0,
+      "stdout": "portable: 9745 req/s, rss 143 MiB",
+      "stderr": "",
+      "valid": true,
+      "value": 9745,
+      "rss_mib": 143
+    },
+    {
+      "label": "baseline",
+      "workload": "wasm_stream",
+      "warmup": true,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:19.664251+00:00",
+      "wall_seconds": 0.49126233300194144,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 94 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 94
+    },
+    {
+      "label": "candidate",
+      "workload": "wasm_stream",
+      "warmup": true,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:20.155949+00:00",
+      "wall_seconds": 0.459742333041504,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 92 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 92
+    },
+    {
+      "label": "baseline",
+      "workload": "wasm_stream",
+      "warmup": false,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:20.616187+00:00",
+      "wall_seconds": 0.48990225000306964,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 86 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 86
+    },
+    {
+      "label": "candidate",
+      "workload": "wasm_stream",
+      "warmup": false,
+      "pair": 1,
+      "started_at": "2026-10-30T23:47:21.106587+00:00",
+      "wall_seconds": 0.4582627919735387,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 94 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 94
+    },
+    {
+      "label": "baseline",
+      "workload": "wasm_stream",
+      "warmup": false,
+      "pair": 2,
+      "started_at": "2026-10-30T23:47:21.565432+00:00",
+      "wall_seconds": 0.4723558329278603,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 91 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 91
+    },
+    {
+      "label": "candidate",
+      "workload": "wasm_stream",
+      "warmup": false,
+      "pair": 2,
+      "started_at": "2026-10-30T23:47:22.038416+00:00",
+      "wall_seconds": 0.4636257499223575,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 91 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 91
+    },
+    {
+      "label": "baseline",
+      "workload": "wasm_stream",
+      "warmup": false,
+      "pair": 3,
+      "started_at": "2026-10-30T23:47:22.502566+00:00",
+      "wall_seconds": 0.46201499993912876,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 92 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 92
+    },
+    {
+      "label": "candidate",
+      "workload": "wasm_stream",
+      "warmup": false,
+      "pair": 3,
+      "started_at": "2026-10-30T23:47:22.965180+00:00",
+      "wall_seconds": 0.4638022080762312,
+      "returncode": 0,
+      "stdout": "wasm stream 32 MiB: ok, 91 MiB/s",
+      "stderr": "",
+      "valid": true,
+      "value": 91
+    }
+  ],
+  "summary": {
+    "request_rate": {
+      "baseline": {
+        "values": [
+          10230,
+          10145,
+          10113,
+          10057,
+          9876
+        ],
+        "min": 9876,
+        "median": 10113,
+        "mean": 10084.2,
+        "max": 10230,
+        "sample_stdev": 132.16542664403576
+      },
+      "candidate": {
+        "values": [
+          9951,
+          10736,
+          10010,
+          10190,
+          9745
+        ],
+        "min": 9745,
+        "median": 10010,
+        "mean": 10126.4,
+        "max": 10736,
+        "sample_stdev": 375.97779189734064
+      },
+      "candidate_median_change_pct": -1.0184910511223166,
+      "paired_change_pct": [
+        -2.7272727272727226,
+        5.8255298176441705,
+        -1.0184910511223166,
+        1.32246196678929,
+        -1.3264479546374996
+      ],
+      "median_paired_change_pct": -1.0184910511223166
+    },
+    "wasm_stream": {
+      "baseline": {
+        "values": [
+          86,
+          91,
+          92
+        ],
+        "min": 86,
+        "median": 91,
+        "mean": 89.66666666666667,
+        "max": 92,
+        "sample_stdev": 3.2145502536643185
+      },
+      "candidate": {
+        "values": [
+          94,
+          91,
+          91
+        ],
+        "min": 91,
+        "median": 91,
+        "mean": 92,
+        "max": 94,
+        "sample_stdev": 1.7320508075688772
+      },
+      "candidate_median_change_pct": 0.0,
+      "paired_change_pct": [
+        9.302325581395344,
+        0.0,
+        -1.0869565217391353
+      ],
+      "median_paired_change_pct": 0.0
+    }
+  },
+  "finished_at": "2026-10-30T23:47:23.429802+00:00"
+}
