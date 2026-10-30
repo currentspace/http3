@@ -5,40 +5,69 @@ and remaining qualification work for each release candidate.
 
 ## 0.9.9
 
-- Candidate incorporates PR #22: raw server cancellation and stream cleanup,
-  bounded WASM payload allocation with application-visible errors, facade EOF
-  cleanup, hot-path allocation/CPU reductions and public error/type exports.
-  Root, Rust and all three native sidecars are aligned to 0.9.9.
-- Before the version bump, local macOS ARM64 qualification passed 450 Node,
-  114 WASM, 67 FFI and 228 Rust unit tests, plus 27 focused Node 24 tests.
-  The later public-export checks passed 28 targeted allocation/body-limit tests.
-  Packed installs passed on Node 24 and 26 across four TypeScript resolution
+- Published as [v0.9.9](https://github.com/currentspace/http3/releases/tag/v0.9.9)
+  at `aad10f2` after [PR #22](https://github.com/currentspace/http3/pull/22).
+  Root, Rust and all three native sidecars are aligned to 0.9.9. All four npm
+  packages report 0.9.9 under `latest`; registry tarballs match their published
+  SHA-512 integrity values. The independent `canary` channel remains 0.8.3.
+- Includes raw server cancellation and stream cleanup, bounded WASM payload
+  allocation with application-visible errors, facade EOF cleanup, hot-path
+  allocation/CPU reductions and public error/type exports.
+- The versioned local gate passed 19 checks, including 452 Node, 114 WASM,
+  67 FFI and 228 Rust unit tests, plus lint, TypeScript/workerd checks, native
+  and WASM builds, concurrency/load gates and packed installs. Separate Rust
+  interop checks passed. Browser checks ran on disposable hosted runners.
+  After the test-only correction below, lint, types and all 452 Node/67 FFI
+  tests passed again.
+- Packed installs passed on Node 24 and 26 across four TypeScript resolution
   modes and both Worker conditions without Node types, with declaration checks
   enabled. See `docs/PUBLIC_TYPES.md`.
 - Seven instrumented workloads completed 172,794 requests without recorded
   transfer errors; completed facade streams drained to zero. Profiling results,
   allocation tradeoffs and remaining hot spots are in `docs/HOTPATH_PROFILING.md`.
-- Earlier queued-response drain and shutdown tests timed out on initial runs,
-  then passed in isolation and full reruns; the drain case passed 20 repeats.
-  Their causes remain unproven. An earlier WASM cancellation timeout also
-  passed isolated and full reruns.
-- Versioned local qualification, hosted checks, release dry-run, publication and
-  registry verification are pending; evidence is retained under
-  `artifacts/releases/0.9.9/` as each step completes.
-- The first versioned local run timed out connecting a Fetch test client, then
-  failed the shared-worker shutdown assertion with that session still open.
-  Both isolated tests and an unchanged full rerun passed (452 Node, 114 WASM,
-  67 FFI tests; 19 verification steps). The connection timeout cause is unproven.
+- Final candidate checks passed, including release dry-run
+  [41113781172](https://github.com/currentspace/http3/actions/runs/41113781172).
+  Merged-main Verify `41116337126`, CI `41116337175`, Distribution `41116337480`,
+  Security `41116337329`, Rust Safety `41116337157`, Interop `41116337755` and
+  Next/Nest `41116337322` all passed. Publication run
+  [41124206102](https://github.com/currentspace/http3/actions/runs/41124206102)
+  passed all three native platforms on Node 24/26, WASM qualification, uploads
+  and final registry checks.
 - Hosted macOS Node 26 exposed an obsolete write-after-end test assumption:
   server destruction can reset an unfinished response before its queued FIN
   arrives. The test now validates either completion or the expected stream
   error, retains the server write-error assertion, and always closes resources.
-- The first Intel macOS Node 24 job exceeded the concurrency latency budget
-  (p95 131.9 ms against 100 ms). The threshold is unchanged; the updated
-  candidate must pass this hosted gate before publication.
+- Earlier queued-response drain, shutdown and WASM cancellation tests timed out
+  on initial runs, then passed isolated and full reruns; the drain case passed
+  20 repeats. The first versioned local run also timed out connecting a Fetch
+  client, leaving a session open and failing the later shared-worker shutdown
+  assertion. Isolated tests and the unchanged full rerun passed. Causes of
+  these initial timeouts remain unproven.
+- Intel macOS latency checks needed retries without code or threshold changes.
+  An early Node 24 PR job measured p95 131.9 ms against 100 ms; the final
+  candidate passed. Merged-main Node 26 measured p95 107.6 and 111.4 ms on its
+  first two attempts (the second also had a 273.6 ms maximum against 250 ms).
+  An isolated Intel diagnostic run passed three times at p95 23.9, 24.0 and
+  18.2 ms; its CPU-profiled run passed at 21.0 ms. The final full Verify retry
+  passed at p95 22.9 ms and maximum 26.5 ms. This does not establish the cause
+  of the earlier outliers. Diagnostic artifacts are attached to
+  [41121763433](https://github.com/currentspace/http3/actions/runs/41121763433).
+- A candidate Kani retry-token proof exceeded its 60-second limit, then all
+  19 harnesses passed an unchanged retry. Merged-main Rust Safety also passed.
+- A fresh registry install loaded the matching macOS arm64 native sidecar,
+  bundled WASM, CLI and integration entry points. The root contains no native
+  binaries, docs or examples. Public root/WASM error constructors match and
+  real rejected allocations narrow to `WasmMemoryError` with the expected code
+  and requested byte count. Installed-package checks passed 62 native/framework
+  tests and 43 mixed lifecycle/WASM tests on each of Node 24.22.1 and 26.13.0.
+  The first Node 24 mixed run timed out in the native queued 20 MiB response
+  test; all 29 lifecycle tests passed in isolation and the unchanged 43-test
+  mixed rerun passed. That initial timeout remains unexplained.
 - Manual Safari and Windows browser trust qualification remain incomplete.
   Publication retains the user's approved documented Safari limitation; no
   automated browser result is represented as manual Safari qualification.
+  Release logs, profiles and registry readbacks are retained locally under
+  `artifacts/releases/0.9.9/`.
 
 ## 0.9.8
 
