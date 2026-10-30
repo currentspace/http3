@@ -44,7 +44,7 @@ function fail(error) {
   });
 }
 server.on('error', fail);
-app.prepare().then(() => server.listen({ port, host: '127.0.0.1' }, () => {
+app.prepare().then(() => server.listen({ port, host: process.env.HTTP3_HOST ?? '::' }, () => {
   console.log(`Ready: https://${hostname}:${port}`);
 })).catch(fail);
 for (const signal of ['SIGINT', 'SIGTERM']) {

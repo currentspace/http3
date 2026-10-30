@@ -121,7 +121,7 @@ pub extern "C" fn hs_new(opts_ptr: u32, opts_len: u32) -> u32 {
             return 0;
         }
     };
-    let http3_config = match Http3Config::from_server_options(&opts) {
+    let mut http3_config = match Http3Config::from_server_options(&opts) {
         Ok(c) => c,
         Err(e) => {
             set_global_error(e.tagged_message());
@@ -129,6 +129,11 @@ pub extern "C" fn hs_new(opts_ptr: u32, opts_len: u32) -> u32 {
         }
     };
 
+    http3_config.stream_read_window = value
+        .get("streamReadWindow")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0 && *n <= 65536)
+        .map(|n| n as usize);
     let handler = H3ServerHandler::new_direct(
         quiche_config,
         http3_config,
@@ -451,6 +456,21 @@ pub extern "C" fn hs_send_trailers(
                 ERR_PROTOCOL
             }
         }
+    })
+    .unwrap_or(ERR_INVALID_HANDLE)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hs_stream_read_credit(
+    handle: u32,
+    conn_handle: u32,
+    stream_id: u64,
+    bytes: u32,
+) -> i64 {
+    with_session_mut(handle, |sess| {
+        sess.handler
+            .stream_read_credit(conn_handle, stream_id, bytes as usize);
+        0i64
     })
     .unwrap_or(ERR_INVALID_HANDLE)
 }

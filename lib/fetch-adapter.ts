@@ -16,6 +16,10 @@ export interface FetchApp {
   fetch: FetchHandler;
 }
 
+// Node's Request follows its parent signal through a weak AbortController.
+// Root it in the live transport while an async handler or response is pending.
+const activeRequests = new WeakMap<IncomingMessage | ServerHttp3Stream, Request>();
+
 function isSseContentType(value: string | null): boolean {
   return typeof value === 'string' && value.toLowerCase().includes('text/event-stream');
 }
@@ -140,7 +144,12 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
     };
     const request = new Request(url, requestInit);
 
+    activeRequests.set(req, request);
     const response = await handler(request);
+    if (request.signal.aborted || isWritableClosed(res)) {
+      try { await response.body?.cancel(); } catch { /* already locked or closed */ }
+      return;
+    }
     const sseResponse = isSseContentType(response.headers.get('content-type'));
     res.statusCode = response.status;
     response.headers.forEach((value, key) => {
@@ -196,6 +205,7 @@ async function handleHttp1Request(handler: FetchHandler, req: IncomingMessage, r
     }
     res.end(err instanceof Error ? err.message : String(err));
   } finally {
+    activeRequests.delete(req);
     disposeBody?.();
     cleanupAbortHandlers();
   }
@@ -210,13 +220,15 @@ async function handleStream(
 ): Promise<void> {
   const abortController = new AbortController();
   const abort = (): void => abortController.abort();
+  const lifecycle = { closeObserved: false };
+  const onClose = (): void => { lifecycle.closeObserved = true; abort(); };
   stream.once('aborted', abort);
-  stream.once('close', abort);
+  stream.once('close', onClose);
   stream.once('error', abort);
 
   const cleanupAbortHandlers = (): void => {
     stream.removeListener('aborted', abort);
-    stream.removeListener('close', abort);
+    stream.removeListener('close', onClose);
     stream.removeListener('error', abort);
   };
 
@@ -254,7 +266,12 @@ async function handleStream(
       duplex: hasBody ? 'half' : undefined,
     });
 
+    activeRequests.set(stream, request);
     const response = await handler(request);
+    if (request.signal.aborted || isWritableClosed(stream)) {
+      try { await response.body?.cancel(); } catch { /* already locked or closed */ }
+      return;
+    }
     const sseResponse = isSseContentType(response.headers.get('content-type'));
 
     const resHeaders: IncomingHeaders = { ':status': String(response.status) };
@@ -319,13 +336,15 @@ async function handleStream(
     }
     stream.destroy(err instanceof Error ? err : new Error(String(err)));
   } finally {
+    activeRequests.delete(stream);
     disposeBody?.();
     // The response may finish before the peer finishes uploading. Keep
     // the error guard until close, and discard the unread tail without
     // retaining it in either the Web queue or the native spill queue.
-    if (!stream.destroyed) {
+    // destroyed/closed can become true before the queued error and close events.
+    if (!lifecycle.closeObserved) {
       stream.once('close', cleanupAbortHandlers);
-      stream.resume();
+      if (!stream.destroyed) stream.resume();
     } else {
       cleanupAbortHandlers();
     }

@@ -11,7 +11,7 @@
     "dev": "npm run build:server && node dist/main.js",
     "build": "npm run build:server && next build web",
     "start": "NODE_ENV=production node dist/main.js",
-    "test:protocols": "node --test --test-timeout=60000 scripts/protocols.test.mjs",
+    "test:protocols": "node --test --test-timeout=60000 scripts/protocols.test.mjs scripts/nest-helper.test.mjs",
     "test:browser": "node scripts/browser.cjs"
   },
   "dependencies": {

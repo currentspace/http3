@@ -43,8 +43,8 @@ npm run build
 npm start
 ```
 
-`PORT=4443 npm run dev` changes the port. The example binds only to IPv4 loopback
-(`127.0.0.1`); use the hostname `localhost` in the URL. The `portable` runtime
+`PORT=4443 npm run dev` changes the port. The example binds dual-stack
+(`::`, all interfaces); `HTTP3_HOST` overrides it. Use `localhost` in the URL. The `portable` runtime
 avoids requiring Linux io_uring capabilities for this local workflow.
 
 ## Streaming file uploads
@@ -171,3 +171,17 @@ deployment configuration or a claim that Next.js natively supports HTTP/3.
 
 Validation covers this small App Router fixture. It does not establish support
 for every Next feature, every browser, or every deployment environment.
+
+## Local trust and IPv6
+
+The source example now binds dual-stack `::` (all interfaces) by default, so
+Chromium's localhost QUIC attempt to ::1 can reach it. `HTTP3_HOST` selects an
+explicit bind address. The certificate SANs include IPv4 and IPv6 loopback;
+browser tests do not force localhost to IPv4. For strictly local IPv4 use, bind
+127.0.0.1 and use that IP consistently in URLs.
+
+The unreleased `http3 dev-cert` CLI provides a constrained CA and explicit trust
+installation/removal. See [local development](../../docs/LOCAL_DEVELOPMENT.md).
+Set `TLS_KEY_FILE`, `TLS_CERT_FILE`, and (for internal clients) `TLS_CA_FILE`;
+set `NODE_EXTRA_CA_CERTS` before starting Node's ordinary HTTPS clients. The
+existing `npm run certs` helper still only writes self-signed test certificates.

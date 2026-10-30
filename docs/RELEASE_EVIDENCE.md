@@ -3,7 +3,53 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
-## 0.9.6 candidate
+## Unreleased consumer integration candidate (PR #20)
+
+- Includes configurable one-day Alt-Svc, socket compatibility, dual-stack/listen
+  arguments, package/types fixes, Nest/proxy/shutdown helpers, dev certificates,
+  diagnostics and documentation. No version bump or publication is performed.
+- After the follow-up consumer review, the full local Node 26 suite passed
+  397 tests and FFI passed 67. Node 24 also passed all 397 tests. Rust passed 279 tests plus targeted flow-control,
+  shutdown and concurrent-stream integration tests. Rebuilt WASM passed 59 tests
+  with no skips, including receive credit and ephemeral-port retries. Final-head
+  hosted results are recorded on PR #20.
+- Clean packed installs resolve types under node/node16/nodenext/bundler on both
+  Node versions, load the freshly packed native sidecar and contain no root
+  native binary duplicates. The root including WASM is approximately 3 MB unpacked.
+- Actual Nest Express helper tests cover split cookies, SSE and shutdown hooks
+  over H1/H2/H3. Hosted candidate Next/Nest tests pass on Node 24/26 in development
+  and production, H3 and H2. Final-head platform checks are recorded in PR #20.
+- A three-way Chromium idle comparison used 60s/86400s Alt-Svc and 30s/120s server
+  QUIC timeouts. All first documents after 75s used H2. With one-day Alt-Svc, the
+  next reload used H3 automatically. NetLog recorded a client-advertised 30s idle
+  timeout and local closure at about 29s. A longer Alt-Svc lifetime is not a
+  guarantee that the first idle reload uses H3.
+- macOS's administrative trust-removal API hung on hosted runners. The CLI's
+  macOS untrust operation instead applies an explicit deny policy to the generated
+  CA; it retains the keychain entry and documents manual deletion. Trust settings
+  are changed only by explicit trust/untrust commands. Hosted Distribution run
+  `40995937710` passed all four Linux/macOS and Node 24/26 jobs, including browser
+  rejection after untrust, automatic H3 negotiation and recovery after idle.
+- Peer reset/bad-preface, bare response destroy and upstream SSE-abort tests
+  pass. Paused 20 MiB uploads stay bounded, allow a concurrent request on the
+  same session and resume with matching SHA-256 over H2/H3, native and WASM.
+  Receive-credit tracking is released at body FIN even while the write side stays open.
+  A deterministic Rust regression caught reset notification loss after FIN on
+  an unread body; the receive-buffer fix preserves one reset without returning
+  read credit. Native and WASM Fetch cancellation tests cover this path.
+  The WASM lane forces garbage collection to verify Request signal lifetime;
+  Fetch retains Requests in their live transports and error guards until close.
+  Stock macOS LibreSSL generation/reuse and six concurrent certificate callers
+  also pass. Distribution run `40999917830` passed all four Linux/macOS and
+  Node 24/26 jobs with the SSL-only macOS trust policy.
+- Native and WASM deterministic startup tests cover TCP collisions after UDP
+  ephemeral binding, bounded retries, explicit-port errors and released sockets.
+  The doctor TCP probe uses a plain connection; TLS trust is checked separately
+  with verification enabled.
+- Windows browser trust and manual Safari qualification remain unverified. Doctor
+  is read-only and does not clear Chrome state. Artifacts: `artifacts/consumer-feedback/`.
+
+## 0.9.6
 
 ### Scope and state
 
@@ -12,7 +58,8 @@ and remaining qualification work for each release candidate.
 - Root, Rust, and all three native sidecars are aligned to 0.9.6. The combined
   example requires 0.9.6 and is included in the root package tarball.
 - The user authorized release of 0.9.6 with the example and both fixes.
-- Publication is not complete. npm still reports latest 0.9.5 and no 0.9.6.
+- Published as tag `v0.9.6` at `ee87a98`; all four packages report 0.9.6.
+  See the [release record](https://github.com/currentspace/http3/releases/tag/v0.9.6).
 
 ### Implementation qualification before the version bump
 
@@ -29,13 +76,20 @@ and remaining qualification work for each release candidate.
 - Artifacts are under `artifacts/nestjs-investigation/`. These checks used
   the source candidate still labeled 0.9.5, not a published release artifact.
 
-### Remaining release qualification
+### Publication qualification
 
-- Validate the versioned candidate and packed sample, local release gates,
-  final hosted checks, and the nonpublishing native/WASM release workflow.
-- Complete current Safari qualification with matching curl H3/H2 evidence.
-- Publish all four packages, create the matching tag and GitHub release, then
-  verify registry dist-tags and a clean installed 0.9.6 sample.
+- All 30 PR checks and release dry-run
+  [40982370278](https://github.com/currentspace/http3/actions/runs/40982370278)
+  passed; publishing run
+  [40984291721](https://github.com/currentspace/http3/actions/runs/40984291721)
+  completed.
+- Clean registry installation passed H1/H2/H3 API checks and eight combined-app
+  Chromium combinations on Node 24/26, development/production, H3/H2.
+- Manual latest-stable Safari qualification remains incomplete. The user
+  explicitly approved publishing with that limitation documented. Playwright
+  WebKit checks are not a Safari qualification pass.
+- Post-merge verification passed on retry after an unchanged Hono example test
+  initially encountered `EADDRINUSE` on an ephemeral port.
 
 ## 0.9.5 candidate
 

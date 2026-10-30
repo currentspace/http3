@@ -68,7 +68,7 @@ test('combined Next/Nest/Express protocols', { timeout: 60000 }, async t => {
         assert.equal(response.headers['x-app-pid'], String(server.pid));
         assert.equal(JSON.parse((await request('/express/info')).body).pid, server.pid);
         assert.equal(JSON.parse((await request('/api/echo', 'POST', {}, 'Next body')).body).body, 'Next body');
-        assert.equal(response.headers['alt-svc'], `h3=":${port}"; ma=60`);
+        assert.equal(response.headers['alt-svc'], `h3=":${port}"; ma=86400`);
       });
       await t.test('JSON parser and raw-body signature input', async () => {
         const body = Buffer.from('{ "hello": "world", "n": 42 }');

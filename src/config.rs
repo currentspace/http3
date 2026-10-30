@@ -291,6 +291,8 @@ pub struct JsClientOptions {
 }
 
 pub struct Http3Config {
+    /// Optional per-stream body bytes admitted before the JS reader returns credit.
+    pub stream_read_window: Option<usize>,
     pub qlog_dir: Option<String>,
     pub qlog_level: Option<String>,
     pub qpack_max_table_capacity: Option<u64>,
@@ -734,6 +736,7 @@ impl Http3Config {
             ClientAuthMode::parse(options.client_auth.as_deref(), options.ca.is_some())?;
 
         Ok(Self {
+            stream_read_window: None,
             qlog_dir: options.qlog_dir.clone(),
             qlog_level: options.qlog_level.clone(),
             qpack_max_table_capacity: options.qpack_max_table_capacity.map(u64::from),

@@ -52,26 +52,17 @@ const nest = await NestFactory.create<NestExpressApplication>(AppModule, new Exp
 });
 nest.setGlobalPrefix('bff');
 
-let stopping: Promise<void> | undefined;
-function stop() {
-  return stopping ??= (async () => {
-    // Keep services alive while accepted requests drain; one bootstrap owns the
-    // shared listener. Nest's internally allocated HTTP server is never bound.
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    await Promise.all([nest.close(), web.close()]);
-    console.log('Closed both applications');
-  })();
-}
+const shutdown = server.closeOnSignals({ timeoutMs: 5000, onClose: async () => {
+  await Promise.all([nest.close(), web.close()]);
+  console.log('Closed both applications');
+} });
 function fail(error: unknown) {
   console.error(error);
-  void stop().then(() => process.exit(1), shutdownError => { console.error(shutdownError); process.exit(1); });
+  void shutdown.close().then(() => process.exit(1), shutdownError => { console.error(shutdownError); process.exit(1); });
 }
 server.on('error', fail);
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => { void stop().then(() => process.exit(0), fail); });
-}
 try {
   await nest.init();
   await web.prepare();
-  server.listen({ port, host: '127.0.0.1' }, () => console.log(`Ready: https://localhost:${port} pid=${process.pid}`));
+  server.listen({ port, host: process.env.HTTP3_HOST ?? '::' }, () => console.log(`Ready: https://localhost:${port} pid=${process.pid}`));
 } catch (error) { fail(error); }

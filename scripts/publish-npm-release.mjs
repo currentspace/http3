@@ -191,8 +191,13 @@ function assertRootPackageLayout(rootManifest, nativePackages) {
     'dist/wasm/index.workerd.d.ts',
     'index.js',
     'index.d.ts',
-    ...nativePackages.map((pkg) => pkg.binaryName),
+    'bin/http3.cjs',
   ];
+  const unwanted = [...files].filter(file => file.endsWith('.node') || /^(docs|examples)\//u.test(file));
+  if (unwanted.length) throw new Error(`Root tarball contains redundant files: ${unwanted.join(', ')}`);
+  for (const pkg of nativePackages) {
+    if (rootManifest.optionalDependencies?.[pkg.name] !== pkg.version) throw new Error(`Missing matching optional native package: ${pkg.name}`);
+  }
   const missing = requiredFiles.filter((file) => !files.has(file));
   if (missing.length > 0) {
     throw new Error(

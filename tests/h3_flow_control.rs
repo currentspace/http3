@@ -135,6 +135,7 @@ fn setup_h3_pair_with_flow_control(initial_max_stream_data: u64, initial_max_dat
     );
 
     let http3_config = Http3Config {
+        stream_read_window: None,
         qlog_dir: None,
         qlog_level: None,
         qpack_max_table_capacity: None,

@@ -9,6 +9,10 @@ import { createSecureServer } from './server.js';
 import type { AddressInfo, ServerOptions } from './server.js';
 import type { IncomingHeaders, ServerHttp3Stream, StreamFlags } from './stream.js';
 import type { Http3ServerSession } from './session.js';
+import { parseListenArgs, validateListenPort } from './listen-options.js';
+import type { ListenOptions } from './listen-options.js';
+import { installShutdownHandlers } from './shutdown.js';
+import type { ShutdownOptions, ShutdownController } from './shutdown.js';
 
 type HeaderValue = string | number | string[];
 type Headers = Record<string, HeaderValue>;
@@ -34,11 +38,11 @@ class RequestSocket extends EventEmitter {
   get writable(): boolean { return this.stream.writable; }
   get readableEnded(): boolean { return this.stream.readableEnded; }
   get writableEnded(): boolean { return this.stream.writableEnded; }
-  setTimeout(ms: number, callback?: () => void): this {
-    if (callback) this.once('timeout', callback);
-    this.stream.setTimeout(ms);
-    return this;
-  }
+  // TCP tuning is not meaningful for an individual H2/H3 request stream.
+  // In particular, never change the shared H2 connection for one SSE request.
+  setKeepAlive(_enable?: boolean, _initialDelay?: number): this { return this; }
+  setNoDelay(_noDelay?: boolean): this { return this; }
+  setTimeout(_ms: number, _callback?: () => void): this { return this; }
   destroy(): this { this.stream.close(this.alpnProtocol === 'h2' ? 8 : 0x10c); return this; }
 }
 
@@ -222,12 +226,16 @@ export class Http3ServerResponse extends Writable {
     } catch (error) { callback(error as Error); }
   }
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    if (error && !this.req.stream.destroyed) this.socket.destroy();
+    // Writable auto-destroys after a successful finish; only an unfinished
+    // response needs cancellation, including destroy() without an Error.
+    if (!this.writableFinished && !this.req.stream.destroyed) this.socket.destroy();
     callback(error);
   }
 }
 
 export interface NodeServerOptions extends ServerOptions {
+  /** H3 advertisement lifetime in seconds. Default: one day. false disables it. */
+  altSvc?: { maxAge?: number } | false;
   /** Maximum time to drain active responses during close. Default: 30 seconds. */
   shutdownTimeoutMs?: number;
   /** Maximum unread H3 request bytes in the transport stream. Default: 1 MiB. */
@@ -251,6 +259,7 @@ export class Http3NodeServer extends EventEmitter {
   private closed = false;
   private readonly closeCallbacks: ((error?: Error) => void)[] = [];
   private closeTimer: NodeJS.Timeout | undefined;
+  private drainTimeoutMs: number;
   listening = false;
   constructor(private readonly options: NodeServerOptions, handler: Handler) {
     super();
@@ -262,12 +271,25 @@ export class Http3NodeServer extends EventEmitter {
       (!Number.isSafeInteger(options.maxBufferedRequestBytes) || options.maxBufferedRequestBytes < 1)) {
       throw new RangeError('maxBufferedRequestBytes must be a positive safe integer');
     }
+    const altSvcOption: unknown = options.altSvc;
+    if (altSvcOption !== undefined && altSvcOption !== false &&
+      (typeof altSvcOption !== 'object' || altSvcOption === null || Array.isArray(altSvcOption))) {
+      throw new TypeError('altSvc must be false or { maxAge: seconds }');
+    }
+    const maxAge = options.altSvc === false ? 0 : options.altSvc?.maxAge ?? 86400;
+    if (!Number.isSafeInteger(maxAge) || maxAge < 0 || maxAge > 2147483647) {
+      throw new RangeError('altSvc.maxAge must be an integer between 0 and 2147483647 seconds');
+    }
+    this.drainTimeoutMs = options.shutdownTimeoutMs ?? 30_000;
+    const advertise = (response: { setHeader(name: string, value: string): unknown }): void => {
+      if (options.altSvc !== false) response.setHeader('alt-svc', `h3=":${this.address()?.port ?? 443}"; ma=${maxAge}`);
+    };
     this.transport = createSecureServer(options, (stream, headers, flags) => {
       if (this.closing) { stream.respond({ ':status': '503' }); stream.end(); return; }
       stream._maxBufferedReadBytes = options.maxBufferedRequestBytes ?? 1024 * 1024;
       const request = new Http3IncomingMessage(stream, headers, flags);
       const response = new Http3ServerResponse(request);
-      response.setHeader('alt-svc', `h3=":${this.address()?.port ?? 443}"; ma=60`);
+      advertise(response);
       this.trackResponse(response);
       try {
         // The facade intentionally implements the stream-based subset used by frameworks.
@@ -280,7 +302,7 @@ export class Http3NodeServer extends EventEmitter {
     this.transport.on('request', (request, response) => {
       this.trackHttp1Socket(request.socket);
       if (this.closing) { response.writeHead(503); response.end(); return; }
-      response.setHeader('alt-svc', `h3=":${this.address()?.port ?? 443}"; ma=60`);
+      advertise(response);
       this.trackResponse(response);
       handler(request, response);
     });
@@ -293,6 +315,7 @@ export class Http3NodeServer extends EventEmitter {
       session.once('close', () => this.sessions.delete(session));
     });
     this.transport.on('error', error => this.startFailed(error));
+    this.transport.on('sessionError', (error, session) => this.emit('sessionError', error, session));
     this.transport.on('listening', () => {
       this.starting = false;
       this.listening = true;
@@ -322,20 +345,23 @@ export class Http3NodeServer extends EventEmitter {
     this.emit('error', error);
   }
   address(): AddressInfo | null { return this.transport.address(); }
-  listen(options: { port?: number; host?: string; path?: string }, callback?: () => void): this {
-    if (options.path) throw new TypeError('HTTP/3 requires an IP port, not a Unix socket');
+  listen(options: ListenOptions, callback?: () => void): this;
+  listen(port: number, callback?: () => void): this;
+  listen(port: number, host?: string, callback?: () => void): this;
+  listen(portOrOptions: number | ListenOptions, hostOrCallback?: string | (() => void), callback?: () => void): this {
+    const options = parseListenArgs(portOrOptions, hostOrCallback, callback);
     if (this.starting || this.listening || this.closing) throw new Error('Server is already started or closing');
     this.starting = true;
-    if (callback) this.once('listening', callback);
+    if (options.callback) this.once('listening', options.callback);
     const start = (host: string): void => {
       try {
-        const port = options.port ?? 0;
-        if (!Number.isInteger(port) || port < 0 || port > 65535) throw new RangeError('port must be an integer between 0 and 65535');
+        const port = options.port;
+        validateListenPort(port);
         this.transport.listen(port, host);
       }
       catch (error) { process.nextTick(() => this.startFailed(error as Error)); }
     };
-    const host = options.host ?? '127.0.0.1';
+    const host = options.host;
     if (isIP(host)) start(host);
     else lookup(host, (error, address) => {
       if (error) this.startFailed(error);
@@ -353,11 +379,21 @@ export class Http3NodeServer extends EventEmitter {
     this.drain();
     return this;
   }
+  /** Drain on SIGINT/SIGTERM, then run application cleanup. Opt-in process ownership. */
+  closeOnSignals(options: ShutdownOptions = {}): ShutdownController {
+    const timeoutMs = options.timeoutMs ?? this.drainTimeoutMs;
+    const controller = installShutdownHandlers(async () => new Promise<void>((resolve, reject) => {
+      this.close(error => error ? reject(error) : resolve());
+    }), { ...options, timeoutMs });
+    this.drainTimeoutMs = timeoutMs;
+    this.once('close', controller.dispose);
+    return controller;
+  }
   private drain(): void {
     this.closeTimer ??= setTimeout(() => {
       for (const socket of this.http1Sockets) socket.destroy();
       this.closeTransport();
-    }, this.options.shutdownTimeoutMs ?? 30_000);
+    }, this.drainTimeoutMs);
     if (this.active.size > 0 || this.draining || this.closeStarted) return;
     this.draining = true;
     for (const socket of this.http1Sockets) socket.end();

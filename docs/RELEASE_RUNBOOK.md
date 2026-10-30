@@ -73,7 +73,12 @@ Do not hard-wire new benchmark gates into CI until the baseline criteria in
 ## Post-Release Validation
 
 - Install the published package in a clean project and verify `import "@currentspace/http3"` and `import "@currentspace/http3/fetch"` both resolve.
-- Confirm the published root tarball contains `dist/` plus the expected `.node` prebuilds.
+- Confirm the root tarball contains `dist/` (including WASM), `bin/`, and the
+  native loader, but no `.node` files or docs/examples. Verify that a clean install
+  with optional dependencies loads its matching native platform package.
+  `scripts/smoke-install.mjs` packs the current host sidecar as well as the root;
+  candidate browser installs must do the same to avoid using an older
+  same-version registry binary. Use `node scripts/pack-host-native.mjs DIR`.
 - Confirm npm dist-tags for `@currentspace/http3`, `@currentspace/http3-linux-x64-gnu`, `@currentspace/http3-linux-arm64-gnu`, and `@currentspace/http3-darwin-arm64`.
 
 ## Rollback
@@ -81,3 +86,15 @@ Do not hard-wire new benchmark gates into CI until the baseline criteria in
 - Publish a fixed patch quickly under the same dist-tag.
 - Pin downstream consumers to the last known-good version until the patch is available.
 - Record the incident and remediation in the changelog and release notes.
+
+
+## Batch integration fixes for release-age consumers
+
+Group related framework fixes into one qualified candidate and release the root
+plus its native sidecars together. Avoid publishing a new patch for each example
+adjustment. Test candidate tarballs before publishing, so consumers can validate
+once rather than repeatedly exempting exact versions from their release-age rule.
+A `stable` dist-tag would only name a version; it does not make a new publication
+older or bypass a package manager's age policy. This batch keeps the existing
+`latest` channel. Consumers can wait out their configured delay before updating;
+urgent exemptions should remain explicit and limited to the versions they need.

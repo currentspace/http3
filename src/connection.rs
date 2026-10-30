@@ -117,6 +117,9 @@ pub struct H3Connection {
     /// worker thread to pull returned buffers back into `data_pool`.
     pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
     pending_body_data: HashMap<u64, PendingRecvBody>,
+    pub stream_read_window: Option<usize>,
+    read_credit: HashMap<u64, usize>,
+    pending_readable: HashSet<u64>,
     trailer_fin_streams: HashSet<u64>,
     ping_state: PingState,
 }
@@ -198,6 +201,9 @@ impl H3Connection {
             data_recycler,
             data_recycle_rx,
             pending_body_data: HashMap::new(),
+            stream_read_window: None,
+            read_credit: HashMap::new(),
+            pending_readable: HashSet::new(),
             trailer_fin_streams: HashSet::new(),
             ping_state: PingState::default(),
         }
@@ -238,6 +244,15 @@ impl H3Connection {
         Ok(())
     }
 
+    pub fn add_read_credit(&mut self, stream_id: u64, bytes: usize) {
+        if let (Some(window), Some(credit)) = (
+            self.stream_read_window,
+            self.read_credit.get_mut(&stream_id),
+        ) {
+            *credit = credit.saturating_add(bytes).min(window);
+        }
+    }
+
     /// Poll for H3 events and push them into the provided batch.
     ///
     /// `app_event_budget` applies only to JS-facing stream/datagram events.
@@ -259,7 +274,20 @@ impl H3Connection {
                     if app_events_remaining == 0 {
                         break;
                     }
-                    match h3_conn.poll(&mut self.quiche_conn) {
+                    // DATA events are edge-triggered. Keep unread streams pending
+                    // until their reader returns credit, while polling other streams.
+                    let ready = self
+                        .pending_readable
+                        .iter()
+                        .copied()
+                        .find(|id| self.read_credit.get(id).copied().unwrap_or(usize::MAX) > 0);
+                    let event = if let Some(id) = ready {
+                        self.pending_readable.remove(&id);
+                        Ok((id, quiche::h3::Event::Data))
+                    } else {
+                        h3_conn.poll(&mut self.quiche_conn)
+                    };
+                    match event {
                         Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
                             if push_pending_body_event(
                                 &mut self.pending_body_data,
@@ -270,6 +298,9 @@ impl H3Connection {
                                 events,
                             ) {
                                 app_events_remaining = app_events_remaining.saturating_sub(1);
+                            }
+                            if let Some(window) = self.stream_read_window {
+                                self.read_credit.entry(stream_id).or_insert(window);
                             }
                             // Track the largest accepted request ID for our own
                             // outgoing GoAway. monotonic since quiche delivers
@@ -294,7 +325,13 @@ impl H3Connection {
                             app_events_remaining = app_events_remaining.saturating_sub(1);
                         }
                         Ok((stream_id, quiche::h3::Event::Data)) => loop {
-                            if app_events_remaining == 0 {
+                            let credit = self
+                                .read_credit
+                                .get(&stream_id)
+                                .copied()
+                                .unwrap_or(usize::MAX);
+                            if app_events_remaining == 0 || credit == 0 {
+                                self.pending_readable.insert(stream_id);
                                 break;
                             }
 
@@ -303,7 +340,8 @@ impl H3Connection {
 
                             loop {
                                 if !self.pending_body_data.contains_key(&stream_id) {
-                                    let (buf, _) = self.data_pool.checkout_recv(H3_RECV_CHUNK);
+                                    let (buf, _) =
+                                        self.data_pool.checkout_recv(H3_RECV_CHUNK.min(credit));
                                     self.pending_body_data
                                         .insert(stream_id, PendingRecvBody { buf });
                                 }
@@ -322,6 +360,9 @@ impl H3Connection {
                                     stream_id,
                                 ) {
                                     Ok(len) => {
+                                        if let Some(credit) = self.read_credit.get_mut(&stream_id) {
+                                            *credit = credit.saturating_sub(len);
+                                        }
                                         if len == 0 {
                                             break;
                                         }
@@ -394,6 +435,10 @@ impl H3Connection {
                             }
                         },
                         Ok((stream_id, quiche::h3::Event::Finished)) => {
+                            // Receive credit ends with the body, independently
+                            // of an open response or blocked writes.
+                            self.read_credit.remove(&stream_id);
+                            self.pending_readable.remove(&stream_id);
                             if push_pending_body_event(
                                 &mut self.pending_body_data,
                                 &mut self.data_pool,
@@ -466,6 +511,17 @@ impl H3Connection {
         self.prune_closed_blocked_streams();
 
         while let Some(stream_id) = self.quiche_conn.stream_writable_next() {
+            // STOP_SENDING makes a stream writable so the application can
+            // observe StreamStopped. An idle response (e.g. SSE) may never be
+            // in blocked_set and may never write again: propagate cancellation
+            // now instead of waiting for another application write.
+            if let Err(quiche::Error::StreamStopped(error_code)) =
+                self.quiche_conn.stream_capacity(stream_id)
+            {
+                self.clear_stream_tracking(stream_id);
+                events.push(JsH3Event::reset(conn_handle, stream_id, error_code));
+                continue;
+            }
             if self.blocked_set.remove(&stream_id) {
                 self.blocked_queue.retain(|&id| id != stream_id);
                 events.push(JsH3Event::drain(conn_handle, stream_id));
@@ -531,6 +587,8 @@ impl H3Connection {
     }
 
     fn clear_stream_tracking(&mut self, stream_id: u64) {
+        self.read_credit.remove(&stream_id);
+        self.pending_readable.remove(&stream_id);
         if self.blocked_set.remove(&stream_id) {
             self.blocked_queue.retain(|&id| id != stream_id);
         }
@@ -1387,6 +1445,50 @@ mod tests {
     }
 
     #[test]
+    fn idle_unblocked_stream_reports_peer_stop_sending() {
+        let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
+            make_direct_h3_pair();
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"POST"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/idle"),
+        ];
+        let stream_id = client.send_request(&headers, false).expect("request");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            while server_h3.poll(&mut server_conn).is_ok() {}
+        }
+        assert!(!client.blocked_set.contains(&stream_id));
+        // Consume the initial writable notification while the app is idle.
+        client.poll_drain_events(7, &mut Vec::new());
+        server_conn
+            .stream_shutdown(stream_id, quiche::Shutdown::Read, 0x10c)
+            .expect("stop sending");
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_drain_events(7, &mut events);
+        }
+        let resets: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == crate::h3_event::EVENT_RESET
+                    && event.stream_id == stream_id as i64
+            })
+            .collect();
+        assert_eq!(
+            resets.len(),
+            1,
+            "STOP_SENDING must reach an idle application once"
+        );
+        assert_eq!(
+            resets[0].meta.as_ref().expect("reset metadata").error_code,
+            Some(0x10c)
+        );
+    }
+
+    #[test]
     fn send_request_stream_blocked_tracks_and_drains_request_stream() {
         let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
             make_direct_h3_pair();
@@ -1429,6 +1531,102 @@ mod tests {
             ),
             "peer flow-control progress should emit drain for blocked request stream"
         );
+    }
+
+    #[test]
+    fn paused_body_reports_peer_reset_without_more_read_credit() {
+        let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
+            make_direct_h3_pair();
+        client.stream_read_window = Some(1);
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"GET"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/paused-reset"),
+        ];
+        let stream_id = client.send_request(&headers, false).expect("request");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            while server_h3.poll(&mut server_conn).is_ok() {}
+        }
+        let response = vec![quiche::h3::Header::new(b":status", b"200")];
+        server_h3
+            .send_response(&mut server_conn, stream_id, &response, false)
+            .expect("response headers");
+        server_h3
+            .send_body(&mut server_conn, stream_id, b"unread body", true)
+            .expect("body");
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        assert_eq!(client.read_credit.get(&stream_id), Some(&0));
+        assert!(client.pending_readable.contains(&stream_id));
+        server_conn
+            .stream_shutdown(stream_id, quiche::Shutdown::Write, 0x10c)
+            .expect("reset sending side");
+        events.clear();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        let resets: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == crate::h3_event::EVENT_RESET
+                    && event.stream_id == stream_id as i64
+            })
+            .collect();
+        assert_eq!(resets.len(), 1, "RESET_STREAM must bypass receive backpressure");
+        assert_eq!(resets[0].meta.as_ref().unwrap().error_code, Some(0x10c));
+        assert!(!client.read_credit.contains_key(&stream_id));
+        assert!(!client.pending_readable.contains(&stream_id));
+    }
+
+    #[test]
+    fn finished_body_releases_read_credit_before_write_side_closes() {
+        let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
+            make_direct_h3_pair();
+        client.stream_read_window = Some(65_536);
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"POST"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/half-open"),
+        ];
+        let stream_id = client.send_request(&headers, false).expect("request");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            while server_h3.poll(&mut server_conn).is_ok() {}
+        }
+        let response = vec![quiche::h3::Header::new(b":status", b"200")];
+        server_h3
+            .send_response(&mut server_conn, stream_id, &response, false)
+            .expect("response headers");
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        assert!(client.read_credit.contains_key(&stream_id));
+        client.trailer_fin_streams.insert(stream_id);
+        server_h3
+            .send_body(&mut server_conn, stream_id, b"", true)
+            .expect("response FIN");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == crate::h3_event::EVENT_FINISHED));
+        assert!(!client.quiche_conn.stream_closed(stream_id));
+        assert!(!client.read_credit.contains_key(&stream_id));
+        assert!(!client.pending_readable.contains(&stream_id));
+        assert!(client.trailer_fin_streams.contains(&stream_id));
+        client.add_read_credit(stream_id, 65_536);
+        assert!(!client.read_credit.contains_key(&stream_id));
     }
 
     #[test]

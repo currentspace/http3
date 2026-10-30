@@ -19,6 +19,22 @@ late failures from larger probes cannot invalidate the new ceiling. Root tests
 
 The workspace uses this source for native, WASM, and the spike. No registry
 cache is modified and no build changes Cargo.lock. Remove this vendored copy
-and the root patch entry when a stable quiche release includes both corrections;
+and the root patch entry when a stable quiche release includes these corrections;
 rerun native/WASM error-path tests and require a warning-free WASM link.
 No upstream issue or PR has been submitted by this task.
+
+STOP_SENDING in `src/lib.rs` now re-arms the writable notification even when
+an idle stream still has capacity. `stream_writable_next()` consumes the previous
+notification; the old capacity check could suppress cancellation until another
+write. `insert_writable` already deduplicates linked entries. Root test
+`idle_unblocked_stream_reports_peer_stop_sending` consumes the initial writable
+notification and checks one reset; the Node proxy test cancels an idle H3 SSE
+response before body data arrives. The application transport maps StreamStopped
+to a stream reset independently of its blocked-write queue.
+
+RESET_STREAM in `src/stream/recv_buf.rs` preserves its readable error marker
+when FIN arrived before the application consumed the body. The normal write
+path deduplicates an empty FIN at a known final offset; using that path alone
+silently discarded the reset notification after clearing the unread bytes.
+Root test `paused_body_reports_peer_reset_without_more_read_credit` reproduces
+the failure with exhausted receive credit and verifies exactly one reset.

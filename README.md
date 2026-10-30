@@ -22,8 +22,12 @@ npm install @currentspace/http3
 ```
 
 Prebuilt native binaries are currently published for Linux x64/arm64 (glibc)
-and macOS arm64. Other platforms may fall back to local native compilation; see
-[`docs/SUPPORT_MATRIX.md`](./docs/SUPPORT_MATRIX.md).
+and macOS arm64, through optional platform packages. Keep optional dependencies
+enabled. The root package contains JavaScript, declarations, WASM, and the CLI;
+it does not bundle other platforms' native binaries, docs, or examples.
+Other platforms require an explicit source build (there is no install-time
+compiler fallback); see
+[`docs/SUPPORT_MATRIX.md`](https://github.com/currentspace/http3/blob/HEAD/docs/SUPPORT_MATRIX.md).
 
 ## Quick server example
 
@@ -38,8 +42,25 @@ const server = createSecureServer({
   stream.end(`hello ${String(headers[':path'] ?? '/')}`);
 });
 
-server.listen(443, '0.0.0.0');
+server.listen({ port: 443 }); // Dual-stack ::, all interfaces.
 ```
+
+## Local development
+
+The following additions are unreleased after 0.9.6. With a package containing
+these changes, `npx http3 dev-cert --out .certs --trust` creates a constrained
+localhost CA, installs local trust explicitly, and issues a certificate. From a
+built source checkout use `node bin/http3.cjs dev-cert --out .certs --trust`.
+Use `key.pem`/`cert.pem` on the server and set
+`NODE_EXTRA_CA_CERTS=/absolute/path/.certs/ca.pem` **before starting Node clients**.
+This library's native/WASM clients need an explicit `ca` option instead.
+
+Chrome also needs `--origin-to-force-quic-on=localhost:1` for locally trusted QUIC.
+The unused port enables the local-root exception; the application still
+negotiates H3 through Alt-Svc. Listeners default to dual-stack `::` (all
+interfaces), so localhost works over IPv4 and IPv6. See the
+[local development guide](https://github.com/currentspace/http3/blob/HEAD/docs/LOCAL_DEVELOPMENT.md) for trust removal, server
+configuration, browser launch commands, and loopback-only binding.
 
 ## Quick client example
 
@@ -79,7 +100,7 @@ const session = await connectQuicAsync('https://sfu:9080', {
 console.log(session.runtimeInfo);
 ```
 
-See [`docs/RUNTIME_MODES.md`](./docs/RUNTIME_MODES.md) for the deployment matrix,
+See [`docs/RUNTIME_MODES.md`](https://github.com/currentspace/http3/blob/HEAD/docs/RUNTIME_MODES.md) for the deployment matrix,
 capability requirements, Docker guidance, topology policy, and the raw endpoint
 contract.
 
@@ -114,13 +135,13 @@ const session = await connectAsync('example.com:443', { runtimeMode: 'wasm' });
 The server side (`Http3SecureServer.listen()` / `QuicServer.listen()`) also
 supports `runtimeMode: 'wasm'`, Node-only. The client build has additionally
 been verified running inside real Cloudflare workerd — see
-[`examples/workerd-client`](./examples/workerd-client/README.md); the only
+[`examples/workerd-client`](https://github.com/currentspace/http3/blob/HEAD/examples/workerd-client/README.md); the only
 remaining blocker to a real workerd deployment is that Workers has no outbound
 UDP client socket API yet ([cloudflare/workerd#4463](https://github.com/cloudflare/workerd/issues/4463)).
 
-See [`docs/WASM_RUNTIME.md`](./docs/WASM_RUNTIME.md) for the full usage guide
+See [`docs/WASM_RUNTIME.md`](https://github.com/currentspace/http3/blob/HEAD/docs/WASM_RUNTIME.md) for the full usage guide
 and current Node/workerd support matrix, and
-[`docs/WASM_CLIENT_PLAN.md`](./docs/WASM_CLIENT_PLAN.md) for the design.
+[`docs/WASM_CLIENT_PLAN.md`](https://github.com/currentspace/http3/blob/HEAD/docs/WASM_CLIENT_PLAN.md) for the design.
 
 ## Raw QUIC mTLS
 
@@ -128,8 +149,8 @@ and current Node/workerd support matrix, and
 - Raw QUIC servers support explicit client certificate policy with `clientAuth`, defaulting to `require` when a verification `ca` is configured.
 - Raw QUIC server sessions expose the verified peer certificate so applications can inspect or pin exact client certificates with Node's `X509Certificate` API.
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for release notes and
-[`docs/RELEASE_EVIDENCE.md`](./docs/RELEASE_EVIDENCE.md) for the current
+See [`CHANGELOG.md`](https://github.com/currentspace/http3/blob/HEAD/CHANGELOG.md) for release notes and
+[`docs/RELEASE_EVIDENCE.md`](https://github.com/currentspace/http3/blob/HEAD/docs/RELEASE_EVIDENCE.md) for the current
 release's audit ledger and caveats.
 
 ## Quick QUIC server
@@ -170,46 +191,51 @@ stream.on('end', () => console.log(Buffer.concat(chunks).toString()));
 
 ## Compatibility surfaces
 
-The experimental [Node-style server factory](./docs/NODE_SERVER.md), introduced
+The experimental [Node-style server factory](https://github.com/currentspace/http3/blob/HEAD/docs/NODE_SERVER.md), introduced
 in 0.9.4, supports Fastify integration. Version 0.9.5 adds the compatibility fixes
-used by the [Next.js custom-server example](./examples/nextjs/README.md).
+used by the [Next.js custom-server example](https://github.com/currentspace/http3/blob/HEAD/examples/nextjs/README.md).
 
 - `@currentspace/http3` - canonical API.
 - `@currentspace/http3/parity` - http2-style aliases for migrations.
 - `@currentspace/http3/h3` - HTTP/3-specific extension namespace.
 
+The package root also exports `createNodeServerFactory` and
+`createExpressHandler`. Subpath declarations use `typesVersions` for legacy
+TypeScript `moduleResolution: "node"`; modern Node16/NodeNext/bundler resolution
+continues to use `exports`. No ambient module declarations are required.
+
 ## Examples
 
-- [Raw API example](./examples/raw-api/README.md)
-- [Express adapter example](./examples/express-adapter/README.md)
-- [Hono `serveFetch()` example](./examples/hono/README.md)
-- [Next.js custom server with HTTP/3 and Fast Refresh](./examples/nextjs/README.md)
-- [NestJS with Fastify over HTTP/3](./examples/nestjs/README.md)
-- [Next.js and NestJS with Express in one process](./examples/nextjs-nestjs/README.md) (0.9.6+)
+- [Raw API example](https://github.com/currentspace/http3/blob/HEAD/examples/raw-api/README.md)
+- [Express adapter example](https://github.com/currentspace/http3/blob/HEAD/examples/express-adapter/README.md)
+- [Hono `serveFetch()` example](https://github.com/currentspace/http3/blob/HEAD/examples/hono/README.md)
+- [Next.js custom server with HTTP/3 and Fast Refresh](https://github.com/currentspace/http3/blob/HEAD/examples/nextjs/README.md)
+- [NestJS with Fastify over HTTP/3](https://github.com/currentspace/http3/blob/HEAD/examples/nestjs/README.md)
+- [Next.js and NestJS with Express in one process](https://github.com/currentspace/http3/blob/HEAD/examples/nextjs-nestjs/README.md) (0.9.6+)
 
 ## Start Here
 
-- [Quickstart](./docs/QUICKSTART.md)
-- [Runtime modes and deployment matrix](./docs/RUNTIME_MODES.md)
-- [WASM runtime guide](./docs/WASM_RUNTIME.md)
-- [Support matrix](./docs/SUPPORT_MATRIX.md)
-- [Configuration options reference](./docs/CONFIGURATION_OPTIONS.md)
-- [Error handling guide](./docs/ERROR_HANDLING.md)
-- [Changelog](./CHANGELOG.md)
+- [Quickstart](https://github.com/currentspace/http3/blob/HEAD/docs/QUICKSTART.md)
+- [Runtime modes and deployment matrix](https://github.com/currentspace/http3/blob/HEAD/docs/RUNTIME_MODES.md)
+- [WASM runtime guide](https://github.com/currentspace/http3/blob/HEAD/docs/WASM_RUNTIME.md)
+- [Support matrix](https://github.com/currentspace/http3/blob/HEAD/docs/SUPPORT_MATRIX.md)
+- [Configuration options reference](https://github.com/currentspace/http3/blob/HEAD/docs/CONFIGURATION_OPTIONS.md)
+- [Error handling guide](https://github.com/currentspace/http3/blob/HEAD/docs/ERROR_HANDLING.md)
+- [Changelog](https://github.com/currentspace/http3/blob/HEAD/CHANGELOG.md)
 
 ## Deployment and Operations
 
-- [QUIC guide](./docs/QUIC_GUIDE.md)
-- [Production docs index](./docs/README.md)
-- [HTTP/2 parity matrix](./docs/HTTP2_PARITY_MATRIX.md)
-- [ECS/Fargate deployment](./docs/ECS_FARGATE_DEPLOYMENT.md)
-- [AWS NLB QUIC passthrough](./docs/AWS_NLB_QUIC_PASSTHROUGH.md)
-- [Session ticket keys across instances](./docs/SESSION_TICKET_KEYS.md)
+- [QUIC guide](https://github.com/currentspace/http3/blob/HEAD/docs/QUIC_GUIDE.md)
+- [Production docs index](https://github.com/currentspace/http3/blob/HEAD/docs/README.md)
+- [HTTP/2 parity matrix](https://github.com/currentspace/http3/blob/HEAD/docs/HTTP2_PARITY_MATRIX.md)
+- [ECS/Fargate deployment](https://github.com/currentspace/http3/blob/HEAD/docs/ECS_FARGATE_DEPLOYMENT.md)
+- [AWS NLB QUIC passthrough](https://github.com/currentspace/http3/blob/HEAD/docs/AWS_NLB_QUIC_PASSTHROUGH.md)
+- [Session ticket keys across instances](https://github.com/currentspace/http3/blob/HEAD/docs/SESSION_TICKET_KEYS.md)
 
 ## Contributors and Maintainers
 
-- [Test strategy](./docs/TEST_STRATEGY.md)
-- [Contributing guide](./CONTRIBUTING.md)
-- [Release evidence ledger](./docs/RELEASE_EVIDENCE.md)
-- [Release runbook](./docs/RELEASE_RUNBOOK.md)
+- [Test strategy](https://github.com/currentspace/http3/blob/HEAD/docs/TEST_STRATEGY.md)
+- [Contributing guide](https://github.com/currentspace/http3/blob/HEAD/CONTRIBUTING.md)
+- [Release evidence ledger](https://github.com/currentspace/http3/blob/HEAD/docs/RELEASE_EVIDENCE.md)
+- [Release runbook](https://github.com/currentspace/http3/blob/HEAD/docs/RELEASE_RUNBOOK.md)
 

@@ -6,35 +6,52 @@ import type { IncomingHttpHeaders } from 'node:http2';
 import { connectAsync } from '../../lib/client.js';
 import { serveFetch } from '../../lib/fetch-adapter.js';
 import { generateTestCerts } from '../support/generate-certs.js';
+import { withTimeoutError } from '../support/async-race.js';
 import type { Readable, Writable } from 'node:stream';
 
-it('H3 resets an upload whose Fetch handler does not consume the receive buffer', async () => {
-  const certs = generateTestCerts();
-  let aborted = false;
-  const server = serveFetch({
-    ...certs, port: 0, host: '127.0.0.1', runtimeMode: 'portable', disableRetry: true,
-    fetch: async request => {
-      await new Promise<void>(resolve => {
-        request.signal.addEventListener('abort', () => { aborted = true; resolve(); }, { once: true });
-      });
-      return new Response('closed');
-    },
+for (const runtimeMode of (process.env.HTTP3_WASM === '1' ? ['portable', 'wasm'] as const : ['portable'] as const)) {
+  it(`${runtimeMode} H3 backpressures an unread Fetch upload and still propagates client cancellation`, async () => {
+    const certs = generateTestCerts();
+    let aborted = false;
+    let onAbort!: () => void;
+    const handlerAborted = new Promise<void>(resolve => { onAbort = resolve; });
+    let onStart!: () => void;
+    const handlerStarted = new Promise<void>(resolve => { onStart = resolve; });
+    const server = serveFetch({
+      ...certs, port: 0, host: '127.0.0.1', runtimeMode, disableRetry: true,
+      fetch: async request => {
+        onStart();
+        await new Promise<void>(resolve => {
+          request.signal.addEventListener('abort', () => { aborted = true; onAbort(); resolve(); }, { once: true });
+        });
+        return new Response('closed');
+      },
+    });
+    const port = await new Promise<number>(resolve => {
+      server.once('listening', () => resolve(server.address()!.port));
+    });
+    const client = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: 'portable' });
+    try {
+      const stream = client.request({ ':method': 'POST', ':path': '/', ':authority': 'localhost', ':scheme': 'https' });
+      stream.on('error', () => {});
+      stream.end(Buffer.alloc(2 * 1024 * 1024));
+      // Cancel only after the peer has dispatched the request. Under CI load,
+      // elapsed time alone does not prove there is a Fetch handler to abort.
+      await withTimeoutError(handlerStarted, 5000, new Error('Fetch handler did not start'));
+      await new Promise(resolve => setTimeout(resolve, 150));
+      // The WASM lane exposes GC to exercise Request's dependent signal lifetime.
+      global.gc?.();
+      assert.equal(stream.destroyed, false);
+      assert.equal(aborted, false);
+      stream.close(0x10c);
+      await withTimeoutError(handlerAborted, 5000, new Error('Client cancellation did not abort Fetch'));
+      assert.equal(aborted, true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
-  const port = await new Promise<number>(resolve => {
-    server.once('listening', () => resolve(server.address()!.port));
-  });
-  const client = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: 'portable' });
-  try {
-    const stream = client.request({ ':method': 'POST', ':path': '/', ':authority': 'localhost', ':scheme': 'https' });
-    const reset = new Promise<Error>(resolve => { stream.once('error', resolve); });
-    stream.end(Buffer.alloc(2 * 1024 * 1024));
-    assert.ok(await reset);
-    assert.equal(aborted, true);
-  } finally {
-    await client.close();
-    await server.close();
-  }
-});
+}
 
 for (const protocol of ['h1', 'h2', 'h3'] as const) {
   for (const oversized of [false, true]) {

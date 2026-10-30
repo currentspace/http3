@@ -340,6 +340,13 @@ impl RecvBuf {
         let buf = RangeBuf::from(b"", final_size, true);
         self.write(buf)?;
 
+        // write() discards an empty FIN when the final offset was already
+        // received. A reset must still become readable after clearing an
+        // unread body, including when FIN arrived before RESET_STREAM.
+        if !self.drain && !self.ready() {
+            self.data.insert(final_size, RangeBuf::from(b"", final_size, true));
+        }
+
         Ok(result)
     }
 

@@ -77,6 +77,12 @@ pub(crate) fn bind_worker_socket(
     let socket =
         Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(Http3NativeError::Io)?;
 
+    // Match Node's dual-stack TCP listener even on hosts configured with
+    // IPV6_V6ONLY by default. An unspecified IPv6 bind must also accept IPv4.
+    if bind_addr.ip().is_unspecified() && bind_addr.is_ipv6() {
+        socket.set_only_v6(false).map_err(Http3NativeError::Io)?;
+    }
+
     set_socket_buffer_sizes(&socket);
 
     if reuse_port {

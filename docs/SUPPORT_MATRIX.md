@@ -36,6 +36,20 @@
 - Other platforms may require local native compilation and are not part of the
   current prebuild release set.
 
+## Package layout and source builds (unreleased after 0.9.6)
+
+The root tarball no longer duplicates native binaries. Keep npm optional
+dependencies enabled so the matching platform package is installed. Docs and
+examples are available in the GitHub repository. WASM remains in the root.
+
+There is no automatic native compilation during npm installation. Unsupported
+prebuild targets require a supported source build of this repository and an
+absolute `NAPI_RS_NATIVE_LIBRARY_PATH` pointing to the resulting `.node` binary.
+Intel macOS distribution CI exercises this explicit source-build path; it does
+not establish a published Intel macOS sidecar. Native Windows/musl are not
+qualified. The packed-install test compiles installed declarations with legacy
+`node`, `node16`, `nodenext`, and `bundler` resolution.
+
 ## Runtime Modes By Environment
 
 | Environment | `fast` | `portable` | `auto` |

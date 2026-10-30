@@ -9,7 +9,7 @@ const app = await createApp({
 });
 app.enableShutdownHooks(['SIGINT', 'SIGTERM']);
 try {
-  await app.listen(port, '127.0.0.1');
+  await app.listen(port, process.env.HTTP3_HOST ?? '::');
   // Nest 12.3.2's getUrl() checks instanceof tls.Server; the facade fails that
   // check even though every supported protocol on this listener uses TLS.
   const address = app.getHttpServer().address();

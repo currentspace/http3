@@ -621,6 +621,7 @@ fn run_h3(args: &CliArgs) -> Result<SustainedResult, String> {
         Http3Config::new_client_quiche_config(&client_js_options).map_err(|e| e.to_string())?;
 
     let http3_config = Http3Config {
+        stream_read_window: None,
         qlog_dir: None,
         qlog_level: None,
         qpack_max_table_capacity: None,

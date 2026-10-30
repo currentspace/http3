@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+- Bound native and WASM H3 request reads with per-stream receive credit so paused
+  uploads resume without overflowing the facade's default buffer limit.
+- Preserve cancellation notifications when a reset follows FIN on an unread
+  request body, including Fetch handlers paused by backpressure. Keep Fetch
+  cancellation signals alive during async handlers and error guards until close.
+- Keep peer H2 session errors from becoming unhandled server exceptions; expose
+  optional `sessionError` diagnostics. Cancel unfinished responses on bare
+  `res.destroy()` and propagate upstream proxy aborts to downstream clients.
+- Bound proxy DNS/TCP/TLS setup separately from SSE inactivity. Support stock
+  macOS LibreSSL certificate verification, serialize concurrent certificate
+  generation, create keys with private permissions and scope macOS trust to SSL.
+
+- Propagate peer STOP_SENDING for idle H3 responses so disconnected SSE/proxy
+  clients release upstream work without waiting for the next write.
+
+- Default Node facade Alt-Svc to one day, with `altSvc: { maxAge }` or `false`.
+- Add `listenNest` for Express-backed Nest applications, a streaming HTTP(S)
+  `proxy` handler, and opt-in `server.closeOnSignals` lifecycle cleanup.
+- Add shared-CA project certificates, automatic leaf renewal and `createDevTls`.
+  Add read-only `http3 doctor`, `HTTP3_DEBUG=1` handshake-close observations,
+  and guidance for cache/revalidation protocol evidence in HARs and NetLog.
+
+- Export the Node server factory and Express bridge at the root and publish
+  `typesVersions` for legacy TypeScript subpath resolution.
+- Add chainable `setKeepAlive`, `setNoDelay` and `setTimeout` no-ops to H2/H3 request sockets
+  for framework compatibility, including older Nest SSE implementations.
+- Accept positional and object `listen` arguments on both HTTP servers; validate
+  arguments before native startup. Retry UDP/TCP port collisions for `listen(0)`
+  with a bounded attempt count; explicit ports retain their bind errors. Default omitted hosts to dual-stack `::`
+  (all interfaces), update the Next/Nest examples, and fix IPv6 URL parsing.
+- Add `http3 dev-cert` with constrained localhost certificates, explicit trust
+  and untrust commands, and Node/Chromium local-development instructions.
+- Remove native binary duplicates, docs, and examples from the root tarball.
+  Native installs use optional platform packages; docs/examples remain on GitHub.
+
 ## 0.9.6
 
 - Join split HTTP/3 Cookie fields with `; ` in the Node request facade, matching

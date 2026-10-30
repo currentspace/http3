@@ -170,8 +170,6 @@ jobs:
         run: node --test --test-isolation=none --test-timeout=15000 dist-test/test/release/**/*.test.js
 
       - name: Smoke install packed artifact
-        env:
-          NPM_CONFIG_OMIT: optional
         run: node scripts/smoke-install.mjs
 
   publish:
