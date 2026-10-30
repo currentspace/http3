@@ -29,8 +29,11 @@ are not published.
 
 The generated CA expires after 365 days, has a critical name constraint for
 `localhost`, its subdomains, IPv4 loopback (127/8), and IPv6 loopback (::1), and
-cannot issue intermediate CAs. Leaves last at most 30 days and cover `localhost`,
-`127.0.0.1`, and `::1`. The CLI reuses matching unexpired keys and certificates.
+cannot issue intermediate CAs. Leaves last at most 30 days and cover the DNS hostname `localhost`.
+They work over both IPv4 and IPv6, but do not cover IP-literal URLs. BoringSSL's
+legacy verifier rejects IP SANs under IP name constraints; the CLI keeps the CA
+constraints intact and issues a DNS-only leaf. Native/WASM clients connecting
+to an IP should set `servername: 'localhost'` alongside the explicit `ca`. The CLI reuses matching unexpired keys and certificates.
 To renew an expiring leaf, remove only `key.pem` and `cert.pem` and run generation
 again. To replace the CA, untrust it first and use a new directory. Keep the CA
 files until untrust succeeds; they identify the exact certificate to remove.
@@ -75,7 +78,11 @@ Port **1 is unused**; the application port still comes from the server's `Alt-Sv
 advertisement. The first visit may use H2. Reload and check DevTools' Network
 Protocol column for `h3`. This is a local development launch configuration, not
 something an application can enable for its users. See Chromium's
-[QUIC testing guidance](https://www.chromium.org/quic/playing-with-quic/).
+[QUIC testing guidance](https://www.chromium.org/quic/playing-with-quic/). The
+[session pool](https://github.com/chromium/chromium/blob/main/net/quic/quic_session_pool.cc)
+extracts hostnames from forced origins for its local-root allowlist, while
+[forced protocol selection](https://github.com/chromium/chromium/blob/main/net/http/http_network_session.cc)
+still matches the specific origin and port.
 
 The example browser scripts pin their generated leaf certificate in an isolated
 Chromium process. They do not install OS trust. The separate Distribution CI test
@@ -96,8 +103,9 @@ server.listen(3443, onListening);
 Omitting the host binds `::` with IPv4 also enabled. **This listens on all
 interfaces**, as do the updated Next/Nest examples; `HTTP3_HOST` overrides their
 bind address. Restrict access with a firewall when using development credentials.
-For a strictly local IPv4 listener, set `HTTP3_HOST=127.0.0.1` and use
-`https://127.0.0.1:3443` consistently. An explicit `::1` listener is IPv6 loopback
+For a strictly local IPv4 listener, set `HTTP3_HOST=127.0.0.1`. Using an
+IP-literal browser URL also requires a different certificate with that IP SAN;
+the CLI certificate is for `localhost`. An explicit `::1` listener is IPv6 loopback
 only. IPv6 must be available for the dual-stack default; use an explicit IPv4
 host on an IPv4-only OS.
 

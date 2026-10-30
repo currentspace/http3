@@ -13,13 +13,16 @@ assert.equal(process.env.HTTP3_TEST_INSTALL_DEV_CA, '1', 'Explicit temporary CA 
 const directory = mkdtempSync(join(tmpdir(), 'http3-dev-trust-'));
 const cli = resolve('bin/http3.cjs');
 function cert(action) {
-  const result = spawnSync(process.execPath, [cli, 'dev-cert', action, '--out', directory], { encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  process.stdout.write(result.stdout);
+  console.log(`dev-cert ${action}`);
+  const result = spawnSync(process.execPath, [cli, 'dev-cert', action, '--out', directory], {
+    stdio: 'inherit', timeout: 120_000, killSignal: 'SIGKILL',
+  });
+  assert.equal(result.status, 0, `dev-cert ${action}: ${result.error ?? result.signal ?? result.status}`);
 }
 let server;
 let browser;
 let trustAttempted = false;
+let qualified = false;
 try {
   cert('generate');
   trustAttempted = true;
@@ -32,13 +35,14 @@ try {
   await once(server, 'listening');
   const origin = `https://localhost:${server.address().port}`;
   const client = spawn(process.execPath, ['-e', `
-    require('node:https').get(${JSON.stringify(origin)}, res => {
+    require('node:https').get(${JSON.stringify(origin)}, { agent: false }, res => {
       if (!res.socket.authorized) process.exitCode = 1;
       res.resume();
     }).on('error', e => { console.error(e); process.exitCode = 1; });
   `], { env: { ...process.env, NODE_EXTRA_CA_CERTS: join(directory, 'ca.pem') }, stdio: 'inherit' });
   assert.equal((await once(client, 'exit'))[0], 0, 'Node HTTPS client must trust NODE_EXTRA_CA_CERTS');
   for (const host of ['127.0.0.1', '[::1]']) {
+    console.log(`Checking native H3 on ${host}`);
     const session = await connectAsync(`https://${host}:${server.address().port}`, {
       ca: readFileSync(join(directory, 'ca.pem')), servername: 'localhost', runtimeMode: 'portable',
     });
@@ -68,12 +72,21 @@ try {
   assert.equal(responses.at(-1).protocol, 'h3');
   assert.equal(await page.textContent('body'), 'trusted localhost');
   console.log(JSON.stringify({ passed: true, browser: browser.version(), responses }));
+  qualified = true;
 } finally {
   try {
     await browser?.close();
-    if (server) await new Promise((resolve, reject) => server.close(e => e ? reject(e) : resolve()));
-  } finally {
     if (trustAttempted) cert('untrust');
+    if (qualified) {
+      // A fresh profile/process must reject the same leaf after CA removal.
+      browser = await chromium.launch();
+      const page = await browser.newPage();
+      await assert.rejects(page.goto(`https://localhost:${server.address().port}`), /ERR_CERT_AUTHORITY_INVALID/);
+      console.log('Fresh Chromium rejects the leaf after untrust');
+    }
+  } finally {
+    await browser?.close();
+    if (server) await new Promise((resolve, reject) => server.close(e => e ? reject(e) : resolve()));
     rmSync(directory, { recursive: true, force: true });
   }
 }

@@ -13,7 +13,7 @@ Generate a localhost CA and certificate (OpenSSL required). Default directory:
 Generation does not change trust settings. --trust explicitly installs this CA
 in the OS/browser trust store; "untrust" removes it. Private keys stay local.
 The CA is restricted to localhost, its subdomains and loopback IP addresses.
-The issued leaf covers localhost, 127.0.0.1 and ::1.
+The issued leaf covers the hostname localhost over IPv4 or IPv6, not IP URLs.
 Linux trust requires sudo, update-ca-certificates (or update-ca-trust), and the
 NSS certutil tool for Chrome. macOS trust requires sudo for the System keychain.
 
@@ -70,8 +70,11 @@ export function generateDevCertificate(directory: string): void {
   }
   const days = Math.min(30, Math.floor((Date.parse(ca.validTo) - Date.now()) / 86400000));
   if (days < 1) throw new Error('CA expires too soon to issue a leaf. Untrust it and create a new CA in another directory.');
+  // BoringSSL's legacy verifier rejects IP SANs under IP name constraints.
+  // Keep the CA fully constrained and issue a DNS-only localhost leaf; both
+  // network families work with localhost as the verified server name.
   const config = join(directory, 'leaf.cnf');
-  writeFileSync(config, `[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=localhost\n[leaf]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\n`, { mode: 0o600 });
+  writeFileSync(config, `[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=localhost\n[leaf]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n`, { mode: 0o600 });
   openssl(['req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-config', config,
     '-keyout', join(directory, 'key.pem'), '-out', join(directory, 'leaf.csr')]);
   chmodSync(join(directory, 'key.pem'), 0o600);

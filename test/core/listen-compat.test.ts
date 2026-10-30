@@ -1,16 +1,26 @@
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { connect as connectH2 } from 'node:http2';
 import { createSecureServer } from '../../lib/server.js';
 import { Http3NodeServer } from '../../lib/node-server.js';
 import { connectAsync } from '../../lib/client.js';
-import { generateMutualTlsTestCerts } from '../support/generate-certs.js';
+import { generateDevCertificate } from '../../lib/dev-cert.js';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { resolveConnectionEndpoint } from '../../lib/endpoint.js';
 
 let tls: { key: Buffer; cert: Buffer };
 let ca: Buffer;
-before(() => { const certs = generateMutualTlsTestCerts(); tls = certs.server; ca = certs.ca.cert; });
+let directory: string;
+before(() => {
+  directory = mkdtempSync(join(tmpdir(), 'http3-listen-cert-'));
+  generateDevCertificate(directory);
+  tls = { key: readFileSync(join(directory, 'key.pem')), cert: readFileSync(join(directory, 'cert.pem')) };
+  ca = readFileSync(join(directory, 'ca.pem'));
+});
+after(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
 
 for (const facade of [false, true]) {
   for (const shape of ['object', 'positional'] as const) {

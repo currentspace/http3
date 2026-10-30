@@ -17,8 +17,8 @@ test('dev-cert issues constrained localhost certificates, preserves keys, and re
   assert.equal(cert.ca, false);
   assert.ok(cert.checkHost('localhost'));
   assert.equal(cert.checkHost('app.localhost'), undefined);
-  assert.ok(cert.checkIP('127.0.0.1'));
-  assert.ok(cert.checkIP('::1'));
+  assert.equal(cert.checkIP('127.0.0.1'), undefined);
+  assert.equal(cert.checkIP('::1'), undefined);
   assert.equal(cert.checkHost('example.com'), undefined);
   const key = readFileSync(join(dir, 'key.pem'));
   generateDevCertificate(dir);
@@ -29,7 +29,7 @@ test('dev-cert issues constrained localhost certificates, preserves keys, and re
   }
   const run = (args: string[]) => execFileSync('openssl', args, { stdio: 'pipe' });
   run(['verify', '-CAfile', join(dir, 'ca.pem'), '-verify_hostname', 'localhost', join(dir, 'cert.pem')]);
-  run(['verify', '-CAfile', join(dir, 'ca.pem'), '-verify_ip', '::1', join(dir, 'cert.pem')]);
+  assert.notEqual(spawnSync('openssl', ['verify', '-CAfile', join(dir, 'ca.pem'), '-verify_ip', '::1', join(dir, 'cert.pem')]).status, 0);
   // Even a leaf signed with the generated CA key must fail outside its scope.
   writeFileSync(join(dir, 'outside.cnf'), 'subjectAltName=DNS:example.com,IP:192.0.2.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n');
   run(['req', '-new', '-key', join(dir, 'key.pem'), '-subj', '/CN=example.com', '-out', join(dir, 'outside.csr')]);
