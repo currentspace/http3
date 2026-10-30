@@ -47,8 +47,7 @@ server.listen({ port: 443 }); // Dual-stack ::, all interfaces.
 
 ## Local development
 
-The following additions are unreleased after 0.9.6. With a package containing
-these changes, `npx http3 dev-cert --out .certs --trust` creates a constrained
+In 0.9.7+, `npx @currentspace/http3 dev-cert --out .certs --trust` creates a constrained
 localhost CA, installs local trust explicitly, and issues a certificate. From a
 built source checkout use `node bin/http3.cjs dev-cert --out .certs --trust`.
 Use `key.pem`/`cert.pem` on the server and set

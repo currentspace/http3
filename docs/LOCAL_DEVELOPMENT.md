@@ -1,7 +1,6 @@
 # Local HTTPS and HTTP/3
 
-The `http3 dev-cert` CLI and listener defaults below are unreleased changes after
-0.9.6. Use a built source checkout or a package containing these changes.
+The `http3 dev-cert` CLI and listener defaults below require 0.9.7 or later.
 
 ## Generate and trust a localhost certificate
 

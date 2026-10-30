@@ -311,7 +311,7 @@ importers:
   examples/nextjs-nestjs:
     dependencies:
       '@currentspace/http3':
-        specifier: 0.9.6
+        specifier: 0.9.7
         version: link:../..
       '@nestjs/common':
         specifier: 12.3.2

@@ -3,12 +3,13 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
-## Unreleased consumer integration candidate (PR #20)
+## 0.9.7
 
 - Includes configurable one-day Alt-Svc, socket compatibility, dual-stack/listen
   arguments, package/types fixes, Nest/proxy/shutdown helpers, dev certificates,
-  diagnostics and documentation. No version bump or publication is performed.
-- After the follow-up consumer review, the full local Node 26 suite passed
+  diagnostics and documentation. Root, Rust and all three native sidecars are
+  aligned to 0.9.7. Publication is pending release workflow validation.
+- The full local Node 26 suite passed
   397 tests and FFI passed 67. Node 24 also passed all 397 tests. Rust passed 279 tests plus targeted flow-control,
   shutdown and concurrent-stream integration tests. Rebuilt WASM passed 59 tests
   with no skips, including receive credit and ephemeral-port retries. Final-head
@@ -48,6 +49,12 @@ and remaining qualification work for each release candidate.
   with verification enabled.
 - Windows browser trust and manual Safari qualification remain unverified. Doctor
   is read-only and does not clear Chrome state. Artifacts: `artifacts/consumer-feedback/`.
+
+- PR #20 merged at `7be72a1`. Its final implementation head `03387ca` passed
+  all required hosted checks: Verify `41002754429`, Distribution `41002754459`,
+  CI `41002754535`, Security `41002754446`, combined Next/Nest `41002754610`,
+  Rust Safety `41002754490` and Interop `41002754421`. Browser trust checks
+  ran on disposable hosted runners, without changing local machine trust.
 
 ## 0.9.6
 

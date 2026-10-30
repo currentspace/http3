@@ -15,7 +15,7 @@
     "test:browser": "node scripts/browser.cjs"
   },
   "dependencies": {
-    "@currentspace/http3": "0.9.6",
+    "@currentspace/http3": "0.9.7",
     "@nestjs/common": "12.3.2",
     "@nestjs/core": "12.3.2",
     "@nestjs/platform-express": "12.3.2",

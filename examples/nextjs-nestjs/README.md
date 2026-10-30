@@ -5,7 +5,7 @@ The shared listener serves HTTP/3 over UDP and HTTP/2 or HTTP/1.1 over TCP at
 `https://localhost:3443`. It does not start a second backend listener or proxy
 process. Nest allocates its usual internal server object, but never binds it.
 
-This example requires **`@currentspace/http3` 0.9.6 or later**. Version 0.9.5 does
+This example requires **`@currentspace/http3` 0.9.7 or later**. Version 0.9.5 does
 not contain `createExpressHandler` or the split Cookie fix. Nest and Next
 themselves are unmodified.
 
@@ -138,7 +138,7 @@ explicit bind address. The certificate SANs include IPv4 and IPv6 loopback;
 browser tests do not force localhost to IPv4. For strictly local IPv4 use, bind
 127.0.0.1 and use that IP consistently in URLs.
 
-The unreleased `http3 dev-cert` CLI provides a constrained CA and explicit trust
+The `http3 dev-cert` CLI provides a constrained CA and explicit trust
 installation/removal. See [local development](../../docs/LOCAL_DEVELOPMENT.md).
 Set `TLS_KEY_FILE`, `TLS_CERT_FILE`, and (for internal clients) `TLS_CA_FILE`;
 set `NODE_EXTRA_CA_CERTS` before starting Node's ordinary HTTPS clients. The

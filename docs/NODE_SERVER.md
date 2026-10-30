@@ -45,7 +45,7 @@ for browser clients. The factory adds `Alt-Svc: h3=":PORT"; ma=86400`; a handler
 replace or remove it. This advertises the bound port, so deployments with port
 translation must set the externally reachable port themselves.
 
-## Listener and TypeScript compatibility (unreleased after 0.9.6)
+## Listener and TypeScript compatibility (0.9.7+)
 
 Omitted hosts now bind dual-stack `::`, on all interfaces. Both stream and Node
 servers accept object and positional forms. See [local development](./LOCAL_DEVELOPMENT.md)

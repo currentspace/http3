@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.7
 
 - Bound native and WASM H3 request reads with per-stream receive credit so paused
   uploads resume without overflowing the facade's default buffer limit.
@@ -36,6 +36,8 @@
   and untrust commands, and Node/Chromium local-development instructions.
 - Remove native binary duplicates, docs, and examples from the root tarball.
   Native installs use optional platform packages; docs/examples remain on GitHub.
+
+Manual Safari and Windows browser trust qualification remain incomplete.
 
 ## 0.9.6
 
