@@ -44,7 +44,7 @@ const { chromium } = require('playwright');
     await page.goto(origin, { waitUntil: 'networkidle' });
     const initial = report.responses.find(r => r.url === origin + '/');
     assert.equal(initial.protocol, 'h2');
-    assert.equal(initial.headers['alt-svc'], `h3=":${port}"; ma=60`);
+    assert.equal(initial.headers['alt-svc'], `h3=":${port}"; ma=86400`);
     for (let n = 0; n < 12; n++) {
       await page.waitForTimeout(250);
       await page.reload({ waitUntil: 'networkidle' });

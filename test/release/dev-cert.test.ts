@@ -42,7 +42,7 @@ test('dev-cert issues constrained localhost certificates, preserves keys, and re
   const mac = devTrustCommands(dir, ca, false, 'darwin');
   assert.deepEqual(mac[0]!.args.slice(0, 6), ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k']);
   const remove = devTrustCommands(dir, ca, true, 'darwin');
-  assert.ok(remove[1]!.args.includes(ca.fingerprint.replaceAll(':', '')));
+  assert.ok(remove[0]!.args.includes(ca.fingerprint.replaceAll(':', '')));
   const linux = devTrustCommands(dir, ca, false, 'linux', { linuxTool: '/usr/sbin/update-ca-certificates', nssDirectories: ['/tmp/test-nss'] });
   assert.equal(linux.at(-1)!.file, 'certutil');
   assert.ok(linux.at(-1)!.args.includes('C,,'));
@@ -64,4 +64,24 @@ test('dev-cert CLI documents trust explicitly and rejects unknown options', () =
   assert.match(help.stdout, /does not change trust/);
   assert.notEqual(run(['dev-cert', '--out']).status, 0);
   assert.notEqual(run(['dev-cert', '--unknown']).status, 0);
+});
+
+test('project certificates share a constrained CA and renew without replacing keys', t => {
+  const base = mkdtempSync(join(tmpdir(), 'http3-shared-ca-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const shared = join(base, 'authority');
+  const project = join(base, 'project');
+  generateDevCertificate(project, shared);
+  assert.deepEqual(readFileSync(join(project, 'ca.pem')), readFileSync(join(shared, 'ca.pem')));
+  assert.throws(() => readFileSync(join(project, 'ca-key.pem')), /ENOENT/);
+  const key = readFileSync(join(project, 'key.pem'));
+  execFileSync('openssl', ['x509', '-req', '-in', join(project, 'leaf.csr'), '-CA', join(shared, 'ca.pem'),
+    '-CAkey', join(shared, 'ca-key.pem'), '-set_serial', '42', '-days', '1', '-extfile', join(project, 'leaf.cnf'),
+    '-extensions', 'leaf', '-out', join(project, 'cert.pem')], { stdio: 'pipe' });
+  const old = new X509Certificate(readFileSync(join(project, 'cert.pem')));
+  generateDevCertificate(project, shared);
+  const renewed = new X509Certificate(readFileSync(join(project, 'cert.pem')));
+  assert.ok(Date.parse(renewed.validTo) > Date.parse(old.validTo));
+  assert.notEqual(old.serialNumber, renewed.serialNumber);
+  assert.deepEqual(readFileSync(join(project, 'key.pem')), key);
 });

@@ -41,7 +41,7 @@ app.listen({ port: 8443, host: '127.0.0.1' }).catch(console.error);
 Requires Node 24+. Native prebuilds support macOS arm64 and Linux glibc x64/arm64.
 See [the support matrix](./SUPPORT_MATRIX.md) before using another platform.
 Permit both TCP and UDP on the selected port. Use a browser-trusted certificate
-for browser clients. The factory adds `Alt-Svc: h3=":PORT"; ma=60`; a handler can
+for browser clients. The factory adds `Alt-Svc: h3=":PORT"; ma=86400`; a handler can
 replace or remove it. This advertises the bound port, so deployments with port
 translation must set the externally reachable port themselves.
 
@@ -104,7 +104,7 @@ const app = express();
 app.use(express.json());
 app.post('/echo', (req, res) => res.json(req.body));
 const server = createNodeServerFactory({ ...tls, allowHTTP1: true })(createExpressHandler(app));
-server.listen({ port: 8443, host: '127.0.0.1' });
+server.listen({ port: 8443 });
 ```
 
 For H2/H3 requests with an unfinished body and no Content-Length, the bridge adds
@@ -133,3 +133,87 @@ CONNECTION_CLOSE; it does not expose per-response acknowledgement completion.
 Consequently this is bounded, best-effort draining, not a delivery guarantee on
 lossy or high-latency paths. Applications needing stronger guarantees must
 coordinate shutdown with their clients/load balancer before calling `close()`.
+
+
+## Alt-Svc lifetime
+
+The facade advertises `h3=":PORT"; ma=86400` on H1/H2/H3 responses by default.
+Configure `altSvc: { maxAge: 604800 }` for a week, or `altSvc: false` to omit the
+automatic header. Values are integer seconds from 0 through 2147483647.
+A handler can override the header. Disabling advertisements does not erase an
+already cached alternative; send `Alt-Svc: clear` when withdrawing one.
+A longer lifetime avoids expiry after a minute idle, but does not guarantee a
+browser will choose H3: trust, network changes and cached failures still matter.
+See [RFC 7838](https://httpwg.org/specs/rfc7838.html#caching).
+
+On H2/H3, `req.socket.setKeepAlive()`, `setNoDelay()` and `setTimeout()` are
+chainable no-ops: the socket represents a multiplexed transport. Use
+`req.setTimeout()`/`res.setTimeout()` for the existing stream timeout behavior.
+Native H1 sockets keep their Node behavior.
+
+## Nest with Express
+
+```ts
+import { listenNest } from '@currentspace/http3/nest';
+
+const listener = await listenNest(app, {
+  port: 3443,
+  tls: { key, cert },
+  closeOnSignals: true,
+});
+// Programmatic shutdown, including Nest lifecycle hooks:
+await listener.close();
+```
+
+Create/configure the Nest Express application before calling the helper; do not
+call `app.listen()`. The helper initializes it, installs the Express bridge and
+binds H3/H2/H1 on one port. It has no Nest dependency. FastifyAdapter applications
+continue using `createNodeServerFactory` through Fastify's `serverFactory`.
+
+`listener.close()` drains transport then calls `app.close()`, once. Set
+`closeApp: false` if another owner must close Nest. `closeOnSignals` defaults to
+false; when enabled it owns SIGINT/SIGTERM, invokes Nest shutdown hooks and exits.
+Do not also call `app.enableShutdownHooks()` in that mode. Calling `app.close()`
+directly does not close the helper's external listener; use `listener.close()`.
+
+## Separate Next and BFF processes
+
+```ts
+import { proxy } from '@currentspace/http3/proxy';
+const bff = proxy('http://127.0.0.1:3001', {
+  rewrite: path => path.replace(/^\/bff(?=\/|$)/, '') || '/',
+  timeoutMs: 0, // allow quiet SSE streams
+});
+const server = createNodeServerFactory({ key, cert, allowHTTP1: true })((req, res) => {
+  const path = (req.url ?? '/').split('?')[0];
+  if (path === '/bff' || path.startsWith('/bff/')) bff(req, res);
+  else nextHandler(req, res);
+});
+```
+
+The fixed upstream is HTTP/1.1 or HTTPS, with certificate verification enabled
+and optional `ca`. Requests/responses stream with backpressure. The handler strips
+hop-by-hop and Connection-nominated headers, preserves separate Set-Cookie values,
+replaces incoming forwarding metadata with this hop's X-Forwarded fields, flushes
+SSE headers and cancels upstream work when the client disconnects. It does not
+rewrite Location or cookie domains/paths, retry requests, impose body limits, or
+forward WebSocket upgrades. Keep Next HMR's upgrade routing on the existing
+custom server; this helper handles HTTP requests only. Run it before body parsers.
+Only trust its forwarding metadata when the upstream is restricted to this proxy.
+The default upstream inactivity timeout is 30 seconds; configure it for SSE.
+
+## Signal shutdown
+
+```ts
+const shutdown = server.closeOnSignals({
+  timeoutMs: 5000,
+  onClose: async () => { await Promise.all([nest.close(), next.close()]); },
+});
+await shutdown.close(); // idempotent; manual calls never exit the process
+```
+
+Signal-triggered calls drain, run `onClose`, and exit (0 on success, 1 on failure
+or deadline). Set `exit: false` to retain process ownership. `dispose()` removes
+this helper's signal handlers. The deadline includes application cleanup; it is
+best-effort transport draining, not a delivery acknowledgement. Register one
+controller for a shared listener. The combined Next/Nest example uses this API.

@@ -30,7 +30,7 @@ try {
   server = createNodeServerFactory({
     key: readFileSync(join(directory, 'key.pem')), cert: readFileSync(join(directory, 'cert.pem')),
     runtimeMode: 'portable', allowHTTP1: true,
-  })((_req, res) => res.end('trusted localhost'));
+  })((_req, res) => { res.setHeader('cache-control', 'no-store'); res.end('trusted localhost'); });
   server.listen({ port: 0 });
   await once(server, 'listening');
   const origin = `https://localhost:${server.address().port}`;
@@ -59,6 +59,7 @@ try {
   const page = await browser.newPage();
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Network.enable');
+  await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
   const responses = [];
   cdp.on('Network.responseReceived', ({ response }) => {
     if (response.url === origin + '/') responses.push({ protocol: response.protocol, remoteIPAddress: response.remoteIPAddress });
@@ -71,7 +72,11 @@ try {
   }
   assert.equal(responses.at(-1).protocol, 'h3');
   assert.equal(await page.textContent('body'), 'trusted localhost');
-  console.log(JSON.stringify({ passed: true, browser: browser.version(), responses }));
+  console.log('Waiting 75 seconds to verify the cached Alt-Svc survives the former one-minute expiry');
+  await page.waitForTimeout(75_000);
+  await page.reload();
+  assert.equal(responses.at(-1).protocol, 'h3', 'Document reload after 75 seconds must negotiate H3 automatically');
+  console.log(JSON.stringify({ passed: true, idleSeconds: 75, browser: browser.version(), responses }));
   qualified = true;
 } finally {
   try {

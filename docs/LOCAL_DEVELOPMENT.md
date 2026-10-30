@@ -8,16 +8,16 @@ The `http3 dev-cert` CLI and listener defaults below are unreleased changes afte
 With the package installed, run:
 
 ```sh
-npx http3 dev-cert --out .certs --trust
+npx @currentspace/http3 dev-cert --out .certs --trust
 ```
 
-From a built source checkout, replace `npx http3` with `node bin/http3.cjs`.
+From a built source checkout, replace `npx @currentspace/http3` with `node bin/http3.cjs`.
 Without `--trust`, generation only writes local files. Trust can also be installed
 or removed separately:
 
 ```sh
-npx http3 dev-cert trust --out .certs
-npx http3 dev-cert untrust --out .certs
+npx @currentspace/http3 dev-cert trust --out .certs
+npx @currentspace/http3 dev-cert untrust --out .certs
 ```
 
 OpenSSL must be installed. macOS trust uses `sudo security` and the System
@@ -33,9 +33,9 @@ cannot issue intermediate CAs. Leaves last at most 30 days and cover the DNS hos
 They work over both IPv4 and IPv6, but do not cover IP-literal URLs. BoringSSL's
 legacy verifier rejects IP SANs under IP name constraints; the CLI keeps the CA
 constraints intact and issues a DNS-only leaf. Native/WASM clients connecting
-to an IP should set `servername: 'localhost'` alongside the explicit `ca`. The CLI reuses matching unexpired keys and certificates.
-To renew an expiring leaf, remove only `key.pem` and `cert.pem` and run generation
-again. To replace the CA, untrust it first and use a new directory. Keep the CA
+to an IP should set `servername: 'localhost'` alongside the explicit `ca`. The CLI reuses matching keys and certificates and renews a leaf automatically
+when it has less than one day remaining, preserving its key. Run generation
+at startup to renew before binding the server. To replace the CA, untrust it first and use a new directory. Keep the CA
 files until untrust succeeds; they identify the exact certificate to remove.
 
 Keep `.certs` out of version control. Its CA private key can impersonate local
@@ -114,3 +114,65 @@ A `127.0.0.1`-only server cannot receive a browser's `localhost` QUIC attempt to
 working while H3 does not. Keep both TCP and UDP reachable on the same port.
 The stream server takes IP literals; the Node facade also resolves hostnames.
 Unix sockets and string-valued ports are rejected before native startup.
+
+
+## Share a CA across projects
+
+```sh
+npx @currentspace/http3 dev-cert --out .certs --ca-dir "$HOME/.http3/ca"
+npx @currentspace/http3 dev-cert trust --out .certs
+```
+
+Projects get their own leaf key and certificate plus a copy of the public CA.
+The CA private key stays in `--ca-dir`. Pass the same CA directory on subsequent
+generation calls. Existing mismatched material is rejected, not overwritten.
+CA expiry requires explicit replacement and trust setup; leaf renewal does not.
+For startup code, `createDevTls({ directory: '.certs', caDirectory })` from
+`@currentspace/http3/dev` returns `{ key, cert, ca }` and never installs trust.
+Generation is synchronous and requires OpenSSL; call it before listening.
+
+## Diagnose a local listener
+
+```sh
+npx @currentspace/http3 doctor https://localhost:3443 --ca .certs/ca.pem
+HTTP3_DEBUG=1 npm run dev
+```
+
+Doctor reports TCP/TLS and UDP/H3 reachability separately for IPv4/IPv6 localhost,
+system trust as seen by Node, a certificate-verified H3 request, Alt-Svc over H2,
+and whether the installed curl supports and completes `--http3-only`. These are
+active probes, not an enumeration of OS socket ownership. The reachability probes
+do not verify certificates; the separate verification checks do. `--ca` supplies
+the native and H2 checks; system-trust and curl checks use their own trust stores.
+An unavailable curl build is reported separately from a failed H3 request.
+`--json` emits a structured report; any failed check makes the exit status 1.
+
+Pass `--chrome-profile /path/to/Profile` to inspect that profile's persisted
+`broken_alternative_services` entries for this origin. Chrome's state schema can
+change, and its in-memory state may be newer. The command never rewrites the
+profile or clears unrelated browser state. Close Chrome and use a new dedicated
+development profile to rule out cached failures; automatic cache clearing is
+not included in this release.
+
+Debug mode logs listener addresses and connections that close before their QUIC
+handshake completes, including an observed TLS alert code when available. It
+cannot establish why a browser chose H2, and it cannot see a QUIC attempt that
+never reached the listener. Certificate hints are possibilities, not diagnoses.
+
+## Confirm the connection behind a HAR entry
+
+Do not count every HAR `httpVersion` value as a new network request. Cache hits
+may carry stored response metadata. Revalidation combines a new 304 exchange
+with an existing response, so the displayed protocol alone is insufficient to
+prove which connection carried that exchange. This does not mean every 304 has
+an incorrect protocol field.
+
+For a clean check, disable the browser cache, bypass service workers, and inspect
+fresh responses in DevTools with the Protocol column enabled. To investigate a
+cached or revalidated response, capture `chrome://net-export/`, reproduce the
+request, stop logging, and correlate that URL's request events with its QUIC or
+HTTP/2 session. Preserve the cache state when reproducing a cache-specific issue.
+See Chromium's [NetLog capture instructions](https://www.chromium.org/for-testers/providing-network-details/)
+and the [DevTools Network protocol](https://chromedevtools.github.io/devtools-protocol/tot/Network/).
+Use the default privacy setting and review captures before sharing them; raw-byte
+captures can contain credentials and application data.

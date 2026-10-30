@@ -1,11 +1,11 @@
 /** Local development certificates. This module never loads the native addon. */
-import { createHash, createPrivateKey, createPublicKey, X509Certificate } from 'node:crypto';
+import { createHash, randomBytes, createPrivateKey, createPublicKey, X509Certificate } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const HELP = `Usage: http3 dev-cert [generate|trust|untrust] [--out DIRECTORY] [--trust]
+const HELP = `Usage: http3 dev-cert [generate|trust|untrust] [--out DIRECTORY] [--ca-dir DIRECTORY] [--trust]
 
 Generate a localhost CA and certificate (OpenSSL required). Default directory:
   ~/.http3/dev-cert
@@ -43,7 +43,34 @@ function loadCa(directory: string, forRemoval = false): X509Certificate {
   return ca;
 }
 
-export function generateDevCertificate(directory: string): void {
+export interface DevTlsOptions {
+  /** Project leaf directory. Default: .certs in the current directory. */
+  directory?: string;
+  /** Shared CA directory. Default: the leaf directory. Never copied into the project. */
+  caDirectory?: string;
+}
+
+/** Generate/read localhost TLS material without changing any trust stores. */
+export function createDevTls(options: DevTlsOptions = {}): { key: Buffer; cert: Buffer; ca: Buffer } {
+  const directory = resolve(options.directory ?? '.certs');
+  generateDevCertificate(directory, options.caDirectory);
+  return { key: readFileSync(join(directory, 'key.pem')), cert: readFileSync(join(directory, 'cert.pem')), ca: readFileSync(join(directory, 'ca.pem')) };
+}
+
+export function generateDevCertificate(directory: string, caDirectory = directory): void {
+  directory = resolve(directory);
+  caDirectory = resolve(caDirectory);
+  if (caDirectory !== directory) {
+    // The shared directory owns the CA key; projects receive only its public certificate.
+    generateDevCertificate(caDirectory);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    for (const file of ['ca.pem', 'ca.json']) {
+      const source = readFileSync(join(caDirectory, file));
+      if (existsSync(join(directory, file))) {
+        if (!readFileSync(join(directory, file)).equals(source)) throw new Error('Project CA differs from the shared CA; refusing to replace it');
+      } else privateFile(join(directory, file), source.toString());
+    }
+  }
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
   const caFile = join(directory, 'ca.pem');
@@ -60,13 +87,16 @@ export function generateDevCertificate(directory: string): void {
     chmodSync(join(directory, 'ca-key.pem'), 0o600);
     privateFile(join(directory, 'ca.json'), JSON.stringify({ sha256: fingerprint(new X509Certificate(readFileSync(caFile))) }) + '\n');
   }
-  const ca = loadCa(directory);
+  const ca = loadCa(caDirectory);
   if (existsSync(join(directory, 'cert.pem')) || existsSync(join(directory, 'key.pem'))) {
-    openssl(['verify', '-CAfile', caFile, '-verify_hostname', 'localhost', join(directory, 'cert.pem')]);
     const cert = new X509Certificate(readFileSync(join(directory, 'cert.pem')));
     if (!createPublicKey(createPrivateKey(readFileSync(join(directory, 'key.pem')))).equals(cert.publicKey)) throw new Error('Leaf key does not match cert.pem');
-    if (Date.parse(cert.validTo) <= Date.now() + 86400000) throw new Error('Leaf certificate expires within a day. Remove only key.pem and cert.pem, then regenerate using this CA.');
-    return;
+    if (!cert.verify(ca.publicKey) || !cert.checkHost('localhost')) throw new Error('Existing leaf does not match this localhost CA');
+    if (Date.parse(cert.validTo) > Date.now() + 86400000) {
+      openssl(['verify', '-CAfile', caFile, '-verify_hostname', 'localhost', join(directory, 'cert.pem')]);
+      return;
+    }
+    // Renew with the existing key so readers cannot observe a new key with an old leaf.
   }
   const days = Math.min(30, Math.floor((Date.parse(ca.validTo) - Date.now()) / 86400000));
   if (days < 1) throw new Error('CA expires too soon to issue a leaf. Untrust it and create a new CA in another directory.');
@@ -75,13 +105,15 @@ export function generateDevCertificate(directory: string): void {
   // network families work with localhost as the verified server name.
   const config = join(directory, 'leaf.cnf');
   writeFileSync(config, `[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=localhost\n[leaf]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n`, { mode: 0o600 });
-  openssl(['req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-config', config,
-    '-keyout', join(directory, 'key.pem'), '-out', join(directory, 'leaf.csr')]);
+  const keyFile = join(directory, 'key.pem');
+  const keyArgs = existsSync(keyFile) ? ['-key', keyFile] : ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', keyFile];
+  openssl(['req', '-new', ...keyArgs, '-config', config, '-out', join(directory, 'leaf.csr')]);
   chmodSync(join(directory, 'key.pem'), 0o600);
-  openssl(['x509', '-req', '-in', join(directory, 'leaf.csr'), '-CA', caFile, '-CAkey', join(directory, 'ca-key.pem'),
-    '-set_serial', '0x' + createHash('sha256').update(readFileSync(join(directory, 'leaf.csr'))).digest('hex').slice(0, 32),
-    '-days', String(days), '-extfile', config, '-extensions', 'leaf', '-out', join(directory, 'cert.pem')]);
-  openssl(['verify', '-CAfile', caFile, '-verify_hostname', 'localhost', join(directory, 'cert.pem')]);
+  openssl(['x509', '-req', '-in', join(directory, 'leaf.csr'), '-CA', caFile, '-CAkey', join(caDirectory, 'ca-key.pem'),
+    '-set_serial', '0x' + randomBytes(16).toString('hex'),
+    '-days', String(days), '-extfile', config, '-extensions', 'leaf', '-out', join(directory, 'cert.next.pem')]);
+  openssl(['verify', '-CAfile', caFile, '-verify_hostname', 'localhost', join(directory, 'cert.next.pem')]);
+  renameSync(join(directory, 'cert.next.pem'), join(directory, 'cert.pem'));
 }
 
 export interface TrustCommand { file: string; args: string[] }
@@ -95,8 +127,8 @@ export function devTrustCommands(
   if (platform === 'darwin') {
     const keychain = options.keychain ?? '/Library/Keychains/System.keychain';
     return remove ? [
-      { file: 'sudo', args: ['security', 'remove-trusted-cert', '-d', caFile] },
-      { file: 'sudo', args: ['security', 'delete-certificate', '-Z', ca.fingerprint.replaceAll(':', ''), keychain] },
+      // -t removes user and (when run as root) admin trust using the keychain item.
+      { file: 'sudo', args: ['security', 'delete-certificate', '-t', '-Z', ca.fingerprint.replaceAll(':', ''), keychain] },
     ] : [{ file: 'sudo', args: ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', keychain, caFile] }];
   }
   if (platform === 'linux') {
@@ -119,7 +151,8 @@ export function devTrustCommands(
 
 function changeTrust(directory: string, remove: boolean): void {
   // Removal must also work after expiry; never require the CA private key to untrust.
-  const ca = loadCa(directory, remove);
+  const ca = loadCa(directory, true);
+  if (!remove && Date.parse(ca.validTo) <= Date.now()) throw new Error('Cannot trust an expired development CA');
   const options: Parameters<typeof devTrustCommands>[4] = {};
   if (process.platform === 'linux') {
     options.linuxTool = ['/usr/sbin/update-ca-certificates', '/usr/bin/update-ca-trust'].find(existsSync);
@@ -139,7 +172,7 @@ function changeTrust(directory: string, remove: boolean): void {
   }
   const commands = devTrustCommands(directory, ca, remove, process.platform, options);
   console.log(`${remove ? 'Removing' : 'Trusting'} localhost CA SHA-256 ${ca.fingerprint256}`);
-  for (const item of commands) execFileSync(item.file, item.args, { stdio: 'inherit' });
+  for (const item of commands) execFileSync(item.file, item.args, { stdio: 'inherit', timeout: 60_000 });
   console.log(remove ? 'Removed local CA trust. Certificate files were retained.' : 'Installed local CA trust. Restart the browser to reload trust settings.');
 }
 
@@ -165,14 +198,16 @@ export function runDevCertCli(args: string[]): void {
     if (!['generate', 'trust', 'untrust'].includes(action)) throw new Error('Expected generate, trust, or untrust');
     let directory = join(homedir(), '.http3/dev-cert');
     let trust = false;
+    let caDirectory: string | undefined;
     while (args.length) {
       const arg = args.shift();
       if (arg === '--out' && args[0] && !args[0].startsWith('--')) directory = resolve(args.shift() ?? '');
+      else if (arg === '--ca-dir' && args[0] && !args[0].startsWith('--') && action === 'generate') caDirectory = resolve(args.shift() ?? '');
       else if (arg === '--trust' && action === 'generate') trust = true;
       else throw new Error(`Unknown or incomplete option: ${String(arg)}`);
     }
     if (action === 'generate') {
-      generateDevCertificate(directory);
+      generateDevCertificate(directory, caDirectory);
       if (trust) changeTrust(directory, false);
       else console.log('Generated/reused local certificates. Trust settings were not changed. Run "http3 dev-cert trust --out DIRECTORY" to install trust explicitly.');
       printUsage(directory);

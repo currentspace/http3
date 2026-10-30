@@ -86,3 +86,15 @@ Do not hard-wire new benchmark gates into CI until the baseline criteria in
 - Publish a fixed patch quickly under the same dist-tag.
 - Pin downstream consumers to the last known-good version until the patch is available.
 - Record the incident and remediation in the changelog and release notes.
+
+
+## Batch integration fixes for release-age consumers
+
+Group related framework fixes into one qualified candidate and release the root
+plus its native sidecars together. Avoid publishing a new patch for each example
+adjustment. Test candidate tarballs before publishing, so consumers can validate
+once rather than repeatedly exempting exact versions from their release-age rule.
+A `stable` dist-tag would only name a version; it does not make a new publication
+older or bypass a package manager's age policy. This batch keeps the existing
+`latest` channel. Consumers can wait out their configured delay before updating;
+urgent exemptions should remain explicit and limited to the versions they need.

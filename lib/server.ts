@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { debugHandshakeClose, debugHttp3 } from './debug.js';
 import { parseListenArgs, validateListenPort } from './listen-options.js';
 import type { ListenOptions } from './listen-options.js';
 import { createSecureServer as createHttp2SecureServer, constants as http2Constants } from 'node:http2';
@@ -344,7 +345,10 @@ export class Http3SecureServer extends EventEmitter {
     h2Server.listen(quicStart.addrInfo.port, listenHost, () => {
       h2Server.off('error', onH2BindError);
       this._starting = false;
-      process.nextTick(() => this.emit('listening'));
+      process.nextTick(() => {
+        debugHttp3('listening', { address: this.address() });
+        this.emit('listening');
+      });
     });
 
     return this;
@@ -474,7 +478,10 @@ export class Http3SecureServer extends EventEmitter {
     h2Server.listen(addrInfo.port, listenHost, () => {
       h2Server.off('error', onH2BindError);
       this._starting = false;
-      process.nextTick(() => this.emit('listening'));
+      process.nextTick(() => {
+        debugHttp3('listening', { address: this.address() });
+        this.emit('listening');
+      });
     });
   }
 
@@ -938,6 +945,7 @@ export class Http3SecureServer extends EventEmitter {
   private _onSessionClose(event: NativeEvent): void {
     const session = this._sessions.get(event.connHandle);
     if (session) {
+      if (!session._handshakeComplete) debugHandshakeClose(event.connHandle, event.meta?.errorCode ?? 0);
       session._stopMetricsEmitter();
       session._stopKeylogEmitter();
       session._rejectPendingPings(new Error('session closed'));

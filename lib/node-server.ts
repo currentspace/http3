@@ -11,6 +11,8 @@ import type { IncomingHeaders, ServerHttp3Stream, StreamFlags } from './stream.j
 import type { Http3ServerSession } from './session.js';
 import { parseListenArgs, validateListenPort } from './listen-options.js';
 import type { ListenOptions } from './listen-options.js';
+import { installShutdownHandlers } from './shutdown.js';
+import type { ShutdownOptions, ShutdownController } from './shutdown.js';
 
 type HeaderValue = string | number | string[];
 type Headers = Record<string, HeaderValue>;
@@ -40,11 +42,7 @@ class RequestSocket extends EventEmitter {
   // In particular, never change the shared H2 connection for one SSE request.
   setKeepAlive(_enable?: boolean, _initialDelay?: number): this { return this; }
   setNoDelay(_noDelay?: boolean): this { return this; }
-  setTimeout(ms: number, callback?: () => void): this {
-    if (callback) this.once('timeout', callback);
-    this.stream.setTimeout(ms);
-    return this;
-  }
+  setTimeout(_ms: number, _callback?: () => void): this { return this; }
   destroy(): this { this.stream.close(this.alpnProtocol === 'h2' ? 8 : 0x10c); return this; }
 }
 
@@ -234,6 +232,8 @@ export class Http3ServerResponse extends Writable {
 }
 
 export interface NodeServerOptions extends ServerOptions {
+  /** H3 advertisement lifetime in seconds. Default: one day. false disables it. */
+  altSvc?: { maxAge?: number } | false;
   /** Maximum time to drain active responses during close. Default: 30 seconds. */
   shutdownTimeoutMs?: number;
   /** Maximum unread H3 request bytes in the transport stream. Default: 1 MiB. */
@@ -257,6 +257,7 @@ export class Http3NodeServer extends EventEmitter {
   private closed = false;
   private readonly closeCallbacks: ((error?: Error) => void)[] = [];
   private closeTimer: NodeJS.Timeout | undefined;
+  private drainTimeoutMs: number;
   listening = false;
   constructor(private readonly options: NodeServerOptions, handler: Handler) {
     super();
@@ -268,12 +269,25 @@ export class Http3NodeServer extends EventEmitter {
       (!Number.isSafeInteger(options.maxBufferedRequestBytes) || options.maxBufferedRequestBytes < 1)) {
       throw new RangeError('maxBufferedRequestBytes must be a positive safe integer');
     }
+    const altSvcOption: unknown = options.altSvc;
+    if (altSvcOption !== undefined && altSvcOption !== false &&
+      (typeof altSvcOption !== 'object' || altSvcOption === null || Array.isArray(altSvcOption))) {
+      throw new TypeError('altSvc must be false or { maxAge: seconds }');
+    }
+    const maxAge = options.altSvc === false ? 0 : options.altSvc?.maxAge ?? 86400;
+    if (!Number.isSafeInteger(maxAge) || maxAge < 0 || maxAge > 2147483647) {
+      throw new RangeError('altSvc.maxAge must be an integer between 0 and 2147483647 seconds');
+    }
+    this.drainTimeoutMs = options.shutdownTimeoutMs ?? 30_000;
+    const advertise = (response: { setHeader(name: string, value: string): unknown }): void => {
+      if (options.altSvc !== false) response.setHeader('alt-svc', `h3=":${this.address()?.port ?? 443}"; ma=${maxAge}`);
+    };
     this.transport = createSecureServer(options, (stream, headers, flags) => {
       if (this.closing) { stream.respond({ ':status': '503' }); stream.end(); return; }
       stream._maxBufferedReadBytes = options.maxBufferedRequestBytes ?? 1024 * 1024;
       const request = new Http3IncomingMessage(stream, headers, flags);
       const response = new Http3ServerResponse(request);
-      response.setHeader('alt-svc', `h3=":${this.address()?.port ?? 443}"; ma=60`);
+      advertise(response);
       this.trackResponse(response);
       try {
         // The facade intentionally implements the stream-based subset used by frameworks.
@@ -286,7 +300,7 @@ export class Http3NodeServer extends EventEmitter {
     this.transport.on('request', (request, response) => {
       this.trackHttp1Socket(request.socket);
       if (this.closing) { response.writeHead(503); response.end(); return; }
-      response.setHeader('alt-svc', `h3=":${this.address()?.port ?? 443}"; ma=60`);
+      advertise(response);
       this.trackResponse(response);
       handler(request, response);
     });
@@ -362,11 +376,21 @@ export class Http3NodeServer extends EventEmitter {
     this.drain();
     return this;
   }
+  /** Drain on SIGINT/SIGTERM, then run application cleanup. Opt-in process ownership. */
+  closeOnSignals(options: ShutdownOptions = {}): ShutdownController {
+    const timeoutMs = options.timeoutMs ?? this.drainTimeoutMs;
+    const controller = installShutdownHandlers(async () => new Promise<void>((resolve, reject) => {
+      this.close(error => error ? reject(error) : resolve());
+    }), { ...options, timeoutMs });
+    this.drainTimeoutMs = timeoutMs;
+    this.once('close', controller.dispose);
+    return controller;
+  }
   private drain(): void {
     this.closeTimer ??= setTimeout(() => {
       for (const socket of this.http1Sockets) socket.destroy();
       this.closeTransport();
-    }, this.options.shutdownTimeoutMs ?? 30_000);
+    }, this.drainTimeoutMs);
     if (this.active.size > 0 || this.draining || this.closeStarted) return;
     this.draining = true;
     for (const socket of this.http1Sockets) socket.end();

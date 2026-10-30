@@ -1,3 +1,3 @@
 #!/usr/bin/env node
 'use strict';
-require('../dist/dev-cert.js').runDevCertCli(process.argv.slice(2));
+void require('../dist/cli.js').runCli(process.argv.slice(2));

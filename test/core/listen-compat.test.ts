@@ -31,6 +31,7 @@ for (const facade of [false, true]) {
         assert.equal(req.socket.setKeepAlive(false), req.socket);
         assert.equal(req.socket.setNoDelay(true), req.socket);
         assert.equal(req.socket.setNoDelay(false), req.socket);
+        assert.equal(req.socket.setTimeout(1, () => assert.fail('socket tuning must be a no-op')), req.socket);
         res.setHeader('content-type', 'text/event-stream');
         res.write('data: first\n\n');
         setTimeout(() => res.end('data: last\n\n'), 10);

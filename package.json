@@ -78,6 +78,18 @@
       },
       "types": "./dist/wasm/index.d.ts",
       "default": "./dist/wasm/index.js"
+    },
+    "./nest": {
+      "types": "./dist/nest.d.ts",
+      "default": "./dist/nest.js"
+    },
+    "./proxy": {
+      "types": "./dist/proxy.d.ts",
+      "default": "./dist/proxy.js"
+    },
+    "./dev": {
+      "types": "./dist/dev-cert.d.ts",
+      "default": "./dist/dev-cert.js"
     }
   },
   "files": [
@@ -252,6 +264,15 @@
       ],
       "wasm": [
         "dist/wasm/index.d.ts"
+      ],
+      "nest": [
+        "dist/nest.d.ts"
+      ],
+      "proxy": [
+        "dist/proxy.d.ts"
+      ],
+      "dev": [
+        "dist/dev-cert.d.ts"
       ]
     }
   },

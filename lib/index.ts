@@ -77,3 +77,12 @@ export type { ConnectionEndpoint, HostEndpoint, AddressEndpoint, DnsLookupFn } f
 export * as constants from './constants.js';
 export * as parity from './http2-parity.js';
 export * as h3 from './http3-extensions.js';
+
+export { listenNest } from './nest.js';
+export type { ListenNestOptions, NestHttp3Listener, NestExpressLikeApplication } from './nest.js';
+export { proxy } from './proxy.js';
+export type { ProxyOptions } from './proxy.js';
+export type { ShutdownOptions, ShutdownController } from './shutdown.js';
+
+export { createDevTls } from './dev-cert.js';
+export type { DevTlsOptions } from './dev-cert.js';

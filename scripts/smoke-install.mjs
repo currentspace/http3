@@ -50,7 +50,7 @@ try {
     const {join} = require('node:path');
     const {readdirSync} = require('node:fs');
     const pkg = require('@currentspace/http3');
-    for (const key of ['createSecureServer','createQuicServer','connectQuic','createSseStream','loadTlsOptionsFromAwsEnv','createNodeServerFactory','createExpressHandler']) assert.equal(typeof pkg[key], 'function', key);
+    for (const key of ['createSecureServer','createQuicServer','connectQuic','createSseStream','loadTlsOptionsFromAwsEnv','createNodeServerFactory','createExpressHandler','listenNest','proxy','createDevTls']) assert.equal(typeof pkg[key], 'function', key);
     assert.equal(typeof require('@currentspace/http3/node').createNodeServerFactory, 'function');
     assert.equal(typeof require('@currentspace/http3/express').createExpressHandler, 'function');
     const root = ${JSON.stringify(installedRoot)};
@@ -70,6 +70,10 @@ try {
     import {createNodeServerFactory} from '@currentspace/http3/node';
     import {createExpressHandler} from '@currentspace/http3/express';
     import {createNodeServerFactory as rootFactory, createExpressHandler as rootHandler, createSecureServer} from '@currentspace/http3';
+    import {listenNest} from '@currentspace/http3/nest';
+    import {proxy} from '@currentspace/http3/proxy';
+    import {createDevTls} from '@currentspace/http3/dev';
+    void listenNest; void proxy; void createDevTls;
     const app = createExpressHandler((_req, res) => res.end('ok'));
     const server = createNodeServerFactory({})(app);
     server.listen({port: 0, host: '::'});

@@ -466,6 +466,17 @@ impl H3Connection {
         self.prune_closed_blocked_streams();
 
         while let Some(stream_id) = self.quiche_conn.stream_writable_next() {
+            // STOP_SENDING makes a stream writable so the application can
+            // observe StreamStopped. An idle response (e.g. SSE) may never be
+            // in blocked_set and may never write again: propagate cancellation
+            // now instead of waiting for another application write.
+            if let Err(quiche::Error::StreamStopped(error_code)) =
+                self.quiche_conn.stream_capacity(stream_id)
+            {
+                self.clear_stream_tracking(stream_id);
+                events.push(JsH3Event::reset(conn_handle, stream_id, error_code));
+                continue;
+            }
             if self.blocked_set.remove(&stream_id) {
                 self.blocked_queue.retain(|&id| id != stream_id);
                 events.push(JsH3Event::drain(conn_handle, stream_id));
@@ -1384,6 +1395,50 @@ mod tests {
         }
 
         false
+    }
+
+    #[test]
+    fn idle_unblocked_stream_reports_peer_stop_sending() {
+        let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
+            make_direct_h3_pair();
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"POST"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/idle"),
+        ];
+        let stream_id = client.send_request(&headers, false).expect("request");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            while server_h3.poll(&mut server_conn).is_ok() {}
+        }
+        assert!(!client.blocked_set.contains(&stream_id));
+        // Consume the initial writable notification while the app is idle.
+        client.poll_drain_events(7, &mut Vec::new());
+        server_conn
+            .stream_shutdown(stream_id, quiche::Shutdown::Read, 0x10c)
+            .expect("stop sending");
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_drain_events(7, &mut events);
+        }
+        let resets: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == crate::h3_event::EVENT_RESET
+                    && event.stream_id == stream_id as i64
+            })
+            .collect();
+        assert_eq!(
+            resets.len(),
+            1,
+            "STOP_SENDING must reach an idle application once"
+        );
+        assert_eq!(
+            resets[0].meta.as_ref().expect("reset metadata").error_code,
+            Some(0x10c)
+        );
     }
 
     #[test]

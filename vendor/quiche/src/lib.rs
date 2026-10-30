@@ -8525,8 +8525,6 @@ impl<F: BufFactory> Connection<F> {
                     Err(e) => return Err(e),
                 };
 
-                let was_writable = stream.is_writable();
-
                 let priority_key = Arc::clone(&stream.priority_key);
 
                 // Save the buffered length before stopping (stop clears the
@@ -8571,9 +8569,11 @@ impl<F: BufFactory> Connection<F> {
 
                     self.streams.insert_reset(stream_id, error_code, final_size);
 
-                    if !was_writable {
-                        self.streams.insert_writable(&priority_key);
-                    }
+                    // stream_writable_next() may have consumed the earlier
+                    // writable notification while the idle stream still had
+                    // capacity. STOP_SENDING is a new notification regardless
+                    // of that capacity; insert_writable deduplicates entries.
+                    self.streams.insert_writable(&priority_key);
 
                     self.stopped_stream_remote_count =
                         self.stopped_stream_remote_count.saturating_add(1);

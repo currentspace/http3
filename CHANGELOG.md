@@ -2,9 +2,19 @@
 
 ## Unreleased
 
+- Propagate peer STOP_SENDING for idle H3 responses so disconnected SSE/proxy
+  clients release upstream work without waiting for the next write.
+
+- Default Node facade Alt-Svc to one day, with `altSvc: { maxAge }` or `false`.
+- Add `listenNest` for Express-backed Nest applications, a streaming HTTP(S)
+  `proxy` handler, and opt-in `server.closeOnSignals` lifecycle cleanup.
+- Add shared-CA project certificates, automatic leaf renewal and `createDevTls`.
+  Add read-only `http3 doctor`, `HTTP3_DEBUG=1` handshake-close observations,
+  and guidance for cache/revalidation protocol evidence in HARs and NetLog.
+
 - Export the Node server factory and Express bridge at the root and publish
   `typesVersions` for legacy TypeScript subpath resolution.
-- Add chainable `setKeepAlive` and `setNoDelay` no-ops to H2/H3 request sockets
+- Add chainable `setKeepAlive`, `setNoDelay` and `setTimeout` no-ops to H2/H3 request sockets
   for framework compatibility, including older Nest SSE implementations.
 - Accept positional and object `listen` arguments on both HTTP servers; validate
   arguments before native startup. Default omitted hosts to dual-stack `::`
