@@ -123,9 +123,10 @@ emulated runs are supplementary reproduction evidence.
 
 When preparing several PRs with Actions temporarily disabled, retain the prior
 repository Actions permissions and verify the disabled setting before pushing.
-Record local checks and unrun platform gates explicitly. Restore the original
-settings after the series is prepared and run consolidated qualification on the
-final candidate; the absence of per-PR checks is not qualification evidence.
+Record local checks and unrun platform gates explicitly. For final consolidated
+qualification, keep automatic workflows disabled while enabling the manual
+Release workflow. Restore original repository/workflow settings after checks
+and final updates are complete; the absence of per-PR checks is not qualification evidence.
 No npm publication is part of preparing the PR series.
 
 For implementation PRs that intentionally retain an already published version,

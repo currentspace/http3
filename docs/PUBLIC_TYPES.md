@@ -18,6 +18,8 @@ It found and corrected these omissions:
 | Catch an oversized Fetch request body | `RequestBodyTooLargeError` from the root, `/fetch`, and `/h3` |
 | Match receive-buffer overflow separately from total body limits | `ERR_HTTP3_RECEIVE_BUFFER_LIMIT` from the root |
 | Annotate runtime fallback details | `RuntimeAttemptFailure` from the root; used by `RuntimeInfo.fastAttempt` |
+| Inspect native binding fallback details (unreleased) | `NativeBindingFailure` from the root; used by `RuntimeInfo.nativeBinding` and `Http3Error.nativeBinding` |
+| Log Node facade runtime selection (unreleased) | Read-only `Http3NodeServer.runtimeInfo`, typed as `RuntimeInfo \| null` |
 | Configure `createFetchHandler` through `/h3` | `FetchHandlerOptions` from `/h3`, matching the existing `/fetch` export |
 | Share options between WASM H3 and raw QUIC servers | `CommonWasmServerOptions` from the Node `/wasm` entry |
 

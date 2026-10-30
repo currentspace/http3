@@ -36,10 +36,19 @@ Used by `createSecureServer()` for server-side TLS material and related helpers.
 
 Used by `createSecureServer()` and `serveFetch()`.
 
+The unreleased platform-coverage series adds automatic WASM fallback when the
+native addon cannot load. All four runtime modes apply to the H3/raw QUIC server
+and client options below. `fallbackPolicy` governs both native fast-to-portable
+and native-binding-to-WASM fallback; explicit native modes never select WASM.
+See [runtime modes](./RUNTIME_MODES.md) for metadata and strict-policy behavior.
+WASM H3 rejects `sessionTicketKeys` and `reusePort: true`; see
+[WASM limitations](./WASM_RUNTIME.md#current-limitations) for other native-only
+options.
+
 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the QUIC/H3 worker. |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable' \| 'wasm'` | `'auto'` | Runtime selection policy for the QUIC/H3 worker. |
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
@@ -93,7 +102,7 @@ Used by `connect()` and `connectAsync()`.
 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the QUIC/H3 client worker. |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable' \| 'wasm'` | `'auto'` | Runtime selection policy for the QUIC/H3 client worker. |
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `ca` | `string \| Buffer \| Array<string \| Buffer>` | `none` | PEM-encoded CA bundle used to verify the remote certificate. |
@@ -151,7 +160,7 @@ Used by `createQuicServer()`.
 | `ca` | `Buffer \| string` | `none` | PEM-encoded CA bundle used to verify client certificates. |
 | `clientAuth` | `'none' \| 'request' \| 'require'` | `'require'` when `ca` is set, otherwise `'none'` | `'require'` closes clients that do not present a verifiable certificate; `'request'` accepts anonymous clients but records a verified client cert when one is presented. |
 | `alpn` | `string[]` | `['quic']` | ALPN protocols advertised by the raw QUIC server. |
-| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the raw QUIC server worker. |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable' \| 'wasm'` | `'auto'` | Runtime selection policy for the raw QUIC server worker. |
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `maxIdleTimeoutMs` | `number` | `30000` | QUIC idle timeout in milliseconds. |
@@ -176,7 +185,7 @@ Used by `connectQuic()` and `connectQuicAsync()`.
 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Runtime selection policy for the raw QUIC client worker. |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable' \| 'wasm'` | `'auto'` | Runtime selection policy for the raw QUIC client worker. |
 | `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Only used when `runtimeMode` is `'auto'`. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Called when runtime selection resolves or falls back. |
 | `ca` | `Buffer \| string` | `none` | PEM-encoded CA bundle used to verify the remote certificate. |
