@@ -45,9 +45,17 @@ for browser clients. The factory adds `Alt-Svc: h3=":PORT"; ma=60`; a handler ca
 replace or remove it. This advertises the bound port, so deployments with port
 translation must set the externally reachable port themselves.
 
+## Listener and TypeScript compatibility (unreleased after 0.9.6)
+
+Omitted hosts now bind dual-stack `::`, on all interfaces. Both stream and Node
+servers accept object and positional forms. See [local development](./LOCAL_DEVELOPMENT.md)
+for loopback-only bindings and locally trusted Chrome H3. The Node factory and
+Express bridge are also exported at the root; legacy TypeScript `node` module
+resolution can resolve the subpaths through `typesVersions`.
+
 ## Supported surface
 
-- `listen({ port, host }, callback)`, `address()`, `listening`, `close(callback)`,
+- `listen({ port, host }, callback)` and `listen(port, host, callback)`, `address()`, `listening`, `close(callback)`,
   and `listening`, `error`, `close` events. Hostnames are resolved before binding.
 - Readable request bodies with `method`, `url`, normalized `headers`, `rawHeaders`,
   trailers, protocol version, completion/abort state, and peer address metadata.
@@ -55,7 +63,8 @@ translation must set the externally reachable port themselves.
   cookies, `writeHead`, `flushHeaders`, `addTrailers`, and body suppression for
   HEAD, 204 and 304. HTTP/1 hop-by-hop response headers are removed on H2/H3.
 - A stream-scoped `socket` facade exposes peer IP/port, encryption/ALPN, timeout
-  and cancellation. Readable/writable lifecycle flags reflect the backing stream.
+  and cancellation. `setKeepAlive()` and `setNoDelay()` return the facade as
+  no-ops on H2/H3; they do not tune the shared connection. Readable/writable lifecycle flags reflect the backing stream.
   Cancelling it resets the request stream, not other requests sharing its QUIC/H2
   connection.
 

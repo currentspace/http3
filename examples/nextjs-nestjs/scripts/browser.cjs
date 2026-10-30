@@ -24,7 +24,6 @@ const { chromium } = require('playwright');
       ...(protocol === 'h2' ? ['--disable-quic'] : ['--origin-to-force-quic-on=localhost:1']),
       // The unused port 1 only enables Chromium's localhost root exception.
       // The app port is learned through Alt-Svc, never forced to QUIC.
-      '--host-resolver-rules=MAP localhost 127.0.0.1',
       `--ignore-certificate-errors-spki-list=${pin}`,
     ] });
     report.browser = browser.version();
@@ -36,6 +35,7 @@ const { chromium } = require('playwright');
     cdp.on('Network.responseReceived', ({ response }) => {
       if (response.url.startsWith(origin)) report.responses.push({
         url: response.url, status: response.status, protocol: response.protocol, headers: response.headers,
+        remoteIPAddress: response.remoteIPAddress,
       });
     });
     cdp.on('Network.webSocketHandshakeResponseReceived', e => report.websocketStatuses.push(e.response.status));

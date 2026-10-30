@@ -73,5 +73,5 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 try {
   await nest.init();
   await web.prepare();
-  server.listen({ port, host: '127.0.0.1' }, () => console.log(`Ready: https://localhost:${port} pid=${process.pid}`));
+  server.listen({ port, host: process.env.HTTP3_HOST ?? '::' }, () => console.log(`Ready: https://localhost:${port} pid=${process.pid}`));
 } catch (error) { fail(error); }

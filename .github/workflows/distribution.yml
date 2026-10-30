@@ -19,6 +19,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         node-version: ['24.22.1', '26.12.1']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,4 +51,17 @@ jobs:
         run: pnpm run test:release
 
       - name: Smoke install packed artifact
-        run: pnpm run smoke:install
+        run: node scripts/smoke-install.mjs
+
+      - name: Install browser trust test dependencies
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y libnss3-tools ca-certificates
+          fi
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Verify dev-cert trust, Node clients and Chromium Alt-Svc
+        env:
+          HTTP3_TEST_INSTALL_DEV_CA: '1'
+        run: node scripts/test-dev-cert-browser.mjs

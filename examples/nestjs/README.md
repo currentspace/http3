@@ -20,7 +20,7 @@ npm start
 ```
 
 Open `https://localhost:3443`. `PORT`, `TLS_KEY_FILE`, and `TLS_CERT_FILE` can
-override the defaults. The listener binds to `127.0.0.1` for local use.
+override the defaults. The listener defaults to dual-stack `::` (all interfaces); `HTTP3_HOST` overrides it.
 
 The certificate command creates a self-signed certificate without changing
 system trust. CLI checks can trust it explicitly:
@@ -52,7 +52,7 @@ const adapter = new FastifyAdapter<Server>({
   serverFactory: factory as unknown as FastifyServerOptions<Server>['serverFactory'],
 });
 const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter);
-await app.listen(3443, '127.0.0.1');
+await app.listen(3443, process.env.HTTP3_HOST ?? '::');
 ```
 
 `Server` is imported as a type from `node:https`. The type assertion is confined
@@ -99,3 +99,17 @@ Nest plugins. CI runs the example against the published package on Node 24/26.
   unsupported APIs, and bounded best-effort shutdown.
 
 This example adds no new library export or runtime dependency to the library.
+
+## Local trust and IPv6
+
+The source example now binds dual-stack `::` (all interfaces) by default, so
+Chromium's localhost QUIC attempt to ::1 can reach it. `HTTP3_HOST` selects an
+explicit bind address. The certificate SANs include IPv4 and IPv6 loopback;
+browser tests do not force localhost to IPv4. For strictly local IPv4 use, bind
+127.0.0.1 and use that IP consistently in URLs.
+
+The unreleased `http3 dev-cert` CLI provides a constrained CA and explicit trust
+installation/removal. See [local development](../../docs/LOCAL_DEVELOPMENT.md).
+Set `TLS_KEY_FILE`, `TLS_CERT_FILE`, and (for internal clients) `TLS_CA_FILE`;
+set `NODE_EXTRA_CA_CERTS` before starting Node's ordinary HTTPS clients. The
+existing `npm run certs` helper still only writes self-signed test certificates.

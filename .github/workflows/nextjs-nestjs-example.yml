@@ -5,6 +5,7 @@ on:
     paths:
       - 'lib/**'
       - 'src/**'
+      - 'scripts/pack-host-native.mjs'
       - 'examples/nextjs-nestjs/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'lib/**'
       - 'src/**'
+      - 'scripts/pack-host-native.mjs'
       - 'examples/nextjs-nestjs/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -56,9 +58,10 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/combined"
           npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/candidate"
+          node scripts/pack-host-native.mjs "$RUNNER_TEMP/candidate"
           cp -R examples/nextjs-nestjs/{src,web,scripts,package.json,tsconfig.json} "$RUNNER_TEMP/combined/"
           cd "$RUNNER_TEMP/combined"
-          npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP"/candidate/*.tgz
+          npm install --include=optional --no-save --package-lock=false --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP"/candidate/*.tgz
           npx playwright install --with-deps chromium
           npm run certs
           npm run build:server

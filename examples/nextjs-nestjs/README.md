@@ -23,16 +23,19 @@ npm run dev
 
 Use Node 24+ on a supported native platform. From the repository root, install
 dependencies and build the library, then install its candidate tarball in the
-example. The local tarball override below tests this checkout, including before
+example. Pack the freshly built platform sidecar too; otherwise a same-version
+registry sidecar can hide native source changes. The local tarball override below tests this checkout, including before
 the next version is on npm. A tarball also avoids a package
 symlink outside Turbopack's example root.
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm run build
-npm pack --ignore-scripts
+mkdir -p /tmp/http3-candidate
+npm pack --ignore-scripts --pack-destination /tmp/http3-candidate
+node scripts/pack-host-native.mjs /tmp/http3-candidate
 cd examples/nextjs-nestjs
-npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund ../../currentspace-http3-0.9.6.tgz
+npm install --include=optional --no-save --package-lock=false --ignore-scripts --no-audit --no-fund /tmp/http3-candidate/*.tgz
 npm run certs
 npm run dev
 ```
@@ -126,3 +129,17 @@ Node facade supports a subset of Node's HTTP APIs; plugins needing raw sockets,
 informational responses, or HTTP/3 WebSockets need separate support. See
 [the facade contract](../../docs/NODE_SERVER.md) and
 [Next's custom-server guidance](https://nextjs.org/docs/app/guides/custom-server).
+
+## Local trust and IPv6
+
+The source example now binds dual-stack `::` (all interfaces) by default, so
+Chromium's localhost QUIC attempt to ::1 can reach it. `HTTP3_HOST` selects an
+explicit bind address. The certificate SANs include IPv4 and IPv6 loopback;
+browser tests do not force localhost to IPv4. For strictly local IPv4 use, bind
+127.0.0.1 and use that IP consistently in URLs.
+
+The unreleased `http3 dev-cert` CLI provides a constrained CA and explicit trust
+installation/removal. See [local development](../../docs/LOCAL_DEVELOPMENT.md).
+Set `TLS_KEY_FILE`, `TLS_CERT_FILE`, and (for internal clients) `TLS_CA_FILE`;
+set `NODE_EXTRA_CA_CERTS` before starting Node's ordinary HTTPS clients. The
+existing `npm run certs` helper still only writes self-signed test certificates.

@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import { parseListenArgs, validateListenPort } from './listen-options.js';
+import type { ListenOptions } from './listen-options.js';
 import { createSecureServer as createHttp2SecureServer, constants as http2Constants } from 'node:http2';
 import type { Http2SecureServer, Http2Session, Http2ServerRequest, Http2ServerResponse, IncomingHttpHeaders, ServerHttp2Stream } from 'node:http2';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -191,14 +193,19 @@ export class Http3SecureServer extends EventEmitter {
   /**
    * Start listening for QUIC and HTTP/2 connections.
    * @param port - UDP/TCP port to bind.
-   * @param host - Bind address (default `'0.0.0.0'`).
+   * @param host - Bind IP address (default `'::'`, all interfaces, dual stack).
    */
-  listen(port: number, host?: string): this {
+  listen(options: ListenOptions, callback?: () => void): this;
+  listen(port: number, callback?: () => void): this;
+  listen(port: number, host?: string, callback?: () => void): this;
+  listen(portOrOptions: number | ListenOptions, hostOrCallback?: string | (() => void), callback?: () => void): this {
     if (this._eventLoop || this._h2Server || this._starting) {
       throw new Http3Error('server is already listening', ERR_HTTP3_INVALID_STATE);
     }
 
-    const listenHost = host ?? '0.0.0.0';
+    const { port, host: listenHost, callback: onListening } = parseListenArgs(portOrOptions, hostOrCallback, callback);
+    validateListenPort(port);
+    if (onListening) this.once('listening', onListening);
     const { key, cert } = this._resolveNativeTlsCreds();
     const ca = this._getNativeCa();
     const serverId = this._resolveServerId();

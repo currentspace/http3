@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Export the Node server factory and Express bridge at the root and publish
+  `typesVersions` for legacy TypeScript subpath resolution.
+- Add chainable `setKeepAlive` and `setNoDelay` no-ops to H2/H3 request sockets
+  for framework compatibility, including older Nest SSE implementations.
+- Accept positional and object `listen` arguments on both HTTP servers; validate
+  arguments before native startup. Default omitted hosts to dual-stack `::`
+  (all interfaces), update the Next/Nest examples, and fix IPv6 URL parsing.
+- Add `http3 dev-cert` with constrained localhost certificates, explicit trust
+  and untrust commands, and Node/Chromium local-development instructions.
+- Remove native binary duplicates, docs, and examples from the root tarball.
+  Native installs use optional platform packages; docs/examples remain on GitHub.
+
 ## 0.9.6
 
 - Join split HTTP/3 Cookie fields with `; ` in the Node request facade, matching

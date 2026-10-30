@@ -49,7 +49,10 @@ export type { HealthSnapshot, HealthServerOptions, HealthServerHandle, GracefulS
 export { loadTlsOptionsFromAwsEnv } from './aws-cert.js';
 export type { AwsTlsEnv, AwsTlsSecretShape } from './aws-cert.js';
 
-export { createExpressAdapter } from './express-adapter.js';
+export { createExpressAdapter, createExpressHandler } from './express-adapter.js';
+export { createNodeServerFactory, Http3NodeServer, Http3IncomingMessage, Http3ServerResponse } from './node-server.js';
+export type { NodeServerOptions } from './node-server.js';
+export type { ListenOptions } from './listen-options.js';
 export type { ExpressLikeHandler, ExpressLikeRequest, ExpressLikeResponse } from './express-adapter.js';
 
 export { createQuicServer, QuicServer, QuicServerSession } from './quic-server.js';

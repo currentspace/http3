@@ -39,6 +39,7 @@ export async function bindNodeUdpServer(
   const type = isIP(host) === 6 ? 'udp6' : 'udp4';
   const socket = dgram.createSocket({
     type,
+    ipv6Only: false,
     recvBufferSize: opts.recvBufferSize ?? DEFAULT_RECV_BUFFER_SIZE,
   });
 

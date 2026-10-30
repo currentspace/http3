@@ -11,7 +11,7 @@ if (existsSync(key) || existsSync(cert)) {
 execFileSync('openssl', [
   'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
   '-nodes', '-days', '30', '-subj', '/CN=localhost',
-  '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+  '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1',
   '-keyout', key, '-out', cert,
 ], { stdio: 'inherit' });
 console.log('Created a self-signed localhost certificate. No system trust settings were changed.');

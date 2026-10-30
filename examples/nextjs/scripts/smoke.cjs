@@ -51,7 +51,6 @@ async function until(predicate, timeout, description) {
       // Chromium permits unknown roots by hostname, but forced transport matches host AND port.
       ...(!forceH2 ? ['--origin-to-force-quic-on=localhost:1'] : []),
       ...(process.env.HTTP3_NETLOG ? [`--log-net-log=${process.env.HTTP3_NETLOG}`] : []),
-      '--host-resolver-rules=MAP localhost 127.0.0.1',
       `--ignore-certificate-errors-spki-list=${pin}`,
     ] });
     report.browser = browser.version();

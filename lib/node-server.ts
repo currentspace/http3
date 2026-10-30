@@ -9,6 +9,8 @@ import { createSecureServer } from './server.js';
 import type { AddressInfo, ServerOptions } from './server.js';
 import type { IncomingHeaders, ServerHttp3Stream, StreamFlags } from './stream.js';
 import type { Http3ServerSession } from './session.js';
+import { parseListenArgs, validateListenPort } from './listen-options.js';
+import type { ListenOptions } from './listen-options.js';
 
 type HeaderValue = string | number | string[];
 type Headers = Record<string, HeaderValue>;
@@ -34,6 +36,10 @@ class RequestSocket extends EventEmitter {
   get writable(): boolean { return this.stream.writable; }
   get readableEnded(): boolean { return this.stream.readableEnded; }
   get writableEnded(): boolean { return this.stream.writableEnded; }
+  // TCP tuning is not meaningful for an individual H2/H3 request stream.
+  // In particular, never change the shared H2 connection for one SSE request.
+  setKeepAlive(_enable?: boolean, _initialDelay?: number): this { return this; }
+  setNoDelay(_noDelay?: boolean): this { return this; }
   setTimeout(ms: number, callback?: () => void): this {
     if (callback) this.once('timeout', callback);
     this.stream.setTimeout(ms);
@@ -322,20 +328,23 @@ export class Http3NodeServer extends EventEmitter {
     this.emit('error', error);
   }
   address(): AddressInfo | null { return this.transport.address(); }
-  listen(options: { port?: number; host?: string; path?: string }, callback?: () => void): this {
-    if (options.path) throw new TypeError('HTTP/3 requires an IP port, not a Unix socket');
+  listen(options: ListenOptions, callback?: () => void): this;
+  listen(port: number, callback?: () => void): this;
+  listen(port: number, host?: string, callback?: () => void): this;
+  listen(portOrOptions: number | ListenOptions, hostOrCallback?: string | (() => void), callback?: () => void): this {
+    const options = parseListenArgs(portOrOptions, hostOrCallback, callback);
     if (this.starting || this.listening || this.closing) throw new Error('Server is already started or closing');
     this.starting = true;
-    if (callback) this.once('listening', callback);
+    if (options.callback) this.once('listening', options.callback);
     const start = (host: string): void => {
       try {
-        const port = options.port ?? 0;
-        if (!Number.isInteger(port) || port < 0 || port > 65535) throw new RangeError('port must be an integer between 0 and 65535');
+        const port = options.port;
+        validateListenPort(port);
         this.transport.listen(port, host);
       }
       catch (error) { process.nextTick(() => this.startFailed(error as Error)); }
     };
-    const host = options.host ?? '127.0.0.1';
+    const host = options.host;
     if (isIP(host)) start(host);
     else lookup(host, (error, address) => {
       if (error) this.startFailed(error);

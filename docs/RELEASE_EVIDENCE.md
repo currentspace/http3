@@ -3,7 +3,7 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
-## 0.9.6 candidate
+## 0.9.6
 
 ### Scope and state
 
@@ -12,7 +12,8 @@ and remaining qualification work for each release candidate.
 - Root, Rust, and all three native sidecars are aligned to 0.9.6. The combined
   example requires 0.9.6 and is included in the root package tarball.
 - The user authorized release of 0.9.6 with the example and both fixes.
-- Publication is not complete. npm still reports latest 0.9.5 and no 0.9.6.
+- Published as tag `v0.9.6` at `ee87a98`; all four packages report 0.9.6.
+  See the [release record](https://github.com/currentspace/http3/releases/tag/v0.9.6).
 
 ### Implementation qualification before the version bump
 
@@ -29,13 +30,20 @@ and remaining qualification work for each release candidate.
 - Artifacts are under `artifacts/nestjs-investigation/`. These checks used
   the source candidate still labeled 0.9.5, not a published release artifact.
 
-### Remaining release qualification
+### Publication qualification
 
-- Validate the versioned candidate and packed sample, local release gates,
-  final hosted checks, and the nonpublishing native/WASM release workflow.
-- Complete current Safari qualification with matching curl H3/H2 evidence.
-- Publish all four packages, create the matching tag and GitHub release, then
-  verify registry dist-tags and a clean installed 0.9.6 sample.
+- All 30 PR checks and release dry-run
+  [40982370278](https://github.com/currentspace/http3/actions/runs/40982370278)
+  passed; publishing run
+  [40984291721](https://github.com/currentspace/http3/actions/runs/40984291721)
+  completed.
+- Clean registry installation passed H1/H2/H3 API checks and eight combined-app
+  Chromium combinations on Node 24/26, development/production, H3/H2.
+- Manual latest-stable Safari qualification remains incomplete. The user
+  explicitly approved publishing with that limitation documented. Playwright
+  WebKit checks are not a Safari qualification pass.
+- Post-merge verification passed on retry after an unchanged Hono example test
+  initially encountered `EADDRINUSE` on an ephemeral port.
 
 ## 0.9.5 candidate
 

@@ -131,10 +131,13 @@ export function parseConnectionEndpoint(
         { endpoint },
       );
     }
+    // WHATWG URL keeps brackets around IPv6 hostnames. DNS and isIP expect
+    // the address without them; keep brackets only in wire authorities.
+    const host = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
     return {
-      host: url.hostname,
+      host,
       port,
-      servername: url.hostname,
+      servername: host,
       authority: endpoint,
     };
   } catch (err: unknown) {
