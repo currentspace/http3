@@ -149,6 +149,7 @@ export interface Http3WasmExports {
     headersJsonLen: number,
   ): bigint;
   hs_stream_send(this: void, handle: number, connHandle: number, streamId: bigint, ptr: number, len: number, fin: number): bigint;
+  hs_stream_read_credit(this: void, handle: number, connHandle: number, streamId: bigint, bytes: number): bigint;
   hs_stream_close(this: void, handle: number, connHandle: number, streamId: bigint, errorCode: number): bigint;
   hs_send_datagram(this: void, handle: number, connHandle: number, ptr: number, len: number): bigint;
   hs_ping(this: void, handle: number, connHandle: number): bigint;

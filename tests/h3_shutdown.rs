@@ -124,6 +124,7 @@ fn setup_h3_pair() -> H3Pair {
     let (server_quiche, client_quiche) = build_h3_quiche_configs(&cert_pem, &key_pem);
 
     let http3_config = Http3Config {
+        stream_read_window: None,
         qlog_dir: None,
         qlog_level: None,
         qpack_max_table_capacity: None,

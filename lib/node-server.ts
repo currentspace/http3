@@ -226,7 +226,9 @@ export class Http3ServerResponse extends Writable {
     } catch (error) { callback(error as Error); }
   }
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    if (error && !this.req.stream.destroyed) this.socket.destroy();
+    // Writable auto-destroys after a successful finish; only an unfinished
+    // response needs cancellation, including destroy() without an Error.
+    if (!this.writableFinished && !this.req.stream.destroyed) this.socket.destroy();
     callback(error);
   }
 }
@@ -313,6 +315,7 @@ export class Http3NodeServer extends EventEmitter {
       session.once('close', () => this.sessions.delete(session));
     });
     this.transport.on('error', error => this.startFailed(error));
+    this.transport.on('sessionError', (error, session) => this.emit('sessionError', error, session));
     this.transport.on('listening', () => {
       this.starting = false;
       this.listening = true;

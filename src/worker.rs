@@ -80,6 +80,11 @@ pub enum WorkerCommand {
         chunk: Chunk,
         fin: bool,
     },
+    StreamReadCredit {
+        conn_handle: u32,
+        stream_id: u64,
+        bytes: usize,
+    },
     StreamClose {
         conn_handle: u32,
         stream_id: u64,
@@ -513,6 +518,7 @@ fn command_conn_handle(cmd: &WorkerCommand) -> u32 {
         | WorkerCommand::SendResponse { conn_handle, .. }
         | WorkerCommand::StreamSend { conn_handle, .. }
         | WorkerCommand::StreamClose { conn_handle, .. }
+        | WorkerCommand::StreamReadCredit { conn_handle, .. }
         | WorkerCommand::SendTrailers { conn_handle, .. }
         | WorkerCommand::CloseSession { conn_handle, .. }
         | WorkerCommand::SendDatagram { conn_handle, .. }
@@ -562,6 +568,15 @@ fn remap_command_handle(cmd: WorkerCommand) -> WorkerCommand {
             stream_id,
             chunk,
             fin,
+        },
+        WorkerCommand::StreamReadCredit {
+            conn_handle,
+            stream_id,
+            bytes,
+        } => WorkerCommand::StreamReadCredit {
+            conn_handle: local_conn_handle(conn_handle),
+            stream_id,
+            bytes,
         },
         WorkerCommand::StreamClose {
             conn_handle,
@@ -2134,6 +2149,7 @@ where
         let outbound_admission = Arc::new(OutboundAdmission::default());
         let admission_ref = Arc::clone(&outbound_admission);
         let http3_clone = Http3Config {
+            stream_read_window: http3_config.stream_read_window,
             qlog_dir: http3_config.qlog_dir.clone(),
             qlog_level: http3_config.qlog_level.clone(),
             qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
@@ -2201,6 +2217,7 @@ where
         let outbound_admission = Arc::new(OutboundAdmission::default());
         let admission_ref = Arc::clone(&outbound_admission);
         let http3_clone = Http3Config {
+            stream_read_window: http3_config.stream_read_window,
             qlog_dir: http3_config.qlog_dir.clone(),
             qlog_level: http3_config.qlog_level.clone(),
             qpack_max_table_capacity: http3_config.qpack_max_table_capacity,
@@ -2681,6 +2698,7 @@ impl H3ServerHandler {
                 return;
             };
 
+            conn.stream_read_window = self.http3_config.stream_read_window;
             if conn.recv(buf, recv_info).is_err() {
                 return;
             }
@@ -3231,6 +3249,12 @@ impl H3ServerHandler {
     /// outbound-admission units from any abandoned pending write/response
     /// (for a caller that wants to track its own backpressure gauge; the
     /// direct-call surface itself doesn't require this).
+    pub fn stream_read_credit(&mut self, conn_handle: u32, stream_id: u64, bytes: usize) {
+        if let Some(conn) = self.conn_map.get_mut(conn_handle as usize) {
+            conn.add_read_credit(stream_id, bytes);
+        }
+    }
+
     pub fn close_stream(
         &mut self,
         conn_handle: u32,
@@ -3517,6 +3541,13 @@ impl ProtocolHandler for H3ServerHandler {
                 } else {
                     self.release_outbound_admission(outbound_units, batch);
                 }
+            }
+            WorkerCommand::StreamReadCredit {
+                conn_handle,
+                stream_id,
+                bytes,
+            } => {
+                self.stream_read_credit(conn_handle, stream_id, bytes);
             }
             WorkerCommand::StreamClose {
                 conn_handle,
@@ -3805,6 +3836,7 @@ impl ProtocolHandler for H3ServerHandler {
                 return;
             };
 
+            conn.stream_read_window = self.http3_config.stream_read_window;
             if conn.recv(buf, recv_info).is_err() {
                 return;
             }

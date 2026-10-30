@@ -148,6 +148,7 @@ export interface Http3SecureServer {
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'runtime', listener: (info: RuntimeInfo) => void): this;
   on(event: 'session', listener: (session: Http3ServerSession) => void): this;
+  on(event: 'sessionError', listener: (error: Error, session: Http3ServerSession) => void): this;
   on(event: 'stream', listener: StreamListener): this;
   on(event: 'request', listener: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void): this;
   on(event: 'upgrade', listener: (req: IncomingMessage, socket: Socket, head: Buffer) => void): this;
@@ -311,7 +312,7 @@ export class Http3SecureServer extends EventEmitter {
         });
 
         const eventLoop = new WorkerEventLoop(workerServer);
-        const addrInfo = workerServer.listen(port, listenHost);
+        const addrInfo = workerServer.listen(port, listenHost, 64 * 1024);
         return { workerServer, eventLoop, addrInfo };
       });
     } catch (err: unknown) {
@@ -416,6 +417,7 @@ export class Http3SecureServer extends EventEmitter {
             const { bindNodeUdpServer } = await import('./wasm/node-udp-server-adapter.js');
             return new WasmLoopCtor(
               {
+                streamReadWindow: 64 * 1024,
                 core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
                 transportFactory: bindNodeUdpServer,
                 key: tls.key,
@@ -737,6 +739,7 @@ export class Http3SecureServer extends EventEmitter {
     if (existing) return existing;
 
     const session = new Http2ServerSessionAdapter(h2Session);
+    session.on('error', error => this.emit('sessionError', error, session));
     this._h2Sessions.set(h2Session, session);
     session.once('close', () => {
       this._h2Sessions.delete(h2Session);
@@ -862,6 +865,7 @@ export class Http3SecureServer extends EventEmitter {
 
   private _onNewSession(event: NativeEvent): void {
     const session = new Http3ServerSession();
+    session.on('error', error => this.emit('sessionError', error, session));
     session._connHandle = event.connHandle;
     session._remoteAddress = event.meta?.remoteAddr ?? '';
     session._remotePort = event.meta?.remotePort ?? 0;

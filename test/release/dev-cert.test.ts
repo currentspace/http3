@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync, execFile } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import { generateDevCertificate, devTrustCommands } from '../../lib/dev-cert.js';
 
@@ -40,7 +40,7 @@ test('dev-cert issues constrained localhost certificates, preserves keys, and re
   assert.match(outside.stdout + outside.stderr, /permitted subtree violation/i);
 
   const mac = devTrustCommands(dir, ca, false, 'darwin');
-  assert.deepEqual(mac[0]!.args.slice(0, 6), ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k']);
+  assert.deepEqual(mac[0]!.args.slice(0, 8), ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-p', 'ssl', '-k']);
   const remove = devTrustCommands(dir, ca, true, 'darwin');
   assert.ok(remove[0]!.args.includes('deny'));
   assert.equal(remove[0]!.args.at(-1), join(dir, 'ca.pem'));
@@ -85,4 +85,30 @@ test('project certificates share a constrained CA and renew without replacing ke
   assert.ok(Date.parse(renewed.validTo) > Date.parse(old.validTo));
   assert.notEqual(old.serialNumber, renewed.serialNumber);
   assert.deepEqual(readFileSync(join(project, 'key.pem')), key);
+});
+
+
+test('stock macOS LibreSSL issues and reuses a verified certificate', { skip: process.platform !== 'darwin' }, t => {
+  const dir = mkdtempSync(join(tmpdir(), 'http3-libressl-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const entry = resolve(__dirname, '../../lib/dev-cert.js');
+  execFileSync(process.execPath, ['-e', `const {generateDevCertificate}=require(process.argv[1]); generateDevCertificate(process.argv[2]); generateDevCertificate(process.argv[2]);`, entry, dir],
+    { env: { ...process.env, PATH: '/usr/bin:/bin' }, stdio: 'pipe' });
+  assert.ok(new X509Certificate(readFileSync(join(dir, 'cert.pem'))).checkHost('localhost'));
+});
+
+test('concurrent projects safely share first-run CA generation', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'http3-cert-race-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const entry = resolve(__dirname, '../../lib/dev-cert.js');
+  const shared = join(dir, 'authority');
+  await Promise.all(Array.from({ length: 6 }, (_, i) => new Promise<void>((resolve, reject) => {
+    execFile(process.execPath, ['-e', 'require(process.argv[1]).generateDevCertificate(process.argv[2], process.argv[3])', entry, join(dir, 'project-' + i % 2), shared],
+      { timeout: 10000 }, error => error ? reject(error) : resolve());
+  })));
+  const ca = new X509Certificate(readFileSync(join(shared, 'ca.pem')));
+  for (const name of ['project-0', 'project-1']) {
+    const cert = new X509Certificate(readFileSync(join(dir, name, 'cert.pem')));
+    assert.ok(cert.verify(ca.publicKey));
+  }
 });

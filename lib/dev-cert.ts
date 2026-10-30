@@ -1,7 +1,7 @@
 /** Local development certificates. This module never loads the native addon. */
 import { createHash, randomBytes, createPrivateKey, createPublicKey, X509Certificate } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -27,6 +27,12 @@ function command(file: string, args: string[]): string {
   return execFileSync(file, args, { encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] }).trim();
 }
 function openssl(args: string[]): string { return command('openssl', args); }
+function verifyLeaf(caFile: string, leafFile: string): void {
+  // LibreSSL's verify command lacks -verify_hostname. Keep full chain/purpose
+  // verification there and perform the hostname check with Node's X509 API.
+  openssl(['verify', '-CAfile', caFile, '-purpose', 'sslserver', leafFile]);
+  if (!new X509Certificate(readFileSync(leafFile)).checkHost('localhost')) throw new Error('Leaf certificate does not cover localhost');
+}
 function fingerprint(cert: X509Certificate): string { return cert.fingerprint256.replaceAll(':', '').toLowerCase(); }
 function privateFile(path: string, contents: string): void { writeFileSync(path, contents, { mode: 0o600, flag: 'wx' }); }
 
@@ -60,9 +66,25 @@ export function createDevTls(options: DevTlsOptions = {}): { key: Buffer; cert: 
 export function generateDevCertificate(directory: string, caDirectory = directory): void {
   directory = resolve(directory);
   caDirectory = resolve(caDirectory);
+  if (caDirectory !== directory) generateDevCertificate(caDirectory);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const lock = join(directory, '.generation-lock');
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try { mkdirSync(lock, { mode: 0o700 }); break; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (Date.now() >= deadline) throw new Error(`Certificate generation is locked at ${lock}; another process may be generating certificates. If it exited, remove that lock directory and retry.`, { cause: error });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try { generateDevCertificateLocked(directory, caDirectory); }
+  finally { rmSync(lock, { recursive: true, force: true }); }
+}
+
+function generateDevCertificateLocked(directory: string, caDirectory: string): void {
   if (caDirectory !== directory) {
     // The shared directory owns the CA key; projects receive only its public certificate.
-    generateDevCertificate(caDirectory);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     for (const file of ['ca.pem', 'ca.json']) {
       const source = readFileSync(join(caDirectory, file));
@@ -82,6 +104,7 @@ export function generateDevCertificate(directory: string, caDirectory = director
     // localhost and its subdomains, not arbitrary development or public names.
     const config = join(directory, 'ca.cnf');
     privateFile(config, `[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ca\n[dn]\nCN=http3 localhost development CA\n[ca]\nbasicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\nnameConstraints=critical,permitted;DNS:localhost,permitted;DNS:.localhost,permitted;IP:127.0.0.0/255.0.0.0,permitted;IP:0:0:0:0:0:0:0:1/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\n`);
+    privateFile(join(directory, 'ca-key.pem'), '');
     openssl(['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '365', '-config', config,
       '-keyout', join(directory, 'ca-key.pem'), '-out', caFile]);
     chmodSync(join(directory, 'ca-key.pem'), 0o600);
@@ -93,7 +116,7 @@ export function generateDevCertificate(directory: string, caDirectory = director
     if (!createPublicKey(createPrivateKey(readFileSync(join(directory, 'key.pem')))).equals(cert.publicKey)) throw new Error('Leaf key does not match cert.pem');
     if (!cert.verify(ca.publicKey) || !cert.checkHost('localhost')) throw new Error('Existing leaf does not match this localhost CA');
     if (Date.parse(cert.validTo) > Date.now() + 86400000) {
-      openssl(['verify', '-CAfile', caFile, '-verify_hostname', 'localhost', join(directory, 'cert.pem')]);
+      verifyLeaf(caFile, join(directory, 'cert.pem'));
       return;
     }
     // Renew with the existing key so readers cannot observe a new key with an old leaf.
@@ -106,13 +129,15 @@ export function generateDevCertificate(directory: string, caDirectory = director
   const config = join(directory, 'leaf.cnf');
   writeFileSync(config, `[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=localhost\n[leaf]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n`, { mode: 0o600 });
   const keyFile = join(directory, 'key.pem');
-  const keyArgs = existsSync(keyFile) ? ['-key', keyFile] : ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', keyFile];
+  const hasKey = existsSync(keyFile);
+  if (!hasKey) privateFile(keyFile, '');
+  const keyArgs = hasKey ? ['-key', keyFile] : ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', keyFile];
   openssl(['req', '-new', ...keyArgs, '-config', config, '-out', join(directory, 'leaf.csr')]);
   chmodSync(join(directory, 'key.pem'), 0o600);
   openssl(['x509', '-req', '-in', join(directory, 'leaf.csr'), '-CA', caFile, '-CAkey', join(caDirectory, 'ca-key.pem'),
     '-set_serial', '0x' + randomBytes(16).toString('hex'),
     '-days', String(days), '-extfile', config, '-extensions', 'leaf', '-out', join(directory, 'cert.next.pem')]);
-  openssl(['verify', '-CAfile', caFile, '-verify_hostname', 'localhost', join(directory, 'cert.next.pem')]);
+  verifyLeaf(caFile, join(directory, 'cert.next.pem'));
   renameSync(join(directory, 'cert.next.pem'), join(directory, 'cert.pem'));
 }
 
@@ -131,7 +156,7 @@ export function devTrustCommands(
       // distrust uses the same supported update API as trust installation and
       // also rejects the CA if a server sends it in a certificate chain.
       { file: 'sudo', args: ['security', 'add-trusted-cert', '-d', '-r', 'deny', '-k', keychain, caFile] },
-    ] : [{ file: 'sudo', args: ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', keychain, caFile] }];
+    ] : [{ file: 'sudo', args: ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-p', 'ssl', '-k', keychain, caFile] }];
   }
   if (platform === 'linux') {
     if (!options.linuxTool || (!remove && !options.nssDirectories?.length)) throw new Error('Linux trust needs update-ca-certificates/update-ca-trust and an NSS database');

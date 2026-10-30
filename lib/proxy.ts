@@ -1,3 +1,4 @@
+import { pipeline } from 'node:stream';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingMessage, ServerResponse, IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http';
@@ -18,6 +19,8 @@ export interface ProxyOptions {
   rewrite?: (path: string, request: IncomingMessage) => string;
   /** Upstream socket inactivity timeout. Default: 30 seconds; 0 disables it for quiet SSE. */
   timeoutMs?: number;
+  /** Deadline for DNS, TCP and TLS setup. Default: 10 seconds, even for idle SSE. */
+  connectTimeoutMs?: number;
   /** CA for an HTTPS upstream. Certificate verification is always enabled. */
   ca?: SecureContextOptions['ca'];
 }
@@ -30,6 +33,8 @@ export function proxy(upstream: string | URL, options: ProxyOptions = {}): (req:
   }
   const timeoutMs = options.timeoutMs ?? 30_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 2147483647) throw new RangeError('proxy timeoutMs must be between 0 and 2147483647');
+  const connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
+  if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs < 1 || connectTimeoutMs > 2147483647) throw new RangeError('proxy connectTimeoutMs must be between 1 and 2147483647');
   return (req, res) => {
     let path: string;
     try {
@@ -49,6 +54,12 @@ export function proxy(upstream: string | URL, options: ProxyOptions = {}): (req:
     let request: ReturnType<typeof httpRequest>;
     try { request = send(target, { method: req.method, path, headers, ca: options.ca, rejectUnauthorized: true }); }
     catch { res.statusCode = 502; res.end('Invalid upstream request'); req.resume(); return; }
+    const connectTimer = setTimeout(() => request.destroy(new Error('Upstream connection timed out')), connectTimeoutMs);
+    request.once('close', () => clearTimeout(connectTimer));
+    request.once('socket', socket => {
+      if (!socket.connecting) clearTimeout(connectTimer); // pooled connection
+      else socket.once(target.protocol === 'https:' ? 'secureConnect' : 'connect', () => clearTimeout(connectTimer));
+    });
     let response: IncomingMessage | undefined;
     const abort = (): void => { request.destroy(); response?.destroy(); };
     const downstreamClosed = (): void => { if (!res.writableFinished) abort(); };
@@ -77,8 +88,7 @@ export function proxy(upstream: string | URL, options: ProxyOptions = {}): (req:
       }
       // Send headers immediately so SSE clients can observe an idle stream.
       res.flushHeaders();
-      incoming.once('error', () => res.destroy());
-      incoming.pipe(res);
+      pipeline(incoming, res, error => { if (error && !res.destroyed) res.destroy(error); });
     });
     req.pipe(request);
   };

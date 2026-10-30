@@ -133,6 +133,7 @@ fn setup_h3_pair_with_timeout(idle_timeout_ms: u64) -> H3Pair {
         build_h3_quiche_configs_with_timeout(&cert_pem, &key_pem, idle_timeout_ms);
 
     let http3_config = Http3Config {
+        stream_read_window: None,
         qlog_dir: None,
         qlog_level: None,
         qpack_max_table_capacity: None,

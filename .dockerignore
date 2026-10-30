@@ -19,3 +19,6 @@ test-results
 .DS_Store
 examples/certs/server.key
 examples/certs/server.crt
+
+# Development TLS material must never enter an image build context.
+**/.certs

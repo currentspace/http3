@@ -117,6 +117,9 @@ pub struct H3Connection {
     /// worker thread to pull returned buffers back into `data_pool`.
     pub(crate) data_recycle_rx: crossbeam_channel::Receiver<Vec<u8>>,
     pending_body_data: HashMap<u64, PendingRecvBody>,
+    pub stream_read_window: Option<usize>,
+    read_credit: HashMap<u64, usize>,
+    pending_readable: HashSet<u64>,
     trailer_fin_streams: HashSet<u64>,
     ping_state: PingState,
 }
@@ -198,6 +201,9 @@ impl H3Connection {
             data_recycler,
             data_recycle_rx,
             pending_body_data: HashMap::new(),
+            stream_read_window: None,
+            read_credit: HashMap::new(),
+            pending_readable: HashSet::new(),
             trailer_fin_streams: HashSet::new(),
             ping_state: PingState::default(),
         }
@@ -238,6 +244,15 @@ impl H3Connection {
         Ok(())
     }
 
+    pub fn add_read_credit(&mut self, stream_id: u64, bytes: usize) {
+        if let (Some(window), Some(credit)) = (
+            self.stream_read_window,
+            self.read_credit.get_mut(&stream_id),
+        ) {
+            *credit = credit.saturating_add(bytes).min(window);
+        }
+    }
+
     /// Poll for H3 events and push them into the provided batch.
     ///
     /// `app_event_budget` applies only to JS-facing stream/datagram events.
@@ -259,7 +274,20 @@ impl H3Connection {
                     if app_events_remaining == 0 {
                         break;
                     }
-                    match h3_conn.poll(&mut self.quiche_conn) {
+                    // DATA events are edge-triggered. Keep unread streams pending
+                    // until their reader returns credit, while polling other streams.
+                    let ready = self
+                        .pending_readable
+                        .iter()
+                        .copied()
+                        .find(|id| self.read_credit.get(id).copied().unwrap_or(usize::MAX) > 0);
+                    let event = if let Some(id) = ready {
+                        self.pending_readable.remove(&id);
+                        Ok((id, quiche::h3::Event::Data))
+                    } else {
+                        h3_conn.poll(&mut self.quiche_conn)
+                    };
+                    match event {
                         Ok((stream_id, quiche::h3::Event::Headers { list, more_frames })) => {
                             if push_pending_body_event(
                                 &mut self.pending_body_data,
@@ -270,6 +298,9 @@ impl H3Connection {
                                 events,
                             ) {
                                 app_events_remaining = app_events_remaining.saturating_sub(1);
+                            }
+                            if let Some(window) = self.stream_read_window {
+                                self.read_credit.entry(stream_id).or_insert(window);
                             }
                             // Track the largest accepted request ID for our own
                             // outgoing GoAway. monotonic since quiche delivers
@@ -294,7 +325,13 @@ impl H3Connection {
                             app_events_remaining = app_events_remaining.saturating_sub(1);
                         }
                         Ok((stream_id, quiche::h3::Event::Data)) => loop {
-                            if app_events_remaining == 0 {
+                            let credit = self
+                                .read_credit
+                                .get(&stream_id)
+                                .copied()
+                                .unwrap_or(usize::MAX);
+                            if app_events_remaining == 0 || credit == 0 {
+                                self.pending_readable.insert(stream_id);
                                 break;
                             }
 
@@ -303,7 +340,8 @@ impl H3Connection {
 
                             loop {
                                 if !self.pending_body_data.contains_key(&stream_id) {
-                                    let (buf, _) = self.data_pool.checkout_recv(H3_RECV_CHUNK);
+                                    let (buf, _) =
+                                        self.data_pool.checkout_recv(H3_RECV_CHUNK.min(credit));
                                     self.pending_body_data
                                         .insert(stream_id, PendingRecvBody { buf });
                                 }
@@ -322,6 +360,9 @@ impl H3Connection {
                                     stream_id,
                                 ) {
                                     Ok(len) => {
+                                        if let Some(credit) = self.read_credit.get_mut(&stream_id) {
+                                            *credit = credit.saturating_sub(len);
+                                        }
                                         if len == 0 {
                                             break;
                                         }
@@ -542,6 +583,8 @@ impl H3Connection {
     }
 
     fn clear_stream_tracking(&mut self, stream_id: u64) {
+        self.read_credit.remove(&stream_id);
+        self.pending_readable.remove(&stream_id);
         if self.blocked_set.remove(&stream_id) {
             self.blocked_queue.retain(|&id| id != stream_id);
         }

@@ -47,6 +47,8 @@ import { buildCommonServerOptionsJson, formatLocalAddr, randomRetryTokenKeyHex }
 import type { CommonWasmServerOptions } from './wasm-options.js';
 
 export interface WasmH3ServerEventLoopOptions extends CommonWasmServerOptions {
+  /** Internal per-stream receive credit window; omitted for raw ABI consumers. */
+  streamReadWindow?: number;
   /** An already-instantiated wasm core — see `WasmH3ClientEventLoopOptions.core`'s identical doc comment. */
   core: Http3WasmCore;
   /** QPACK dynamic table capacity. */
@@ -107,6 +109,7 @@ export class WasmH3ServerEventLoop {
 
       const optsJson: Record<string, unknown> = {
         ...buildCommonServerOptionsJson(this.opts),
+        streamReadWindow: this.opts.streamReadWindow,
         localAddr: formatLocalAddr(local.address, local.family, local.port),
         retryTokenKeyHex: randomRetryTokenKeyHex(),
       };
@@ -173,6 +176,13 @@ export class WasmH3ServerEventLoop {
     // map to 0, matching the native streamSendOutcomeBytes convention
     // (lib/event-loop.ts) and the client wasm event loops' identical rule.
     return result < 0 ? 0 : result;
+  }
+
+  streamReadCredit(connHandle: number, streamId: number, bytes: number): boolean {
+    if (this.closed) return false;
+    const result = this.core.exports.hs_stream_read_credit(this.handle, connHandle, BigInt(streamId), bytes);
+    this.pump();
+    return result === 0n;
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {

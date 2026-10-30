@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Bound native and WASM H3 request reads with per-stream receive credit so paused
+  uploads resume without overflowing the facade's default buffer limit.
+- Keep peer H2 session errors from becoming unhandled server exceptions; expose
+  optional `sessionError` diagnostics. Cancel unfinished responses on bare
+  `res.destroy()` and propagate upstream proxy aborts to downstream clients.
+- Bound proxy DNS/TCP/TLS setup separately from SSE inactivity. Support stock
+  macOS LibreSSL certificate verification, serialize concurrent certificate
+  generation, create keys with private permissions and scope macOS trust to SSL.
+
 - Propagate peer STOP_SENDING for idle H3 responses so disconnected SSE/proxy
   clients release upstream work without waiting for the next write.
 

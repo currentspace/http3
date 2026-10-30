@@ -122,8 +122,21 @@ API still exposes duplicate fields as arrays.
 
 `maxBufferedRequestBytes` defaults to 1 MiB and bounds unread H3 bytes buffered in
 the transport stream. Exceeding it resets that stream; it is not a replacement
-for Fastify's `bodyLimit`. H2 uses Node's stream backpressure. The wrapper itself
-also uses Node readable/writable high-water marks.
+for Fastify's `bodyLimit`. Native and WASM H3 readers use per-stream receive
+credit: when the application pauses a request, the transport stops consuming
+that body's DATA frames until the reader has room. QUIC flow control then limits
+the sender; other streams on the connection can continue. H2 uses Node's stream
+backpressure. The wrapper also uses Node readable/writable high-water marks.
+The credit window is 64 KiB; setting the failure limit below one window can reject
+a request even when it is being consumed. Slow streaming uploads do not require
+raising the default 1 MiB limit.
+
+`res.destroy()` cancels an unfinished H2/H3 response even without an Error.
+Successful response completion does not reset the stream. Peer connection errors
+(including H2 resets and invalid prefaces) emit optional `sessionError(error,
+session)` on the server and `error` on the session; they do not become unhandled
+server errors when no application observer is installed. Listener/startup errors
+still use the server's ordinary `error` event.
 
 `shutdownTimeoutMs` defaults to 30,000. `close()` rejects new requests, waits for
 active response writes, invokes session shutdown, and then stops the transport.
@@ -196,12 +209,18 @@ and optional `ca`. Requests/responses stream with backpressure. The handler stri
 hop-by-hop and Connection-nominated headers and upstream Alt-Svc (the gateway
 keeps its own advertisement), preserves separate Set-Cookie values,
 replaces incoming forwarding metadata with this hop's X-Forwarded fields, flushes
-SSE headers and cancels upstream work when the client disconnects. It does not
+SSE headers, cancels upstream work when the client disconnects, and resets an
+unfinished downstream response if the upstream aborts (so EventSource can reconnect). It does not
 rewrite Location or cookie domains/paths, retry requests, impose body limits, or
 forward WebSocket upgrades. Keep Next HMR's upgrade routing on the existing
 custom server; this helper handles HTTP requests only. Run it before body parsers.
 Only trust its forwarding metadata when the upstream is restricted to this proxy.
 The default upstream inactivity timeout is 30 seconds; configure it for SSE.
+`connectTimeoutMs` separately bounds DNS/TCP/TLS setup (default 10 seconds),
+including when `timeoutMs: 0` allows an idle SSE response.
+An upstream URL path is a prefix when no `rewrite` is supplied; with `rewrite`,
+the returned origin-relative path replaces it. Specify only an origin when your
+application already adds the BFF prefix.
 
 ## Signal shutdown
 

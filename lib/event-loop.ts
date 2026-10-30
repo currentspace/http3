@@ -117,10 +117,11 @@ export function streamSendOutcomeBytes(outcome: NativeStreamSendOutcome): number
  * @internal
  */
 export interface NativeWorkerServerBinding {
-  listen(port: number, host: string): { address: string; family: string; port: number };
+  listen(port: number, host: string, readWindow?: number): { address: string; family: string; port: number };
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): boolean;
   sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): boolean;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
+  streamReadCredit(connHandle: number, streamId: number, bytes: number): boolean;
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): boolean;
   closeSession(connHandle: number, errorCode: number, reason: string): boolean;
@@ -550,6 +551,7 @@ export interface ServerEventLoopLike {
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, fin: boolean): void;
   sendResponse(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>, data: Buffer, fin: boolean): void;
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number;
+  streamReadCredit?(connHandle: number, streamId: number, bytes: number): boolean;
   streamClose(connHandle: number, streamId: number, errorCode: number): void;
   sendTrailers(connHandle: number, streamId: number, headers: Array<{ name: string; value: string }>): void;
   closeSession(connHandle: number, errorCode: number, reason: string): void;
@@ -608,6 +610,10 @@ export class WorkerEventLoop implements ServerEventLoopLike {
 
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): number {
     return streamSendOutcomeBytes(this.worker.streamSend(connHandle, streamId, data, fin));
+  }
+
+  streamReadCredit(connHandle: number, streamId: number, bytes: number): boolean {
+    return this.worker.streamReadCredit(connHandle, streamId, bytes);
   }
 
   streamClose(connHandle: number, streamId: number, errorCode: number): void {

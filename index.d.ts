@@ -91,7 +91,7 @@ export declare class NativeWorkerServer {
    * Start the worker thread, binding to the given address.
    * Returns the bound address info.
    */
-  listen(port: number, host: string): JsAddressInfo
+  listen(port: number, host: string, readWindow?: number | undefined | null): JsAddressInfo
   /** Send a command to the worker. Returns false if backpressure (queue full). */
   sendResponseHeaders(connHandle: number, streamId: number, headers: Array<JsHeader>, fin: boolean): boolean
   /**
@@ -101,6 +101,7 @@ export declare class NativeWorkerServer {
   sendResponse(connHandle: number, streamId: number, headers: Array<JsHeader>, data: Buffer, fin: boolean): boolean
   streamSend(connHandle: number, streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
   sendTrailers(connHandle: number, streamId: number, headers: Array<JsHeader>): boolean
+  streamReadCredit(connHandle: number, streamId: number, bytes: number): boolean
   streamClose(connHandle: number, streamId: number, errorCode: number): boolean
   closeSession(connHandle: number, errorCode: number, reason: string): boolean
   sendDatagram(connHandle: number, data: Buffer): boolean

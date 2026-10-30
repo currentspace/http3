@@ -145,6 +145,8 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal */ _nativeWriteWindow = createNativeWriteWindow(this.writableHighWaterMark);
   /** @internal */ _timeoutMs = 0;
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
+  private _uncreditedReadBytes = 0;
+  private _creditRetry: NodeJS.Immediate | undefined;
   private _finalChunk: Buffer | null = null;
 
   /** The HTTP/3 stream ID. */
@@ -269,11 +271,24 @@ export class ServerHttp3Stream extends Duplex {
   _read(_size: number): void {
     this._onActivity();
     drainPendingReads(this, this._bp);
+    this._returnReadCredit();
   }
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
+    this._uncreditedReadBytes += chunk?.length ?? 0;
     this._bp = pushData(this, this._bp, chunk, this._maxBufferedReadBytes);
+    this._returnReadCredit();
+  }
+
+  private _returnReadCredit(): void {
+    if (this.destroyed || this._bp?.readBackpressure || this._uncreditedReadBytes === 0 || !this._eventLoop?.streamReadCredit) return;
+    if (this._eventLoop.streamReadCredit(this._connHandle, this._streamId, this._uncreditedReadBytes)) {
+      this._uncreditedReadBytes = 0;
+    } else if (!this._creditRetry) {
+      // A full worker command queue must delay credit, never silently lose it.
+      this._creditRetry = setImmediate(() => { this._creditRetry = undefined; this._returnReadCredit(); });
+    }
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -404,6 +419,7 @@ export class ServerHttp3Stream extends Duplex {
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
     if (error && 'code' in error && error.code === 'ERR_HTTP3_RECEIVE_BUFFER_LIMIT') this._eventLoop?.streamClose(this._connHandle, this._streamId, 0x010c);
 
+    clearImmediate(this._creditRetry);
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));
     this._clearTimeout();

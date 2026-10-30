@@ -8,14 +8,16 @@ import { serveFetch } from '../../lib/fetch-adapter.js';
 import { generateTestCerts } from '../support/generate-certs.js';
 import type { Readable, Writable } from 'node:stream';
 
-it('H3 resets an upload whose Fetch handler does not consume the receive buffer', async () => {
+it('H3 backpressures an unread Fetch upload and still propagates client cancellation', async () => {
   const certs = generateTestCerts();
   let aborted = false;
+  let onAbort!: () => void;
+  const handlerAborted = new Promise<void>(resolve => { onAbort = resolve; });
   const server = serveFetch({
     ...certs, port: 0, host: '127.0.0.1', runtimeMode: 'portable', disableRetry: true,
     fetch: async request => {
       await new Promise<void>(resolve => {
-        request.signal.addEventListener('abort', () => { aborted = true; resolve(); }, { once: true });
+        request.signal.addEventListener('abort', () => { aborted = true; onAbort(); resolve(); }, { once: true });
       });
       return new Response('closed');
     },
@@ -26,9 +28,13 @@ it('H3 resets an upload whose Fetch handler does not consume the receive buffer'
   const client = await connectAsync(`127.0.0.1:${port}`, { rejectUnauthorized: false, runtimeMode: 'portable' });
   try {
     const stream = client.request({ ':method': 'POST', ':path': '/', ':authority': 'localhost', ':scheme': 'https' });
-    const reset = new Promise<Error>(resolve => { stream.once('error', resolve); });
+    stream.on('error', () => {});
     stream.end(Buffer.alloc(2 * 1024 * 1024));
-    assert.ok(await reset);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(stream.destroyed, false);
+    assert.equal(aborted, false);
+    stream.close(0x10c);
+    await handlerAborted;
     assert.equal(aborted, true);
   } finally {
     await client.close();

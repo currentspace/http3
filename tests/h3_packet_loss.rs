@@ -106,6 +106,7 @@ fn setup_h3_pair_with_loss(drop_pct: u32) -> H3PairWithLoss {
     );
 
     let http3_config = Http3Config {
+        stream_read_window: None,
         qlog_dir: None,
         qlog_level: None,
         qpack_max_table_capacity: None,

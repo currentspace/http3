@@ -20,7 +20,8 @@ npx @currentspace/http3 dev-cert trust --out .certs
 npx @currentspace/http3 dev-cert untrust --out .certs
 ```
 
-OpenSSL must be installed. macOS trust uses `sudo security` and the System
+OpenSSL or stock macOS LibreSSL must be installed. macOS trust is restricted
+to the SSL policy and uses `sudo security` and the System
 keychain. On macOS, `untrust` sets an explicit deny policy for this CA and retains
 its keychain entry. This avoids a headless macOS hang in the trust-removal API;
 remove the entry manually in Keychain Access when it is no longer needed.
@@ -41,7 +42,14 @@ when it has less than one day remaining, preserving its key. Run generation
 at startup to renew before binding the server. To replace the CA, untrust it first and use a new directory. Keep the CA
 files until untrust succeeds; they identify the exact certificate to remove.
 
-Keep `.certs` out of version control. Its CA private key can impersonate local
+Generation serializes concurrent callers sharing a directory. If a process is
+killed while generating, subsequent calls report its `.generation-lock` path;
+remove that directory only after confirming the earlier process has exited.
+Generation never invokes a trust prompt unless `--trust` was explicitly requested.
+A cancelled trust command returns an error; run generation and trust as separate
+steps if your application should start before the manual trust step.
+
+Keep `.certs` out of version control and Docker build contexts. Its CA private key can impersonate local
 services on machines that trust it. The CLI restricts directory/key permissions
 on Unix; it does not distribute the CA or change browser launch settings.
 
@@ -188,3 +196,13 @@ See Chromium's [NetLog capture instructions](https://www.chromium.org/for-tester
 and the [DevTools Network protocol](https://chromedevtools.github.io/devtools-protocol/tot/Network/).
 Use the default privacy setting and review captures before sharing them; raw-byte
 captures can contain credentials and application data.
+
+
+## Next custom-server development lifecycle
+
+The examples use Next's custom-server API. Fast Refresh is tested, but this does
+not provide the `next dev` supervisor's config-file, heap-limit or memory-restart
+behavior. Restart the custom server after changing `next.config.*`; set your
+Node heap and watcher limits in the launching environment when needed. A process
+supervisor belongs in the consuming application's development launcher. Do not
+assume an undocumented Next exit code is a stable library contract.

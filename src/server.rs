@@ -123,7 +123,12 @@ impl NativeWorkerServer {
     /// Start the worker thread, binding to the given address.
     /// Returns the bound address info.
     #[napi]
-    pub fn listen(&mut self, port: u32, host: String) -> napi::Result<JsAddressInfo> {
+    pub fn listen(
+        &mut self,
+        port: u32,
+        host: String,
+        read_window: Option<u32>,
+    ) -> napi::Result<JsAddressInfo> {
         let host_for_parse = if host.contains(':') && !host.starts_with('[') {
             format!("[{host}]")
         } else {
@@ -137,10 +142,11 @@ impl NativeWorkerServer {
             .quiche_config
             .take()
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
-        let http3_config = self
+        let mut http3_config = self
             .http3_config
             .take()
             .ok_or_else(|| napi::Error::from_reason("already listening"))?;
+        http3_config.stream_read_window = read_window.filter(|n| *n > 0).map(|n| n as usize);
         let tsfn = self
             .tsfn
             .take()
@@ -268,6 +274,18 @@ impl NativeWorkerServer {
             conn_handle,
             stream_id: stream_id as u64,
             headers: h,
+        })
+    }
+
+    #[napi]
+    pub fn stream_read_credit(&self, conn_handle: u32, stream_id: i64, bytes: u32) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        handle.send_command(crate::worker::WorkerCommand::StreamReadCredit {
+            conn_handle,
+            stream_id: stream_id as u64,
+            bytes: bytes as usize,
         })
     }
 
