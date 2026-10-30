@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.9
 
 - Bound WASM server packet batches and allocate packet pools on demand, so
   large single-buffer responses do not exhaust memory through packet staging.
@@ -11,6 +11,21 @@
   completion. Preserve explicit close codes and settle pending writes once.
 - Remove H3 server streams from tracking on close even before request FIN, and
   ignore late trailers for closed streams.
+
+- Release completed bodyless Node/Express facade requests on persistent
+  connections instead of retaining their transport streams until disconnect.
+- Cache Express descriptor enumeration and memory-growth-aware WASI views,
+  coalesce H3 client/server receive credits, and allocate native H3/raw QUIC
+  packet pools on demand. Preserve compatibility descriptors, clock values,
+  receive windows and write-admission limits.
+- Export `WasmMemoryError` from the root and Node/Worker WASM entry points,
+  including typed `code` and `requestedBytes`. Complete exports for Fetch
+  body-limit errors, receive-buffer error codes, runtime fallback details,
+  Fetch handler options and shared WASM server options.
+- Add installed-package consumer checks across TypeScript resolution modes,
+  Worker conditions without Node types, and reproducible profiling workloads.
+
+Manual Safari and Windows browser trust qualification remain incomplete.
 
 ## 0.9.8
 

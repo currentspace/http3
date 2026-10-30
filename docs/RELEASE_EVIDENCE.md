@@ -3,6 +3,32 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.9
+
+- Candidate incorporates PR #22: raw server cancellation and stream cleanup,
+  bounded WASM payload allocation with application-visible errors, facade EOF
+  cleanup, hot-path allocation/CPU reductions and public error/type exports.
+  Root, Rust and all three native sidecars are aligned to 0.9.9.
+- Before the version bump, local macOS ARM64 qualification passed 450 Node,
+  114 WASM, 67 FFI and 228 Rust unit tests, plus 27 focused Node 24 tests.
+  The later public-export checks passed 28 targeted allocation/body-limit tests.
+  Packed installs passed on Node 24 and 26 across four TypeScript resolution
+  modes and both Worker conditions without Node types, with declaration checks
+  enabled. See `docs/PUBLIC_TYPES.md`.
+- Seven instrumented workloads completed 172,794 requests without recorded
+  transfer errors; completed facade streams drained to zero. Profiling results,
+  allocation tradeoffs and remaining hot spots are in `docs/HOTPATH_PROFILING.md`.
+- Earlier queued-response drain and shutdown tests timed out on initial runs,
+  then passed in isolation and full reruns; the drain case passed 20 repeats.
+  Their causes remain unproven. An earlier WASM cancellation timeout also
+  passed isolated and full reruns.
+- Versioned local qualification, hosted checks, release dry-run, publication and
+  registry verification are pending; evidence is retained under
+  `artifacts/releases/0.9.9/` as each step completes.
+- Manual Safari and Windows browser trust qualification remain incomplete.
+  Publication retains the user's approved documented Safari limitation; no
+  automated browser result is represented as manual Safari qualification.
+
 ## 0.9.8
 
 - Candidate includes client response receive-credit flow control in native and
