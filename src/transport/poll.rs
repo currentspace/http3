@@ -91,7 +91,7 @@ mod inner {
                 hdrs[i].msg_hdr.msg_namelen =
                     std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
                 hdrs[i].msg_hdr.msg_control = slots[i].cmsg_buf.as_mut_ptr().cast();
-                hdrs[i].msg_hdr.msg_controllen = CMSG_CONTROL_LEN;
+                hdrs[i].msg_hdr.msg_controllen = CMSG_CONTROL_LEN as _;
             }
 
             Self { slots, hdrs }
@@ -103,7 +103,7 @@ mod inner {
                 self.slots[i].iov.iov_len = RX_BUF_SIZE;
                 self.hdrs[i].msg_hdr.msg_namelen =
                     std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-                self.hdrs[i].msg_hdr.msg_controllen = CMSG_CONTROL_LEN;
+                self.hdrs[i].msg_hdr.msg_controllen = CMSG_CONTROL_LEN as _;
                 self.hdrs[i].msg_hdr.msg_flags = 0;
                 self.hdrs[i].msg_len = 0;
             }
@@ -310,7 +310,7 @@ mod inner {
                     self.socket_fd,
                     self.rx_batch.hdrs.as_mut_ptr(),
                     MAX_RX_PER_POLL as libc::c_uint,
-                    libc::MSG_DONTWAIT,
+                    libc::MSG_DONTWAIT as _,
                     std::ptr::null_mut(), // no timeout
                 )
             };
@@ -331,8 +331,11 @@ mod inner {
                 let namelen = self.rx_batch.hdrs[i].msg_hdr.msg_namelen;
                 let peer = sockaddr_to_socketaddr(&self.rx_batch.slots[i].addr, namelen);
                 if let Some(peer) = peer {
-                    let cmsg_data = &self.rx_batch.slots[i].cmsg_buf
-                        [..self.rx_batch.hdrs[i].msg_hdr.msg_controllen];
+                    let cmsg_data = &self.rx_batch.slots[i].cmsg_buf[..(self.rx_batch.hdrs[i]
+                        .msg_hdr
+                        .msg_controllen
+                        as usize)
+                        .min(CMSG_CONTROL_LEN)];
                     let parsed = parse_recv_cmsgs(cmsg_data);
                     let local = parsed
                         .local_ip
@@ -416,7 +419,7 @@ mod inner {
                     self.socket_fd,
                     self.tx_hdrs.as_mut_ptr(),
                     count as libc::c_uint,
-                    libc::MSG_DONTWAIT,
+                    libc::MSG_DONTWAIT as _,
                 )
             };
 
@@ -501,7 +504,7 @@ mod inner {
                 if batch_seg_sizes[i] > 0 && batch_lens[i] > batch_seg_sizes[i] as usize {
                     let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[i], batch_seg_sizes[i]);
                     tx_hdrs[i].msg_hdr.msg_control = tx_cmsg_bufs[i].as_mut_ptr().cast();
-                    tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len;
+                    tx_hdrs[i].msg_hdr.msg_controllen = cmsg_len as _;
                 }
             }
 
@@ -512,7 +515,7 @@ mod inner {
                     self.socket_fd,
                     tx_hdrs.as_mut_ptr(),
                     count as libc::c_uint,
-                    libc::MSG_DONTWAIT,
+                    libc::MSG_DONTWAIT as _,
                 )
             };
 

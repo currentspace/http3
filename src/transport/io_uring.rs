@@ -204,7 +204,7 @@ mod inner {
             // SAFETY: zeroed msghdr is valid.
             let mut msg: Box<libc::msghdr> = Box::new(unsafe { std::mem::zeroed() });
             msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-            msg.msg_controllen = CMSG_CONTROL_LEN;
+            msg.msg_controllen = CMSG_CONTROL_LEN as _;
 
             Ok(Self {
                 ring_ptr,
@@ -527,7 +527,7 @@ mod inner {
             self.msg.msg_namelen = socketaddr_to_sockaddr(self.peer, self.addr.as_mut());
             let cmsg_len = build_gso_cmsg(&mut *self.cmsg_buf, segment_size);
             self.msg.msg_control = self.cmsg_buf.as_mut_ptr().cast();
-            self.msg.msg_controllen = cmsg_len;
+            self.msg.msg_controllen = cmsg_len as _;
             self.msg.msg_flags = 0;
             self.gso_segment_size = segment_size;
             self.in_flight = true;

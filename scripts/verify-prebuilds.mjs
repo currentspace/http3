@@ -1,13 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { nativePackages } from './native-packages.mjs';
 
 const prebuildDir = resolve(process.env.VERIFY_PREBUILDS_DIR ?? '.');
 
-const expected = [
-  'http3.linux-x64-gnu.node',
-  'http3.linux-arm64-gnu.node',
-  'http3.darwin-arm64.node',
-];
+const expected = nativePackages().map(({ pkg }) => pkg.main);
 
 const requiredExports = [
   'NativeWorkerServer',

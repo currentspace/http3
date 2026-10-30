@@ -3014,6 +3014,9 @@ packages:
     resolution: {integrity: sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ==}
 
 ignoredOptionalDependencies:
+  - '@currentspace/http3-darwin-x64'
+  - '@currentspace/http3-linux-arm64-musl'
+  - '@currentspace/http3-linux-x64-musl'
   - '@currentspace/http3-darwin-arm64'
   - '@currentspace/http3-linux-arm64-gnu'
   - '@currentspace/http3-linux-x64-gnu'

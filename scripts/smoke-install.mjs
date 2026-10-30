@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { nativePackages, selectNativePackage } from './native-packages.mjs';
 
 const repoRoot = process.cwd();
 const tempDir = mkdtempSync(join(tmpdir(), 'http3-smoke-install-'));
@@ -23,9 +24,7 @@ try {
   assert.ok(root.files.every(f => !f.path.endsWith('.node')), 'root tarball must not duplicate native binaries');
   assert.ok(root.files.every(f => !/^(docs|examples)\//u.test(f.path)), 'docs and examples belong in the repository');
   assert.ok(root.files.some(f => f.path === 'bin/http3.cjs'), 'dev-cert CLI missing');
-  const native = readdirSync(join(repoRoot, 'npm')).map(dir => ({
-    dir, pkg: JSON.parse(readFileSync(join(repoRoot, 'npm', dir, 'package.json'), 'utf8')),
-  })).find(({ pkg }) => pkg.os.includes(process.platform) && pkg.cpu.includes(process.arch));
+  const native = selectNativePackage(nativePackages(repoRoot));
   const artifacts = [root.tarball];
   let env = { ...process.env, NAPI_RS_ENFORCE_VERSION_CHECK: '1' };
   if (native) {
@@ -34,8 +33,7 @@ try {
     copyFileSync(join(repoRoot, native.pkg.main), join(stage, native.pkg.main));
     artifacts.push(pack(stage, native.pkg.name).tarball);
   } else {
-    // Intel macOS is a source-build CI target, not a published native package.
-    // Test the documented explicit override instead of claiming registry support.
+    // A custom source-built target can still use the documented override.
     const binary = join(repoRoot, `http3.${process.platform}-${process.arch}.node`);
     assert.ok(existsSync(binary), `No published sidecar or source-built override for ${process.platform}-${process.arch}`);
     env.NAPI_RS_NATIVE_LIBRARY_PATH = binary;

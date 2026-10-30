@@ -101,6 +101,40 @@ async function quic() {
     await server.close();
   }
 }
+async function nativeRequestRate() {
+  const warningCount = warnings.length;
+  const server = createNodeServerFactory({ key: tls.key, cert: tls.cert, runtimeMode: 'portable' })((_req, res) => res.end('ok'));
+  let client;
+  try {
+    const listening = once(server, 'listening');
+    server.listen(0, '127.0.0.1');
+    await listening;
+    assert.equal(server.runtimeInfo.selectedMode, 'portable');
+    const port = server.address().port;
+    client = await connectAsync(`https://localhost:${port}`, { ca: tls.ca, runtimeMode: 'portable' });
+    assert.equal(client.runtimeInfo.selectedMode, 'portable');
+    let next = 0;
+    let completed = 0;
+    const start = process.hrtime.bigint();
+    await Promise.all(Array.from({ length: 50 }, async () => {
+      while (next++ < 1000) {
+        const request = client.request({ ':method': 'GET', ':path': '/', ':scheme': 'https', ':authority': `localhost:${port}` }, { endStream: true });
+        const [[headers], body] = await Promise.all([once(request, 'response'), collect(request)]);
+        assert.equal(headers[':status'], '200');
+        assert.equal(body, 'ok');
+        completed++;
+      }
+    }));
+    assert.equal(completed, 1000);
+    const seconds = Number(process.hrtime.bigint() - start) / 1e9;
+    console.log(`Native portable: ${completed} GETs, concurrency 50, ${Math.round(completed / seconds)} req/s (informational)`);
+  } finally {
+    if (client) await client.close();
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+  await turn();
+  assert.equal(warnings.length, warningCount, 'explicit portable must not emit fallback warnings');
+}
 function unsupported(error) {
   assert.ok(error instanceof Http3Error);
   assert.equal(error.code, 'ERR_HTTP3_RUNTIME_UNSUPPORTED');
@@ -176,6 +210,7 @@ async function main() {
   assert.equal(warnings.length, 0, 'strict failures must not emit fallback warnings');
   await h3('auto');
   await quic();
+  if (expected === 'native') await nativeRequestRate();
   await turn();
   if (expected === 'wasm') {
     assert.equal(warnings.length, 1, 'same missing binding must warn once across servers and clients');
