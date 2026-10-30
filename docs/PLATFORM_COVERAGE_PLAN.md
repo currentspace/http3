@@ -1,6 +1,8 @@
 # Platform coverage and automatic WASM fallback
 
-Date: 2026-10-30. Status: proposed implementation plan; no runtime changes made.
+Date: 2026-10-30. Status: implementation in a stacked PR series.
+Qualification results and remaining release steps are tracked in
+[PLATFORM_COVERAGE_EVIDENCE.md](./PLATFORM_COVERAGE_EVIDENCE.md).
 
 Source request: `/tmp/http3-platforms/README.md`, with consumer repros in
 `/tmp/http3-platforms/repro/`. Baseline: `main` at `966c611`, package version 0.9.9.
@@ -253,7 +255,7 @@ Runtime fallback can ship before the new sidecars once units 1/2 and their
 platform gates pass; musl and Intel packages can follow. Publishing remains a
 separate release action. After publication, repeat clean registry installs with
 and without optional dependencies before declaring the consumer's launcher
-workaround removable. No implementation or publication is part of this plan.
+workaround removable. Publication is separate from the implementation PR series.
 
 Runner reference: [GitHub-hosted runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 Musl toolchain reference: [napi-rs cross-building and native dependencies](https://napi.rs/docs/cross-build).

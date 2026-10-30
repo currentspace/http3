@@ -7,7 +7,7 @@ HTTP/3, HTTP/2, and raw QUIC server/client package for Node.js 24+, powered by R
 - HTTP/3 server and client over QUIC/UDP
 - HTTP/2 fallback over TLS/TCP on the same listener
 - Raw QUIC: bidirectional streams, datagrams, session resumption, custom ALPN
-- Explicit runtime selection: `fast`, `portable`, or `auto`
+- Runtime selection: `auto`, `fast`, `portable`, or `wasm`
 - Platform-native I/O: kqueue (macOS), io_uring (Linux fast path), `poll` (Linux portable path)
 - WASM runtime (`runtimeMode: 'wasm'`) for HTTP/3 and raw QUIC clients, plus a
   Node-only WASM server — no native `.node` addon required, and confirmed
@@ -21,12 +21,27 @@ HTTP/3, HTTP/2, and raw QUIC server/client package for Node.js 24+, powered by R
 npm install @currentspace/http3
 ```
 
-Prebuilt native binaries are currently published for Linux x64/arm64 (glibc)
-and macOS arm64, through optional platform packages. Keep optional dependencies
-enabled. The root package contains JavaScript, declarations, WASM, and the CLI;
-it does not bundle other platforms' native binaries, docs, or examples.
-Other platforms require an explicit source build (there is no install-time
-compiler fallback); see
+The automatic WASM fallback, bounded large writes, facade runtime metadata, and
+new native targets described below are **unreleased platform-coverage changes**.
+Published 0.9.9 requires explicit WASM and does not contain these changes; use a
+built candidate to evaluate them until a new release is published.
+
+Keep optional dependencies enabled for native performance. If the native addon
+cannot load, the default `auto` mode selects the bundled WASM runtime and emits
+`WARN_HTTP3_RUNTIME_FALLBACK`. The root package contains JavaScript, declarations,
+WASM, and the CLI; it does not bundle native binaries, docs, or examples.
+
+| Platform | Native package target | When the addon cannot load |
+| --- | --- | --- |
+| macOS arm64 / x64 | `darwin-arm64` / `darwin-x64` | WASM |
+| Linux glibc arm64 / x64 | `linux-arm64-gnu` / `linux-x64-gnu` | WASM |
+| Linux musl arm64 / x64 (Alpine) | `linux-arm64-musl` / `linux-x64-musl` | WASM |
+| Windows | None | WASM |
+| Other Node platforms | None in the release matrix | WASM; platform qualification varies |
+
+The new musl and Intel macOS targets require publication of matching sidecars;
+published 0.9.9 contains only macOS arm64 and Linux glibc arm64/x64. There is no
+install-time compiler fallback. See
 [`docs/SUPPORT_MATRIX.md`](https://github.com/currentspace/http3/blob/HEAD/docs/SUPPORT_MATRIX.md).
 
 ## Quick server example
@@ -91,12 +106,21 @@ remotely and rejects pending writes; normal duplex completion does not reset it.
 
 Every QUIC-capable API accepts:
 
-- `runtimeMode: 'auto' | 'fast' | 'portable'`
+- `runtimeMode: 'auto' | 'fast' | 'portable' | 'wasm'`
 - `fallbackPolicy: 'error' | 'warn-and-fallback'`
 - `onRuntimeEvent(info)`
 
 Returned client sessions and server objects expose `runtimeInfo`, and `auto`
 fallback also emits a process warning with code `WARN_HTTP3_RUNTIME_FALLBACK`.
+This includes the Node facade returned by `createNodeServerFactory`.
+
+`auto` prefers native, retaining the Linux `fast` → `portable` fallback when
+io_uring is unavailable. If the binding itself cannot load, `auto` with the
+default `warn-and-fallback` policy selects WASM before constructing native state.
+The warning identifies the OS, architecture, Linux libc, and loader failure.
+`runtimeInfo.reasonCode` is `native-binding-unavailable` for this case.
+Explicit `fast`/`portable`, or `auto` with `fallbackPolicy: 'error'`, instead fail
+with `ERR_HTTP3_RUNTIME_UNSUPPORTED`. Explicit WASM never probes native loading.
 
 ```ts
 import { connectQuicAsync } from '@currentspace/http3';
@@ -133,15 +157,27 @@ npm run bench:h3 -- --profile smoke
 
 ## WASM runtime
 
-`runtimeMode: 'wasm'` runs the client (HTTP/3 or raw QUIC) entirely on a
+`runtimeMode: 'wasm'` runs HTTP/3 and raw QUIC clients and Node servers on a
 `wasm32-wasip1` build of the same quiche + BoringSSL protocol core, with no
-native `.node` addon in the process:
+native `.node` addon:
 
 ```ts
 import { connectAsync } from '@currentspace/http3';
 
 const session = await connectAsync('example.com:443', { runtimeMode: 'wasm' });
 ```
+
+Large Node stream writes, including `res.end(buffer)`, are admitted in bounded
+slices under WASM. Continue to respect writable backpressure; concurrent work
+still shares a finite WASM heap. Native writes retain their existing path.
+
+Consumer measurements on 2026-10-30, using 0.9.9 on macOS arm64 / Node 26.13
+with a native client, found about 5,060–5,270 requests/s under WASM versus
+10,500–12,300 native portable for 1,000 small GETs at concurrency 50. Streamed
+32 MiB downloads measured 91–93 MiB/s versus 836–933 MiB/s. These describe those
+workloads, not performance guarantees on other hosts. Use native packages for
+throughput-sensitive deployments; WASM keeps development and smaller workloads
+usable without an addon.
 
 The server side (`Http3SecureServer.listen()` / `QuicServer.listen()`) also
 supports `runtimeMode: 'wasm'`, Node-only. The client build has additionally

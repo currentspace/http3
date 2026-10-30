@@ -25,10 +25,17 @@ instances before they reach JS session and stream objects.
 | `syscall` | `string \| undefined` | Native syscall/operation name when available. |
 | `endpoint` | `string \| undefined` | Endpoint string involved in parse/resolve failures. |
 | `runtimeInfo` | `RuntimeInfo \| undefined` | Runtime snapshot attached to selection failures. |
+| `nativeBinding` | `NativeBindingFailure \| undefined` | Structured platform, libc, package, and load-failure category. |
+| `nativeBindingError` | `Error \| undefined` | Original binding error retained if the subsequent WASM startup fails. |
 
 ## Native binding startup failures
 
-If no native binding can load, server/client startup reports
+If no native binding can load, default `auto` startup selects WASM and emits
+`WARN_HTTP3_RUNTIME_FALLBACK` once per distinct fallback cause per process.
+Its runtime snapshot reports `selectedMode: 'wasm'`, `fallbackOccurred: true`,
+and `reasonCode: 'native-binding-unavailable'`.
+
+Explicit `fast`/`portable` and `auto` with `fallbackPolicy: 'error'` instead report
 `ERR_HTTP3_RUNTIME_UNSUPPORTED` as an `Http3Error`. Its message names the OS,
 architecture and, on Linux, glibc or musl:
 
@@ -45,8 +52,10 @@ architecture and, on Linux, glibc or musl:
 
 Imports remain lazy: importing the package does not require a native binding.
 Working local binaries are accepted even on targets without a published
-prebuild. `runtimeMode: 'wasm'` bypasses native loading; `auto` does not select
-WASM. Attach a server `'error'` listener before `listen()` to handle asynchronous
+prebuild. Explicit `runtimeMode: 'wasm'` bypasses native loading. TLS, DNS, bind,
+and application failures do not trigger a WASM retry. If WASM startup fails,
+the failure retains the native-load context and does not announce a successful
+fallback. Attach a server `'error'` listener before `listen()` to handle asynchronous
 startup failures. Promise-based client connections reject on startup failure.
 
 ## Allocation and body-limit errors
@@ -56,6 +65,10 @@ startup failures. Promise-based client connections reject on startup failure.
 conditions. It extends `Error` directly, not `Http3Error`. Its readonly `code`
 has the literal type `'ERR_HTTP3_WASM_MEMORY_LIMIT'`, and its readonly
 `requestedBytes` is the number of payload bytes whose allocation was rejected.
+Node stream writes are sliced before entering WASM, including large single
+`write()`/`end()` calls and `respondWithBody()`. This prevents the entire body
+being staged at once; aggregate heap exhaustion and low-level oversized ABI
+calls can still produce this error. Datagram messages are not split.
 
 ```ts
 import { WasmMemoryError } from '@currentspace/http3';

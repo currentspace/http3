@@ -1,0 +1,44 @@
+{
+  "node": {
+    "source": "831d135",
+    "counts": [
+      "# tests 552",
+      "# suites 81",
+      "# pass 552",
+      "# fail 0",
+      "# cancelled 0",
+      "# skipped 0",
+      "# todo 0"
+    ]
+  },
+  "ffi": {
+    "source": "831d135",
+    "counts": [
+      "\u2139 tests 67",
+      "\u2139 suites 28",
+      "\u2139 pass 67",
+      "\u2139 fail 0",
+      "\u2139 cancelled 0",
+      "\u2139 skipped 0",
+      "\u2139 todo 0"
+    ]
+  },
+  "wasm": {
+    "source": "831d135",
+    "counts": [
+      "\u2139 tests 128",
+      "\u2139 suites 13",
+      "\u2139 pass 128",
+      "\u2139 fail 0",
+      "\u2139 cancelled 0",
+      "\u2139 skipped 0",
+      "\u2139 todo 0"
+    ]
+  },
+  "native_rebuild_and_release": {
+    "source": "a812b37",
+    "rust_unit": "228 passed",
+    "release": "38 passed",
+    "rust_full": "passed"
+  }
+}

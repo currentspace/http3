@@ -1,0 +1,149 @@
+{
+  "source": "a812b37, rebuilt native addon and dist; unchanged WASM artifact",
+  "node": "26.13.0",
+  "platform": "darwin arm64",
+  "results": [
+    {
+      "args": [
+        "request-rate.cjs",
+        "portable"
+      ],
+      "exit": 0,
+      "stdout": "portable: 9939 req/s, rss 143 MiB",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "request-rate.cjs",
+        "portable"
+      ],
+      "exit": 0,
+      "stdout": "portable: 10778 req/s, rss 144 MiB",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "request-rate.cjs",
+        "portable"
+      ],
+      "exit": 0,
+      "stdout": "portable: 10359 req/s, rss 144 MiB",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "portable",
+        "32",
+        "buffer"
+      ],
+      "exit": 0,
+      "stdout": "portable buffer 32 MiB: ok, 834 MiB/s",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "portable",
+        "32",
+        "buffer"
+      ],
+      "exit": 0,
+      "stdout": "portable buffer 32 MiB: ok, 826 MiB/s",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "portable",
+        "32",
+        "buffer"
+      ],
+      "exit": 0,
+      "stdout": "portable buffer 32 MiB: ok, 818 MiB/s",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "request-rate.cjs",
+        "wasm"
+      ],
+      "exit": 0,
+      "stdout": "wasm: 4790 req/s, rss 178 MiB",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "request-rate.cjs",
+        "wasm"
+      ],
+      "exit": 0,
+      "stdout": "wasm: 5043 req/s, rss 178 MiB",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "request-rate.cjs",
+        "wasm"
+      ],
+      "exit": 0,
+      "stdout": "wasm: 4926 req/s, rss 179 MiB",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "wasm",
+        "32",
+        "stream"
+      ],
+      "exit": 0,
+      "stdout": "wasm stream 32 MiB: ok, 78 MiB/s",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "wasm",
+        "32",
+        "stream"
+      ],
+      "exit": 0,
+      "stdout": "wasm stream 32 MiB: ok, 80 MiB/s",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "wasm",
+        "32",
+        "stream"
+      ],
+      "exit": 0,
+      "stdout": "wasm stream 32 MiB: ok, 82 MiB/s",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "wasm",
+        "32",
+        "buffer"
+      ],
+      "exit": 0,
+      "stdout": "wasm buffer 32 MiB: ok, 87 MiB/s",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "throughput.cjs",
+        "wasm",
+        "128",
+        "buffer"
+      ],
+      "exit": 0,
+      "stdout": "wasm buffer 128 MiB: ok, 94 MiB/s",
+      "stderr": ""
+    }
+  ]
+}
