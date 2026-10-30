@@ -1534,6 +1534,57 @@ mod tests {
     }
 
     #[test]
+    fn paused_body_reports_peer_reset_without_more_read_credit() {
+        let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
+            make_direct_h3_pair();
+        client.stream_read_window = Some(1);
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"GET"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/paused-reset"),
+        ];
+        let stream_id = client.send_request(&headers, false).expect("request");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            while server_h3.poll(&mut server_conn).is_ok() {}
+        }
+        let response = vec![quiche::h3::Header::new(b":status", b"200")];
+        server_h3
+            .send_response(&mut server_conn, stream_id, &response, false)
+            .expect("response headers");
+        server_h3
+            .send_body(&mut server_conn, stream_id, b"unread body", true)
+            .expect("body");
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        assert_eq!(client.read_credit.get(&stream_id), Some(&0));
+        assert!(client.pending_readable.contains(&stream_id));
+        server_conn
+            .stream_shutdown(stream_id, quiche::Shutdown::Write, 0x10c)
+            .expect("reset sending side");
+        events.clear();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        let resets: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == crate::h3_event::EVENT_RESET
+                    && event.stream_id == stream_id as i64
+            })
+            .collect();
+        assert_eq!(resets.len(), 1, "RESET_STREAM must bypass receive backpressure");
+        assert_eq!(resets[0].meta.as_ref().unwrap().error_code, Some(0x10c));
+        assert!(!client.read_credit.contains_key(&stream_id));
+        assert!(!client.pending_readable.contains(&stream_id));
+    }
+
+    #[test]
     fn finished_body_releases_read_credit_before_write_side_closes() {
         let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
             make_direct_h3_pair();

@@ -4,6 +4,9 @@
 
 - Bound native and WASM H3 request reads with per-stream receive credit so paused
   uploads resume without overflowing the facade's default buffer limit.
+- Preserve cancellation notifications when a reset follows FIN on an unread
+  request body, including Fetch handlers paused by backpressure. Keep Fetch
+  cancellation signals alive during async handlers and error guards until close.
 - Keep peer H2 session errors from becoming unhandled server exceptions; expose
   optional `sessionError` diagnostics. Cancel unfinished responses on bare
   `res.destroy()` and propagate upstream proxy aborts to downstream clients.

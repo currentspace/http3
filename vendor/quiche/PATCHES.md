@@ -31,3 +31,10 @@ write. `insert_writable` already deduplicates linked entries. Root test
 notification and checks one reset; the Node proxy test cancels an idle H3 SSE
 response before body data arrives. The application transport maps StreamStopped
 to a stream reset independently of its blocked-write queue.
+
+RESET_STREAM in `src/stream/recv_buf.rs` preserves its readable error marker
+when FIN arrived before the application consumed the body. The normal write
+path deduplicates an empty FIN at a known final offset; using that path alone
+silently discarded the reset notification after clearing the unread bytes.
+Root test `paused_body_reports_peer_reset_without_more_read_credit` reproduces
+the failure with exhausted receive credit and verifies exactly one reset.

@@ -9,8 +9,8 @@ and remaining qualification work for each release candidate.
   arguments, package/types fixes, Nest/proxy/shutdown helpers, dev certificates,
   diagnostics and documentation. No version bump or publication is performed.
 - After the follow-up consumer review, the full local Node 26 suite passed
-  397 tests and FFI passed 67. Node 24 also passed all 397 tests. Rust passed 278 tests plus targeted flow-control,
-  shutdown and concurrent-stream integration tests. Rebuilt WASM passed 51 tests
+  397 tests and FFI passed 67. Node 24 also passed all 397 tests. Rust passed 279 tests plus targeted flow-control,
+  shutdown and concurrent-stream integration tests. Rebuilt WASM passed 59 tests
   with no skips, including receive credit and ephemeral-port retries. Final-head
   hosted results are recorded on PR #20.
 - Clean packed installs resolve types under node/node16/nodenext/bundler on both
@@ -34,9 +34,14 @@ and remaining qualification work for each release candidate.
   pass. Paused 20 MiB uploads stay bounded, allow a concurrent request on the
   same session and resume with matching SHA-256 over H2/H3, native and WASM.
   Receive-credit tracking is released at body FIN even while the write side stays open.
+  A deterministic Rust regression caught reset notification loss after FIN on
+  an unread body; the receive-buffer fix preserves one reset without returning
+  read credit. Native and WASM Fetch cancellation tests cover this path.
+  The WASM lane forces garbage collection to verify Request signal lifetime;
+  Fetch retains Requests in their live transports and error guards until close.
   Stock macOS LibreSSL generation/reuse and six concurrent certificate callers
-  also pass. The macOS trust policy is now SSL-only; that policy change requires
-  fresh hosted browser verification.
+  also pass. Distribution run `40999917830` passed all four Linux/macOS and
+  Node 24/26 jobs with the SSL-only macOS trust policy.
 - Native and WASM deterministic startup tests cover TCP collisions after UDP
   ephemeral binding, bounded retries, explicit-port errors and released sockets.
   The doctor TCP probe uses a plain connection; TLS trust is checked separately
