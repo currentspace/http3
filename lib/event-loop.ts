@@ -5,6 +5,7 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { Http3Error, ERR_HTTP3_RUNTIME_UNSUPPORTED } from './errors.js';
 
 /** Sentinel event emitted by each Rust worker thread before exit. */
 export const EVENT_SHUTDOWN_COMPLETE = 15;
@@ -508,10 +509,17 @@ let cachedBinding: NativeBinding | null = null;
  */
 export function getBinding(): NativeBinding {
   if (!cachedBinding) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
-    const loaded: NativeBinding = require(findBinding());
-    cachedBinding = loaded;
-    return loaded;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
+      const loaded: NativeBinding = require(findBinding());
+      cachedBinding = loaded;
+      return loaded;
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === ERR_HTTP3_RUNTIME_UNSUPPORTED) {
+        throw new Http3Error(error.message, ERR_HTTP3_RUNTIME_UNSUPPORTED, { cause: error });
+      }
+      throw error;
+    }
   }
   return cachedBinding;
 }

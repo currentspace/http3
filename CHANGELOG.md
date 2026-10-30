@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Report native binding startup failures with `ERR_HTTP3_RUNTIME_UNSUPPORTED`,
+  the OS/architecture and Linux libc. Distinguish unpublished prebuild targets
+  from missing optional platform packages and binaries that fail to load.
+  Preserve loader causes, local source builds and explicit WASM selection.
+
 ## 0.9.9
 
 - Bound WASM server packet batches and allocate packet pools on demand, so
