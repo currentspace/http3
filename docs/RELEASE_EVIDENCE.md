@@ -8,7 +8,8 @@ and remaining qualification work for each release candidate.
 - Includes configurable one-day Alt-Svc, socket compatibility, dual-stack/listen
   arguments, package/types fixes, Nest/proxy/shutdown helpers, dev certificates,
   diagnostics and documentation. Root, Rust and all three native sidecars are
-  aligned to 0.9.7. Publication is pending release workflow validation.
+  aligned to 0.9.7. Published as `v0.9.7` at `d2c9928`; all four packages
+  report 0.9.7 under `latest`.
 - The full local Node 26 suite passed
   397 tests and FFI passed 67. Node 24 also passed all 397 tests. Rust passed 279 tests plus targeted flow-control,
   shutdown and concurrent-stream integration tests. Rebuilt WASM passed 59 tests
@@ -48,13 +49,36 @@ and remaining qualification work for each release candidate.
   The doctor TCP probe uses a plain connection; TLS trust is checked separately
   with verification enabled.
 - Windows browser trust and manual Safari qualification remain unverified. Doctor
-  is read-only and does not clear Chrome state. Artifacts: `artifacts/consumer-feedback/`.
+  is read-only and does not clear Chrome state. Release artifacts: `artifacts/releases/0.9.7/`.
 
 - PR #20 merged at `7be72a1`. Its final implementation head `03387ca` passed
   all required hosted checks: Verify `41002754429`, Distribution `41002754459`,
   CI `41002754535`, Security `41002754446`, combined Next/Nest `41002754610`,
   Rust Safety `41002754490` and Interop `41002754421`. Browser trust checks
   ran on disposable hosted runners, without changing local machine trust.
+
+### Publication qualification
+
+- Release dry-run [41008592531](https://github.com/currentspace/http3/actions/runs/41008592531)
+  and publishing run [41010050585](https://github.com/currentspace/http3/actions/runs/41010050585)
+  passed at `d2c9928`. Both validated all three native packages on Node 24/26
+  and built/tested the bundled WASM runtime. All hosted release-commit checks
+  passed, including Verify `41010050462` and Distribution `41010050473`.
+- Versioned local checks passed lint, typechecks, Node/FFI tests, Rust tests,
+  concurrency/load gates and packed-install checks in all four TypeScript
+  resolution modes. Browser trust checks ran on disposable hosted runners.
+- Fresh npm registry installation loaded the 0.9.7 platform package, all public
+  integration entry points and bundled WASM, with no native binaries, docs or
+  examples in the root. Registry integrity and `latest` were checked for all
+  four packages.
+- Installed-package regressions passed 12 tests each on Node 24.22.1 and
+  26.13.0, covering H2 resets, H1/H2/H3 SSE aborts, proxy handshake timeouts and
+  paused 20 MiB native/WASM uploads with concurrent requests.
+- A clean registry-installed Next/Nest example passed 29 protocol/lifecycle tests
+  in development and 29 in production on Node 26.13.0, including split cookies,
+  H1/H2/H3 routing, SSE, uploads and coordinated shutdown.
+- [GitHub release](https://github.com/currentspace/http3/releases/tag/v0.9.7).
+  Manual Safari and Windows browser trust qualification remain incomplete.
 
 ## 0.9.6
 
