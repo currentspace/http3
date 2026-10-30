@@ -94,6 +94,8 @@ pub extern "C" fn h3c_new(opts_ptr: u32, opts_len: u32) -> u32 {
         return 0;
     };
 
+    handler.enable_read_credit();
+
     if params.keylog {
         handler.enable_keylog();
     }
@@ -295,6 +297,15 @@ pub extern "C" fn h3c_stream_send(
             released,
             sess.handler.has_pending_stream_write(stream_id),
         )
+    })
+    .unwrap_or(ERR_INVALID_HANDLE)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn h3c_stream_read_credit(handle: u32, stream_id: u64, bytes: u32) -> i64 {
+    with_session_mut(handle, |sess| {
+        sess.handler.stream_read_credit(stream_id, bytes as usize);
+        0i64
     })
     .unwrap_or(ERR_INVALID_HANDLE)
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.8
+
+- Apply receive-credit flow control to native and WASM client response bodies,
+  so paused downloads stop reading from QUIC and resume without buffering the
+  entire response in JavaScript.
+- Cancel unfinished client H3 streams on `destroy()`, including idle SSE and
+  blocked uploads/downloads, and remove closed streams from session tracking.
+- Withhold producer drain events while a client or server still owns queued
+  writes. This prevents WASM producers from running ahead of a paused peer.
+- Clear the proxy inactivity timeout after SSE response headers so quiet event
+  streams stay open. Preserve connection deadlines and non-SSE inactivity limits.
+- Clarify H3 request-body flow control and the distinction between the unread
+  buffer safety cap and total upload size.
+
 ## 0.9.7
 
 - Bound native and WASM H3 request reads with per-stream receive credit so paused

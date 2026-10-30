@@ -155,6 +155,7 @@ export interface NativeWorkerClientBinding {
   connect(serverAddr: string, serverName: string): { address: string; family: string; port: number };
   sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number;
   streamSend(streamId: number, data: Buffer, fin: boolean): NativeStreamSendOutcome;
+  streamReadCredit(streamId: number, bytes: number): boolean;
   streamClose(streamId: number, errorCode: number): boolean;
   sendDatagram(data: Buffer): boolean;
   getSessionMetrics(): {
@@ -695,6 +696,7 @@ export interface ClientEventLoopLike {
   connect(serverAddr: string, serverName: string): Promise<void>;
   sendRequest(headers: Array<{ name: string; value: string }>, fin: boolean): number;
   streamSend(streamId: number, data: Buffer, fin: boolean): number;
+  streamReadCredit?(streamId: number, bytes: number): boolean;
   streamClose(streamId: number, errorCode: number): boolean;
   sendDatagram(data: Buffer): boolean;
   getSessionMetrics(): {
@@ -748,6 +750,10 @@ export class ClientEventLoop implements ClientEventLoopLike {
 
   streamSend(streamId: number, data: Buffer, fin: boolean): number {
     return streamSendOutcomeBytes(this.worker.streamSend(streamId, data, fin));
+  }
+
+  streamReadCredit(streamId: number, bytes: number): boolean {
+    return this.worker.streamReadCredit(streamId, bytes);
   }
 
   streamClose(streamId: number, errorCode: number): boolean {

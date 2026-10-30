@@ -366,7 +366,12 @@ export async function createH3Pair(opts?: {
       ...(opts?.maxIdleTimeoutMs != null && { maxIdleTimeoutMs: opts.maxIdleTimeoutMs }),
       ...(opts?.initialMaxStreamDataBidiLocal != null && { initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal }),
     },
-    clientEvents.callback,
+    (err: Error | null, events: any[]) => {
+      clientEvents.callback(err, events);
+      for (const event of events ?? []) {
+        if (isH3BodyDataEvent(event)) client.streamReadCredit(event.streamId, event.data.length);
+      }
+    },
   );
 
   client.connect(`127.0.0.1:${addr.port}`, 'localhost');

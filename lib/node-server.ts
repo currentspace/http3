@@ -238,7 +238,11 @@ export interface NodeServerOptions extends ServerOptions {
   altSvc?: { maxAge?: number } | false;
   /** Maximum time to drain active responses during close. Default: 30 seconds. */
   shutdownTimeoutMs?: number;
-  /** Maximum unread H3 request bytes in the transport stream. Default: 1 MiB. */
+  /** Safety cap on unread H3 bytes buffered in the transport stream. Default: 1 MiB.
+   * Native and WASM H3 request bodies are flow-controlled: slow or paused handlers
+   * hold the sender back. Large streaming uploads (e.g. 4 MiB) work at the default;
+   * this caps buffered/in-flight data, not total body size. Exceeding it resets the stream.
+   */
   maxBufferedRequestBytes?: number;
 }
 

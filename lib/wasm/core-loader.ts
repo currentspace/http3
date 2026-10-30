@@ -82,6 +82,7 @@ export interface Http3WasmExports {
   h3c_drain_events(this: void, handle: number, outPtrPtr: number): bigint;
   h3c_send_request(this: void, handle: number, headersJsonPtr: number, headersJsonLen: number, fin: number): bigint;
   h3c_stream_send(this: void, handle: number, streamId: bigint, ptr: number, len: number, fin: number): bigint;
+  h3c_stream_read_credit(this: void, handle: number, streamId: bigint, bytes: number): bigint;
   h3c_stream_close(this: void, handle: number, streamId: bigint, errorCode: number): bigint;
   h3c_send_datagram(this: void, handle: number, ptr: number, len: number): bigint;
   h3c_ping(this: void, handle: number): bigint;

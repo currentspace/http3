@@ -75,6 +75,18 @@ const stream = session.request({
 }, { endStream: true });
 ```
 
+## Streaming and cancellation
+
+H3 request and response bodies apply receive-credit flow control in native and
+WASM runtimes. Pausing a reader eventually backpressures the peer; other streams
+on the connection can continue. QUIC receive windows and transport queues are
+separate from Node's readable high-water mark.
+
+Use `pipeline()` or wait for `drain` when `write()` returns `false`. Write
+callbacks, `drain`, and `finish` describe local write admission, not receipt or
+acknowledgement by the peer. Destroying an unfinished client stream cancels it
+remotely and rejects pending writes; normal duplex completion does not reset it.
+
 ## Runtime modes
 
 Every QUIC-capable API accepts:
@@ -202,6 +214,15 @@ The package root also exports `createNodeServerFactory` and
 `createExpressHandler`. Subpath declarations use `typesVersions` for legacy
 TypeScript `moduleResolution: "node"`; modern Node16/NodeNext/bundler resolution
 continues to use `exports`. No ambient module declarations are required.
+
+Since 0.9.7, native and WASM H3 request bodies are flow-controlled: a slow or
+paused handler holds the client back. A 4 MiB upload can stream through a slow
+handler with the default `maxBufferedRequestBytes: 1024 * 1024` (1 MiB).
+This option caps unread bytes buffered in the transport stream, including data
+already in flight when reading pauses; it is not a total upload-size limit.
+Exceeding the cap resets the stream, but large streaming uploads do not normally
+need a higher value. Framework body-size limits still apply. See
+[request buffering](https://github.com/currentspace/http3/blob/HEAD/docs/NODE_SERVER.md#request-buffering-and-shutdown).
 
 ## Examples
 
