@@ -36,11 +36,15 @@
 - Other platforms may require local native compilation and are not part of the
   current prebuild release set.
 
-## Package layout and source builds (unreleased after 0.9.6)
+## Package layout and source builds
 
 The root tarball no longer duplicates native binaries. Keep npm optional
 dependencies enabled so the matching platform package is installed. Docs and
 examples are available in the GitHub repository. WASM remains in the root.
+
+Native startup failures name the OS/architecture and Linux libc, distinguish
+unpublished targets from missing optional packages, and retain the original
+loader errors as causes. See [startup error handling](./ERROR_HANDLING.md#native-binding-startup-failures).
 
 There is no automatic native compilation during npm installation. Unsupported
 prebuild targets require a supported source build of this repository and an

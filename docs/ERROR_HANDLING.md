@@ -26,6 +26,29 @@ instances before they reach JS session and stream objects.
 | `endpoint` | `string \| undefined` | Endpoint string involved in parse/resolve failures. |
 | `runtimeInfo` | `RuntimeInfo \| undefined` | Runtime snapshot attached to selection failures. |
 
+## Native binding startup failures
+
+If no native binding can load, server/client startup reports
+`ERR_HTTP3_RUNTIME_UNSUPPORTED` as an `Http3Error`. Its message names the OS,
+architecture and, on Linux, glibc or musl:
+
+- When no prebuild is published for that target, the message lists published
+  targets. Reinstalling cannot supply an unpublished binary. Use an explicitly
+  selected WASM runtime or a qualified source build; see the
+  [support matrix](./SUPPORT_MATRIX.md).
+- On a published target with a missing optional platform package, the message
+  names that package and the required version. Install with optional
+  dependencies enabled, for example `npm install --include=optional`.
+- If a binary exists but cannot load, or `NAPI_RS_NATIVE_LIBRARY_PATH` is
+  invalid, inspect the original errors in the `cause` chain. These cases do
+  not receive the missing-package reinstall advice.
+
+Imports remain lazy: importing the package does not require a native binding.
+Working local binaries are accepted even on targets without a published
+prebuild. `runtimeMode: 'wasm'` bypasses native loading; `auto` does not select
+WASM. Attach a server `'error'` listener before `listen()` to handle asynchronous
+startup failures. Promise-based client connections reject on startup failure.
+
 ## Allocation and body-limit errors
 
 `WasmMemoryError` is available from both `@currentspace/http3` and

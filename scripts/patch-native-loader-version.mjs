@@ -23,4 +23,21 @@ source = source.replaceAll(
   'expected ${EXPECTED_NATIVE_PACKAGE_VERSION} but got ${bindingPackageVersion}',
 );
 
+const diagnostic = `if (!nativeBinding) {
+  throw require('./bin/native-binding-error.cjs')({
+    platform: process.platform,
+    arch: process.arch,
+    musl: process.platform === 'linux' && isMusl(),
+    override: process.env.NAPI_RS_NATIVE_LIBRARY_PATH,
+    loadErrors,
+    cause: createLoadErrorChain(loadErrors),
+  })
+}`;
+const failureBlock = /if \(!nativeBinding\) \{\n  if \(loadErrors\.length > 0\) \{[\s\S]*?\n  throw new Error\(`Failed to load native binding`\)\n\}/u;
+if (failureBlock.test(source)) {
+  source = source.replace(failureBlock, diagnostic);
+} else if (!source.includes(diagnostic)) {
+  throw new Error('Native loader failure block changed; update the diagnostics patch before building.');
+}
+
 writeFileSync(loaderPath, source);

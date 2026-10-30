@@ -723,18 +723,14 @@ if (!nativeBinding || forceWasi) {
 }
 
 if (!nativeBinding) {
-  if (loadErrors.length > 0) {
-    const error = new Error(
-      `Cannot find native binding. ` +
-        `npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). ` +
-        'Please try `npm i` again after removing both package-lock.json and node_modules directory.',
-    )
-    // assign instead of the `new Error(message, { cause })` options form,
-    // which Node < 16.9 silently ignores
-    error.cause = createLoadErrorChain(loadErrors)
-    throw error
-  }
-  throw new Error(`Failed to load native binding`)
+  throw require('./bin/native-binding-error.cjs')({
+    platform: process.platform,
+    arch: process.arch,
+    musl: process.platform === 'linux' && isMusl(),
+    override: process.env.NAPI_RS_NATIVE_LIBRARY_PATH,
+    loadErrors,
+    cause: createLoadErrorChain(loadErrors),
+  })
 }
 
 // A package can patch its own fallback in front of the load-failure check
