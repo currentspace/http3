@@ -23,9 +23,44 @@ and remaining qualification work for each release candidate.
 - Offline candidate tarball installs loaded the matching native sidecar and
   WASM runtime. Paused H3 downloads buffered about 128 KiB in JavaScript;
   transport queues and QUIC windows hold additional bytes.
-- Versioned local checks, hosted qualification, publication and registry install
-  verification are pending. Manual Safari and Windows browser trust remain
-  unverified; preserve these documented limitations in the release handoff.
+- Published as [v0.9.8](https://github.com/currentspace/http3/releases/tag/v0.9.8)
+  at `47afad7` after PR #21. All four npm packages report 0.9.8 under `latest`;
+  downloaded registry tarballs match their published SHA-512 integrity values.
+- The versioned local gate passed 19 checks with no failures; browser checks
+  were skipped locally and ran on disposable hosted runners. The separate Rust
+  interop suite passed. Release dry-run
+  [41077729812](https://github.com/currentspace/http3/actions/runs/41077729812)
+  passed all three native platforms on Node 24/26 and the bundled WASM build.
+- Release-commit Verify `41082011706`, Distribution `41082011969`, CI
+  `41082011824`, Security `41082011637`, Interop `41082011708`, Rust Safety
+  `41082011763` and combined Next/Nest `41082011757` passed.
+  Two Intel macOS jobs needed unchanged retries: the PR Node 26 concurrency
+  latency check initially measured p95 123.5 ms against 100 ms, then 44.4 ms;
+  the merged-main Node 24 raw QUIC rapid-lifecycle test initially reported
+  `shared quic client worker not running`. Both retries passed without code or
+  threshold changes. These first-attempt failures are retained in the artifacts;
+  their underlying causes have not been resolved by this release.
+- Publishing run
+  [41082068399](https://github.com/currentspace/http3/actions/runs/41082068399)
+  built and validated all artifacts and npm accepted all four uploads. Its
+  final registry check timed out waiting for Linux x64 and the workflow remains
+  failed. The accepted package subsequently became available without another
+  upload. Independent reads verified all four versions, `latest` tags, tarball
+  integrity and package contents before creating the GitHub release.
+- A fresh npm install loaded the matching macOS arm64 sidecar, bundled WASM,
+  CLI and integration entry points. The root contains no native binaries,
+  examples or docs. Installed-package streaming regressions passed 28 tests
+  each on Node 24.22.1 and 26.13.0. A fresh registry-installed Next/Nest example
+  passed 29 protocol/lifecycle tests in development and 29 in production.
+- A follow-up symmetry check against the published package found that raw
+  `ServerHttp3Stream.destroy()` does not cancel the peer in native or WASM mode,
+  unlike client destroy and the Node response adapter. Explicit raw-server
+  `close()` cancels the peer, but server tracking retains streams closed before
+  request FIN until session teardown. These server lifecycle paths need a
+  follow-up fix; they are not covered by the client cancellation changes.
+- Manual Safari and Windows browser trust qualification remain incomplete.
+  Release logs, registry verification and follow-up reproduction evidence are
+  retained in `artifacts/releases/0.9.8/`.
 
 ## 0.9.7
 
