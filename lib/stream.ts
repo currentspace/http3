@@ -285,14 +285,21 @@ export class ServerHttp3Stream extends Duplex {
   _read(_size: number): void {
     this._onActivity();
     drainPendingReads(this, this._bp);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
   }
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
     this._uncreditedReadBytes += chunk?.length ?? 0;
     this._bp = pushData(this, this._bp, chunk, this._maxBufferedReadBytes);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
+  }
+
+  private _scheduleReadCredit(): void {
+    if (this._creditRetry || this.destroyed || this._bp?.readBackpressure || this._uncreditedReadBytes === 0 || !this._eventLoop?.streamReadCredit) return;
+    // Coalesce a poll turn's consumed chunks without expanding the native
+    // receive window. Recheck backpressure and destruction before granting.
+    this._creditRetry = setImmediate(() => { this._creditRetry = undefined; this._returnReadCredit(); });
   }
 
   private _returnReadCredit(): void {
@@ -553,14 +560,21 @@ export class ClientHttp3Stream extends Duplex {
   _read(_size: number): void {
     this._onActivity();
     drainPendingReads(this, this._bp);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
   }
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
     this._uncreditedReadBytes += chunk?.length ?? 0;
     this._bp = pushData(this, this._bp, chunk);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
+  }
+
+  private _scheduleReadCredit(): void {
+    if (this._creditRetry || this.destroyed || this._bp?.readBackpressure || this._uncreditedReadBytes === 0 || !this._eventLoop?.streamReadCredit) return;
+    // Coalesce a poll turn's consumed chunks without expanding the native
+    // receive window. Recheck backpressure and destruction before granting.
+    this._creditRetry = setImmediate(() => { this._creditRetry = undefined; this._returnReadCredit(); });
   }
 
   private _returnReadCredit(): void {

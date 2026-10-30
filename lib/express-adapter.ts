@@ -29,7 +29,7 @@ export type ExpressLikeHandler = (req: ExpressLikeRequest, res: ExpressLikeRespo
  * Keeping these descriptors as own properties preserves the transport without
  * mutating Express globals or changing real HTTP/1 request/response objects.
  */
-function facadeDescriptors(prototype: object): PropertyDescriptorMap {
+function facadeDescriptors(prototype: object): ReadonlyArray<readonly [PropertyKey, PropertyDescriptor]> {
   const descriptors: PropertyDescriptorMap = {};
   let current: object | null = prototype;
   while (current && current !== Object.prototype) {
@@ -43,15 +43,15 @@ function facadeDescriptors(prototype: object): PropertyDescriptorMap {
     }
     current = Object.getPrototypeOf(current) as object | null;
   }
-  return descriptors;
+  return Reflect.ownKeys(descriptors).map(key => [key, descriptors[key]] as const);
 }
 
 const requestDescriptors = facadeDescriptors(Http3IncomingMessage.prototype);
 const responseDescriptors = facadeDescriptors(Http3ServerResponse.prototype);
 
-function preserveFacade(instance: object, descriptors: PropertyDescriptorMap): void {
-  for (const key of Reflect.ownKeys(descriptors)) {
-    if (!Object.hasOwn(instance, key)) Object.defineProperty(instance, key, descriptors[key]);
+function preserveFacade(instance: object, descriptors: ReadonlyArray<readonly [PropertyKey, PropertyDescriptor]>): void {
+  for (const [key, descriptor] of descriptors) {
+    if (!Object.hasOwn(instance, key)) Object.defineProperty(instance, key, descriptor);
   }
 }
 

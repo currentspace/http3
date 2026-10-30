@@ -103,7 +103,13 @@ export class Http3IncomingMessage extends Readable {
     // Error events still reach body parsers, while requests with no parser remain safe.
     this.on('error', () => {});
     stream.on('error', error => { this.aborted ||= !this.complete; this.destroy(error); });
-    if (flags.endStream) this.push(null);
+    if (flags.endStream) {
+      this.push(null);
+      // The facade already knows EOF, so resuming it need not call _read().
+      // Consume the transport's EOF too, allowing normal duplex cleanup once
+      // the response finishes without cancelling its admitted writes.
+      stream.resume();
+    }
   }
   get connection(): RequestSocket { return this.socket; }
   override _read(): void { this.stream.resume(); }

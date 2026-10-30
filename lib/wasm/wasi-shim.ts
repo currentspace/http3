@@ -91,8 +91,19 @@ export function makePreview1Imports(
   const random = opts.random ?? defaultRandom;
   const onStderr = opts.onStderr ?? ((): void => {});
 
-  const dataView = (): DataView => new DataView(getMemory().buffer);
-  const bytes = (): Uint8Array => new Uint8Array(getMemory().buffer);
+  let cachedView: DataView | undefined;
+  let cachedBytes: Uint8Array | undefined;
+  // memory.grow replaces (and can detach) the buffer, including grow(0).
+  const dataView = (): DataView => {
+    const buffer = getMemory().buffer;
+    if (cachedView?.buffer !== buffer) cachedView = new DataView(buffer);
+    return cachedView;
+  };
+  const bytes = (): Uint8Array => {
+    const buffer = getMemory().buffer;
+    if (cachedBytes?.buffer !== buffer) cachedBytes = new Uint8Array(buffer);
+    return cachedBytes;
+  };
 
   // Anchor wall-clock (REALTIME) at the shim's creation time, then advance
   // it by the same delta the (possibly mocked) monotonic-like `nowNs`

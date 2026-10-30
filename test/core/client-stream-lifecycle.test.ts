@@ -61,7 +61,8 @@ test('receive credit retries queue saturation without losing bytes', async () =>
   stream._pushData(Buffer.alloc(20));
   await nextTurn();
   await nextTurn();
-  assert.deepEqual(attempts, [10, 30, 30]);
+  await nextTurn();
+  assert.deepEqual(attempts, [30, 30, 30]);
   stream.destroy();
 });
 
@@ -70,6 +71,7 @@ test('destroy stops retrying receive credit on a saturated queue', async () => {
   let attempts = 0;
   loop.streamReadCredit = () => { attempts++; return false; };
   stream._pushData(Buffer.alloc(10));
+  await nextTurn();
   stream.destroy();
   await nextTurn();
   assert.equal(attempts, 1);

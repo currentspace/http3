@@ -2525,9 +2525,10 @@ impl H3ServerHandler {
         Self {
             conn_map,
             timer_heap: TimerHeap::new(),
-            // WASM is a synchronous pump with a 64 MiB heap, not a native reactor.
-            buffer_pool: BufferPool::new(if cfg!(target_arch = "wasm32") { 0 } else { 256 }, 65535),
-            tx_pool: BufferPool::new(if cfg!(target_arch = "wasm32") { 0 } else { 256 }, 65535),
+            // Allocate packet storage on first use, including on idle native
+            // shards. Checked-out buffers are still initialized and recycled.
+            buffer_pool: BufferPool::new(0, 65535),
+            tx_pool: BufferPool::new(0, 65535),
             pending_write_pool: AdaptiveBufferPool::new(
                 PENDING_WRITE_POOL_SIZE,
                 PENDING_WRITE_MIN_CAPACITY,

@@ -2346,9 +2346,9 @@ impl QuicServerHandler {
         Self {
             conn_map,
             timer_heap: TimerHeap::new(),
-            // WASM is a synchronous pump with a 64 MiB heap, not a native reactor.
-            buffer_pool: BufferPool::new(if cfg!(target_arch = "wasm32") { 0 } else { 256 }, 65535),
-            tx_pool: BufferPool::new(if cfg!(target_arch = "wasm32") { 0 } else { 256 }, 65535),
+            // Idle native shards need no packet storage until traffic arrives.
+            buffer_pool: BufferPool::new(0, 65535),
+            tx_pool: BufferPool::new(0, 65535),
             pending_writes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
             handles_buf: Vec::new(),
