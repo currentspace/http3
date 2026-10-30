@@ -53,6 +53,14 @@ try {
     for (const key of ['createSecureServer','createQuicServer','connectQuic','createSseStream','loadTlsOptionsFromAwsEnv','createNodeServerFactory','createExpressHandler','listenNest','proxy','createDevTls']) assert.equal(typeof pkg[key], 'function', key);
     assert.equal(typeof require('@currentspace/http3/node').createNodeServerFactory, 'function');
     assert.equal(typeof require('@currentspace/http3/express').createExpressHandler, 'function');
+    const wasm = require('@currentspace/http3/wasm');
+    assert.equal(pkg.WasmMemoryError, wasm.WasmMemoryError);
+    const memoryError = new pkg.WasmMemoryError(1024);
+    assert.equal(memoryError.code, pkg.ERR_HTTP3_WASM_MEMORY_LIMIT);
+    assert.equal(memoryError.code, wasm.ERR_HTTP3_WASM_MEMORY_LIMIT);
+    assert.equal(memoryError.requestedBytes, 1024);
+    assert.equal(pkg.RequestBodyTooLargeError, require('@currentspace/http3/fetch').RequestBodyTooLargeError);
+    assert.equal(pkg.RequestBodyTooLargeError, require('@currentspace/http3/h3').RequestBodyTooLargeError);
     const root = ${JSON.stringify(installedRoot)};
     assert.ok(readdirSync(root).every(f => !f.endsWith('.node')));
     const binding = require(join(root, 'index.js'));
@@ -66,31 +74,36 @@ try {
   const compilerManifest = require.resolve('typescript/package.json');
   const compiler = JSON.parse(readFileSync(compilerManifest, 'utf8'));
   const compilerBin = resolve(compilerManifest, '..', compiler.bin.tsc ?? compiler.bin.tsc6);
-  writeFileSync(join(tempDir, 'consumer.ts'), `
-    import {createNodeServerFactory} from '@currentspace/http3/node';
-    import {createExpressHandler} from '@currentspace/http3/express';
-    import {createNodeServerFactory as rootFactory, createExpressHandler as rootHandler, createSecureServer} from '@currentspace/http3';
-    import {listenNest} from '@currentspace/http3/nest';
-    import {proxy} from '@currentspace/http3/proxy';
-    import {createDevTls} from '@currentspace/http3/dev';
-    void listenNest; void proxy; void createDevTls;
-    const app = createExpressHandler((_req, res) => res.end('ok'));
-    const server = createNodeServerFactory({})(app);
-    server.listen({port: 0, host: '::'});
-    server.listen(0, '::', () => {});
-    rootFactory({})(rootHandler(app));
-    createSecureServer({}).listen({port: 0});
-    // @ts-expect-error Ports must be numeric.
-    server.listen({port: '443'});
-  `);
+  copyFileSync(join(repoRoot, 'scripts/fixtures/installed-consumer.ts'), join(tempDir, 'consumer.ts'));
   for (const [moduleResolution, module] of [['node', 'CommonJS'], ['node16', 'Node16'], ['nodenext', 'NodeNext'], ['bundler', 'ESNext']]) {
     writeFileSync(join(tempDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: {
       moduleResolution, module, target: 'ES2022', strict: true, noEmit: true,
-      skipLibCheck: true, ignoreDeprecations: '6.0',
+      skipLibCheck: false, ignoreDeprecations: '6.0',
       typeRoots: [resolve(repoRoot, 'node_modules/@types')], types: ['node'],
     }, files: ['consumer.ts'] }));
     run(process.execPath, [compilerBin, '-p', 'tsconfig.json']);
     console.log(`Installed type declarations resolve with moduleResolution=${moduleResolution}`);
+  }
+  copyFileSync(join(repoRoot, 'scripts/fixtures/installed-worker-consumer.ts'), join(tempDir, 'worker.ts'));
+  for (const condition of ['workerd', 'worker']) {
+    for (const [moduleResolution, module] of [['nodenext', 'NodeNext'], ['bundler', 'ESNext']]) {
+      writeFileSync(join(tempDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: {
+        moduleResolution, module, customConditions: [condition], target: 'ES2022',
+        lib: ['ES2022', 'WebWorker'], types: [], strict: true, noEmit: true, skipLibCheck: false,
+      }, files: ['worker.ts'] }));
+      run(process.execPath, [compilerBin, '-p', 'tsconfig.json']);
+      console.log(`Installed ${condition} declarations resolve with ${moduleResolution} and no Node types`);
+    }
+    run(process.execPath, [`--conditions=${condition}`, '-e', `
+      const assert = require('node:assert/strict');
+      const wasm = require('@currentspace/http3/wasm');
+      assert.equal(typeof wasm.createUnavailableDatagramTransport, 'function');
+      assert.equal(wasm.connectNodeUdp, undefined);
+      const error = new wasm.WasmMemoryError(17);
+      assert.equal(error.code, wasm.ERR_HTTP3_WASM_MEMORY_LIMIT);
+      assert.equal(error.requestedBytes, 17);
+      assert.ok(!Object.keys(require.cache).some(path => /node-udp|node-core-loader/.test(path)));
+    `]);
   }
   console.log(`Root package: ${root.size} packed bytes, ${root.unpackedSize} unpacked bytes; no bundled native binaries.`);
   process.stdout.write(run(process.execPath, [join(installedRoot, 'bin/http3.cjs'), '--help']));

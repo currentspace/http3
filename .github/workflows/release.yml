@@ -175,6 +175,7 @@ jobs:
           dist-test/test/core/request-backpressure.test.js
           dist-test/test/core/response-backpressure.test.js
           dist-test/test/core/client-stream-lifecycle.test.js
+          dist-test/test/core/server-stream-lifecycle.test.js
           dist-test/test/core/proxy-timeouts.test.js
 
       - name: Smoke install packed artifact

@@ -2525,8 +2525,10 @@ impl H3ServerHandler {
         Self {
             conn_map,
             timer_heap: TimerHeap::new(),
-            buffer_pool: BufferPool::default(),
-            tx_pool: BufferPool::new(256, 65535),
+            // Allocate packet storage on first use, including on idle native
+            // shards. Checked-out buffers are still initialized and recycled.
+            buffer_pool: BufferPool::new(0, 65535),
+            tx_pool: BufferPool::new(0, 65535),
             pending_write_pool: AdaptiveBufferPool::new(
                 PENDING_WRITE_POOL_SIZE,
                 PENDING_WRITE_MIN_CAPACITY,
@@ -2966,8 +2968,13 @@ impl H3ServerHandler {
         let count = self.handles_buf.len();
         let mut done = vec![false; count];
         let mut active = count;
-        while active > 0 {
+        'drain: while active > 0 {
             for i in 0..count {
+                // Return a bounded batch so the WASM host can send and recycle
+                // buffers before materializing more packets.
+                if cfg!(target_arch = "wasm32") && outbound.len() >= 32 {
+                    break 'drain;
+                }
                 if done[i] {
                     continue;
                 }

@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { createRequestBody, RequestBodyTooLargeError } from '../../lib/request-body.js';
 import { ServerHttp3Stream } from '../../lib/stream.js';
 import { createFetchHandler } from '../../lib/fetch-adapter.js';
+import { ERR_HTTP3_RECEIVE_BUFFER_LIMIT } from '../../lib/index.js';
 
 it('request body pauses a fast source and streams all bytes when consumed', async () => {
   let produced = 0;
@@ -66,7 +67,7 @@ it('native receive spill is bounded and resets only the overflowing stream', asy
   const error = once(stream, 'error');
   for (let i = 0; i < 100; i++) stream._pushData(Buffer.alloc(64 * 1024));
   assert.equal(stream.destroyed, true);
-  assert.equal((await error)[0].code, 'ERR_HTTP3_RECEIVE_BUFFER_LIMIT');
+  assert.equal((await error)[0].code, ERR_HTTP3_RECEIVE_BUFFER_LIMIT);
   assert.equal(resets, 1);
   assert.equal(stream._bp?.pendingReads.length, 0);
 });

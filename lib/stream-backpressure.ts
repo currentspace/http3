@@ -20,6 +20,7 @@
  */
 
 import type { Duplex } from 'node:stream';
+import { ERR_HTTP3_RECEIVE_BUFFER_LIMIT } from './errors.js';
 
 /**
  * Drain callback. Invoked with no argument on a real drain (resume the
@@ -149,7 +150,7 @@ export function pushData(
   if (chunk !== null && buffered + chunk.length > maxBufferedBytes) {
     if (state) { state.pendingReads.length = 0; state.pendingReadBytes = 0; }
     stream.destroy(Object.assign(new Error(`receive buffer exceeded ${maxBufferedBytes} bytes`), {
-      code: 'ERR_HTTP3_RECEIVE_BUFFER_LIMIT',
+      code: ERR_HTTP3_RECEIVE_BUFFER_LIMIT,
     }));
     return state;
   }

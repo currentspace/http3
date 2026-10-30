@@ -27,7 +27,9 @@
 //! - **Handles** are `u32` slab indices; `0` is never a valid handle.
 //! - **Errors**: a negative return is a shared code —
 //!   `-1` again/blocked, `-2` protocol/config error, `-3` invalid handle,
-//!   `-4` bad arguments. Fetch the message with `{h3c,qc,hs,qs}_last_error`;
+//!   `-4` bad arguments, `-5` payload allocation rejected (no bytes admitted).
+//!   Allocation rejection has no last-error string, avoiding another allocation
+//!   on the failure path. For other errors fetch `{h3c,qc,hs,qs}_last_error`;
 //!   `handle = 0` reads a global last-error slot (where construction
 //!   failures from `{h3c,qc,hs,qs}_new` land, since a handle doesn't exist
 //!   yet to hang the error off of).

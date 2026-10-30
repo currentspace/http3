@@ -1,3 +1,4 @@
+import { checkPayloadAllocation } from './memory-error.js';
 import { DeadlineTimer, drainUntilDone } from './lifecycle.js';
 /**
  * `WasmQuicServerEventLoop` — implements `QuicServerEventLoopLike`
@@ -112,8 +113,10 @@ export class WasmQuicServerEventLoop {
 
   streamSend(connHandle: number, streamId: number, data: Uint8Array, fin: boolean): number {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.qs_stream_send(this.handle, connHandle, BigInt(streamId), ptr, len, fin ? 1 : 0));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.qs_stream_send(this.handle, connHandle, BigInt(streamId), ptr, len, fin ? 1 : 0)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     this.pump();
     return result < 0 ? 0 : result;
   }
@@ -137,8 +140,10 @@ export class WasmQuicServerEventLoop {
 
   sendDatagram(connHandle: number, data: Uint8Array): boolean {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.qs_send_datagram(this.handle, connHandle, ptr, len));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.qs_send_datagram(this.handle, connHandle, ptr, len)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     this.pump();
     return result >= 0;
   }

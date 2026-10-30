@@ -11,6 +11,7 @@ use http3::wasm_exports::{
     Chunk, JsH3Event, OutboundAdmission, QuicClientHandler, new_quic_client_config_in_memory,
 };
 
+use crate::abi::copy_payload;
 use crate::abi::{
     ERR_AGAIN, ERR_INVALID_HANDLE, ERR_PROTOCOL, RX_TX_BUFFER_LEN, bytes_in, set_global_error,
     str_in, write_out_message, write_out_ptr_len,
@@ -246,7 +247,10 @@ pub extern "C" fn qc_open_stream(handle: u32) -> i64 {
 /// `ptr`/`len` must describe a valid, readable byte range.
 #[unsafe(no_mangle)]
 pub extern "C" fn qc_stream_send(handle: u32, stream_id: u64, ptr: u32, len: u32, fin: i32) -> i64 {
-    let data = unsafe { bytes_in(ptr, len) }.to_vec();
+    let data = match copy_payload(unsafe { bytes_in(ptr, len) }) {
+        Ok(data) => data,
+        Err(code) => return code,
+    };
     with_session_mut(handle, |sess| {
         let chunk = if data.is_empty() {
             Chunk::empty()
@@ -285,7 +289,10 @@ pub extern "C" fn qc_stream_close(handle: u32, stream_id: u64, error_code: u32) 
 /// `ptr`/`len` must describe a valid, readable byte range.
 #[unsafe(no_mangle)]
 pub extern "C" fn qc_send_datagram(handle: u32, ptr: u32, len: u32) -> i64 {
-    let data = unsafe { bytes_in(ptr, len) }.to_vec();
+    let data = match copy_payload(unsafe { bytes_in(ptr, len) }) {
+        Ok(data) => data,
+        Err(code) => return code,
+    };
     with_session_mut(handle, |sess| {
         if sess.handler.send_datagram(Chunk::unpooled(data)) {
             0i64

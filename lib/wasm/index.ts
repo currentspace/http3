@@ -24,6 +24,7 @@
  * `index.workerd.ts` rather than one file with both surfaces.
  */
 
+export { WasmMemoryError, ERR_HTTP3_WASM_MEMORY_LIMIT } from './memory-error.js';
 export { loadHttp3WasmCore } from './core-loader.js';
 export type { Http3WasmCore, Http3WasmExports, WasmCoreSource } from './core-loader.js';
 
@@ -32,7 +33,7 @@ export type { ShimOptions } from './wasi-shim.js';
 
 export type { WasmEvent } from './events.js';
 
-export type { CommonWasmClientOptions } from './wasm-options.js';
+export type { CommonWasmClientOptions, CommonWasmServerOptions } from './wasm-options.js';
 
 export { WasmH3ClientEventLoop } from './h3-client-event-loop.js';
 export type { WasmH3ClientEventLoopOptions } from './h3-client-event-loop.js';

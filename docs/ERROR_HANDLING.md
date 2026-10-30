@@ -17,20 +17,62 @@ instances before they reach JS session and stream objects.
 | `code` | `string` | Stable `ERR_HTTP3_*` category. |
 | `quicCode` | `number \| undefined` | QUIC transport close code, when the failure is session-scoped. |
 | `h3Code` | `number \| undefined` | HTTP/3 application error code, when the failure is stream-scoped. |
-| `requestedMode` | `'auto' \| 'fast' \| 'portable' \| undefined` | Requested runtime mode for runtime-selection failures. |
-| `selectedMode` | `'fast' \| 'portable' \| undefined` | Selected runtime mode when known. |
-| `driver` | `'io_uring' \| 'poll' \| 'kqueue' \| undefined` | Native driver associated with the failure. |
+| `requestedMode` | `RuntimeMode \| undefined` | Requested runtime mode for runtime-selection failures, including `'wasm'`. |
+| `selectedMode` | `SelectedRuntimeMode \| undefined` | Selected runtime mode when known. |
+| `driver` | `RuntimeDriver \| undefined` | Driver associated with the failure, including `'wasm'`. |
 | `reasonCode` | `string \| undefined` | Structured reason identifier for endpoint/runtime failures. |
 | `errno` | `number \| undefined` | Native errno when available. |
 | `syscall` | `string \| undefined` | Native syscall/operation name when available. |
 | `endpoint` | `string \| undefined` | Endpoint string involved in parse/resolve failures. |
 | `runtimeInfo` | `RuntimeInfo \| undefined` | Runtime snapshot attached to selection failures. |
 
+## Allocation and body-limit errors
+
+`WasmMemoryError` is available from both `@currentspace/http3` and
+`@currentspace/http3/wasm`, including the `worker` and `workerd` export
+conditions. It extends `Error` directly, not `Http3Error`. Its readonly `code`
+has the literal type `'ERR_HTTP3_WASM_MEMORY_LIMIT'`, and its readonly
+`requestedBytes` is the number of payload bytes whose allocation was rejected.
+
+```ts
+import { WasmMemoryError } from '@currentspace/http3';
+
+function handleStreamError(error: Error): void {
+  if (error instanceof WasmMemoryError) {
+    console.error(`WASM rejected ${error.requestedBytes} payload bytes`);
+    return;
+  }
+  console.error(error);
+}
+
+// Attach before writing; a rejected write also reports through its callback.
+// stream.on('error', handleStreamError);
+```
+
+Stream error listeners and write callbacks remain typed as `Error`, because
+transport failures and other errors can also occur. Narrow with `instanceof`
+before accessing subclass fields. For code-based matching across duplicate
+package instances, check that the error is an object with a `code` property
+equal to the exported constant; code matching alone does not narrow the other
+fields to the class type.
+
+`RequestBodyTooLargeError` is exported from the root, `/fetch`, and `/h3`.
+Fetch handlers can catch it when consuming a request body that exceeds
+`maxBodyBytes`, including through `request.text()` or `request.json()`. If it
+escapes the handler before response headers are sent, the Fetch adapter produces
+a 413 response. A response already in progress cannot have its status replaced.
+The error has no custom `code` or byte-count property.
+
+The receive-buffer safety limit is a separate error: it is a plain `Error`
+with `code: ERR_HTTP3_RECEIVE_BUFFER_LIMIT`, exported from the root. It does
+not imply that the configured total Fetch body limit was exceeded.
+
 ## Exported Error Codes
 
 | Code | Current meaning | Typical source |
 | --- | --- | --- |
 | `ERR_HTTP3_STREAM_ERROR` | A request/response stream was reset or failed. | Native stream reset/error mapped through `toStreamError()`. |
+| `ERR_HTTP3_STREAM_BLOCKED` | Request creation is temporarily blocked by stream flow control. | `request()`; use `requestAsync()` to wait for capacity. |
 | `ERR_HTTP3_SESSION_ERROR` | A connection-level failure occurred. | Native session close/error mapped through `toSessionError()`. |
 | `ERR_HTTP3_HEADERS_SENT` | Headers were already committed. | Reserved public code for response-state errors in compatibility layers. |
 | `ERR_HTTP3_INVALID_STATE` | API call was made in the wrong lifecycle state. | Requesting before connect, re-listening, invalid 0-RTT use. |
@@ -42,6 +84,8 @@ instances before they reach JS session and stream objects.
 | `ERR_HTTP3_FAST_PATH_UNAVAILABLE` | Requested Linux fast path could not be used. | `io_uring_setup` blocked by seccomp/policy, unsupported fast runtime. |
 | `ERR_HTTP3_RUNTIME_UNSUPPORTED` | Runtime driver failed for an environmental reason. | Post-start driver failure or unsupported runtime environment. |
 | `ERR_HTTP3_RUNTIME_FALLBACK` | Runtime fallback category for consumers classifying warnings/events. | `runtimeInfo` / `'runtime'` events / `onRuntimeEvent`. |
+| `ERR_HTTP3_WASM_MEMORY_LIMIT` | Payload allocation was rejected by the WASM memory limit. | `WasmMemoryError` through stream errors/write callbacks or direct WASM helpers. |
+| `ERR_HTTP3_RECEIVE_BUFFER_LIMIT` | The bounded JavaScript receive buffer was exceeded. | Readable backpressure safety limit. |
 
 ## How Native Errors Are Mapped
 
@@ -87,7 +131,7 @@ changes.
 
 ### Fetch/SSE/EventSource adapters
 
-- `serveFetch()` converts handler throws into `500` responses on fallback HTTP/1.1/HTTP/2 paths.
+- `serveFetch()` converts handler throws into `500` responses on fallback HTTP/1.1/HTTP/2 paths, except `RequestBodyTooLargeError`, which produces 413.
 - `ServerSentEventStream` closes itself if heartbeat writes fail.
 - `Http3EventSource` emits plain `Error` objects for bad status/content-type responses and reconnects unless `reconnect: false` is set.
 

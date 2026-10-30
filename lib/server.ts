@@ -906,6 +906,10 @@ export class Http3SecureServer extends EventEmitter {
       return;
     }
 
+    // Trailers can already be queued when a stream closes. They must not
+    // create another request after its tracking entry has been removed.
+    if (!event.headers.some(header => header.name.startsWith(':'))) return;
+
     // New stream — create and emit
     const stream = new ServerHttp3Stream();
     stream.session = this._sessions.get(event.connHandle) ?? null;
@@ -913,6 +917,9 @@ export class Http3SecureServer extends EventEmitter {
     stream._streamId = event.streamId;
     stream._eventLoop = this._eventLoop;
     this._streams.set(streamKey, stream);
+    stream.once('close', () => {
+      this._streams.delete(streamKey);
+    });
 
     const headers = nativeHeadersToIncomingHeaders(event.headers);
 
@@ -944,12 +951,8 @@ export class Http3SecureServer extends EventEmitter {
       if (stream.readableFlowing === null) {
         stream.resume();
       }
-      // Don't remove from _streams yet — the writable side may still
-      // have pending drain callbacks. Stream is cleaned up on session close
-      // or when both sides complete naturally via 'close' event.
-      stream.once('close', () => {
-        this._streams.delete(streamKey);
-      });
+      // Keep routing write/drain events after request FIN. The close listener
+      // installed at creation also handles cancellation before that FIN.
     }
   }
 
@@ -957,6 +960,9 @@ export class Http3SecureServer extends EventEmitter {
     const streamKey = `${event.connHandle}:${event.streamId}`;
     const stream = this._streams.get(streamKey);
     if (stream) {
+      // A peer reset may terminate only one direction. Release the other
+      // direction and pending native writes before user abort handlers run.
+      stream._closeTransport(event.meta?.errorCode ?? 0x010c);
       stream.emit('aborted');
       stream.destroy(new Http3Error('stream reset', ERR_HTTP3_STREAM_ERROR, {
         h3Code: event.meta?.errorCode,
@@ -979,6 +985,7 @@ export class Http3SecureServer extends EventEmitter {
     const err = new Error('session closed');
     for (const [key, stream] of this._streams) {
       if (key.startsWith(`${event.connHandle}:`)) {
+        stream._eventLoop = null;
         if (stream.listenerCount('error') > 0) {
           stream.destroy(err);
         } else {

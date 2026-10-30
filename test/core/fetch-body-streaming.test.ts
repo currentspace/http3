@@ -4,7 +4,8 @@ import https from 'node:https';
 import { connect as connectH2 } from 'node:http2';
 import type { IncomingHttpHeaders } from 'node:http2';
 import { connectAsync } from '../../lib/client.js';
-import { serveFetch } from '../../lib/fetch-adapter.js';
+import { serveFetch, RequestBodyTooLargeError } from '../../lib/fetch-adapter.js';
+import { RequestBodyTooLargeError as RootBodyError } from '../../lib/index.js';
 import { generateTestCerts } from '../support/generate-certs.js';
 import { withTimeoutError } from '../support/async-race.js';
 import type { Readable, Writable } from 'node:stream';
@@ -64,7 +65,14 @@ for (const protocol of ['h1', 'h2', 'h3'] as const) {
         disableRetry: true, allowHTTP1: true, maxBodyBytes: 32,
         fetch: async request => {
           started();
-          return new Response(await request.text());
+          try {
+            return new Response(await request.text());
+          } catch (error) {
+            assert.ok(oversized);
+            assert.ok(error instanceof RequestBodyTooLargeError);
+            assert.ok(error instanceof RootBodyError);
+            throw error;
+          }
         },
       });
       const port = await new Promise<number>((resolve, reject) => {

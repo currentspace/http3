@@ -19,6 +19,7 @@ use http3::wasm_exports::{
     Chunk, H3ServerHandler, Http3Config, JsH3Event, OutboundAdmission, TxDatagram,
 };
 
+use crate::abi::copy_payload;
 use crate::abi::{
     ERR_AGAIN, ERR_BAD_ARGS, ERR_INVALID_HANDLE, ERR_PROTOCOL, RX_TX_BUFFER_LEN, bytes_in,
     set_global_error, str_in, write_out_message, write_out_ptr_len,
@@ -39,8 +40,8 @@ struct H3ServerSession {
     /// Packets ready to hand out via `hs_next_send`, one at a time.
     /// Refilled from `H3ServerHandler::flush_all_sends` (a whole-server,
     /// round-robin-across-every-connection drain) whenever this empties —
-    /// `flush_all_sends` already exhausts everything available in one
-    /// call, so refilling once per empty-queue check is sufficient; the
+    /// `flush_all_sends` returns a bounded batch on WASM, allowing packet
+    /// buffers to be recycled before another batch is materialized; the
     /// per-packet `hs_next_send`/`hs_next_send_dest` pair mirrors the
     /// client's identical "loop until 0" convention. Also holds any
     /// Retry/Version-Negotiation packet a fresh Initial produced during
@@ -388,7 +389,10 @@ pub extern "C" fn hs_stream_send(
     len: u32,
     fin: i32,
 ) -> i64 {
-    let data = unsafe { bytes_in(ptr, len) }.to_vec();
+    let data = match copy_payload(unsafe { bytes_in(ptr, len) }) {
+        Ok(data) => data,
+        Err(code) => return code,
+    };
     with_session_mut(handle, |sess| {
         let chunk = if data.is_empty() {
             Chunk::empty()
@@ -494,7 +498,10 @@ pub extern "C" fn hs_stream_close(
 /// `ptr`/`len` must describe a valid, readable byte range.
 #[unsafe(no_mangle)]
 pub extern "C" fn hs_send_datagram(handle: u32, conn_handle: u32, ptr: u32, len: u32) -> i64 {
-    let data = unsafe { bytes_in(ptr, len) }.to_vec();
+    let data = match copy_payload(unsafe { bytes_in(ptr, len) }) {
+        Ok(data) => data,
+        Err(code) => return code,
+    };
     with_session_mut(handle, |sess| {
         if sess
             .handler

@@ -147,6 +147,7 @@ export class ServerHttp3Stream extends Duplex {
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
   private _uncreditedReadBytes = 0;
   private _creditRetry: NodeJS.Immediate | undefined;
+  private _closeSent = false;
   private _finalChunk: Buffer | null = null;
 
   /** The HTTP/3 stream ID. */
@@ -199,13 +200,18 @@ export class ServerHttp3Stream extends Duplex {
 
     const buf = typeof body === 'string' ? Buffer.from(body) : body;
 
-    this._eventLoop?.sendResponse(
-      this._connHandle,
-      this._streamId,
-      h,
-      buf,
-      true,
-    );
+    try {
+      this._eventLoop?.sendResponse(
+        this._connHandle,
+        this._streamId,
+        h,
+        buf,
+        true,
+      );
+    } catch (error) {
+      this.destroy(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
 
     // End the Duplex writable side. _final will be a no-op since _finSent is true.
     this.end();
@@ -223,10 +229,18 @@ export class ServerHttp3Stream extends Duplex {
    * @param code - HTTP/3 error code (default `0` / H3_NO_ERROR).
    */
   close(code?: number): void {
-    this._eventLoop?.streamClose(this._connHandle, this._streamId, code ?? 0);
+    if (this.destroyed) return;
+    this._closeTransport(code ?? 0);
     rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this._clearTimeout();
     this.destroy();
+  }
+
+  /** @internal Terminate remaining transport work once, preserving the first close code. */
+  _closeTransport(code: number): void {
+    if (this._closeSent) return;
+    this._closeSent = true;
+    this._eventLoop?.streamClose(this._connHandle, this._streamId, code);
   }
 
   /**
@@ -271,14 +285,21 @@ export class ServerHttp3Stream extends Duplex {
   _read(_size: number): void {
     this._onActivity();
     drainPendingReads(this, this._bp);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
   }
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
     this._uncreditedReadBytes += chunk?.length ?? 0;
     this._bp = pushData(this, this._bp, chunk, this._maxBufferedReadBytes);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
+  }
+
+  private _scheduleReadCredit(): void {
+    if (this._creditRetry || this.destroyed || this._bp?.readBackpressure || this._uncreditedReadBytes === 0 || !this._eventLoop?.streamReadCredit) return;
+    // Coalesce a poll turn's consumed chunks without expanding the native
+    // receive window. Recheck backpressure and destruction before granting.
+    this._creditRetry = setImmediate(() => { this._creditRetry = undefined; this._returnReadCredit(); });
   }
 
   private _returnReadCredit(): void {
@@ -324,12 +345,18 @@ export class ServerHttp3Stream extends Duplex {
       });
       return;
     }
-    const written = this._eventLoop?.streamSend(
-      this._connHandle,
-      this._streamId,
-      chunk,
-      false,
-    ) ?? 0;
+    let written: number;
+    try {
+      written = this._eventLoop?.streamSend(
+        this._connHandle,
+        this._streamId,
+        chunk,
+        false,
+      ) ?? 0;
+    } catch (error) {
+      callback(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
 
     if (written >= chunk.length) {
       completeNativeWrite(this._nativeWriteWindow, written, callback);
@@ -348,9 +375,15 @@ export class ServerHttp3Stream extends Duplex {
 
   private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
-    const written = this._blocked
-      ? 0
-      : this._eventLoop?.streamSend(this._connHandle, this._streamId, chunk, true) ?? 0;
+    let written: number;
+    try {
+      written = this._blocked
+        ? 0
+        : this._eventLoop?.streamSend(this._connHandle, this._streamId, chunk, true) ?? 0;
+    } catch (error) {
+      callback(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
 
     if (chunk.length === 0) {
       if (written > 0) {
@@ -417,7 +450,9 @@ export class ServerHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    if (error && 'code' in error && error.code === 'ERR_HTTP3_RECEIVE_BUFFER_LIMIT') this._eventLoop?.streamClose(this._connHandle, this._streamId, 0x010c);
+    // Automatic destruction after both halves finish must leave admitted
+    // response bytes in the transport; finish is not a delivery acknowledgement.
+    if (!this.readableEnded || !this.writableFinished) this._closeTransport(0x010c);
 
     clearImmediate(this._creditRetry);
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
@@ -525,14 +560,21 @@ export class ClientHttp3Stream extends Duplex {
   _read(_size: number): void {
     this._onActivity();
     drainPendingReads(this, this._bp);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
   }
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
     this._uncreditedReadBytes += chunk?.length ?? 0;
     this._bp = pushData(this, this._bp, chunk);
-    this._returnReadCredit();
+    this._scheduleReadCredit();
+  }
+
+  private _scheduleReadCredit(): void {
+    if (this._creditRetry || this.destroyed || this._bp?.readBackpressure || this._uncreditedReadBytes === 0 || !this._eventLoop?.streamReadCredit) return;
+    // Coalesce a poll turn's consumed chunks without expanding the native
+    // receive window. Recheck backpressure and destruction before granting.
+    this._creditRetry = setImmediate(() => { this._creditRetry = undefined; this._returnReadCredit(); });
   }
 
   private _returnReadCredit(): void {
@@ -575,7 +617,13 @@ export class ClientHttp3Stream extends Duplex {
       });
       return;
     }
-    const written = this._eventLoop?.streamSend(this._streamId, chunk, false) ?? 0;
+    let written: number;
+    try {
+      written = this._eventLoop?.streamSend(this._streamId, chunk, false) ?? 0;
+    } catch (error) {
+      callback(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
     if (written >= chunk.length) {
       completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
@@ -590,9 +638,15 @@ export class ClientHttp3Stream extends Duplex {
 
   private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
     this._onActivity();
-    const written = this._blocked
-      ? 0
-      : this._eventLoop?.streamSend(this._streamId, chunk, true) ?? 0;
+    let written: number;
+    try {
+      written = this._blocked
+        ? 0
+        : this._eventLoop?.streamSend(this._streamId, chunk, true) ?? 0;
+    } catch (error) {
+      callback(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
 
     if (chunk.length === 0) {
       if (written > 0) {

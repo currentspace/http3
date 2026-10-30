@@ -41,6 +41,20 @@ This matrix defines compatibility expectations for users migrating from
 | Trailers | `stream.sendTrailers()` | `stream.sendTrailers()` | Supported for H3 and adapted for H2. |
 | Timeouts | `stream.setTimeout()` | `stream.setTimeout()` | Supported on client and server streams. |
 | Flow-control drain | stream `drain` | stream `drain` | Backpressure supported through native worker events. |
+| End outgoing body | `stream.end()` | `stream.end()` | Finishes the writable half; the readable half can continue. |
+| Cancel a stream | `stream.destroy(error?)` | `stream.destroy(error?)` | Cancels unfinished transport work. H3 uses `H3_REQUEST_CANCELLED`; the H2 adapter delegates to Node's stream destruction. |
+| Explicit close code | `stream.close(code)` | `stream.close(code)` | Preserves the first explicit close code; later destruction does not replace it. |
+
+Stream tracking ends on `close`, including cancellation before request FIN.
+Receiving FIN alone does not remove the stream: its outgoing half can still
+need write/drain events. Automatic destruction after both halves complete does
+not cancel response bytes already admitted to the transport. A write callback
+or `finish` is not confirmation that the peer received those bytes.
+
+These lifecycle rules follow [Node's HTTP/2 stream semantics](https://nodejs.org/api/http2.html#destruction)
+and [HTTP/3 request cancellation](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.1.1).
+Ending a response early does not implicitly cancel an upload; `destroy()`
+cancels the exchange, rather than only stopping its incoming half.
 
 ## Explicit differences
 

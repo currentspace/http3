@@ -1,3 +1,4 @@
+import { checkPayloadAllocation } from './memory-error.js';
 import { DeadlineTimer, drainUntilDone } from './lifecycle.js';
 /**
  * `WasmH3ServerEventLoop` — implements `ServerEventLoopLike`
@@ -206,8 +207,10 @@ export class WasmH3ServerEventLoop {
 
   sendDatagram(connHandle: number, data: Uint8Array): boolean {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.hs_send_datagram(this.handle, connHandle, ptr, len));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.hs_send_datagram(this.handle, connHandle, ptr, len)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     this.pump();
     return result >= 0;
   }
@@ -317,8 +320,10 @@ export class WasmH3ServerEventLoop {
 
   private rawStreamSend(connHandle: number, streamId: number, data: Uint8Array, fin: boolean): number {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.hs_stream_send(this.handle, connHandle, BigInt(streamId), ptr, len, fin ? 1 : 0));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.hs_stream_send(this.handle, connHandle, BigInt(streamId), ptr, len, fin ? 1 : 0)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     return result;
   }
 

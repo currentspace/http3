@@ -6,10 +6,43 @@ import { request as requestHttps } from 'node:https';
 import { Readable } from 'node:stream';
 import express from 'express';
 import { createExpressHandler, createExpressAdapter } from '../../lib/express-adapter.js';
-import { Http3NodeServer } from '../../lib/node-server.js';
+import { Http3NodeServer, Http3IncomingMessage, Http3ServerResponse } from '../../lib/node-server.js';
+import { ServerHttp3Stream } from '../../lib/stream.js';
 import { connectAsync } from '../../lib/client.js';
 import { createSecureServer } from '../../lib/server.js';
 import { generateMutualTlsTestCerts } from '../support/generate-certs.js';
+
+test('Express preparation preserves descriptors, symbols, and existing own overrides across prototype replacement', () => {
+  const stream = new ServerHttp3Stream();
+  const req = new Http3IncomingMessage(stream, {}, { endStream: true });
+  const res = new Http3ServerResponse(req);
+  const originalWrite = res.write.bind(res);
+  Object.defineProperty(res, 'write', { value: originalWrite, configurable: false });
+  const expected = new Map<object, Map<PropertyKey, PropertyDescriptor>>();
+  for (const instance of [req, res]) {
+    const descriptors = new Map<PropertyKey, PropertyDescriptor>();
+    for (let proto: object | null = Object.getPrototypeOf(instance) as object; proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto) as object | null) {
+      for (const key of Reflect.ownKeys(proto)) {
+        if (key === 'constructor' || descriptors.has(key) || Object.hasOwn(instance, key)) continue;
+        descriptors.set(key, { ...Object.getOwnPropertyDescriptor(proto, key), configurable: true });
+      }
+    }
+    expected.set(instance, descriptors);
+  }
+  const handle = createExpressHandler((request, response) => {
+    for (const instance of [request, response]) {
+      Object.setPrototypeOf(instance, Object.prototype);
+      for (const [key, descriptor] of expected.get(instance)!) {
+        assert.deepEqual(Object.getOwnPropertyDescriptor(instance, key), descriptor);
+      }
+    }
+  });
+  handle(req as unknown as Parameters<typeof handle>[0], res as unknown as Parameters<typeof handle>[1]);
+  assert.equal(Object.getOwnPropertyDescriptor(res, 'write')?.value, originalWrite);
+  res.setHeader('x-test', 'preserved');
+  assert.equal(res.getHeader('x-test'), 'preserved');
+  req.destroy(); res.destroy(); stream.destroy();
+});
 
 for (const protocol of ['h3', 'h2', 'h1'] as const) {
   test(`real Express: ${protocol} helpers, parsers, mounted apps and streaming`, async t => {

@@ -36,6 +36,7 @@
  */
 
 import { makePreview1Imports } from './wasi-shim.js';
+import { wasmMemoryError } from './memory-error.js';
 import type { ShimOptions } from './wasi-shim.js';
 
 export interface WasmCoreSource {
@@ -224,7 +225,7 @@ class MemoryView {
 /** Typed facade over the raw wasm exports, plus buffer-lifetime-safe memory helpers. */
 export interface Http3WasmCore {
   readonly exports: Http3WasmExports;
-  /** `wasm_alloc(size)` — caller must `free()` with the same size. */
+  /** `wasm_alloc(size)` — throws on allocation failure; free with the same size. */
   alloc(size: number): number;
   /** `wasm_free(ptr, size)` — `size` must match the original `alloc()` call. */
   free(ptr: number, size: number): void;
@@ -289,7 +290,9 @@ class Http3WasmCoreImpl implements Http3WasmCore {
   }
 
   alloc(size: number): number {
-    return this.exports.wasm_alloc(size);
+    const ptr = this.exports.wasm_alloc(size);
+    if (ptr === 0 && size > 0) throw wasmMemoryError(size);
+    return ptr;
   }
 
   free(ptr: number, size: number): void {

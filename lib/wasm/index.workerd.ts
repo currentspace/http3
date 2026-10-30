@@ -62,6 +62,7 @@
  *   working transport and never will be one.
  */
 
+export { WasmMemoryError, ERR_HTTP3_WASM_MEMORY_LIMIT } from './memory-error.js';
 export { loadHttp3WasmCore } from './core-loader.js';
 export type { Http3WasmCore, Http3WasmExports, WasmCoreSource } from './core-loader.js';
 

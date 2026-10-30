@@ -1,3 +1,4 @@
+import { checkPayloadAllocation } from './memory-error.js';
 import { DeadlineTimer, drainUntilDone } from './lifecycle.js';
 /**
  * `WasmClientEventLoop` (raw QUIC) — implements `QuicClientEventLoopLike`
@@ -145,8 +146,10 @@ export class WasmQuicClientEventLoop {
 
   streamSend(streamId: number, data: Uint8Array, fin: boolean): number {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.qc_stream_send(this.handle, BigInt(streamId), ptr, len, fin ? 1 : 0));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.qc_stream_send(this.handle, BigInt(streamId), ptr, len, fin ? 1 : 0)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     this.pump();
     // See h3-client-event-loop.ts's identical comment: negative results
     // map to 0 (streamSendOutcomeBytes convention); real errors flow via
@@ -162,8 +165,10 @@ export class WasmQuicClientEventLoop {
 
   sendDatagram(data: Uint8Array): boolean {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.qc_send_datagram(this.handle, ptr, len));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.qc_send_datagram(this.handle, ptr, len)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     this.pump();
     return result >= 0;
   }

@@ -33,9 +33,13 @@ export {
   ERR_HTTP3_ENDPOINT_RESOLUTION,
   ERR_HTTP3_FAST_PATH_UNAVAILABLE,
   ERR_HTTP3_RUNTIME_UNSUPPORTED,
+  ERR_HTTP3_WASM_MEMORY_LIMIT,
+  ERR_HTTP3_RECEIVE_BUFFER_LIMIT,
   ERR_HTTP3_RUNTIME_FALLBACK,
   WARN_HTTP3_RUNTIME_FALLBACK,
 } from './errors.js';
+export { WasmMemoryError } from './wasm/memory-error.js';
+export { RequestBodyTooLargeError } from './request-body.js';
 
 export { createSseStream, ServerSentEventStream, encodeSseEvent, encodeSseComment, sseHeaders } from './sse.js';
 export type { SseEvent, SseStreamOptions } from './sse.js';
@@ -70,6 +74,7 @@ export type {
   RuntimeDriver,
   RuntimeReasonCode,
   RuntimeInfo,
+  RuntimeAttemptFailure,
   RuntimeOptions,
 } from './runtime.js';
 export type { ConnectionEndpoint, HostEndpoint, AddressEndpoint, DnsLookupFn } from './endpoint.js';
