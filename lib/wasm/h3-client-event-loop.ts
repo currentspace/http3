@@ -1,3 +1,4 @@
+import { checkPayloadAllocation } from './memory-error.js';
 import { DeadlineTimer, drainUntilDone } from './lifecycle.js';
 /**
  * `WasmClientEventLoop` (HTTP/3) — implements `ClientEventLoopLike`
@@ -168,8 +169,10 @@ export class WasmH3ClientEventLoop {
 
   streamSend(streamId: number, data: Uint8Array, fin: boolean): number {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.h3c_stream_send(this.handle, BigInt(streamId), ptr, len, fin ? 1 : 0));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.h3c_stream_send(this.handle, BigInt(streamId), ptr, len, fin ? 1 : 0)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     this.pump();
     // Negative results (backpressure or an already-reported protocol error
     // — see crates/http3-wasm/src/h3.rs's classify_send_outcome) map to 0,
@@ -194,8 +197,10 @@ export class WasmH3ClientEventLoop {
 
   sendDatagram(data: Uint8Array): boolean {
     const { ptr, len } = this.core.writeBytes(data);
-    const result = Number(this.core.exports.h3c_send_datagram(this.handle, ptr, len));
-    this.core.free(ptr, len);
+    let result: number;
+    try { result = Number(this.core.exports.h3c_send_datagram(this.handle, ptr, len)); }
+    finally { this.core.free(ptr, len); }
+    checkPayloadAllocation(result, len);
     this.pump();
     return result >= 0;
   }

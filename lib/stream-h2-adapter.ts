@@ -231,6 +231,7 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
   }
 
   override close(code?: number): void {
+    if (this.destroyed) return;
     try {
       this._h2Stream.close(code ?? http2Constants.NGHTTP2_NO_ERROR);
     } catch {
@@ -238,6 +239,14 @@ export class ServerHttp2StreamAdapter extends ServerHttp3Stream {
     }
     rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this.destroy();
+  }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    if (!this._h2Closed && !this._h2Stream.closed && !this._h2Stream.destroyed &&
+        (!this.readableEnded || !this.writableFinished)) {
+      this._h2Stream.destroy(error ?? undefined);
+    }
+    super._destroy(error, callback);
   }
 
   override setTimeout(ms: number, cb?: () => void): this {

@@ -16,6 +16,15 @@ pub(crate) const ERR_INVALID_HANDLE: i64 = -3;
 /// Malformed arguments (bad JSON, wrong shape) that never reached the
 /// protocol layer.
 pub(crate) const ERR_BAD_ARGS: i64 = -4;
+/// The payload could not be allocated; no stream bytes were admitted.
+pub(crate) const ERR_MEMORY: i64 = -5;
+
+pub(crate) fn copy_payload(data: &[u8]) -> Result<Vec<u8>, i64> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(data.len()).map_err(|_| ERR_MEMORY)?;
+    copy.extend_from_slice(data);
+    Ok(copy)
+}
 
 /// Fixed RX/TX datagram staging region size (§5.3 "fixed 64 KiB … staging
 /// region").
@@ -40,6 +49,7 @@ pub(crate) fn take_global_error_for_read() -> Option<String> {
 /// pointer callers can write into before passing it to another export
 /// (options JSON, header JSON, stream payloads). Caller must release it
 /// with `wasm_free(ptr, size)` — the same `size` used to allocate.
+/// Returns 0 on allocation failure; callers must not write through it.
 ///
 /// # Safety
 /// Exported to an untrusted-in-the-Rust-type-system-sense host; safe in
@@ -47,7 +57,10 @@ pub(crate) fn take_global_error_for_read() -> Option<String> {
 /// just an offset into memory only this module and its host can touch.
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_alloc(size: u32) -> u32 {
-    let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+    let mut buf: Vec<u8> = Vec::new();
+    if buf.try_reserve_exact(size as usize).is_err() {
+        return 0;
+    }
     let ptr = buf.as_mut_ptr();
     // Leak intentionally: ownership transfers to the host until it calls
     // `wasm_free` with the same (ptr, size).

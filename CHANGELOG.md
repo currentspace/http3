@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Bound WASM server packet batches and allocate packet pools on demand, so
+  large single-buffer responses do not exhaust memory through packet staging.
+  Return `ERR_HTTP3_WASM_MEMORY_LIMIT` for rejected payload allocations through
+  stream errors and write callbacks on H3 and raw QUIC clients and servers.
+- Cancel unfinished raw server streams on `destroy()`, including the H2 adapter,
+  while preserving half-close behavior and response bytes queued after normal
+  completion. Preserve explicit close codes and settle pending writes once.
+- Remove H3 server streams from tracking on close even before request FIN, and
+  ignore late trailers for closed streams.
+
 ## 0.9.8
 
 - Apply receive-credit flow control to native and WASM client response bodies,

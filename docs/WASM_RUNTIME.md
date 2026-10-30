@@ -249,9 +249,21 @@ except:
 
 ## Current limitations
 
-- **Client-only.** No server support, and none is planned for this
-  architecture (N1). `createSecureServer`/`createQuicServer` reject
-  `runtimeMode: 'wasm'` immediately.
+- **Servers require Node.js.** `createSecureServer` and `createQuicServer`
+  support `runtimeMode: 'wasm'` in Node.js; Workers do not expose the UDP
+  listener required to run a server.
+- **Fixed 64 MiB WASM memory ceiling.** Payloads that cannot be allocated are
+  rejected with `code: 'ERR_HTTP3_WASM_MEMORY_LIMIT'`. On H3 and raw QUIC
+  streams, `write()`/`end()` report this through the write callback and the
+  stream's `error` event; `respondWithBody()` reports it through `error`.
+  The failed stream is cancelled, and the connection remains usable. Direct
+  WASM memory helpers and datagram sends throw the error synchronously.
+  Handle stream errors and use smaller writes with backpressure. The suite
+  covers successful 20 MiB single-buffer responses and recoverable rejection
+  of 32 MiB and 64 MiB writes; these are test cases, not fixed size limits.
+  Available space depends on other live streams and protocol state. This
+  handles payload allocation failures, not every possible out-of-memory
+  failure inside Rust or the TLS/QUIC dependencies.
 - **No qlog.** Excluded from the wasm build entirely (N5) — the `qlog-files`
   Cargo feature (`quiche/qlog`) is not enabled when building
   `crates/http3-wasm` (`--no-default-features --features wasm-abi`).

@@ -183,7 +183,13 @@ export class QuicStream extends Duplex {
       });
       return;
     }
-    const written = this._doSend(chunk, false);
+    let written: number;
+    try {
+      written = this._doSend(chunk, false);
+    } catch (error) {
+      callback(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
     if (written >= chunk.length) {
       completeNativeWrite(this._nativeWriteWindow, written, callback);
     } else {
@@ -197,7 +203,13 @@ export class QuicStream extends Duplex {
   }
 
   private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
-    const written = this._blocked ? 0 : this._doSend(chunk, true);
+    let written: number;
+    try {
+      written = this._blocked ? 0 : this._doSend(chunk, true);
+    } catch (error) {
+      callback(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
     if (chunk.length === 0) {
       if (written > 0) {
         completeNativeWrite(this._nativeWriteWindow, written, callback);

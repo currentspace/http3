@@ -2346,8 +2346,9 @@ impl QuicServerHandler {
         Self {
             conn_map,
             timer_heap: TimerHeap::new(),
-            buffer_pool: BufferPool::default(),
-            tx_pool: BufferPool::new(256, 65535),
+            // WASM is a synchronous pump with a 64 MiB heap, not a native reactor.
+            buffer_pool: BufferPool::new(if cfg!(target_arch = "wasm32") { 0 } else { 256 }, 65535),
+            tx_pool: BufferPool::new(if cfg!(target_arch = "wasm32") { 0 } else { 256 }, 65535),
             pending_writes: HashMap::new(),
             conn_send_buffers: HashMap::new(),
             handles_buf: Vec::new(),
@@ -2708,8 +2709,13 @@ impl QuicServerHandler {
         let count = self.handles_buf.len();
         let mut done = vec![false; count];
         let mut active = count;
-        while active > 0 {
+        'drain: while active > 0 {
             for i in 0..count {
+                // Return a bounded batch so the WASM host can send and recycle
+                // buffers before materializing more packets.
+                if cfg!(target_arch = "wasm32") && outbound.len() >= 32 {
+                    break 'drain;
+                }
                 if done[i] {
                     continue;
                 }
