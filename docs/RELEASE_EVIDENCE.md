@@ -3,6 +3,30 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 0.9.8
+
+- Candidate includes client response receive-credit flow control in native and
+  WASM runtimes, cancellation of unfinished client streams, pending-write drain
+  ordering, and quiet SSE proxy timeout handling. Root, Rust and all three
+  native sidecars are aligned to 0.9.8.
+- Before the version bump, macOS arm64 Node 26 passed 414 Node tests and 67 FFI
+  tests; Node 24 passed 415 Node tests after the response-FIN regression was
+  added. WASM passed 71 tests. Rust passed 228 unit tests and 17 targeted H3
+  flow-control, concurrency, shutdown and mock-pair tests. Lint, TypeScript,
+  workerd types and Node-API boundary checks passed.
+- Paused 20 MiB downloads remain bounded in JavaScript, permit another stream
+  on the same connection, and resume into a slow reader with matching SHA-256.
+  Tests cover native/WASM blocked uploads and downloads, idle SSE cancellation,
+  peer cancellation after response FIN, normal completion without a reset, and
+  receive-credit retries when the native command queue is full. A Rust test
+  exercises receive credit through the dedicated-worker command dispatcher.
+- Offline candidate tarball installs loaded the matching native sidecar and
+  WASM runtime. Paused H3 downloads buffered about 128 KiB in JavaScript;
+  transport queues and QUIC windows hold additional bytes.
+- Versioned local checks, hosted qualification, publication and registry install
+  verification are pending. Manual Safari and Windows browser trust remain
+  unverified; preserve these documented limitations in the release handoff.
+
 ## 0.9.7
 
 - Includes configurable one-day Alt-Svc, socket compatibility, dual-stack/listen

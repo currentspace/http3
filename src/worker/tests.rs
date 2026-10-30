@@ -5,6 +5,21 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::MutexGuard;
 
+#[test]
+fn pending_writes_suppress_only_their_own_drains() {
+    let mut events = vec![
+        JsH3Event::drain(1, 4),
+        JsH3Event::reset(1, 4, 0x010c),
+        JsH3Event::drain(1, 8),
+        JsH3Event::drain(2, 4),
+    ];
+    suppress_pending_drains(&mut events, 1, |stream_id| stream_id == 4);
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].event_type, crate::h3_event::EVENT_RESET);
+    assert_eq!((events[1].conn_handle, events[1].stream_id), (1, 8));
+    assert_eq!((events[2].conn_handle, events[2].stream_id), (2, 4));
+}
+
 fn setup_metrics() -> MutexGuard<'static, ()> {
     let guard = reactor_metrics::test_metrics_guard();
     reactor_metrics::reset();
@@ -740,6 +755,126 @@ mod direct_call_h3_server {
             }
         }
         panic!("pump_until exceeded the 5s deadline without reaching the target condition");
+    }
+
+    #[test]
+    fn client_receive_credit_command_resumes_a_paused_response() {
+        use crate::h3_event::EVENT_FINISHED;
+        let _guard = setup_metrics();
+        let (client_addr, server_addr) = test_addrs();
+        let mut server = build_server_direct(None, None);
+        let mut client = build_client_direct(0x62, client_addr, server_addr);
+        client.enable_read_credit();
+        let mut client_batch = Vec::new();
+        let mut server_batch = Vec::new();
+        pump_until(
+            &mut client,
+            &mut server,
+            client_addr,
+            server_addr,
+            &mut client_batch,
+            &mut server_batch,
+            |c, s| {
+                c.iter().any(|e| e.event_type == EVENT_HANDSHAKE_COMPLETE)
+                    && s.iter().any(|e| e.event_type == EVENT_HANDSHAKE_COMPLETE)
+            },
+        );
+        let handle = server_batch
+            .iter()
+            .find(|e| e.event_type == EVENT_NEW_SESSION)
+            .unwrap()
+            .conn_handle;
+        let stream_id = client
+            .send_request(
+                vec![
+                    (":method".into(), "GET".into()),
+                    (":scheme".into(), "https".into()),
+                    (":authority".into(), "localhost".into()),
+                    (":path".into(), "/".into()),
+                ],
+                true,
+            )
+            .unwrap();
+        pump_until(
+            &mut client,
+            &mut server,
+            client_addr,
+            server_addr,
+            &mut client_batch,
+            &mut server_batch,
+            |_, s| s.iter().any(|e| e.event_type == EVENT_HEADERS),
+        );
+        server
+            .send_response_headers(
+                handle,
+                stream_id,
+                vec![(":status".into(), "200".into())],
+                false,
+                &mut server_batch,
+            )
+            .unwrap();
+        server.queue_stream_send(
+            handle,
+            stream_id,
+            Chunk::unpooled(vec![0x61; 256 * 1024]),
+            true,
+            &mut server_batch,
+        );
+        client_batch.clear();
+        let byte_count = |events: &[JsH3Event]| {
+            events
+                .iter()
+                .filter_map(|e| e.data.as_ref())
+                .map(|data| data.len())
+                .sum::<usize>()
+        };
+        pump_until(
+            &mut client,
+            &mut server,
+            client_addr,
+            server_addr,
+            &mut client_batch,
+            &mut server_batch,
+            |c, _| byte_count(c) == 64 * 1024,
+        );
+        for _ in 0..20 {
+            pump(
+                &mut client,
+                &mut server,
+                client_addr,
+                server_addr,
+                &mut client_batch,
+                &mut server_batch,
+            );
+        }
+        assert_eq!(byte_count(&client_batch), 64 * 1024);
+        assert!(!client_batch.iter().any(|e| e.event_type == EVENT_FINISHED));
+        // Use the dedicated-worker command dispatcher, not the direct WASM call.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = 0;
+        loop {
+            let bytes = byte_count(&client_batch);
+            received += bytes;
+            if client_batch.iter().any(|e| e.event_type == EVENT_FINISHED) {
+                break;
+            }
+            client_batch.clear();
+            client.dispatch_command(
+                ClientWorkerCommand::StreamReadCredit { stream_id, bytes },
+                &mut client_batch,
+            );
+            client.poll_app_events_for_handle(usize::MAX, &mut client_batch, 0);
+            pump(
+                &mut client,
+                &mut server,
+                client_addr,
+                server_addr,
+                &mut client_batch,
+                &mut server_batch,
+            );
+            assert!(Instant::now() < deadline, "credit must resume the response");
+        }
+        assert_eq!(received, 256 * 1024);
     }
 
     #[test]

@@ -179,6 +179,13 @@ export class WasmH3ClientEventLoop {
     return result < 0 ? 0 : result;
   }
 
+  streamReadCredit(streamId: number, bytes: number): boolean {
+    if (this.handle === 0) return false;
+    const result = this.core.exports.h3c_stream_read_credit(this.handle, BigInt(streamId), bytes);
+    this.pump();
+    return result === 0n;
+  }
+
   streamClose(streamId: number, errorCode: number): boolean {
     const result = Number(this.core.exports.h3c_stream_close(this.handle, BigInt(streamId), errorCode));
     this.pump();

@@ -132,7 +132,12 @@ describe('FFI boundary stress', () => {
 
     const client = new binding.NativeWorkerClient(
       { rejectUnauthorized: false, runtimeMode: 'portable' },
-      clientEvents.callback,
+      (err: Error | null, events: any[]) => {
+        clientEvents.callback(err, events);
+        for (const event of h3BodyDataEvents(events ?? [])) {
+          client.streamReadCredit(event.streamId, event.data.length);
+        }
+      },
     );
     client.connect(`127.0.0.1:${addr.port}`, 'localhost');
 

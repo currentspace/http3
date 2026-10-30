@@ -133,6 +133,14 @@ impl NativeWorkerClient {
     }
 
     #[napi]
+    pub fn stream_read_credit(&self, stream_id: i64, bytes: u32) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        handle.stream_read_credit(stream_id as u64, bytes as usize)
+    }
+
+    #[napi]
     pub fn stream_close(&self, stream_id: i64, error_code: u32) -> bool {
         let Some(handle) = &self.handle else {
             return false;

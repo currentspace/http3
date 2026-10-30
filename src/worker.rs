@@ -34,7 +34,7 @@ use crate::connection_map::ConnectionMap;
 use crate::datagram::TxDatagram;
 use crate::error::Http3NativeError;
 use crate::event_loop::{self, EventBatcher, MAX_BATCH_SIZE, ProtocolHandler, SEND_BUF_SIZE};
-use crate::h3_event::{JsH3Event, JsSessionMetrics};
+use crate::h3_event::{EVENT_DRAIN, JsH3Event, JsSessionMetrics};
 use crate::keylog_sink::KeylogBuffer;
 use crate::outbound_admission::{
     OutboundAdmission, accepted_outbound_payload_units, outbound_payload_units,
@@ -49,6 +49,20 @@ use crate::shared_client_reactor;
 use crate::timer_heap::TimerHeap;
 #[cfg(feature = "os-runtime")]
 use crate::transport::{self, ErasedWaker};
+
+// Transport capacity is not an application drain while the handler still owns
+// a pending write. Its flush path emits drain once that retained queue is empty.
+fn suppress_pending_drains(
+    batch: &mut Vec<JsH3Event>,
+    conn_handle: u32,
+    has_pending: impl Fn(u64) -> bool,
+) {
+    batch.retain(|event| {
+        event.event_type != EVENT_DRAIN
+            || event.conn_handle != conn_handle
+            || !has_pending(event.stream_id as u64)
+    });
+}
 
 const H3_INTERNAL_ERROR: u64 = 0x0102;
 
@@ -658,6 +672,10 @@ pub enum ClientWorkerCommand {
         chunk: Chunk,
         fin: bool,
     },
+    StreamReadCredit {
+        stream_id: u64,
+        bytes: usize,
+    },
     StreamClose {
         stream_id: u64,
         error_code: u32,
@@ -709,6 +727,11 @@ enum SharedClientWorkerCommand {
         stream_id: u64,
         chunk: Chunk,
         fin: bool,
+    },
+    StreamReadCredit {
+        session_handle: u32,
+        stream_id: u64,
+        bytes: usize,
     },
     StreamClose {
         session_handle: u32,
@@ -906,6 +929,43 @@ impl ClientWorkerHandle {
                     .is_ok()
                 {
                     reactor_metrics::record_outbound_command_queued(queued_bytes);
+                    worker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        }
+    }
+
+    pub fn stream_read_credit(&self, stream_id: u64, bytes: usize) -> bool {
+        match &self.kind {
+            Some(ClientWorkerHandleKind::Dedicated { cmd_tx, waker, .. }) => {
+                if cmd_tx
+                    .try_send(ClientWorkerCommand::StreamReadCredit { stream_id, bytes })
+                    .is_ok()
+                {
+                    let _ = waker.wake();
+                    true
+                } else {
+                    false
+                }
+            }
+            #[cfg(feature = "node-api")]
+            Some(ClientWorkerHandleKind::Shared {
+                session_handle,
+                worker,
+            }) => {
+                if worker
+                    .cmd_tx
+                    .try_send(SharedClientWorkerCommand::StreamReadCredit {
+                        session_handle: *session_handle,
+                        stream_id,
+                        bytes,
+                    })
+                    .is_ok()
+                {
                     worker.wake();
                     true
                 } else {
@@ -1309,6 +1369,7 @@ pub fn spawn_client_worker(
             admission_ref,
         );
         let Some(mut handler) = handler else { return };
+        handler.enable_read_credit();
         event_loop::run_event_loop(
             &mut driver,
             cmd_rx,
@@ -1668,7 +1729,8 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                                 "failed to create h3 client session".into(),
                             ))
                         },
-                        |handler| {
+                        |mut handler| {
+                            handler.enable_read_credit();
                             let dcid = handler.current_dcid();
                             let handle = sessions.insert(SharedClientSession {
                                 handler,
@@ -1722,6 +1784,15 @@ fn run_shared_client_event_loop<D: transport::Driver>(
                     }
                     if should_release {
                         pending_release.push(session_handle);
+                    }
+                }
+                SharedClientWorkerCommand::StreamReadCredit {
+                    session_handle,
+                    stream_id,
+                    bytes,
+                } => {
+                    if let Some(session) = sessions.get_mut(session_handle as usize) {
+                        session.handler.stream_read_credit(stream_id, bytes);
                     }
                 }
                 SharedClientWorkerCommand::StreamClose {
@@ -2730,6 +2801,10 @@ impl H3ServerHandler {
             }
 
             conn.poll_h3_events(offset | (handle as u32), app_event_budget, batch);
+            suppress_pending_drains(batch, offset | (handle as u32), |stream_id| {
+                let key = (handle as u32, stream_id);
+                self.pending_writes.contains_key(&key) || self.pending_responses.contains_key(&key)
+            });
             for duration_ms in conn.poll_ping_acks() {
                 batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
             }
@@ -2798,6 +2873,11 @@ impl H3ServerHandler {
                     batch.push(conn.session_close_event(offset | (handle as u32)));
                 } else {
                     conn.poll_h3_events(offset | (handle as u32), app_event_budget, batch);
+                    suppress_pending_drains(batch, offset | (handle as u32), |stream_id| {
+                        let key = (handle as u32, stream_id);
+                        self.pending_writes.contains_key(&key)
+                            || self.pending_responses.contains_key(&key)
+                    });
                     for duration_ms in conn.poll_ping_acks() {
                         batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
                     }
@@ -2857,6 +2937,11 @@ impl H3ServerHandler {
             let handle = self.handles_buf[i];
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 conn.poll_h3_events(offset | (handle as u32), remaining, batch);
+                suppress_pending_drains(batch, offset | (handle as u32), |stream_id| {
+                    let key = (handle as u32, stream_id);
+                    self.pending_writes.contains_key(&key)
+                        || self.pending_responses.contains_key(&key)
+                });
                 for duration_ms in conn.poll_ping_acks() {
                     batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
                 }
@@ -3000,6 +3085,11 @@ impl H3ServerHandler {
             if let Some(conn) = self.conn_map.get_mut(handle) {
                 if !conn.blocked_set.is_empty() {
                     conn.poll_drain_events(offset | (handle as u32), batch);
+                    suppress_pending_drains(batch, offset | (handle as u32), |stream_id| {
+                        let key = (handle as u32, stream_id);
+                        self.pending_writes.contains_key(&key)
+                            || self.pending_responses.contains_key(&key)
+                    });
                 }
             }
         }
@@ -3858,6 +3948,10 @@ impl ProtocolHandler for H3ServerHandler {
             }
 
             conn.poll_h3_events(offset | (handle as u32), app_event_budget, batch);
+            suppress_pending_drains(batch, offset | (handle as u32), |stream_id| {
+                let key = (handle as u32, stream_id);
+                self.pending_writes.contains_key(&key) || self.pending_responses.contains_key(&key)
+            });
             for duration_ms in conn.poll_ping_acks() {
                 batch.push(JsH3Event::ping_ack(offset | (handle as u32), duration_ms));
             }
@@ -4234,6 +4328,15 @@ impl H3ClientHandler {
         self.pending_writes.contains_key(&stream_id)
     }
 
+    /// Bound response delivery to the JS reader; sans-IO callers opt in explicitly.
+    pub fn enable_read_credit(&mut self) {
+        self.conn.stream_read_window = Some(64 * 1024);
+    }
+
+    pub fn stream_read_credit(&mut self, stream_id: u64, bytes: usize) {
+        self.conn.add_read_credit(stream_id, bytes);
+    }
+
     pub fn close_stream(&mut self, stream_id: u64, error_code: u32) -> usize {
         match self.conn.stream_close(stream_id, u64::from(error_code)) {
             Ok(()) => remove_pending_write(&mut self.pending_writes, &stream_id),
@@ -4337,6 +4440,9 @@ impl H3ClientHandler {
         }
         self.conn
             .poll_h3_events(conn_handle, app_event_budget, batch);
+        suppress_pending_drains(batch, conn_handle, |stream_id| {
+            self.pending_writes.contains_key(&stream_id)
+        });
         for duration_ms in self.conn.poll_ping_acks() {
             batch.push(JsH3Event::ping_ack(conn_handle, duration_ms));
         }
@@ -4364,6 +4470,9 @@ impl H3ClientHandler {
             } else {
                 self.conn
                     .poll_h3_events(conn_handle, app_event_budget, batch);
+                suppress_pending_drains(batch, conn_handle, |stream_id| {
+                    self.pending_writes.contains_key(&stream_id)
+                });
                 for duration_ms in self.conn.poll_ping_acks() {
                     batch.push(JsH3Event::ping_ack(conn_handle, duration_ms));
                 }
@@ -4387,6 +4496,9 @@ impl H3ClientHandler {
 
         self.conn
             .poll_h3_events(conn_handle, app_event_budget, batch);
+        suppress_pending_drains(batch, conn_handle, |stream_id| {
+            self.pending_writes.contains_key(&stream_id)
+        });
         for duration_ms in self.conn.poll_ping_acks() {
             batch.push(JsH3Event::ping_ack(conn_handle, duration_ms));
         }
@@ -4460,6 +4572,9 @@ impl H3ClientHandler {
     pub fn poll_drain_events_for_handle(&mut self, batch: &mut Vec<JsH3Event>, conn_handle: u32) {
         if !self.conn.blocked_set.is_empty() {
             self.conn.poll_drain_events(conn_handle, batch);
+            suppress_pending_drains(batch, conn_handle, |stream_id| {
+                self.pending_writes.contains_key(&stream_id)
+            });
         }
     }
 
@@ -4529,6 +4644,9 @@ impl ProtocolHandler for H3ClientHandler {
             } => {
                 let released = self.queue_stream_send(stream_id, chunk, fin, batch, 0);
                 self.release_outbound_admission(released, batch);
+            }
+            ClientWorkerCommand::StreamReadCredit { stream_id, bytes } => {
+                self.stream_read_credit(stream_id, bytes);
             }
             ClientWorkerCommand::StreamClose {
                 stream_id,

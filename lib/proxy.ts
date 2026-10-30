@@ -17,7 +17,9 @@ function forwardedHeaders(input: IncomingHttpHeaders): OutgoingHttpHeaders {
 export interface ProxyOptions {
   /** Rewrite only the request path; the configured upstream origin is fixed. */
   rewrite?: (path: string, request: IncomingMessage) => string;
-  /** Upstream socket inactivity timeout. Default: 30 seconds; 0 disables it for quiet SSE. */
+  /** Upstream socket inactivity timeout. Default: 30 seconds; 0 disables it.
+   * Cleared after text/event-stream response headers, including when explicitly configured.
+   */
   timeoutMs?: number;
   /** Deadline for DNS, TCP and TLS setup. Default: 10 seconds, even for idle SSE. */
   connectTimeoutMs?: number;
@@ -81,6 +83,10 @@ export function proxy(upstream: string | URL, options: ProxyOptions = {}): (req:
     });
     request.once('response', incoming => {
       response = incoming;
+      // Quiet SSE bodies are valid; retain the timeout only until their headers arrive.
+      if (incoming.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() === 'text/event-stream') {
+        request.setTimeout(0);
+      }
       res.statusCode = incoming.statusCode ?? 502;
       for (const [name, value] of Object.entries(forwardedHeaders(incoming.headers))) {
         // The upstream's alternative port is not the browser-facing listener.

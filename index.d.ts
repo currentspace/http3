@@ -68,6 +68,7 @@ export declare class NativeWorkerClient {
   connect(serverAddr: string, serverName: string): JsAddressInfo
   sendRequest(headers: Array<JsHeader>, fin: boolean): number
   streamSend(streamId: number, data: Buffer, fin: boolean): JsStreamSendOutcome
+  streamReadCredit(streamId: number, bytes: number): boolean
   streamClose(streamId: number, errorCode: number): boolean
   close(errorCode: number, reason: string): boolean
   sendDatagram(data: Buffer): boolean

@@ -99,6 +99,7 @@ const EXPECTED_EXPORTS = [
   'h3c_drain_events',
   'h3c_send_request',
   'h3c_stream_send',
+  'h3c_stream_read_credit',
   'h3c_stream_close',
   'h3c_send_datagram',
   'h3c_ping',

@@ -337,6 +337,7 @@ export class Http3ClientSession extends Http3ClientSessionBase {
     stream._streamId = streamId;
     stream._eventLoop = this._eventLoop;
     this._streams.set(streamId, stream);
+    stream.once('close', () => { this._streams.delete(streamId); });
     if (options?.endStream ?? false) {
       stream._finSent = true;
       stream.end();
@@ -516,9 +517,6 @@ export class Http3ClientSession extends Http3ClientSessionBase {
       // Don't delete from _streams here: the writable side may still have
       // pending drain callbacks that need EVENT_DRAIN to route through.
       // Map cleanup happens on 'close' instead. (Audit finding #2.)
-      stream.once('close', () => {
-        this._streams.delete(event.streamId);
-      });
     }
   }
 

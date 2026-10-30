@@ -458,6 +458,9 @@ export class ClientHttp3Stream extends Duplex {
   /** @internal */ _timeout: NodeJS.Timeout | null = null;
   /** @internal — see ServerHttp3Stream._blocked. */ _blocked = false;
   /** @internal */ _finSent = false;
+  private _uncreditedReadBytes = 0;
+  private _creditRetry: NodeJS.Immediate | undefined;
+  private _closeSent = false;
   private _finalChunk: Buffer | null = null;
   /**
    * @internal — set after the response HEADERS arrive. Subsequent
@@ -475,7 +478,10 @@ export class ClientHttp3Stream extends Duplex {
    */
   close(code?: number): void {
     const closeCode = code ?? 0;
-    this._eventLoop?.streamClose(this._streamId, closeCode);
+    if (!this._closeSent) {
+      this._closeSent = true;
+      this._eventLoop?.streamClose(this._streamId, closeCode);
+    }
     rejectDrainCallbacks(this._bp, new Error('stream closed'));
     this._clearTimeout();
     this.destroy();
@@ -519,11 +525,23 @@ export class ClientHttp3Stream extends Duplex {
   _read(_size: number): void {
     this._onActivity();
     drainPendingReads(this, this._bp);
+    this._returnReadCredit();
   }
 
   /** @internal — push data respecting Readable backpressure. */
   _pushData(chunk: Buffer | null): void {
+    this._uncreditedReadBytes += chunk?.length ?? 0;
     this._bp = pushData(this, this._bp, chunk);
+    this._returnReadCredit();
+  }
+
+  private _returnReadCredit(): void {
+    if (this.destroyed || this._bp?.readBackpressure || this._uncreditedReadBytes === 0 || !this._eventLoop?.streamReadCredit) return;
+    if (this._eventLoop.streamReadCredit(this._streamId, this._uncreditedReadBytes)) {
+      this._uncreditedReadBytes = 0;
+    } else if (!this._creditRetry) {
+      this._creditRetry = setImmediate(() => { this._creditRetry = undefined; this._returnReadCredit(); });
+    }
   }
 
   _write(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void): void {
@@ -635,6 +653,11 @@ export class ClientHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    if (!this._closeSent && (!this.readableEnded || !this.writableFinished)) {
+      this._closeSent = true;
+      this._eventLoop?.streamClose(this._streamId, 0x010c);
+    }
+    clearImmediate(this._creditRetry);
 
     rejectDrainCallbacks(this._bp, error ?? new Error('stream destroyed'));
     rejectNativeWriteWindow(this._nativeWriteWindow, error ?? new Error('stream destroyed'));

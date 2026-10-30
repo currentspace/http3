@@ -120,9 +120,15 @@ API still exposes duplicate fields as arrays.
 
 ## Request buffering and shutdown
 
-`maxBufferedRequestBytes` defaults to 1 MiB and bounds unread H3 bytes buffered in
-the transport stream. Exceeding it resets that stream; it is not a replacement
-for Fastify's `bodyLimit`. Native and WASM H3 readers use per-stream receive
+Since 0.9.7, native and WASM H3 request bodies are flow-controlled. A slow or
+paused handler holds the client back: a 4 MiB upload to a handler that starts
+reading late or pipes to a slow consumer succeeds with the default
+`maxBufferedRequestBytes` of 1 MiB. This is a safety cap on unread H3 bytes
+buffered in the transport stream, including data already in flight when the
+handler pauses, not a total upload-size limit. Exceeding it resets that stream;
+framework body-size limits such as Fastify's `bodyLimit` still apply.
+
+Native and WASM H3 readers use per-stream receive
 credit: when the application pauses a request, the transport stops consuming
 that body's DATA frames until the reader has room. QUIC flow control then limits
 the sender; other streams on the connection can continue. H2 uses Node's stream
@@ -130,6 +136,17 @@ backpressure. The wrapper also uses Node readable/writable high-water marks.
 The credit window is 64 KiB; setting the failure limit below one window can reject
 a request even when it is being consumed. Slow streaming uploads do not require
 raising the default 1 MiB limit.
+
+Client H3 response bodies use the same receive-credit mechanism in native and
+WASM runtimes. A paused download stops returning credit until the reader has
+room. The 64 KiB credit window limits delivery into JavaScript; QUIC's receive
+windows and transport queues can hold additional bytes.
+
+For uploads and downloads, use `pipeline()` or stop writing when `write()`
+returns `false` and wait for `drain`. Write callbacks, `drain`, and `finish`
+indicate local admission, not peer receipt or acknowledgement. A client stream's
+`destroy()` cancels an unfinished exchange and rejects pending writes. Normal
+completion of both sides does not send a reset.
 
 `res.destroy()` cancels an unfinished H2/H3 response even without an Error.
 Successful response completion does not reset the stream. Peer connection errors
@@ -195,7 +212,6 @@ directly does not close the helper's external listener; use `listener.close()`.
 import { proxy } from '@currentspace/http3/proxy';
 const bff = proxy('http://127.0.0.1:3001', {
   rewrite: path => path.replace(/^\/bff(?=\/|$)/, '') || '/',
-  timeoutMs: 0, // allow quiet SSE streams
 });
 const server = createNodeServerFactory({ key, cert, allowHTTP1: true })((req, res) => {
   const path = (req.url ?? '/').split('?')[0];
@@ -215,9 +231,13 @@ rewrite Location or cookie domains/paths, retry requests, impose body limits, or
 forward WebSocket upgrades. Keep Next HMR's upgrade routing on the existing
 custom server; this helper handles HTTP requests only. Run it before body parsers.
 Only trust its forwarding metadata when the upstream is restricted to this proxy.
-The default upstream inactivity timeout is 30 seconds; configure it for SSE.
+The upstream socket inactivity timeout (`timeoutMs`) defaults to 30 seconds;
+`0` disables it. Once upstream response headers identify `text/event-stream`,
+the proxy clears this timeout so quiet SSE bodies can remain open. This also
+applies to an explicitly configured `timeoutMs`; it still limits inactivity
+before the SSE headers arrive. Non-SSE bodies retain the configured timeout.
 `connectTimeoutMs` separately bounds DNS/TCP/TLS setup (default 10 seconds),
-including when `timeoutMs: 0` allows an idle SSE response.
+regardless of `timeoutMs` or the eventual response type.
 An upstream URL path is a prefix when no `rewrite` is supplied; with `rewrite`,
 the returned origin-relative path replaces it. Specify only an origin when your
 application already adds the BFF prefix.

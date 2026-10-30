@@ -142,9 +142,9 @@ export function pushData(
   maxBufferedBytes = Infinity,
 ): BackpressureState | null {
   if (stream.destroyed) return state;
-  // Native events can already be in flight when Readable pauses. Bound
-  // that spill queue instead of letting a stalled consumer retain data
-  // indefinitely. This is a failure limit, not transport flow control.
+  // Native/WASM H3 server receive credit provides transport flow control.
+  // Events can already be in flight when Readable pauses; this separate safety
+  // cap bounds unread bytes and that spill queue, not the total request body.
   const buffered = stream.readableLength + (state?.pendingReadBytes ?? 0);
   if (chunk !== null && buffered + chunk.length > maxBufferedBytes) {
     if (state) { state.pendingReads.length = 0; state.pendingReadBytes = 0; }
