@@ -193,7 +193,8 @@ const server = createNodeServerFactory({ key, cert, allowHTTP1: true })((req, re
 
 The fixed upstream is HTTP/1.1 or HTTPS, with certificate verification enabled
 and optional `ca`. Requests/responses stream with backpressure. The handler strips
-hop-by-hop and Connection-nominated headers, preserves separate Set-Cookie values,
+hop-by-hop and Connection-nominated headers and upstream Alt-Svc (the gateway
+keeps its own advertisement), preserves separate Set-Cookie values,
 replaces incoming forwarding metadata with this hop's X-Forwarded fields, flushes
 SSE headers and cancels upstream work when the client disconnects. It does not
 rewrite Location or cookie domains/paths, retry requests, impose body limits, or

@@ -42,7 +42,8 @@ test('dev-cert issues constrained localhost certificates, preserves keys, and re
   const mac = devTrustCommands(dir, ca, false, 'darwin');
   assert.deepEqual(mac[0]!.args.slice(0, 6), ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k']);
   const remove = devTrustCommands(dir, ca, true, 'darwin');
-  assert.ok(remove[0]!.args.includes(ca.fingerprint.replaceAll(':', '')));
+  assert.ok(remove[0]!.args.includes('deny'));
+  assert.equal(remove[0]!.args.at(-1), join(dir, 'ca.pem'));
   const linux = devTrustCommands(dir, ca, false, 'linux', { linuxTool: '/usr/sbin/update-ca-certificates', nssDirectories: ['/tmp/test-nss'] });
   assert.equal(linux.at(-1)!.file, 'certutil');
   assert.ok(linux.at(-1)!.args.includes('C,,'));

@@ -60,6 +60,7 @@ test('proxy streams bodies, cookies and forwarding metadata across h1/h2/h3', as
     for await (const chunk of req) chunks.push(chunk as Buffer);
     res.setHeader('connection', 'x-hop');
     res.setHeader('x-hop', 'must disappear');
+    res.setHeader('alt-svc', 'h3=":1"; ma=60');
     res.setHeader('set-cookie', ['a=1; Path=/', 'b=2; Path=/']);
     res.end(JSON.stringify({ path: req.url, headers: req.headers, body: Buffer.concat(chunks).toString() }));
   });
@@ -78,12 +79,14 @@ test('proxy streams bodies, cookies and forwarding metadata across h1/h2/h3', as
       assert.equal(result.headers['x-forwarded-host'], new URL(origin).host);
       assert.notEqual(result.headers['x-forwarded-for'], 'spoofed');
       assert.equal(result.headers.forwarded, undefined);
+      assert.equal(result.headers['x-remove'], undefined);
       assert.equal(result.body, protocol === 'h1' ? '' : 'streamed body');
     };
     if (protocol === 'h1') {
       await new Promise<void>((resolve, reject) => {
         get(origin + '/test?q=1', { ca, agent: false, headers: { connection: 'x-remove', 'x-remove': 'remove', 'x-forwarded-for': 'spoofed', forwarded: 'spoofed' } }, async response => {
           assert.equal(response.headers['x-hop'], undefined);
+          assert.equal(response.headers['alt-svc'], `h3=":${server.address()!.port}"; ma=86400`);
           assert.equal(response.headers['set-cookie']?.length, 2);
           const chunks: Buffer[] = []; for await (const chunk of response) chunks.push(chunk as Buffer);
           check(Buffer.concat(chunks).toString()); resolve();
@@ -93,7 +96,7 @@ test('proxy streams bodies, cookies and forwarding metadata across h1/h2/h3', as
       const session = protocol === 'h2' ? connectH2(origin, { ca }) : await connectAsync(origin, { ca, runtimeMode: 'portable' });
       try {
         const stream = session.request({ ':method': 'POST', ':path': '/test?q=1', ':authority': new URL(origin).host, 'x-forwarded-for': 'spoofed', forwarded: 'spoofed' });
-        stream.once('response', headers => { assert.equal(headers['x-hop'], undefined); assert.equal(headers['set-cookie']?.length, 2); });
+        stream.once('response', headers => { assert.equal(headers['x-hop'], undefined); assert.equal(headers['alt-svc'], `h3=":${server.address()!.port}"; ma=86400`); assert.equal(headers['set-cookie']?.length, 2); });
         stream.write(Buffer.from('streamed body')); stream.end();
         const chunks: Buffer[] = []; for await (const chunk of stream) chunks.push(chunk as Buffer);
         check(Buffer.concat(chunks).toString());
@@ -171,4 +174,22 @@ test('server shutdown waits for an accepted response before application cleanup'
   await closing;
   assert.equal(cleaned, true);
   assert.equal(server.listening, false);
+});
+
+test('proxy returns 502 on invalid rewritten paths and upstream inactivity', async t => {
+  const upstream = createServer(() => {});
+  upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
+  t.after(async () => { upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve())); });
+  const target = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
+  for (const rewrite of [() => '//another-host/', () => '/invalid space', undefined]) {
+    const server = new Http3NodeServer({ ...tls, allowHTTP1: true, runtimeMode: 'portable' }, proxy(target, { rewrite, timeoutMs: 20 }));
+    server.listen(0); await once(server, 'listening');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        get(`https://localhost:${server.address()!.port}`, { ca, agent: false }, response => {
+          assert.equal(response.statusCode, 502); response.resume(); response.once('end', resolve);
+        }).once('error', reject);
+      });
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  }
 });

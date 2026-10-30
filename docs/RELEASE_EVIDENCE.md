@@ -3,6 +3,33 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## Unreleased consumer integration candidate (PR #20)
+
+- Includes configurable one-day Alt-Svc, socket compatibility, dual-stack/listen
+  arguments, package/types fixes, Nest/proxy/shutdown helpers, dev certificates,
+  diagnostics and documentation. No version bump or publication is performed.
+- Local Node 24/26 full suites passed 381 tests each; the subsequent proxy error
+  and upstream Alt-Svc regression passed in the targeted suite. FFI: 67 tests.
+  Rust: 277 tests, including idle STOP_SENDING; rebuilt WASM: 41 tests with no skips.
+- Clean packed installs resolve types under node/node16/nodenext/bundler on both
+  Node versions, load the freshly packed native sidecar and contain no root
+  native binary duplicates. The root including WASM is approximately 3 MB unpacked.
+- Actual Nest Express helper tests cover split cookies, SSE and shutdown hooks
+  over H1/H2/H3. Hosted candidate Next/Nest tests pass on Node 24/26 in development
+  and production, H3 and H2. Final-head platform checks are recorded in PR #20.
+- A three-way Chromium idle comparison used 60s/86400s Alt-Svc and 30s/120s server
+  QUIC timeouts. All first documents after 75s used H2. With one-day Alt-Svc, the
+  next reload used H3 automatically. NetLog recorded a client-advertised 30s idle
+  timeout and local closure at about 29s. A longer Alt-Svc lifetime is not a
+  guarantee that the first idle reload uses H3.
+- macOS's administrative trust-removal API hung on hosted runners. The CLI's
+  macOS untrust operation instead applies an explicit deny policy to the generated
+  CA; it retains the keychain entry and documents manual deletion. Trust settings
+  are changed only by explicit trust/untrust commands. Browser verification of
+  this final operation remains a hosted Distribution gate.
+- Windows browser trust and manual Safari qualification remain unverified. Doctor
+  is read-only and does not clear Chrome state. Artifacts: `artifacts/consumer-feedback/`.
+
 ## 0.9.6
 
 ### Scope and state

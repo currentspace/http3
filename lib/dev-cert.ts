@@ -11,7 +11,7 @@ Generate a localhost CA and certificate (OpenSSL required). Default directory:
   ~/.http3/dev-cert
 
 Generation does not change trust settings. --trust explicitly installs this CA
-in the OS/browser trust store; "untrust" removes it. Private keys stay local.
+in the OS/browser trust store; "untrust" disables trust (macOS retains a deny entry). Private keys stay local.
 The CA is restricted to localhost, its subdomains and loopback IP addresses.
 The issued leaf covers the hostname localhost over IPv4 or IPv6, not IP URLs.
 Linux trust requires sudo, update-ca-certificates (or update-ca-trust), and the
@@ -127,8 +127,10 @@ export function devTrustCommands(
   if (platform === 'darwin') {
     const keychain = options.keychain ?? '/Library/Keychains/System.keychain';
     return remove ? [
-      // -t removes user and (when run as root) admin trust using the keychain item.
-      { file: 'sudo', args: ['security', 'delete-certificate', '-t', '-Z', ca.fingerprint.replaceAll(':', ''), keychain] },
+      // Removing admin trust settings can block on headless macOS. Explicit
+      // distrust uses the same supported update API as trust installation and
+      // also rejects the CA if a server sends it in a certificate chain.
+      { file: 'sudo', args: ['security', 'add-trusted-cert', '-d', '-r', 'deny', '-k', keychain, caFile] },
     ] : [{ file: 'sudo', args: ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', keychain, caFile] }];
   }
   if (platform === 'linux') {
@@ -173,7 +175,11 @@ function changeTrust(directory: string, remove: boolean): void {
   const commands = devTrustCommands(directory, ca, remove, process.platform, options);
   console.log(`${remove ? 'Removing' : 'Trusting'} localhost CA SHA-256 ${ca.fingerprint256}`);
   for (const item of commands) execFileSync(item.file, item.args, { stdio: 'inherit', timeout: 60_000 });
-  console.log(remove ? 'Removed local CA trust. Certificate files were retained.' : 'Installed local CA trust. Restart the browser to reload trust settings.');
+  console.log(remove
+    ? process.platform === 'darwin'
+      ? 'Distrusted the local CA. Its System keychain entry is retained with an explicit deny policy; remove it manually in Keychain Access when no longer needed. Certificate files were retained.'
+      : 'Removed local CA trust. Certificate files were retained.'
+    : 'Installed local CA trust. Restart the browser to reload trust settings.');
 }
 
 function printUsage(directory: string): void {

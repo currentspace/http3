@@ -13,7 +13,7 @@ npx @currentspace/http3 dev-cert --out .certs --trust
 
 From a built source checkout, replace `npx @currentspace/http3` with `node bin/http3.cjs`.
 Without `--trust`, generation only writes local files. Trust can also be installed
-or removed separately:
+or disabled separately:
 
 ```sh
 npx @currentspace/http3 dev-cert trust --out .certs
@@ -21,7 +21,10 @@ npx @currentspace/http3 dev-cert untrust --out .certs
 ```
 
 OpenSSL must be installed. macOS trust uses `sudo security` and the System
-keychain. Linux uses `sudo update-ca-certificates` or `sudo update-ca-trust`, plus
+keychain. On macOS, `untrust` sets an explicit deny policy for this CA and retains
+its keychain entry. This avoids a headless macOS hang in the trust-removal API;
+remove the entry manually in Keychain Access when it is no longer needed.
+No system authorization policy is changed. Linux uses `sudo update-ca-certificates` or `sudo update-ca-trust`, plus
 NSS `certutil` (`libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora) for Chrome.
 Windows uses the current user's Root store via `certutil.exe`; that command path
 has unit coverage but no Windows browser qualification. Native Windows binaries
@@ -86,9 +89,18 @@ still matches the specific origin and port.
 
 The example browser scripts pin their generated leaf certificate in an isolated
 Chromium process. They do not install OS trust. The separate Distribution CI test
-installs/removes the CLI's CA on disposable Linux/macOS runners, checks a Node
+installs and disables trust for the CLI's CA on disposable Linux/macOS runners, checks a Node
 HTTPS client using `NODE_EXTRA_CA_CERTS`, and checks H2-to-H3 negotiation without
 SPKI bypass, ignored HTTPS errors, or a hostname resolver override.
+
+An idle connection is separate from the Alt-Svc cache. In Chromium testing,
+75 seconds idle produced H2 for the first document and H3 on a subsequent reload,
+even with `ma=86400`. NetLog showed Chromium advertising a 30-second QUIC idle
+timeout and closing at about 29 seconds; increasing the server timeout to 120
+seconds did not override the client's limit. A surviving H2 connection can win
+the next connection race. The one-day advertisement avoids expiry after a minute,
+but does not guarantee H3 on the first post-idle document. The browser test checks
+automatic recovery and records the first post-idle protocol separately.
 
 ## IPv4, IPv6 and listener scope
 

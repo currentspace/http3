@@ -46,7 +46,9 @@ export function proxy(upstream: string | URL, options: ProxyOptions = {}): (req:
     headers['x-forwarded-proto'] = 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http';
     headers.host = target.host;
     const send = target.protocol === 'https:' ? httpsRequest : httpRequest;
-    const request = send(target, { method: req.method, path, headers, ca: options.ca, rejectUnauthorized: true });
+    let request: ReturnType<typeof httpRequest>;
+    try { request = send(target, { method: req.method, path, headers, ca: options.ca, rejectUnauthorized: true }); }
+    catch { res.statusCode = 502; res.end('Invalid upstream request'); req.resume(); return; }
     let response: IncomingMessage | undefined;
     const abort = (): void => { request.destroy(); response?.destroy(); };
     const downstreamClosed = (): void => { if (!res.writableFinished) abort(); };
@@ -70,7 +72,8 @@ export function proxy(upstream: string | URL, options: ProxyOptions = {}): (req:
       response = incoming;
       res.statusCode = incoming.statusCode ?? 502;
       for (const [name, value] of Object.entries(forwardedHeaders(incoming.headers))) {
-        if (value !== undefined) res.setHeader(name, value);
+        // The upstream's alternative port is not the browser-facing listener.
+        if (name !== 'alt-svc' && value !== undefined) res.setHeader(name, value);
       }
       // Send headers immediately so SSE clients can observe an idle stream.
       res.flushHeaders();
