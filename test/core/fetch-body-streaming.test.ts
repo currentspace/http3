@@ -6,6 +6,7 @@ import type { IncomingHttpHeaders } from 'node:http2';
 import { connectAsync } from '../../lib/client.js';
 import { serveFetch } from '../../lib/fetch-adapter.js';
 import { generateTestCerts } from '../support/generate-certs.js';
+import { withTimeoutError } from '../support/async-race.js';
 import type { Readable, Writable } from 'node:stream';
 
 it('H3 backpressures an unread Fetch upload and still propagates client cancellation', async () => {
@@ -13,9 +14,12 @@ it('H3 backpressures an unread Fetch upload and still propagates client cancella
   let aborted = false;
   let onAbort!: () => void;
   const handlerAborted = new Promise<void>(resolve => { onAbort = resolve; });
+  let onStart!: () => void;
+  const handlerStarted = new Promise<void>(resolve => { onStart = resolve; });
   const server = serveFetch({
     ...certs, port: 0, host: '127.0.0.1', runtimeMode: 'portable', disableRetry: true,
     fetch: async request => {
+      onStart();
       await new Promise<void>(resolve => {
         request.signal.addEventListener('abort', () => { aborted = true; onAbort(); resolve(); }, { once: true });
       });
@@ -30,11 +34,14 @@ it('H3 backpressures an unread Fetch upload and still propagates client cancella
     const stream = client.request({ ':method': 'POST', ':path': '/', ':authority': 'localhost', ':scheme': 'https' });
     stream.on('error', () => {});
     stream.end(Buffer.alloc(2 * 1024 * 1024));
+    // Cancel only after the peer has dispatched the request. Under CI load,
+    // elapsed time alone does not prove there is a Fetch handler to abort.
+    await withTimeoutError(handlerStarted, 5000, new Error('Fetch handler did not start'));
     await new Promise(resolve => setTimeout(resolve, 150));
     assert.equal(stream.destroyed, false);
     assert.equal(aborted, false);
     stream.close(0x10c);
-    await handlerAborted;
+    await withTimeoutError(handlerAborted, 5000, new Error('Client cancellation did not abort Fetch'));
     assert.equal(aborted, true);
   } finally {
     await client.close();

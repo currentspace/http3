@@ -435,6 +435,10 @@ impl H3Connection {
                             }
                         },
                         Ok((stream_id, quiche::h3::Event::Finished)) => {
+                            // Receive credit ends with the body, independently
+                            // of an open response or blocked writes.
+                            self.read_credit.remove(&stream_id);
+                            self.pending_readable.remove(&stream_id);
                             if push_pending_body_event(
                                 &mut self.pending_body_data,
                                 &mut self.data_pool,
@@ -1527,6 +1531,51 @@ mod tests {
             ),
             "peer flow-control progress should emit drain for blocked request stream"
         );
+    }
+
+    #[test]
+    fn finished_body_releases_read_credit_before_write_side_closes() {
+        let (mut client, mut server_conn, mut server_h3, client_addr, server_addr) =
+            make_direct_h3_pair();
+        client.stream_read_window = Some(65_536);
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"POST"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/half-open"),
+        ];
+        let stream_id = client.send_request(&headers, false).expect("request");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            while server_h3.poll(&mut server_conn).is_ok() {}
+        }
+        let response = vec![quiche::h3::Header::new(b":status", b"200")];
+        server_h3
+            .send_response(&mut server_conn, stream_id, &response, false)
+            .expect("response headers");
+        let mut events = Vec::new();
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        assert!(client.read_credit.contains_key(&stream_id));
+        client.trailer_fin_streams.insert(stream_id);
+        server_h3
+            .send_body(&mut server_conn, stream_id, b"", true)
+            .expect("response FIN");
+        for _ in 0..10 {
+            exchange_h3_packets(&mut client, &mut server_conn, client_addr, server_addr);
+            client.poll_h3_events(7, 16, &mut events);
+        }
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == crate::h3_event::EVENT_FINISHED));
+        assert!(!client.quiche_conn.stream_closed(stream_id));
+        assert!(!client.read_credit.contains_key(&stream_id));
+        assert!(!client.pending_readable.contains(&stream_id));
+        assert!(client.trailer_fin_streams.contains(&stream_id));
+        client.add_read_credit(stream_id, 65_536);
+        assert!(!client.read_credit.contains_key(&stream_id));
     }
 
     #[test]
