@@ -19,6 +19,7 @@ mod inner {
     use std::time::{Duration, Instant};
 
     use crate::buffer_pool::AdaptiveBufferPool;
+    use crate::error::Http3NativeError;
     use crate::proof_core::ring_layout;
     use crate::reactor_metrics;
     use crate::transport::socket::{
@@ -29,6 +30,37 @@ mod inner {
         group_for_gso,
     };
     use crate::unsafe_boundary::ProvidedBufferId;
+
+    #[cfg(test)]
+    pub(crate) fn test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SetupStage {
+        Ring,
+        Files,
+        RxBufferRing,
+    }
+
+    fn setup_error(stage: SetupStage, source: io::Error) -> Http3NativeError {
+        let syscall = match stage {
+            SetupStage::Ring => "io_uring_setup",
+            SetupStage::Files => "io_uring_register_files",
+            SetupStage::RxBufferRing => "io_uring_register_buf_ring",
+        };
+        let unavailable = matches!(
+            source.raw_os_error(),
+            Some(libc::EPERM | libc::EACCES | libc::ENOSYS | libc::EOPNOTSUPP | libc::ENOMEM)
+        ) || (stage == SetupStage::RxBufferRing
+            && source.raw_os_error() == Some(libc::EINVAL));
+        if unavailable {
+            Http3NativeError::fast_path_unavailable("io_uring", syscall, source)
+        } else {
+            Http3NativeError::runtime_io("io_uring", syscall, "driver-setup-failed", source)
+        }
+    }
 
     /// Number of provided buffers in the RX buffer ring.
     /// 512 gives enough headroom for burst receives between poll() calls —
@@ -149,7 +181,17 @@ mod inner {
     unsafe impl Send for RxBufferRing {}
 
     impl RxBufferRing {
-        fn new(submitter: &io_uring::Submitter<'_>) -> io::Result<Self> {
+        fn new(submitter: &io_uring::Submitter<'_>) -> Result<Self, Http3NativeError> {
+            Self::with_registration(|address, entries, group| {
+                // SAFETY: with_registration keeps initialized, page-aligned
+                // memory alive through registration and the returned ring.
+                unsafe { submitter.register_buf_ring(address, entries, group) }
+            })
+        }
+
+        fn with_registration(
+            register: impl FnOnce(u64, u16, u16) -> io::Result<()>,
+        ) -> Result<Self, Http3NativeError> {
             let entry_size = std::mem::size_of::<io_uring::types::BufRingEntry>();
             let ring_header_size = entry_size * (RX_RING_SIZE as usize);
             let total_buf_size = RX_BUF_SIZE * (RX_RING_SIZE as usize);
@@ -168,7 +210,7 @@ mod inner {
                 )
             };
             if ptr == libc::MAP_FAILED {
-                return Err(io::Error::last_os_error());
+                return Err(io::Error::last_os_error().into());
             }
             let ring_ptr = ptr.cast::<u8>();
             let buf_base = unsafe { ring_ptr.add(ring_header_size) };
@@ -187,8 +229,17 @@ mod inner {
 
             // Register with the kernel.
             // SAFETY: ring_ptr is page-aligned mmap memory, entries are initialized.
-            unsafe {
-                submitter.register_buf_ring(ring_ptr as u64, RX_RING_SIZE, BUF_GROUP)?;
+            // The registration API reports EINVAL when the kernel lacks
+            // IORING_REGISTER_PBUF_RING (introduced in Linux 5.19). These
+            // arguments are fixed-valid: mmap alignment, power-of-two entries
+            // below 32768, and a fresh buffer group. Only this setup stage may
+            // therefore classify EINVAL as an unavailable fast-path feature.
+            const { assert!(RX_RING_SIZE.is_power_of_two() && RX_RING_SIZE <= 32_768) };
+            if let Err(error) = register(ring_ptr as u64, RX_RING_SIZE, BUF_GROUP) {
+                // Self does not exist yet, so its Drop cannot release this map.
+                // SAFETY: ptr/total_size describe the allocation made above.
+                unsafe { libc::munmap(ptr, total_size) };
+                return Err(setup_error(SetupStage::RxBufferRing, error));
             }
 
             // Advance tail to make all buffers available.
@@ -295,6 +346,16 @@ mod inner {
 
     impl TxBufRing {
         fn new(submitter: &io_uring::Submitter<'_>, peer: SocketAddr) -> io::Result<Self> {
+            Self::with_registration(peer, |address, entries, group| {
+                // SAFETY: with_registration owns the initialized mapping.
+                unsafe { submitter.register_buf_ring(address, entries, group) }
+            })
+        }
+
+        fn with_registration(
+            peer: SocketAddr,
+            register: impl FnOnce(u64, u16, u16) -> io::Result<()>,
+        ) -> io::Result<Self> {
             let entry_size = std::mem::size_of::<io_uring::types::BufRingEntry>();
             let ring_header_size = entry_size * (TX_RING_ENTRIES as usize);
             let total_buf_size = TX_BUF_ENTRY_SIZE * (TX_RING_ENTRIES as usize);
@@ -329,8 +390,12 @@ mod inner {
 
             // Register with kernel.
             // SAFETY: ring_ptr is page-aligned mmap memory, entries are initialized.
-            unsafe {
-                submitter.register_buf_ring(ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP)?;
+            if let Err(error) = register(ring_ptr as u64, TX_RING_ENTRIES, TX_BUF_GROUP) {
+                // Optional send-bundle setup must not leak its allocation when
+                // the kernel rejects the registration.
+                // SAFETY: ptr/total_size describe the allocation made above.
+                unsafe { libc::munmap(ptr, total_size) };
+                return Err(error);
             }
 
             // Tail starts at 0 — no buffers available until fill_and_submit.
@@ -637,10 +702,10 @@ mod inner {
         eventfd: Arc<OwnedFd>,
     }
 
-    impl Driver for IoUringDriver {
-        type Waker = IoUringWaker;
-
-        fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
+    impl IoUringDriver {
+        pub(crate) fn create(
+            socket: std::net::UdpSocket,
+        ) -> Result<(Self, IoUringWaker), Http3NativeError> {
             // DEFER_TASKRUN + COOP_TASKRUN + SINGLE_ISSUER reduce overhead by
             // deferring completion work to io_uring_enter. However, SINGLE_ISSUER
             // requires the thread calling io_uring_enter(GETEVENTS) to be the same
@@ -671,7 +736,8 @@ mod inner {
                 .or_else(|_| {
                     // Minimal fallback.
                     io_uring::IoUring::new(SQ_RING_ENTRIES).map(|r| (r, false))
-                })?;
+                })
+                .map_err(|error| setup_error(SetupStage::Ring, error))?;
             let socket_fd = socket.as_raw_fd();
             let local_addr = socket.local_addr()?;
             let gso_supported = probe_gso(&socket);
@@ -690,7 +756,7 @@ mod inner {
             // SAFETY: eventfd with EFD_NONBLOCK returns a valid fd or -1.
             let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
             if efd < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(io::Error::last_os_error().into());
             }
             // SAFETY: efd is a valid fd from successful eventfd() call.
             let eventfd = unsafe { OwnedFd::from_raw_fd(efd) };
@@ -698,9 +764,7 @@ mod inner {
             // Register socket and eventfd for fixed-fd SQE submission.
             ring.submitter()
                 .register_files(&[socket_fd, eventfd.as_raw_fd()])
-                .map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("register_files: {e}"))
-                })?;
+                .map_err(|error| setup_error(SetupStage::Files, error))?;
 
             // Set up provided buffer ring for multishot recvmsg.
             let rx_ring = RxBufferRing::new(&ring.submitter())?;
@@ -784,7 +848,7 @@ mod inner {
             // SAFETY: dup the eventfd for the waker (the driver keeps the original).
             let waker_fd = unsafe { libc::dup(driver.eventfd.as_raw_fd()) };
             if waker_fd < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(io::Error::last_os_error().into());
             }
             // SAFETY: waker_fd is a valid fd from successful dup().
             let waker_eventfd = unsafe { OwnedFd::from_raw_fd(waker_fd) };
@@ -793,6 +857,14 @@ mod inner {
                 eventfd: Arc::new(waker_eventfd),
             };
             Ok((driver, waker))
+        }
+    }
+
+    impl Driver for IoUringDriver {
+        type Waker = IoUringWaker;
+
+        fn new(socket: std::net::UdpSocket) -> io::Result<(Self, Self::Waker)> {
+            Self::create(socket).map_err(crate::transport::transport_error_to_io)
         }
 
         fn poll(&mut self, deadline: Option<Instant>) -> io::Result<PollOutcome> {
@@ -1926,6 +1998,128 @@ mod inner {
     mod tests {
         use super::*;
 
+        fn assert_unmapped(address: u64) {
+            let mut resident = 0_u8;
+            // SAFETY: mincore only inspects the mapping; it does not dereference
+            // the address. One page requires one byte in the output vector.
+            let result =
+                unsafe { libc::mincore(address as *mut libc::c_void, 1, &raw mut resident) };
+            assert_eq!(result, -1);
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENOMEM)
+            );
+        }
+
+        #[test]
+        fn missing_required_buffer_ring_is_typed_and_releases_mapping() {
+            let _serial = test_lock()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut address = 0;
+            let result = RxBufferRing::with_registration(|ptr, entries, group| {
+                address = ptr;
+                assert!(entries.is_power_of_two() && entries <= 32_768);
+                assert_eq!(group, BUF_GROUP);
+                Err(io::Error::from_raw_os_error(libc::EINVAL))
+            });
+            assert_unmapped(address);
+            let Err(Http3NativeError::FastPathUnavailable {
+                driver,
+                syscall,
+                errno,
+                source,
+            }) = result
+            else {
+                panic!("unsupported provided-buffer registration must be a typed capability error");
+            };
+            assert_eq!(driver, "io_uring");
+            assert_eq!(syscall, "io_uring_register_buf_ring");
+            assert_eq!(errno, Some(libc::EINVAL));
+            assert_eq!(source.raw_os_error(), Some(libc::EINVAL));
+        }
+
+        #[test]
+        fn rejected_optional_buffer_ring_releases_mapping() {
+            let _serial = test_lock()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut address = 0;
+            let result = TxBufRing::with_registration(
+                "127.0.0.1:4433".parse().expect("valid socket address"),
+                |ptr, _, _| {
+                    address = ptr;
+                    Err(io::Error::from_raw_os_error(libc::EINVAL))
+                },
+            );
+            assert_unmapped(address);
+            assert!(matches!(result, Err(error) if error.raw_os_error() == Some(libc::EINVAL)));
+        }
+
+        #[test]
+        fn invalid_setup_arguments_outside_required_buffer_ring_remain_errors() {
+            for stage in [SetupStage::Ring, SetupStage::Files] {
+                let error = setup_error(stage, io::Error::from_raw_os_error(libc::EINVAL));
+                assert!(matches!(
+                    error,
+                    Http3NativeError::RuntimeIo {
+                        errno: Some(libc::EINVAL),
+                        reason_code: "driver-setup-failed",
+                        ..
+                    }
+                ));
+            }
+            // Socket bind/config errors bypass setup_error and cannot trigger
+            // auto fallback merely because the errno is EINVAL.
+            assert!(matches!(
+                Http3NativeError::from(io::Error::from_raw_os_error(libc::EINVAL)),
+                Http3NativeError::Io(_)
+            ));
+        }
+
+        #[test]
+        fn setup_permission_and_missing_syscall_failures_preserve_stage_and_errno() {
+            for errno in [
+                libc::EPERM,
+                libc::EACCES,
+                libc::ENOSYS,
+                libc::EOPNOTSUPP,
+                libc::ENOMEM,
+            ] {
+                let error = setup_error(SetupStage::Ring, io::Error::from_raw_os_error(errno));
+                assert!(matches!(error, Http3NativeError::FastPathUnavailable {
+                    syscall: "io_uring_setup", errno: Some(actual), ..
+                } if actual == errno));
+            }
+            let error = setup_error(SetupStage::Files, io::Error::from_raw_os_error(libc::EIO));
+            assert!(matches!(
+                error,
+                Http3NativeError::RuntimeIo {
+                    syscall: "io_uring_register_files",
+                    errno: Some(libc::EIO),
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn unexpected_buffer_registration_failure_does_not_trigger_fallback() {
+            let _serial = test_lock()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let result = RxBufferRing::with_registration(|_, _, _| {
+                Err(io::Error::from_raw_os_error(libc::EBADF))
+            });
+            assert!(matches!(
+                result,
+                Err(Http3NativeError::RuntimeIo {
+                    syscall: "io_uring_register_buf_ring",
+                    errno: Some(libc::EBADF),
+                    ..
+                })
+            ));
+        }
+
         #[derive(Debug, PartialEq, Eq)]
         struct TestCqe {
             user_data: u64,
@@ -2066,3 +2260,6 @@ mod inner {
 pub use inner::{IoUringDriver, IoUringWaker};
 #[cfg(all(target_os = "linux", not(feature = "bench-internals")))]
 pub(crate) use inner::{IoUringDriver, IoUringWaker};
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use inner::test_lock;

@@ -202,6 +202,7 @@ jobs:
 
       - name: Qualify installed native HTTP and QUIC APIs
         run: |
+          node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
           mkdir -p artifacts/packed
           pnpm pack --config.ignore-scripts=true --pack-destination artifacts/packed
           node scripts/pack-host-native.mjs artifacts/packed

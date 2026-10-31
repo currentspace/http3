@@ -126,8 +126,7 @@ mod tests {
     }
 
     fn io_uring_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::transport::io_uring::test_lock()
     }
 
     /// Probe whether `io_uring_setup(2)` is permitted in this environment.
