@@ -48,25 +48,35 @@ export async function bindNodeUdpServer(
     onMessage?.(msg, formatLocalAddr(rinfo.address, rinfo.family, rinfo.port));
   });
 
+  // Keep late errors observed even after startup has failed. QUIC handles
+  // post-bind UDP errors through loss recovery rather than adapter callbacks.
+  socket.on('error', () => {});
   await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      socket.off('error', onBindError);
+      socket.off('listening', onListening);
+    };
     const onBindError = (err: Error): void => {
-      reject(err);
+      if (settled) return;
+      settled = true;
+      cleanup();
+      onMessage = null;
+      // A failed bind still owns an open dgram handle. Finish releasing it
+      // before rejecting, preserving the bind failure rather than close errors.
+      try { socket.close(() => reject(err)); }
+      catch { reject(err); }
+    };
+    const onListening = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
     };
     socket.once('error', onBindError);
-    socket.bind(port, host, () => {
-      socket.removeListener('error', onBindError);
-      resolve();
-    });
-  });
-
-  // Mandatory (mirrors connectNodeUdp's identical, more-commented handler):
-  // an EventEmitter with an 'error' event and no listener throws, crashing
-  // the whole process, for conditions that are routine at the protocol
-  // layer (e.g. an ICMP port-unreachable from a peer that has since gone
-  // away). `DatagramServerTransport` has no error-reporting method by
-  // design — every post-bind error is swallowed.
-  socket.on('error', () => {
-    /* swallowed intentionally — see comment above */
+    socket.once('listening', onListening);
+    try { socket.bind(port, host); }
+    catch (error) { onBindError(error instanceof Error ? error : new Error(String(error))); }
   });
 
   let closed = false;

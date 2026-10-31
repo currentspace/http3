@@ -7,7 +7,7 @@ import type { QuicServerEventLoopLike } from './quic-stream.js';
 import { createServerEventLoop, resolveWasmArtifactPath } from './client-event-loop-factory.js';
 import { toNativeEvents } from './wasm-event-bridge.js';
 import { toSessionError } from './error-map.js';
-import { Http3Error, ERR_HTTP3_RUNTIME_UNSUPPORTED } from './errors.js';
+import { Http3Error, ERR_HTTP3_INVALID_STATE, ERR_HTTP3_RUNTIME_UNSUPPORTED } from './errors.js';
 import { defaultSessionCloseInfo, sessionCloseInfoFromEvent, type SessionCloseInfo } from './session.js';
 import type { RuntimeInfo, RuntimeOptions } from './runtime.js';
 import { runWithRuntimeSelection, setPendingRuntimeInfo } from './runtime.js';
@@ -323,6 +323,10 @@ export class QuicServer extends EventEmitter {
   private _eventLoop: QuicServerEventLoopLike | null = null;
   private readonly _sessions = new Map<number, QuicServerSession>();
   private readonly _options: QuicServerOptions;
+  private _startupGeneration = 0;
+  private _startup: Promise<{ address: string; family: string; port: number }> | null = null;
+  private _closePromise: Promise<void> | null = null;
+  private _closing = false;
   private _address: { address: string; family: string; port: number } | null = null;
   /** @internal */
   _runtimeInfo: RuntimeInfo | null = null;
@@ -344,6 +348,18 @@ export class QuicServer extends EventEmitter {
    * @param host - Bind address (default `'127.0.0.1'`).
    */
   async listen(port: number, host?: string): Promise<{ address: string; family: string; port: number }> {
+    if (this._startup || this._eventLoop || this._closing) {
+      throw new Http3Error('server is already listening, starting, or closing', ERR_HTTP3_INVALID_STATE);
+    }
+    this._closePromise = null;
+    setPendingRuntimeInfo(this, this._options);
+    const startup = this._startListening(port, host, ++this._startupGeneration);
+    this._startup = startup;
+    try { return await startup; }
+    finally { if (this._startup === startup) this._startup = null; }
+  }
+
+  private async _startListening(port: number, host: string | undefined, generation: number): Promise<{ address: string; family: string; port: number }> {
     const opts = this._options;
     const clientAuth = resolveServerClientAuthMode({
       ca: opts.ca,
@@ -359,111 +375,128 @@ export class QuicServer extends EventEmitter {
     // happens only inside the native thunk, never eagerly — this is the fix
     // for the same bug class as "connectQuic() unconditionally resolved the
     // native binding".
-    const result = await runWithRuntimeSelection(this, opts, async (runtimeMode) => createServerEventLoop<{
-      eventLoop: QuicServerEventLoopLike;
-      addr: { address: string; family: string; port: number };
-    }>(
-      runtimeMode,
-      () => {
-        if (runtimeMode === 'wasm') {
-          // Unreachable: createServerEventLoop never invokes this thunk for
-          // 'wasm' — see docs/WASM_CLIENT_PLAN.md §6.6 ("never pass 'wasm'
-          // to the native binding") and lib/quic-client.ts's identical
-          // guard. Guarded explicitly rather than asserted away so a future
-          // bug here fails loudly instead of silently resolving the native
-          // binding for a wasm request.
-          throw new Http3Error('unreachable: native constructor invoked for wasm runtime mode', ERR_HTTP3_RUNTIME_UNSUPPORTED);
-        }
-        const NativeQuicServer = getNativeQuicServerConstructor();
-        const native = new NativeQuicServer(
-          {
-            key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
-            cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
-            ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
-            clientAuth,
-            alpn: opts.alpn,
-            runtimeMode,
-            maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
-            maxUdpPayloadSize: opts.maxUdpPayloadSize,
-            initialMaxData: opts.initialMaxData,
-            initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal,
-            initialMaxStreamsBidi: opts.initialMaxStreamsBidi,
-            disableActiveMigration: opts.disableActiveMigration,
-            enableDatagrams: opts.enableDatagrams,
-            maxConnections: opts.maxConnections,
-            disableRetry: opts.disableRetry,
-            qlogDir: opts.qlogDir,
-            qlogLevel: opts.qlogLevel,
-            keylog: opts.keylog,
-          },
-          (_err: Error | null, events: NativeEvent[]) => {
-            try {
-              let hasShutdown = false;
-              for (const event of events) {
-                if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
-                  hasShutdown = true;
+    const result = await runWithRuntimeSelection(this, opts, async (runtimeMode) => {
+      const started = await createServerEventLoop<{
+        eventLoop: QuicServerEventLoopLike;
+        addr: { address: string; family: string; port: number };
+      }>(
+        runtimeMode,
+        () => {
+          if (runtimeMode === 'wasm') {
+            // Unreachable: createServerEventLoop never invokes this thunk for
+            // 'wasm' — see docs/WASM_CLIENT_PLAN.md §6.6 ("never pass 'wasm'
+            // to the native binding") and lib/quic-client.ts's identical
+            // guard. Guarded explicitly rather than asserted away so a future
+            // bug here fails loudly instead of silently resolving the native
+            // binding for a wasm request.
+            throw new Http3Error('unreachable: native constructor invoked for wasm runtime mode', ERR_HTTP3_RUNTIME_UNSUPPORTED);
+          }
+          const NativeQuicServer = getNativeQuicServerConstructor();
+          const native = new NativeQuicServer(
+            {
+              key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
+              cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
+              ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
+              clientAuth,
+              alpn: opts.alpn,
+              runtimeMode,
+              maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
+              maxUdpPayloadSize: opts.maxUdpPayloadSize,
+              initialMaxData: opts.initialMaxData,
+              initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal,
+              initialMaxStreamsBidi: opts.initialMaxStreamsBidi,
+              disableActiveMigration: opts.disableActiveMigration,
+              enableDatagrams: opts.enableDatagrams,
+              maxConnections: opts.maxConnections,
+              disableRetry: opts.disableRetry,
+              qlogDir: opts.qlogDir,
+              qlogLevel: opts.qlogLevel,
+              keylog: opts.keylog,
+            },
+            (_err: Error | null, events: NativeEvent[]) => {
+              try {
+                let hasShutdown = false;
+                for (const event of events) {
+                  if (event.eventType === EVENT_SHUTDOWN_COMPLETE) {
+                    hasShutdown = true;
+                  }
                 }
+                if (!hasShutdown) {
+                  this._dispatchEvents(events);
+                } else {
+                  this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
+                  eventLoop._onShutdownSentinel();
+                }
+              } finally {
+                // Audit #14: release credit on the outstanding-events gauge even
+                // when user event handlers throw during dispatch.
+                native.ackEventBatch(events.length);
               }
-              if (!hasShutdown) {
-                this._dispatchEvents(events);
-              } else {
-                this._dispatchEvents(events.filter(e => e.eventType !== EVENT_SHUTDOWN_COMPLETE));
-                eventLoop._onShutdownSentinel();
-              }
-            } finally {
-              // Audit #14: release credit on the outstanding-events gauge even
-              // when user event handlers throw during dispatch.
-              native.ackEventBatch(events.length);
-            }
-          },
-        );
+            },
+          );
 
-        const eventLoop = new QuicWorkerEventLoop(native);
-        const addr = native.listen(port, host ?? '127.0.0.1');
-        return { eventLoop, addr };
-      },
-      async () => {
-        // Lazily dynamic-imported so native-only consumers never load any
-        // wasm code (docs/WASM_CLIENT_PLAN.md §6.6) — mirrors
-        // lib/quic-client.ts's identical wasm-branch construction.
-        const { WasmQuicServerEventLoop: WasmLoopCtor } = await import('./wasm/quic-server-event-loop.js');
-        const { loadHttp3WasmCoreFromFile } = await import('./wasm/node-core-loader.js');
-        const { bindNodeUdpServer } = await import('./wasm/node-udp-server-adapter.js');
-        const eventLoop = new WasmLoopCtor(
-          {
-            core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
-            transportFactory: bindNodeUdpServer,
-            key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
-            cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
-            ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
-            alpn: opts.alpn,
-            clientAuth,
-            maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
-            maxUdpPayloadSize: opts.maxUdpPayloadSize,
-            initialMaxData: opts.initialMaxData,
-            initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal,
-            initialMaxStreamsBidi: opts.initialMaxStreamsBidi,
-            disableActiveMigration: opts.disableActiveMigration,
-            enableDatagrams: opts.enableDatagrams,
-            disableRetry: opts.disableRetry,
-            maxConnections: opts.maxConnections,
-            // See lib/server.ts's identical, more-detailed note: no
-            // take_keylog-equivalent export exists for wasm servers yet, so
-            // this is always disabled here regardless of `opts.keylog`
-            // (native QUIC servers are unaffected).
-            keylog: false,
-          },
-          (events) => {
-            this._dispatchEvents(toNativeEvents(events));
-          },
-        );
-        const addr = await eventLoop.listen(port, host ?? '127.0.0.1');
-        return { eventLoop, addr };
-      },
-    ));
+          const eventLoop = new QuicWorkerEventLoop(native);
+          try {
+            const addr = native.listen(port, host ?? '127.0.0.1');
+            return { eventLoop, addr };
+          } catch (error) {
+            // The factory still owns this binding if listen throws. No
+            // event loop was published for close() to release its callback.
+            try { native.shutdown(); } catch { /* preserve the listen failure */ }
+            throw error;
+          }
+        },
+        async () => {
+          // Lazily dynamic-imported so native-only consumers never load any
+          // wasm code (docs/WASM_CLIENT_PLAN.md §6.6) — mirrors
+          // lib/quic-client.ts's identical wasm-branch construction.
+          const { WasmQuicServerEventLoop: WasmLoopCtor } = await import('./wasm/quic-server-event-loop.js');
+          const { loadHttp3WasmCoreFromFile } = await import('./wasm/node-core-loader.js');
+          const { bindNodeUdpServer } = await import('./wasm/node-udp-server-adapter.js');
+          const eventLoop = new WasmLoopCtor(
+            {
+              core: loadHttp3WasmCoreFromFile(resolveWasmArtifactPath()),
+              transportFactory: bindNodeUdpServer,
+              key: typeof opts.key === 'string' ? Buffer.from(opts.key) : opts.key,
+              cert: typeof opts.cert === 'string' ? Buffer.from(opts.cert) : opts.cert,
+              ca: opts.ca ? (typeof opts.ca === 'string' ? Buffer.from(opts.ca) : opts.ca) : undefined,
+              alpn: opts.alpn,
+              clientAuth,
+              maxIdleTimeoutMs: opts.maxIdleTimeoutMs,
+              maxUdpPayloadSize: opts.maxUdpPayloadSize,
+              initialMaxData: opts.initialMaxData,
+              initialMaxStreamDataBidiLocal: opts.initialMaxStreamDataBidiLocal,
+              initialMaxStreamsBidi: opts.initialMaxStreamsBidi,
+              disableActiveMigration: opts.disableActiveMigration,
+              enableDatagrams: opts.enableDatagrams,
+              disableRetry: opts.disableRetry,
+              maxConnections: opts.maxConnections,
+              // See lib/server.ts's identical, more-detailed note: no
+              // take_keylog-equivalent export exists for wasm servers yet, so
+              // this is always disabled here regardless of `opts.keylog`
+              // (native QUIC servers are unaffected).
+              keylog: false,
+            },
+            (events) => {
+              this._dispatchEvents(toNativeEvents(events));
+            },
+          );
+          const addr = await eventLoop.listen(port, host ?? '127.0.0.1');
+          return { eventLoop, addr };
+        },
+      );
+      if (generation !== this._startupGeneration) {
+        await started.eventLoop.close();
+        throw new Http3Error('server startup cancelled', ERR_HTTP3_INVALID_STATE, { reasonCode: 'startup-cancelled' });
+      }
+      this._eventLoop = started.eventLoop;
+      this._address = started.addr;
+      return started;
+    });
 
-    this._eventLoop = result.eventLoop;
-    this._address = result.addr;
+    if (generation !== this._startupGeneration) {
+      throw new Http3Error('server startup cancelled', ERR_HTTP3_INVALID_STATE, { reasonCode: 'startup-cancelled' });
+    }
     this.emit('listening');
     await Promise.resolve();
     return result.addr;
@@ -474,17 +507,30 @@ export class QuicServer extends EventEmitter {
     return this._address;
   }
 
-  /** Gracefully shut down the server and destroy all sessions. */
+  /** Gracefully shut down the server, including any in-flight listener startup. */
   async close(): Promise<void> {
-    for (const session of this._sessions.values()) {
-      session._cleanup();
-    }
-    this._sessions.clear();
-    if (this._eventLoop) {
-      await this._eventLoop.close();
+    if (this._closePromise) return this._closePromise;
+    this._closing = true;
+    const generation = ++this._startupGeneration;
+    const startup = this._startup;
+    this._closePromise = (async (): Promise<void> => {
+      // The startup task owns a loop until it either publishes it or notices
+      // cancellation and closes it. Waiting here prevents post-close binds.
+      try { await startup; } catch { /* listen() retains its original rejection */ }
+      for (const session of this._sessions.values()) session._cleanup();
+      this._sessions.clear();
+      const loop = this._eventLoop;
       this._eventLoop = null;
-    }
-    this.emit('close');
+      this._address = null;
+      if (loop) await loop.close();
+      // Cleanup is complete before listeners can start another lifecycle.
+      this._closing = false;
+      this.emit('close');
+    })().finally(() => {
+      // A close listener may already have started and closed a new listener.
+      if (generation === this._startupGeneration) this._closing = false;
+    });
+    return this._closePromise;
   }
 
   private _dispatchEvents(events: NativeEvent[]): void {

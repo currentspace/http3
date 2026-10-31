@@ -854,7 +854,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
         if (shouldAbortConnect()) {
           await eventLoop.close();
           session._setEventLoop(null);
-          return;
+          throw abortSignalError(options?.signal);
         }
         try {
           await eventLoop.connect(resolved.socketAddress, options?.servername ?? resolved.servername);
@@ -870,7 +870,7 @@ export function connectQuic(authority: ConnectionEndpoint, options?: QuicConnect
         if (shouldAbortConnect()) {
           await eventLoop.close();
           session._setEventLoop(null);
-          return;
+          throw abortSignalError(options?.signal);
         }
       }, selection);
     } catch (err: unknown) {

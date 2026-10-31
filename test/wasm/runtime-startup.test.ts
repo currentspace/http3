@@ -82,3 +82,106 @@ test('WASM raw QUIC keeps required client authentication after runtime selection
   await new Promise<void>(resolve => client.once('close', resolve));
   assert.equal(sessions, 0, 'an anonymous client must not create an authenticated session');
 });
+
+test('raw QUIC close waits for deferred WASM startup cleanup without announcing selection', { skip: wasmSkipReason() }, async t => {
+  const { WasmQuicServerEventLoop } = await import('../../lib/wasm/quic-server-event-loop.js');
+  const { createSocket } = await import('node:dgram');
+  let resume!: () => void;
+  let entered!: () => void;
+  let port = 0;
+  let loopCloses = 0;
+  const gate = new Promise<void>(resolve => { resume = resolve; });
+  const bound = new Promise<void>(resolve => { entered = resolve; });
+  // Original prototype methods are invoked with their receiver below.
+  // eslint-disable-next-line @typescript-eslint/unbound-method
+  const listen = WasmQuicServerEventLoop.prototype.listen;
+  // eslint-disable-next-line @typescript-eslint/unbound-method
+  const close = WasmQuicServerEventLoop.prototype.close;
+  t.mock.method(WasmQuicServerEventLoop.prototype, 'listen', async function(this: InstanceType<typeof WasmQuicServerEventLoop>, targetPort: number, host: string) {
+    const address = await listen.call(this, targetPort, host);
+    port = address.port;
+    entered();
+    await gate;
+    return address;
+  });
+  t.mock.method(WasmQuicServerEventLoop.prototype, 'close', async function(this: InstanceType<typeof WasmQuicServerEventLoop>) {
+    loopCloses++;
+    return close.call(this);
+  });
+  const server = new QuicServer({ ...generateTestCerts(), runtimeMode: 'wasm' });
+  t.after(() => server.close());
+  let closes = 0;
+  server.on('close', () => { closes++; });
+  server.on('runtime', () => assert.fail('cancelled startup selected a runtime'));
+  server.on('listening', () => assert.fail('cancelled startup published a listener'));
+  const opening = server.listen(0, '127.0.0.1');
+  const rejected = assert.rejects(opening, { code: 'ERR_HTTP3_INVALID_STATE', reasonCode: 'startup-cancelled' });
+  await bound;
+  const closing = server.close();
+  const alsoClosing = server.close();
+  assert.equal(closes, 0, 'close must wait for local loop cleanup');
+  resume();
+  await Promise.all([rejected, closing, alsoClosing]);
+  assert.equal(closes, 1);
+  assert.equal(loopCloses, 1);
+  assert.equal(server.address(), null);
+  assert.equal(server.runtimeInfo?.selectedMode, null);
+  const probe = createSocket('udp4');
+  t.after(() => new Promise<void>(resolve => probe.close(() => resolve())));
+  probe.bind(port, '127.0.0.1');
+  await once(probe, 'listening');
+});
+
+for (const runtimeMode of ['wasm', 'portable'] as const) {
+  test(`raw QUIC ${runtimeMode} can restart from its close event and close the new listener`, {
+    skip: runtimeMode === 'wasm' ? wasmSkipReason() : false,
+  }, async t => {
+    const server = new QuicServer({ ...generateTestCerts(), runtimeMode });
+    t.after(() => server.close());
+    let selections = 0;
+    let closes = 0;
+    server.on('runtime', () => { selections++; });
+    server.on('close', () => { closes++; });
+    await server.listen(0, '127.0.0.1');
+    let restarting: ReturnType<QuicServer['listen']> | undefined;
+    server.once('close', () => {
+      assert.equal(server.address(), null);
+      restarting = server.listen(0, '127.0.0.1');
+    });
+    await server.close();
+    assert.ok(restarting, 'close event should start the next listener');
+    const address = await restarting;
+    assert.deepEqual(server.address(), address);
+    assert.equal(server.runtimeInfo?.selectedMode, runtimeMode);
+    assert.equal(selections, 2);
+    await Promise.all([server.close(), server.close()]);
+    assert.equal(server.address(), null);
+    assert.equal(closes, 2, 'each listener must emit close exactly once');
+  });
+
+  test(`raw QUIC ${runtimeMode} can cancel a restart from its close event`, {
+    skip: runtimeMode === 'wasm' ? wasmSkipReason() : false,
+  }, async t => {
+    const server = new QuicServer({ ...generateTestCerts(), runtimeMode });
+    t.after(() => server.close());
+    let selections = 0;
+    let closes = 0;
+    server.on('runtime', () => { selections++; });
+    server.on('close', () => { closes++; });
+    await server.listen(0, '127.0.0.1');
+    let restartedAndClosed: Promise<void> | undefined;
+    server.once('close', () => {
+      const restarted = assert.rejects(server.listen(0, '127.0.0.1'), {
+        code: 'ERR_HTTP3_INVALID_STATE', reasonCode: 'startup-cancelled',
+      });
+      restartedAndClosed = Promise.all([restarted, server.close()]).then(() => {});
+    });
+    await server.close();
+    assert.ok(restartedAndClosed, 'close event should start the next lifecycle');
+    await restartedAndClosed;
+    assert.equal(server.address(), null);
+    assert.equal(server.runtimeInfo?.selectedMode, null);
+    assert.equal(selections, 1, 'cancelled restart must not publish a new selection');
+    assert.equal(closes, 2);
+  });
+}
