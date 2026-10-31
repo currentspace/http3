@@ -67,7 +67,24 @@ Do not hard-wire new benchmark gates into CI until the baseline criteria in
 ## One-Time Bootstrap For A New Native Package
 
 - New native sidecar packages must exist on npm before Trusted Publisher can be configured for them.
-- Use a prerelease bootstrap version such as `<version>-bootstrap.0`, publish it with `pnpm run release:bootstrap:native -- --package-dir npm/<target> --binary <downloaded-node-file> --version <version>-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm. Always specify the package directory: the helper's historical default is the GNU Linux x64 package.
+- Use a prerelease bootstrap version such as `<version>-bootstrap.0` and the
+  `bootstrap` tag. Execute publication on a GitHub-hosted runner. The
+  `scripts/bootstrap-native-package.mjs` helper supports local dry runs; its
+  `--publish` option belongs in the publishing workflow. Always specify
+  `--package-dir npm/<target>`: the historical default is GNU Linux x64.
+- For the remaining 1.0.0 Linux x64 musl bootstrap, manually dispatch
+  `bootstrap-native-once.yml` on `main`. This deliberately fixed workflow
+  verifies the source run, artifact archive and native binary, then uses npm's
+  browser login on the runner. Download the `npm-login-challenge` and, when
+  required, `npm-publish-challenge` artifacts while the run is active and
+  complete their npm URLs promptly. They contain only browser approval URLs;
+  do not upload credentials or npm logs. The workflow requires the expected npm
+  account, verifies the public package bytes, and revokes/removes its runner
+  credentials. It creates no repository npm-token secret. Inspect registry
+  state after any interrupted or failed run before attempting another publish.
+- The one-time workflow refuses another target, version, source artifact or
+  branch. A future bootstrap needs an independently reviewed workflow update;
+  do not repurpose its pinned artifact for a different release.
 - Match the publisher to `currentspace/http3`, workflow filename `release.yml`,
   with direct `npm publish` allowed and no GitHub environment unless the
   workflow explicitly declares one. Read back existing configurations before

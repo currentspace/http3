@@ -1,0 +1,77 @@
+name: Bootstrap missing npm sidecar once
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: npm-bootstrap-linux-x64-musl
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    if: github.repository == 'currentspace/http3' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26.13.0"
+
+      - name: Verify PTY and credential-handling protocol without authentication
+        run: python3 scripts/bootstrap-npm-github.test.py
+
+      - name: Verify fixed qualified source and prepare exact bootstrap tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/bootstrap-npm-github.py prepare
+
+      - name: Start isolated npm browser login on the runner
+        run: |
+          python3 scripts/bootstrap-npm-github.py start
+          python3 scripts/bootstrap-npm-github.py await --phase login
+
+      # Only the npm browser challenge is shared. Never upload npmrc, cache,
+      # private/, doneUrl, or raw process output. Approval stays in npm's UI.
+      - name: Share npm login approval URL
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-login-challenge
+          path: ${{ runner.temp }}/http3-npm-bootstrap/login-challenge.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Await expected npm account and publication approval
+        run: python3 scripts/bootstrap-npm-github.py await --phase publish
+
+      - name: Share npm publication approval URL
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-publish-challenge
+          path: ${{ runner.temp }}/http3-npm-bootstrap/publish-challenge.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Require accepted publish and anonymous byte-for-byte readback
+        run: python3 scripts/bootstrap-npm-github.py await --phase complete
+
+      - name: Revoke runner npm session and erase credentials
+        if: always()
+        run: python3 scripts/bootstrap-npm-github.py cleanup
+
+      - name: Retain public source, integrity, and cleanup receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-bootstrap-public-receipts
+          path: ${{ runner.temp }}/http3-npm-bootstrap/public/
+          if-no-files-found: error
+          retention-days: 30

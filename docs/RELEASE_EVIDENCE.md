@@ -45,6 +45,29 @@ and remaining qualification work for each release candidate.
   matrix passed, including io_uring under unconfined/privileged profiles; an
   old-expectation control reproduced the failure, and a capable auto-fast
   control passed. Workflow validation passed in Node 24/26 containers.
+- Candidate `95109299a5fde5c022d5774d81ce14c00d7923f1` passed the normal
+  [release dry run](https://github.com/currentspace/http3/actions/runs/41176836293)
+  (30 jobs, all seven packages), CI (11 jobs), Distribution (8 jobs), Interop,
+  Security and Rust Safety. Full Verify passed eight host jobs, but its two
+  Debian Docker jobs timed out after FFI failures; this was not a green gate.
+  Raw native config/state/telemetry fixtures omitted the runtime mode, so the
+  corrected fast-driver behavior rejected Docker's `io_uring_setup` restriction
+  with EPERM. Generic FFI fixtures now select portable explicitly and register
+  shutdown before startup; dedicated fast-driver assertions remain unchanged.
+  Both complete Docker FFI suites pass 67 tests and exit naturally on Node 24/26,
+  with a guard proving the former forced-exit hooks were not needed.
+- The older `4c296bd` release dry run failed an Intel Node 26 backpressure
+  fixture when its synchronous second request encountered temporary QUIC
+  congestion capacity exhaustion. The same test passed at `9510929`; the
+  documented asynchronous admission API is the appropriate fixture contract.
+  The correction retains the concurrent response before upload consumption,
+  paused-buffer bound and complete upload byte/hash assertions.
+- Intel macOS and Linux arm64 musl bootstrap versions `1.0.0-bootstrap.0`
+  were accepted through interactive local publication before publication was
+  restricted to GitHub Actions. Their registry tarball checksums and native
+  bytes match the prepared qualification artifacts. Npm assigned both
+  `bootstrap` and `latest` to those first versions. Stable 1.0.0 remains
+  unpublished; subsequent publication must run on GitHub-hosted runners.
 
 ## 0.9.9
 
