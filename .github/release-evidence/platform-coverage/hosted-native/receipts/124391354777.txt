@@ -1,0 +1,19 @@
+run=41151580339
+head=74a7c977db89b79c0fb71630e55b13cbdfd7e261
+job=124391354777 validate (aarch64-unknown-linux-gnu, node 24.22.1)
+conclusion=success
+url=https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354777
+2026-10-31T00:50:34.0940989Z ℹ tests 56
+2026-10-31T00:50:34.0942023Z ℹ pass 55
+2026-10-31T00:50:34.0942243Z ℹ fail 0
+2026-10-31T00:50:44.2666256Z ℹ tests 42
+2026-10-31T00:50:44.2666842Z ℹ pass 42
+2026-10-31T00:50:44.2667063Z ℹ fail 0
+2026-10-31T00:51:04.9016369Z ##[group]Run node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
+2026-10-31T00:51:04.9017911Z node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
+2026-10-31T00:51:04.9339973Z Native runtime host: {"platform":"linux","arch":"arm64","node":"v24.22.1","kernel":"7.0.0-1017-azure"}
+2026-10-31T00:51:08.2380450Z H2/H3 wasm: {"requestedMode":"wasm","fallbackPolicy":"warn-and-fallback","selectedMode":"wasm","driver":"wasm","fallbackOccurred":false,"reasonCode":"requested-wasm","fastAttempt":null}
+2026-10-31T00:51:08.2381985Z H2/H3 auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"fast","driver":"io_uring","fallbackOccurred":false,"reasonCode":"auto-selected-fast","fastAttempt":null}
+2026-10-31T00:51:08.2384134Z QUIC auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"fast","driver":"io_uring","fallbackOccurred":false,"reasonCode":"auto-selected-fast","fastAttempt":null}
+2026-10-31T00:51:08.2385347Z Native portable: 1000 GETs, concurrency 50, 2750 req/s (informational)
+2026-10-31T00:51:08.2385845Z PASS linux/arm64 v24.22.1: native installed consumer

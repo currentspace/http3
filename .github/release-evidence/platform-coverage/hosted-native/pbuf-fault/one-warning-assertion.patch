@@ -1,0 +1,15 @@
+--- a/scripts/fixtures/platform-consumer.cjs
++++ b/scripts/fixtures/platform-consumer.cjs
+@@ -218,7 +218,11 @@
+     assert.ok(warnings[0].message.includes(process.platform));
+     assert.ok(warnings[0].message.includes(process.arch));
+   } else {
+-    if (nativeFastPathUnavailable) await strictNative();
++    if (nativeFastPathUnavailable) {
++      assert.equal(warnings.length, 1, 'same unavailable native fast path must warn once across servers and clients');
++      await strictNative();
++      console.log('Native fallback warnings: 1');
++    }
+     assert.ok(warnings.every(warning => !warning.message.includes('wasm')), 'native install must not fall back to WASM');
+   }
+   console.log(`PASS ${process.platform}/${process.arch} ${process.version}: ${expected} installed consumer`);

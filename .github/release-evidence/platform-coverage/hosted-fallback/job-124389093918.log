@@ -1,0 +1,40 @@
+2026-10-31T00:45:59.8608455Z ✔ portable h2: paused 20 MiB upload stays bounded and does not block another stream (2782.04253ms)
+2026-10-31T00:46:00.7455646Z ✔ portable h3: paused 20 MiB upload stays bounded and does not block another stream (884.54298ms)
+2026-10-31T00:46:03.5455317Z ✔ wasm h2: paused 20 MiB upload stays bounded and does not block another stream (2799.801454ms)
+2026-10-31T00:46:05.5312795Z ✔ wasm h3: paused 20 MiB upload stays bounded and does not block another stream (1985.516038ms)
+2026-10-31T00:46:05.6086970Z ✔ portable: peer cancellation after response FIN reaches an unread client (77.297085ms)
+2026-10-31T00:46:10.6729989Z ✔ wasm: peer cancellation after response FIN reaches an unread client (129.28529ms)
+2026-10-31T00:46:16.8925005Z ✔ server destroy before request FIN removes tracking and ignores late trailers (0.532685ms)
+2026-10-31T00:46:16.8927569Z ✔ server close before request FIN removes tracking and ignores late trailers (0.241025ms)
+2026-10-31T00:46:16.8932717Z ✔ server request FIN retains pending response drain routing until full completion (0.419771ms)
+2026-10-31T00:46:16.9206876Z ✔ h2: raw server destroy notifies the peer and releases tracking before request FIN (26.247702ms)
+2026-10-31T00:46:16.9604896Z ✔ h2: raw server destroy-error notifies the peer and releases tracking before request FIN (39.708475ms)
+2026-10-31T00:46:16.9832313Z ✔ h2: raw server close notifies the peer and releases tracking before request FIN (22.641482ms)
+2026-10-31T00:46:17.0033524Z ✔ h2: response FIN preserves the open request half (20.039025ms)
+2026-10-31T00:46:17.2738808Z ✔ h2: request FIN and automatic destruction preserve a queued 20 MiB response (270.35377ms)
+2026-10-31T00:46:17.4786741Z ✔ native-h3: raw server destroy notifies the peer and releases tracking before request FIN (33.064764ms)
+2026-10-31T00:46:17.5117576Z ✔ native-h3: raw server destroy-error notifies the peer and releases tracking before request FIN (32.944832ms)
+2026-10-31T00:46:17.5437256Z ✔ native-h3: raw server close notifies the peer and releases tracking before request FIN (31.85397ms)
+2026-10-31T00:46:17.5741326Z ✔ native-h3: response FIN preserves the open request half (30.322995ms)
+2026-10-31T00:46:18.1088265Z ✔ native-h3: request FIN and automatic destruction preserve a queued 20 MiB response (534.519355ms)
+2026-10-31T00:46:18.8120362Z ✔ wasm-h3: raw server destroy notifies the peer and releases tracking before request FIN (30.420359ms)
+2026-10-31T00:46:18.8560957Z ✔ wasm-h3: raw server destroy-error notifies the peer and releases tracking before request FIN (43.984945ms)
+2026-10-31T00:46:18.8849484Z ✔ wasm-h3: raw server close notifies the peer and releases tracking before request FIN (28.756461ms)
+2026-10-31T00:46:18.9263889Z ✔ wasm-h3: response FIN preserves the open request half (41.387752ms)
+2026-10-31T00:46:20.8360430Z ✔ wasm-h3: request FIN and automatic destruction preserve a queued 20 MiB response (1909.38743ms)
+2026-10-31T00:46:22.6148792Z   ✔ queued response data and FIN cross small windows exactly once (129.391125ms)
+2026-10-31T00:46:52.3263557Z   ✔ QUIC client end: 32 MiB preserves bytes, FIN, and a subsequent stream (3720.427356ms)
+2026-10-31T00:46:59.4915837Z   ✔ QUIC client end: 64 MiB preserves bytes, FIN, and a subsequent stream (7165.053741ms)
+2026-10-31T00:47:03.1640776Z   ✔ QUIC server end: 32 MiB preserves bytes, FIN, and a subsequent stream (3672.299729ms)
+2026-10-31T00:47:10.2187136Z   ✔ QUIC server end: 64 MiB preserves bytes, FIN, and a subsequent stream (7054.446918ms)
+2026-10-31T00:47:25.9317351Z   ✔ QuicStream write backpressure (STREAM_BLOCKED -> DRAIN) then FIN (112.287333ms)
+2026-10-31T00:47:26.4426254Z   ✔ queued data and FIN cross small windows exactly once in both directions (139.424407ms)
+2026-10-31T00:47:27.0822864Z     ✔ QuicStream write backpressure (STREAM_BLOCKED -> DRAIN) then FIN (291.324894ms)
+2026-10-31T00:47:28.1742640Z ℹ tests 133
+2026-10-31T00:47:28.1743134Z ℹ suites 13
+2026-10-31T00:47:28.1743518Z ℹ pass 133
+2026-10-31T00:47:28.1743856Z ℹ fail 0
+2026-10-31T00:47:28.1744093Z ℹ cancelled 0
+2026-10-31T00:47:28.1744382Z ℹ skipped 0
+2026-10-31T00:47:28.1744859Z ℹ todo 0
+2026-10-31T00:47:28.1745308Z ℹ duration_ms 93284.089413

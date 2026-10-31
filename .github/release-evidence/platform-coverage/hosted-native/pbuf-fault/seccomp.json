@@ -1,0 +1,19 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": [
+        "io_uring_register"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 22,
+      "args": [
+        {
+          "index": 1,
+          "value": 22,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 # Platform coverage and automatic WASM fallback
 
-Date: 2026-10-30. Status: implementation in a stacked PR series.
+Date: 2026-10-30. Status: implemented and qualified in a stacked PR series;
+merge and npm publication remain separate release steps.
 Qualification results and remaining release steps are tracked in
 [PLATFORM_COVERAGE_EVIDENCE.md](./PLATFORM_COVERAGE_EVIDENCE.md).
 
@@ -233,8 +234,9 @@ io_uring even with the correct musl binary installed. In that environment,
 `auto` legitimately selects native `portable` with the existing
 `fast-path-unavailable` warning. Require **no WASM/binding-unavailable fallback**
 there; require no warning for explicit portable, and test warning-free auto on
-an io_uring-capable host. Do not suppress an existing meaningful warning to
-satisfy an ambiguous assertion.
+an io_uring-capable host. This differs from the spec's literal warning-free
+Alpine auto clause under restrictive Docker policy. Preserve the diagnostic
+and record that acceptance distinction explicitly.
 
 Run lint, typecheck (including workerd boundaries), runtime/release/core/WASM
 tests, native H3/QUIC interop, and packed-install checks. Rebuild WASM/native

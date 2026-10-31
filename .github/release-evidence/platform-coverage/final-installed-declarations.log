@@ -7,7 +7,7 @@ Installed workerd declarations resolve with nodenext and no Node types
 Installed workerd declarations resolve with bundler and no Node types
 Installed worker declarations resolve with nodenext and no Node types
 Installed worker declarations resolve with bundler and no Node types
-Root package: 1008057 packed bytes, 3061239 unpacked bytes; no bundled native binaries.
+Root package: 1008228 packed bytes, 3062106 unpacked bytes; no bundled native binaries.
 Usage: http3 dev-cert [generate|trust|untrust] [--out DIR] [--ca-dir DIR] [--trust]
        http3 doctor https://localhost:3443 [--ca FILE] [--chrome-profile DIR] [--json]
 Doctor is read-only. It probes TCP/UDP reachability, trust and Alt-Svc, and checks curl and a specified Chrome profile.

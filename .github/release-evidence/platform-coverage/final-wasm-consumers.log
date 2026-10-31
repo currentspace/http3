@@ -1,52 +1,174 @@
-Run: https://github.com/currentspace/http3/actions/runs/41148612055
-Head: 107df8432b0861485c01e4b1b409e1923509c332
-Scope: build-wasm and ten no-native-addon fallback jobs
-Overall run at observation: in_progress
-
-build-wasm: success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124379511389
-2026-10-31T00:14:54.1918021Z ℹ tests 133
-2026-10-31T00:14:54.1921160Z ℹ pass 133
-2026-10-31T00:14:54.1921539Z ℹ fail 0
-2026-10-31T00:14:54.1921937Z ℹ cancelled 0
-2026-10-31T00:14:54.1922217Z ℹ skipped 0
-
-qualify-fallback / no native addon (ubuntu-24.04-arm, Node 24.22.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149034
-2026-10-31T00:15:19.7896690Z PASS linux/arm64 v24.22.1: wasm installed consumer
-
-qualify-fallback / no native addon (ubuntu-24.04, Node 26.12.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149054
-2026-10-31T00:15:29.0872087Z PASS linux/x64 v26.12.1: wasm installed consumer
-
-qualify-fallback / no native addon (macos-26, Node 26.12.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149085
-2026-10-31T00:16:09.5055660Z PASS darwin/arm64 v26.12.1: wasm installed consumer
-
-qualify-fallback / no native addon (macos-26, Node 24.22.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149087
-2026-10-31T00:15:42.1634870Z PASS darwin/arm64 v24.22.1: wasm installed consumer
-
-qualify-fallback / no native addon (macos-26-intel, Node 24.22.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149096
-2026-10-31T00:17:05.7837210Z PASS darwin/x64 v24.22.1: wasm installed consumer
-
-qualify-fallback / no native addon (windows-latest, Node 24.22.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149099
-2026-10-31T00:16:14.3973770Z PASS win32/x64 v24.22.1: wasm installed consumer
-
-qualify-fallback / no native addon (windows-latest, Node 26.12.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149115
-2026-10-31T00:16:10.8369992Z PASS win32/x64 v26.12.1: wasm installed consumer
-
-qualify-fallback / no native addon (ubuntu-24.04-arm, Node 26.12.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149117
-2026-10-31T00:15:25.9694525Z PASS linux/arm64 v26.12.1: wasm installed consumer
-
-qualify-fallback / no native addon (ubuntu-24.04, Node 24.22.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149130
-2026-10-31T00:15:23.4548484Z PASS linux/x64 v24.22.1: wasm installed consumer
-
-qualify-fallback / no native addon (macos-26-intel, Node 26.12.1): success
-https://github.com/currentspace/http3/actions/runs/41148612055/job/124381149137
-2026-10-31T00:16:29.7556550Z PASS darwin/x64 v26.12.1: wasm installed consumer
+$ npm run build:test && node --expose-gc --test --test-isolation=none --test-timeout=15000 dist-test/test/wasm/**/*.test.js dist-test/test/core/request-backpressure.test.js dist-test/test/core/response-backpressure.test.js dist-test/test/core/server-stream-lifecycle.test.js dist-test/test/core/ephemeral-listen.test.js dist-test/test/core/fetch-body-streaming.test.js
+npm notice run @currentspace/http3@0.9.9 build:test
+npm notice run tsc -p tsconfig.test.json
+✔ portable: ephemeral TCP collision retry (99.750584ms)
+✔ portable: ephemeral TCP collision exhausted (224.883167ms)
+✔ portable: ephemeral TCP collision explicit (64.903292ms)
+✔ wasm: ephemeral TCP collision retry (58.629417ms)
+✔ wasm: ephemeral TCP collision exhausted (57.010375ms)
+✔ wasm: ephemeral TCP collision explicit (52.446917ms)
+✔ portable H3 backpressures an unread Fetch upload and still propagates client cancellation (213.7125ms)
+✔ wasm H3 backpressures an unread Fetch upload and still propagates client cancellation (295.86175ms)
+✔ h1 invokes Fetch before the upload ends and preserves body bytes (54.145792ms)
+✔ h1 rejects a body over the limit without Content-Length (33.23975ms)
+✔ h2 invokes Fetch before the upload ends and preserves body bytes (34.864292ms)
+✔ h2 rejects a body over the limit without Content-Length (32.895125ms)
+✔ h3 invokes Fetch before the upload ends and preserves body bytes (36.68825ms)
+✔ h3 rejects a body over the limit without Content-Length (35.418125ms)
+✔ portable h2: paused 20 MiB upload stays bounded and does not block another stream (3218.966916ms)
+✔ portable h3: paused 20 MiB upload stays bounded and does not block another stream (648.875375ms)
+✔ wasm h2: paused 20 MiB upload stays bounded and does not block another stream (3231.561458ms)
+✔ wasm h3: paused 20 MiB upload stays bounded and does not block another stream (1321.486167ms)
+✔ portable: peer cancellation after response FIN reaches an unread client (58.630291ms)
+✔ portable h2: paused download stays bounded and resumes into a slow reader (3242.320833ms)
+✔ portable h3: paused download stays bounded and resumes into a slow reader (688.206084ms)
+✔ portable: client destroy cancels idle-sse and releases the producer (262.2555ms)
+✔ portable: client destroy cancels blocked-download and releases the producer (284.770625ms)
+✔ portable: client destroy rejects a flow-controlled upload and cancels the peer (316.869167ms)
+✔ wasm: peer cancellation after response FIN reaches an unread client (82.030709ms)
+✔ wasm h2: paused download stays bounded and resumes into a slow reader (3197.574667ms)
+✔ wasm h3: paused download stays bounded and resumes into a slow reader (1452.578875ms)
+✔ wasm: client destroy cancels idle-sse and releases the producer (267.231333ms)
+✔ wasm: client destroy cancels blocked-download and releases the producer (518.56225ms)
+✔ wasm: client destroy rejects a flow-controlled upload and cancels the peer (598.179958ms)
+✔ server automatic duplex destruction preserves admitted writes (1.785583ms)
+✔ server close preserves its explicit code through repeated close/destroy (0.413916ms)
+✔ server destroy rejects a blocked final write exactly once despite late drain (1.011ms)
+✔ server destroy rejects an admitted write callback once before its scheduled release (0.564625ms)
+✔ server destroy before request FIN removes tracking and ignores late trailers (0.384708ms)
+✔ server close before request FIN removes tracking and ignores late trailers (0.123541ms)
+✔ server request FIN retains pending response drain routing until full completion (0.264959ms)
+✔ server peer reset preserves the code even when an abort handler destroys the stream (0.216084ms)
+✔ server session teardown does not send stream resets to a closed transport (0.183708ms)
+▶ lifecycle fixture cancellation during connection releases both listeners
+  ✔ cancel an unfinished connection when its test completes (29.235541ms)
+✔ lifecycle fixture cancellation during connection releases both listeners (30.396042ms)
+✔ h2: raw server destroy notifies the peer and releases tracking before request FIN (25.265125ms)
+✔ h2: raw server destroy-error notifies the peer and releases tracking before request FIN (20.371417ms)
+✔ h2: raw server close notifies the peer and releases tracking before request FIN (18.896083ms)
+✔ h2: response FIN preserves the open request half (18.498334ms)
+✔ h2: request FIN and automatic destruction preserve a queued 20 MiB response (193.261542ms)
+✔ h2: cancellation releases a blocked response producer (172.700208ms)
+✔ native-h3: raw server destroy notifies the peer and releases tracking before request FIN (24.607125ms)
+✔ native-h3: raw server destroy-error notifies the peer and releases tracking before request FIN (21.871333ms)
+✔ native-h3: raw server close notifies the peer and releases tracking before request FIN (20.975333ms)
+✔ native-h3: response FIN preserves the open request half (20.835959ms)
+✔ native-h3: request FIN and automatic destruction preserve a queued 20 MiB response (278.434542ms)
+✔ native-h3: respondWithBody shortcut finishes locally without cancelling queued transport bytes (164.985667ms)
+✔ native-h3: cancellation releases a blocked response producer (179.797666ms)
+✔ wasm-h3: raw server destroy notifies the peer and releases tracking before request FIN (25.643833ms)
+✔ wasm-h3: raw server destroy-error notifies the peer and releases tracking before request FIN (19.895083ms)
+✔ wasm-h3: raw server close notifies the peer and releases tracking before request FIN (24.86225ms)
+✔ wasm-h3: response FIN preserves the open request half (20.194791ms)
+✔ wasm-h3: request FIN and automatic destruction preserve a queued 20 MiB response (1012.479792ms)
+✔ wasm-h3: respondWithBody shortcut finishes locally without cancelling queued transport bytes (26.637625ms)
+✔ wasm-h3: cancellation releases a blocked response producer (439.962708ms)
+▶ wasm artifact shape (C2)
+  ✔ compiles as a valid WebAssembly module (0.088542ms)
+  ✔ imports only wasi_snapshot_preview1 functions from the frozen allowlist (0.082292ms)
+  ✔ exports the full h3c_*/qc_* ABI table plus wasm_alloc/wasm_free (0.223458ms)
+  ✔ exports the full hs_*/qs_* server ABI table (0.0705ms)
+  ✔ exports a linear memory (0.045083ms)
+✔ wasm artifact shape (C2) (0.750792ms)
+▶ wasm deterministic clock (C5)
+  ✔ fast-forwards an idle timeout via a mocked clock without a real wall-clock wait (47.81875ms)
+✔ wasm deterministic clock (C5) (47.944958ms)
+✔ WASM HTTP server default listener accepts IPv4 and IPv6 (80.648875ms)
+✔ WASM H3 server receives cancellation of an idle response (69.229417ms)
+▶ wasm frozen-clock simulation (C6)
+  ✔ completes a full handshake + GET with a clock frozen except at explicit I/O ticks (52.982875ms)
+✔ wasm frozen-clock simulation (C6) (53.090333ms)
+▶ wasm H3 loopback (C3)
+  ✔ handshake completes via connectAsync with runtimeMode wasm (36.643125ms)
+  ✔ GET request receives a response with a body (37.499875ms)
+  ✔ request body upload exercises backpressure (STREAM_BLOCKED -> DRAIN) (50.4315ms)
+  ✔ trailers arrive as a "trailers" event after the response body (39.951375ms)
+  ✔ GOAWAY from the server is observed as a "goaway" session event (37.002792ms)
+  ✔ RESET from the server destroys the client stream with an error (38.563417ms)
+  ✔ datagram round-trip (client -> server -> client) (38.047916ms)
+  ✔ ping resolves with a duration (38.463333ms)
+  ✔ close() resolves promptly via the shutdown sentinel, not the 5s fallback (37.7425ms)
+✔ wasm H3 loopback (C3) (355.1125ms)
+▶ wasm H3 SERVER loopback
+  ✔ queued response data and FIN cross small windows exactly once (48.1895ms)
+  ▶ native client x wasm server (matrix cell 5)
+    ✔ handshake completes, GET request/response, clean close on both sides (24.32725ms)
+  ✔ native client x wasm server (matrix cell 5) (24.43575ms)
+  ▶ wasm client x wasm server (matrix cell 7)
+    ✔ handshake completes on both sides (25.484709ms)
+    ✔ GET request receives a response with a body (28.339583ms)
+    ✔ request body upload exercises backpressure (STREAM_BLOCKED -> DRAIN) (41.03125ms)
+    ✔ trailers arrive as a "trailers" event after the response body (28.84975ms)
+    ✔ datagram round-trip (client -> server -> client) (26.065125ms)
+    ✔ close() resolves promptly on both sides (28.021ms)
+  ✔ wasm client x wasm server (matrix cell 7) (178.308042ms)
+✔ wasm H3 SERVER loopback (251.144292ms)
+▶ WASM large Node stream writes
+  ✔ H3 server respondWithBody: 32 MiB matches bytes and hash with a native client (392.276417ms)
+  ✔ H3 server write: 32 MiB matches bytes and hash with a native client (380.799375ms)
+  ✔ H3 server end: 32 MiB matches bytes and hash with a native client (387.727667ms)
+  ✔ H3 server respondWithBody: 64 MiB matches bytes and hash with a native client (732.5805ms)
+  ✔ H3 server write: 64 MiB matches bytes and hash with a native client (733.02375ms)
+  ✔ H3 server end: 64 MiB matches bytes and hash with a native client (741.085208ms)
+  ✔ H3 server respondWithBody: 128 MiB matches bytes and hash with a native client (1459.132417ms)
+  ✔ H3 server write: 128 MiB matches bytes and hash with a native client (1442.429333ms)
+  ✔ H3 server end: 128 MiB matches bytes and hash with a native client (1528.703333ms)
+  ✔ H3 client end: 32 MiB upload preserves payload and connection (1492.714709ms)
+  ✔ H3 client end: 64 MiB upload preserves payload and connection (2632.575416ms)
+  ✔ QUIC client end: 32 MiB preserves bytes, FIN, and a subsequent stream (1510.73275ms)
+  ✔ QUIC client end: 64 MiB preserves bytes, FIN, and a subsequent stream (2722.439583ms)
+  ✔ QUIC server end: 32 MiB preserves bytes, FIN, and a subsequent stream (1485.425041ms)
+  ✔ QUIC server end: 64 MiB preserves bytes, FIN, and a subsequent stream (2637.045375ms)
+  ✔ QUIC client destroy after partial admission resets the peer and preserves the session (109.452209ms)
+  ✔ QUIC server destroy after partial admission resets the peer and preserves the session (52.201625ms)
+  ✔ Node facade res.end accepts one 32 MiB response (382.068458ms)
+  ✔ trailing headers follow every byte of a large write (1346.055791ms)
+  ✔ peer cancellation rejects a blocked large response once and leaves the session usable (293.1265ms)
+  ✔ concurrent 32 MiB responses stay backpressured while readers pause, then resume without corruption (3972.126209ms)
+  ℹ WASM heap: initial 1966080, peak 9109504 bytes for three 32 MiB responses
+✔ WASM large Node stream writes (26437.156916ms)
+▶ WASM payload memory pressure
+  ✔ allocation failure returns an error without trapping or poisoning later allocations (1.044584ms)
+  ✔ each payload ABI reports failed ownership allocation before touching a session (0.385875ms)
+✔ WASM payload memory pressure (1.642084ms)
+▶ wasm QUIC loopback (C3)
+  ✔ handshake completes via connectQuicAsync with runtimeMode wasm (33.675ms)
+  ✔ openStream() bidi echo (51.772916ms)
+  ✔ server-initiated stream surfaces as a "stream" event (23.297334ms)
+  ✔ QuicStream write backpressure (STREAM_BLOCKED -> DRAIN) then FIN (47.1115ms)
+  ✔ datagram round-trip (client -> server -> client) (23.376417ms)
+  ✔ close() resolves promptly and destroys open streams (21.271791ms)
+✔ wasm QUIC loopback (C3) (201.128042ms)
+▶ wasm QUIC SERVER loopback
+  ✔ pair helper waits for a delayed server session event (127.329ms)
+  ✔ queued data and FIN cross small windows exactly once in both directions (55.538625ms)
+  ▶ native client x wasm server (matrix cell 6)
+    ✔ handshake completes, openStream() bidi echo, clean close on both sides (23.287667ms)
+  ✔ native client x wasm server (matrix cell 6) (23.420958ms)
+  ▶ wasm client x wasm server (matrix cell 8)
+    ✔ handshake completes on both sides (25.367167ms)
+    ✔ openStream() bidi echo (26.208959ms)
+    ✔ server-initiated stream surfaces as a "stream" event on the client (25.576792ms)
+    ✔ QuicStream write backpressure (STREAM_BLOCKED -> DRAIN) then FIN (110.801291ms)
+    ✔ datagram round-trip (client -> server -> client) (25.944875ms)
+    ✔ close() resolves promptly and destroys open streams on both sides (25.130875ms)
+  ✔ wasm client x wasm server (matrix cell 8) (239.578583ms)
+✔ wasm QUIC SERVER loopback (446.196333ms)
+✔ WASM rejects unsupported server option reusePort (12.04625ms)
+✔ WASM rejects unsupported server option sessionTicketKeys (10.9625ms)
+✔ WASM close during deferred UDP bind never publishes a successful runtime (11.868584ms)
+✔ Node facade exposes pending runtime and delivers selection exactly once (13.317709ms)
+✔ WASM raw QUIC keeps required client authentication after runtime selection (104.899042ms)
+✔ raw QUIC close waits for deferred WASM startup cleanup without announcing selection (13.248875ms)
+✔ raw QUIC wasm can restart from its close event and close the new listener (11.873667ms)
+✔ raw QUIC wasm can cancel a restart from its close event (11.468583ms)
+✔ raw QUIC portable can restart from its close event and close the new listener (16.409458ms)
+✔ raw QUIC portable can cancel a restart from its close event (17.54275ms)
+ℹ tests 135
+ℹ suites 13
+ℹ pass 135
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 51772.636417

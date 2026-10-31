@@ -1,0 +1,58 @@
+Run: https://github.com/currentspace/http3/actions/runs/41151580339
+Hosted source: 74a7c977db89b79c0fb71630e55b13cbdfd7e261
+Run result: completed / success
+Final run update: 2026-10-31T00:52:41Z
+Local final source: 13d8a31f93657872b0c02ceceac694cac6011bd3
+Source difference: test/core/server-stream-lifecycle.test.ts only; production code identical.
+Scope: shared WASM build/test plus ten installed no-native-addon consumers.
+Logs contain selected job-log lines with original timestamps; ANSI formatting removed.
+These receipts do not claim standalone CI on intermediate PR heads.
+
+build-wasm: success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124389093918
+2026-10-31T00:46:18.1088265Z ✔ native-h3: request FIN and automatic destruction preserve a queued 20 MiB response (534.519355ms)
+2026-10-31T00:47:28.1742640Z ℹ tests 133
+2026-10-31T00:47:28.1743518Z ℹ pass 133
+2026-10-31T00:47:28.1743856Z ℹ fail 0
+2026-10-31T00:47:28.1744093Z ℹ cancelled 0
+2026-10-31T00:47:28.1744382Z ℹ skipped 0
+
+qualify-fallback / no native addon (windows-latest, Node 24.22.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669419
+2026-10-31T00:48:45.9980109Z PASS win32/x64 v24.22.1: wasm installed consumer
+
+qualify-fallback / no native addon (ubuntu-24.04, Node 26.12.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669428
+2026-10-31T00:48:06.9073756Z PASS linux/x64 v26.12.1: wasm installed consumer
+
+qualify-fallback / no native addon (ubuntu-24.04-arm, Node 26.12.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669445
+2026-10-31T00:48:10.2298718Z PASS linux/arm64 v26.12.1: wasm installed consumer
+
+qualify-fallback / no native addon (macos-26, Node 24.22.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669461
+2026-10-31T00:48:41.6592410Z PASS darwin/arm64 v24.22.1: wasm installed consumer
+
+qualify-fallback / no native addon (ubuntu-24.04, Node 24.22.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669477
+2026-10-31T00:47:59.3904906Z PASS linux/x64 v24.22.1: wasm installed consumer
+
+qualify-fallback / no native addon (ubuntu-24.04-arm, Node 24.22.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669480
+2026-10-31T00:47:58.9525542Z PASS linux/arm64 v24.22.1: wasm installed consumer
+
+qualify-fallback / no native addon (macos-26-intel, Node 24.22.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669485
+2026-10-31T00:49:38.1415910Z PASS darwin/x64 v24.22.1: wasm installed consumer
+
+qualify-fallback / no native addon (macos-26, Node 26.12.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669488
+2026-10-31T00:48:46.0312550Z PASS darwin/arm64 v26.12.1: wasm installed consumer
+
+qualify-fallback / no native addon (macos-26-intel, Node 26.12.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669501
+2026-10-31T00:49:11.0755700Z PASS darwin/x64 v26.12.1: wasm installed consumer
+
+qualify-fallback / no native addon (windows-latest, Node 26.12.1): success
+https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669553
+2026-10-31T00:49:00.5428509Z PASS win32/x64 v26.12.1: wasm installed consumer

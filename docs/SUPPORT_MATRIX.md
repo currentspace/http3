@@ -36,10 +36,15 @@ workflow is not proof that an unpublished sidecar has been qualified or released
 | Linux glibc x64 | linux-x64-gnu | Included in 0.9.9 |
 | Linux glibc arm64 | linux-arm64-gnu | Included in 0.9.9 |
 | macOS arm64 | darwin-arm64 | Included in 0.9.9 |
-| Linux musl x64 | linux-x64-musl | Added by the platform-coverage series; release qualification required |
-| Linux musl arm64 | linux-arm64-musl | Added by the platform-coverage series; release qualification required |
-| macOS Intel | darwin-x64 | Added by the platform-coverage series; release qualification required |
-| Windows | none | WASM qualification lane; no native driver |
+| Linux musl x64 | linux-x64-musl | Candidate qualified; first publication pending |
+| Linux musl arm64 | linux-arm64-musl | Candidate qualified; first publication pending |
+| macOS Intel | darwin-x64 | Candidate qualified; first publication pending |
+| Windows x64 | none | Candidate WASM fallback qualified; no native driver |
+
+The platform-coverage candidate passed native builds and installed consumers on
+Node 24/26, including the three new targets and Windows WASM fallback. See
+[source-bound qualification evidence](./PLATFORM_COVERAGE_EVIDENCE.md). These
+results do not change the package contents already published as 0.9.9.
 
 Other Node platforms may use the WASM fallback but are not qualified merely
 because the generated native loader recognizes their names. Native Windows,
@@ -86,8 +91,8 @@ driver, not a synonym for WASM.
   and structured metadata. Strict policy and explicit native modes reject it.
 - Explicit WASM never probes the native loader.
 - Windows x64, macOS arm64/Intel, and GNU Linux x64/arm64 installed fallback
-  checks are in `platform-fallback.yml`; Alpine x64/arm64 checks are in the musl
-  consumer lanes. Retain actual run evidence before claiming a platform passed.
+  checks passed in `platform-fallback.yml`; Alpine x64/arm64 checks passed in the
+  musl consumer lanes. The evidence document identifies the qualified source.
 - See [WASM_RUNTIME.md](./WASM_RUNTIME.md) for options, memory limits, and the
   separate workerd client status. Node server support does not establish
   support for server sockets in Workers.

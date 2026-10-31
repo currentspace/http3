@@ -1,0 +1,10 @@
+(1/1) Installing openssl (3.5.9-r0)
+Executing busybox-1.37.0-r31.trigger
+OK: 11.9 MiB in 20 packages
+H2/H3 wasm: {"requestedMode":"wasm","fallbackPolicy":"warn-and-fallback","selectedMode":"wasm","driver":"wasm","fallbackOccurred":false,"reasonCode":"requested-wasm","fastAttempt":null}
+H2/H3 auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"portable","driver":"poll","fallbackOccurred":true,"reasonCode":"fast-path-unavailable","message":"Invalid argument (os error 22)","errno":22,"syscall":"io_uring_register_buf_ring","warningCode":"WARN_HTTP3_RUNTIME_FALLBACK","fastAttempt":{"code":"ERR_HTTP3_FAST_PATH_UNAVAILABLE","message":"Invalid argument (os error 22)","driver":"io_uring","errno":22,"syscall":"io_uring_register_buf_ring"}}
+QUIC auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"portable","driver":"poll","fallbackOccurred":true,"reasonCode":"fast-path-unavailable","message":"Invalid argument (os error 22)","errno":22,"syscall":"io_uring_register_buf_ring","warningCode":"WARN_HTTP3_RUNTIME_FALLBACK","fastAttempt":{"code":"ERR_HTTP3_FAST_PATH_UNAVAILABLE","message":"Invalid argument (os error 22)","driver":"io_uring","errno":22,"syscall":"io_uring_register_buf_ring"}}
+Native portable: 1000 GETs, concurrency 50, 3020 req/s (informational)
+Native strict: fast and auto/error rejected across H3 and raw QUIC clients/servers
+Native fallback warnings: 1
+PASS linux/arm64 v24.22.1: native installed consumer

@@ -1,0 +1,306 @@
+{
+  "run": "41151580339",
+  "head": "74a7c977db89b79c0fb71630e55b13cbdfd7e261",
+  "conclusion": "success",
+  "native_builds": 6,
+  "alpine_consumers": 4,
+  "gnu_macos_consumers": 8,
+  "all_job_conclusions": {
+    "success": 29,
+    "skipped": 1
+  },
+  "jobs": [
+    {
+      "job": 124389094065,
+      "name": "prebuilds (macos-26, aarch64-apple-darwin)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094065",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124389094065.txt",
+      "sha256": "dc6aada3d181ced655996a2bd38d623ed34c3a5505ee29b0ee76e3ac64c02826"
+    },
+    {
+      "job": 124389094066,
+      "name": "prebuilds-musl / prebuild musl (arm64)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094066",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124389094066.txt",
+      "sha256": "f89f1b6b8fc33f6c98d9759a600ef88e7f1ea3300b58c8d7f6b433582dc09585"
+    },
+    {
+      "job": 124389094077,
+      "name": "prebuilds (ubuntu-24.04-arm, aarch64-unknown-linux-gnu)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094077",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124389094077.txt",
+      "sha256": "002433d639d472760c4920482ed9b5eb4bbe427f7a1ae60562bebf4bc32ae8e7"
+    },
+    {
+      "job": 124389094113,
+      "name": "prebuilds (ubuntu-22.04, x86_64-unknown-linux-gnu)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094113",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124389094113.txt",
+      "sha256": "af28bfddf29430af7f96284b76b26d1c2ccc04ce90aae0c474497294cf482f31"
+    },
+    {
+      "job": 124389094138,
+      "name": "prebuilds (macos-26-intel, x86_64-apple-darwin)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094138",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124389094138.txt",
+      "sha256": "eedfddd59d5e00784d55acf7407ae62f36631cb952d36787c32aa6cdeb10d248"
+    },
+    {
+      "job": 124389094165,
+      "name": "prebuilds-musl / prebuild musl (x64)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094165",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124389094165.txt",
+      "sha256": "2d0d5da715dcb6e4c95bef4c57d3a3e313de1b51068b30d9b5f54098108b7564"
+    },
+    {
+      "job": 124391354675,
+      "name": "validate (aarch64-apple-darwin, node 26.12.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354675",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354675.txt",
+      "sha256": "77868b428ba47b9aa78d31b268b2d4ee961be43edc5947143280c8359ba39822",
+      "native_auto": {
+        "selectedMode": "fast",
+        "driver": "kqueue",
+        "reasonCode": "auto-selected-fast",
+        "errno": null,
+        "syscall": null
+      },
+      "strict_native_verified": false,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": null,
+      "strict_native_applicability": "fast-path-available"
+    },
+    {
+      "job": 124391354684,
+      "name": "validate (x86_64-apple-darwin, node 26.12.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354684",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354684.txt",
+      "sha256": "3fd3c5ba34c5b9877aff292c7ecfc8b74507c659d8a523487b4585c63ce18ff0",
+      "native_auto": {
+        "selectedMode": "fast",
+        "driver": "kqueue",
+        "reasonCode": "auto-selected-fast",
+        "errno": null,
+        "syscall": null
+      },
+      "strict_native_verified": false,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": null,
+      "strict_native_applicability": "fast-path-available"
+    },
+    {
+      "job": 124391354725,
+      "name": "validate (aarch64-apple-darwin, node 24.22.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354725",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354725.txt",
+      "sha256": "6508a92745629e87a4463cb4cd56d4d2101cea722392ffc26db34e7faa79a409",
+      "native_auto": {
+        "selectedMode": "fast",
+        "driver": "kqueue",
+        "reasonCode": "auto-selected-fast",
+        "errno": null,
+        "syscall": null
+      },
+      "strict_native_verified": false,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": null,
+      "strict_native_applicability": "fast-path-available"
+    },
+    {
+      "job": 124391354736,
+      "name": "validate (x86_64-unknown-linux-gnu, node 26.12.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354736",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354736.txt",
+      "sha256": "cb9ea4689a990d97d8ff76faebdaa28834cf63ad88919e33fc331147b8cb16f1",
+      "native_auto": {
+        "selectedMode": "portable",
+        "driver": "poll",
+        "reasonCode": "fast-path-unavailable",
+        "errno": 22,
+        "syscall": "io_uring_register_buf_ring"
+      },
+      "strict_native_verified": true,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": 8,
+      "strict_native_applicability": "fast-path-unavailable"
+    },
+    {
+      "job": 124391354744,
+      "name": "validate (aarch64-unknown-linux-gnu, node 26.12.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354744",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354744.txt",
+      "sha256": "2b33cd62a4365880c27dcd23b4a59fe32d5217ec8ba25076aab13d7e8238e233",
+      "native_auto": {
+        "selectedMode": "fast",
+        "driver": "io_uring",
+        "reasonCode": "auto-selected-fast",
+        "errno": null,
+        "syscall": null
+      },
+      "strict_native_verified": false,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": null,
+      "strict_native_applicability": "fast-path-available"
+    },
+    {
+      "job": 124391354752,
+      "name": "validate-musl / Alpine x64 / Node 24",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354752",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354752.txt",
+      "sha256": "20c31b2a5d9c5f1d0dcffbdbe88cc6d4c10d866bf67de01024c34725fe44d81a",
+      "native_auto": {
+        "selectedMode": "portable",
+        "driver": "poll",
+        "reasonCode": "fast-path-unavailable",
+        "errno": 1,
+        "syscall": "io_uring_setup"
+      },
+      "strict_native_verified": true,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": 8,
+      "strict_native_applicability": "fast-path-unavailable"
+    },
+    {
+      "job": 124391354774,
+      "name": "validate (x86_64-unknown-linux-gnu, node 24.22.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354774",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354774.txt",
+      "sha256": "5eac2415f07539d042c874d8610e732284b0203db5d6ecee514931403b664379",
+      "native_auto": {
+        "selectedMode": "portable",
+        "driver": "poll",
+        "reasonCode": "fast-path-unavailable",
+        "errno": 22,
+        "syscall": "io_uring_register_buf_ring"
+      },
+      "strict_native_verified": true,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": 8,
+      "strict_native_applicability": "fast-path-unavailable"
+    },
+    {
+      "job": 124391354777,
+      "name": "validate (aarch64-unknown-linux-gnu, node 24.22.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354777",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354777.txt",
+      "sha256": "4c0e4dada69c18127efee370dff5daac256191587a90f2a9ed2be33f9c5a48ca",
+      "native_auto": {
+        "selectedMode": "fast",
+        "driver": "io_uring",
+        "reasonCode": "auto-selected-fast",
+        "errno": null,
+        "syscall": null
+      },
+      "strict_native_verified": false,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": null,
+      "strict_native_applicability": "fast-path-available"
+    },
+    {
+      "job": 124391354781,
+      "name": "validate-musl / Alpine arm64 / Node 26",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354781",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354781.txt",
+      "sha256": "66e822909b8c15ad81931033852cf5d447af20d63807ffcc88cb2dffb406991a",
+      "native_auto": {
+        "selectedMode": "portable",
+        "driver": "poll",
+        "reasonCode": "fast-path-unavailable",
+        "errno": 1,
+        "syscall": "io_uring_setup"
+      },
+      "strict_native_verified": true,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": 8,
+      "strict_native_applicability": "fast-path-unavailable"
+    },
+    {
+      "job": 124391354787,
+      "name": "validate-musl / Alpine arm64 / Node 24",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354787",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354787.txt",
+      "sha256": "b3173535805f530f94d8a5a878d8af3542c41d46ec442b6bddf2b52af40afa84",
+      "native_auto": {
+        "selectedMode": "portable",
+        "driver": "poll",
+        "reasonCode": "fast-path-unavailable",
+        "errno": 1,
+        "syscall": "io_uring_setup"
+      },
+      "strict_native_verified": true,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": 8,
+      "strict_native_applicability": "fast-path-unavailable"
+    },
+    {
+      "job": 124391354799,
+      "name": "validate (x86_64-apple-darwin, node 24.22.1)",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354799",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354799.txt",
+      "sha256": "4819532879d6e968fd2c451aaf45047e5576857115e978112088f8cb1ddef554",
+      "native_auto": {
+        "selectedMode": "fast",
+        "driver": "kqueue",
+        "reasonCode": "auto-selected-fast",
+        "errno": null,
+        "syscall": null
+      },
+      "strict_native_verified": false,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": null,
+      "strict_native_applicability": "fast-path-available"
+    },
+    {
+      "job": 124391354806,
+      "name": "validate-musl / Alpine x64 / Node 26",
+      "status": "success",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354806",
+      "receipt": ".github/release-evidence/platform-coverage/hosted-native/receipts/124391354806.txt",
+      "sha256": "1ec5c460494787036e4fd76b0d19a5cf24465b05ed62573ee86780db3a9d3139",
+      "native_auto": {
+        "selectedMode": "portable",
+        "driver": "poll",
+        "reasonCode": "fast-path-unavailable",
+        "errno": 1,
+        "syscall": "io_uring_setup"
+      },
+      "strict_native_verified": true,
+      "portable_get_count": 1000,
+      "portable_concurrency": 50,
+      "strict_native_rejections": 8,
+      "strict_native_applicability": "fast-path-unavailable"
+    }
+  ],
+  "url": "https://github.com/currentspace/http3/actions/runs/41151580339",
+  "scope": "Six native prebuilds and twelve installed native consumers; other job conclusions are aggregate workflow status only.",
+  "receipt_hash_note": "SHA256 values cover the byte-for-byte compact text receipts. Receipt paths are relative to the repository root.",
+  "strict_native_note": "false means the conditional rejection test was not applicable because the native fast path succeeded; it is not a failed check."
+}

@@ -1,0 +1,19 @@
+run=41151580339
+head=74a7c977db89b79c0fb71630e55b13cbdfd7e261
+job=124391354725 validate (aarch64-apple-darwin, node 24.22.1)
+conclusion=success
+url=https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354725
+2026-10-31T00:51:13.7032890Z ℹ tests 56
+2026-10-31T00:51:13.7235520Z ℹ pass 56
+2026-10-31T00:51:13.7339300Z ℹ fail 0
+2026-10-31T00:51:28.0877380Z ℹ tests 42
+2026-10-31T00:51:28.0878760Z ℹ pass 42
+2026-10-31T00:51:28.0879490Z ℹ fail 0
+2026-10-31T00:51:44.9984740Z ##[group]Run node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
+2026-10-31T00:51:44.9988800Z node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
+2026-10-31T00:51:45.1734240Z Native runtime host: {"platform":"darwin","arch":"arm64","node":"v24.22.1","kernel":"25.6.0"}
+2026-10-31T00:51:47.3154300Z H2/H3 wasm: {"requestedMode":"wasm","fallbackPolicy":"warn-and-fallback","selectedMode":"wasm","driver":"wasm","fallbackOccurred":false,"reasonCode":"requested-wasm","fastAttempt":null}
+2026-10-31T00:51:47.3156780Z H2/H3 auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"fast","driver":"kqueue","fallbackOccurred":false,"reasonCode":"auto-selected-fast","fastAttempt":null}
+2026-10-31T00:51:47.3159760Z QUIC auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"fast","driver":"kqueue","fallbackOccurred":false,"reasonCode":"auto-selected-fast","fastAttempt":null}
+2026-10-31T00:51:47.3162980Z Native portable: 1000 GETs, concurrency 50, 3235 req/s (informational)
+2026-10-31T00:51:47.3163680Z PASS darwin/arm64 v24.22.1: native installed consumer
