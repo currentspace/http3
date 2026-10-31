@@ -3,12 +3,14 @@ import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
   ERR_HTTP3_FAST_PATH_UNAVAILABLE,
+  ERR_HTTP3_RUNTIME_UNSUPPORTED,
   Http3Error,
   WARN_HTTP3_RUNTIME_FALLBACK,
 } from '../../lib/index.js';
 import type { RuntimeInfo } from '../../lib/runtime.js';
 import {
   resetRuntimeSelectionCacheForTests,
+  resolveRuntimeSelection,
   runWithRuntimeSelection,
   runWithRuntimeSelectionSync,
   setPendingRuntimeInfo,
@@ -209,5 +211,102 @@ describe('runtime selection', () => {
         return true;
       },
     );
+  });
+});
+
+function unavailable(): Http3Error {
+  return new Http3Error('native binding unavailable for linux x64 (musl)', ERR_HTTP3_RUNTIME_UNSUPPORTED, {
+    reasonCode: 'native-binding-unavailable',
+    nativeBinding: { platform: 'linux', arch: 'x64', libc: 'musl', packageName: '@currentspace/http3-linux-x64-musl', category: 'missing', message: 'missing binary' },
+    cause: new Error('original loader failure'),
+  });
+}
+
+describe('native availability selection', () => {
+  beforeEach(() => resetRuntimeSelectionCacheForTests());
+  afterEach(() => resetRuntimeSelectionCacheForTests());
+
+  it('skips the native probe for explicit WASM under either policy', () => {
+    for (const fallbackPolicy of ['error', 'warn-and-fallback'] as const) {
+      const decision = resolveRuntimeSelection(new RuntimeTarget(), { runtimeMode: 'wasm', fallbackPolicy }, () => assert.fail('native probe'));
+      assert.deepEqual(decision, { wasm: true });
+    }
+  });
+
+  for (const runtimeMode of ['auto', 'fast', 'portable'] as const) {
+    it(`preserves typed loader details and causes for strict ${runtimeMode}`, () => {
+      const target = new RuntimeTarget();
+      const error = unavailable();
+      assert.throws(() => resolveRuntimeSelection(target, { runtimeMode, fallbackPolicy: 'error' }, () => { throw error; }), (actual: unknown) => {
+        assert.ok(actual instanceof Http3Error);
+        assert.equal(actual.code, ERR_HTTP3_RUNTIME_UNSUPPORTED);
+        assert.equal(actual.cause, error);
+        assert.equal(actual.nativeBinding?.libc, 'musl');
+        assert.equal(actual.runtimeInfo?.selectedMode, null);
+        assert.equal(actual.runtimeInfo?.reasonCode, 'native-binding-unavailable');
+        return true;
+      });
+    });
+  }
+
+  it('does not convert unrelated unsupported errors into fallback', () => {
+    const error = new Http3Error('invalid configuration', ERR_HTTP3_RUNTIME_UNSUPPORTED);
+    assert.throws(() => resolveRuntimeSelection(new RuntimeTarget(), {}, () => { throw error; }), actual => actual === error);
+  });
+
+  it('selects WASM once per target, warns once per cause, and keeps fastAttempt empty', async () => {
+    const original = process.emitWarning.bind(process) as typeof process.emitWarning;
+    const warnings: unknown[] = [];
+    process.emitWarning = ((...args: unknown[]): void => { warnings.push(args); }) as typeof process.emitWarning;
+    try {
+      for (let i = 0; i < 2; i++) {
+        const target = new RuntimeTarget();
+        const decision = resolveRuntimeSelection(target, {}, () => { throw unavailable(); });
+        const attempts: string[] = [];
+        let events = 0;
+        target.on('runtime', () => { events++; });
+        const result = await runWithRuntimeSelection(target, {}, async mode => { attempts.push(mode); return 42; }, decision);
+        assert.equal(result, 42);
+        assert.deepEqual(attempts, ['wasm']);
+        assert.equal(events, 1);
+        assert.equal(target._runtimeInfo?.requestedMode, 'auto');
+        assert.equal(target._runtimeInfo?.selectedMode, 'wasm');
+        assert.equal(target._runtimeInfo?.reasonCode, 'native-binding-unavailable');
+        assert.equal(target._runtimeInfo?.fallbackOccurred, true);
+        assert.equal(target._runtimeInfo?.fastAttempt, null);
+        assert.equal(target._runtimeInfo?.nativeBinding?.libc, 'musl');
+      }
+      assert.equal(warnings.length, 1);
+    } finally { process.emitWarning = original; }
+  });
+
+  it('preserves WASM bootstrap failure and loader context without a success warning', async () => {
+    const target = new RuntimeTarget();
+    const decision = resolveRuntimeSelection(target, {}, () => { throw unavailable(); });
+    const error = Object.assign(new Error('UDP bind denied'), { code: 'EACCES' });
+    const original = process.emitWarning.bind(process) as typeof process.emitWarning;
+    process.emitWarning = (() => assert.fail('failed bootstrap must not warn success')) as typeof process.emitWarning;
+    try {
+      await assert.rejects(runWithRuntimeSelection(target, {}, async () => { throw error; }, decision), (actual: unknown) => {
+        assert.ok(actual instanceof Http3Error);
+        assert.equal(actual.cause, error);
+        assert.equal(actual.code, 'EACCES');
+        assert.equal(actual.nativeBindingError, decision.nativeBindingError);
+        assert.equal((actual.nativeBindingError?.cause as Error)?.message, 'original loader failure');
+        assert.equal(actual.nativeBinding?.category, 'missing');
+        return true;
+      });
+      assert.equal(target._runtimeInfo?.selectedMode, null);
+      assert.equal(target._runtimeInfo?.fallbackOccurred, false);
+    } finally { process.emitWarning = original; }
+  });
+
+  it('does not retry native constructor failures through WASM', async () => {
+    const target = new RuntimeTarget();
+    const decision = resolveRuntimeSelection(target, {}, () => ({}));
+    const attempts: string[] = [];
+    const error = new Error('TLS configuration failed');
+    await assert.rejects(runWithRuntimeSelection(target, {}, async mode => { attempts.push(mode); throw error; }, decision), actual => actual === error);
+    assert.deepEqual(attempts, ['fast']);
   });
 });

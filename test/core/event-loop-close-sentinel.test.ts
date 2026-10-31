@@ -9,7 +9,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { WorkerEventLoop } from '../../lib/event-loop.js';
+import { ClientEventLoop, WorkerEventLoop } from '../../lib/event-loop.js';
 
 interface FakeBinding {
   requestShutdown: () => boolean;
@@ -58,5 +58,22 @@ describe('WorkerEventLoop.close awaits shutdown sentinel', () => {
     loop._onShutdownSentinel();
     await loop.close();
     await loop.close(); // must not throw, must not hang
+  });
+});
+
+describe('ClientEventLoop.close before native connect', () => {
+  it('joins immediately when no worker exists and no sentinel can arrive', async () => {
+    let joined = 0;
+    const loop = new ClientEventLoop({
+      close: () => false,
+      requestShutdown: () => false,
+      joinWorker: () => { joined++; },
+    } as never);
+    let resolved = false;
+    const closing = loop.close().then(() => { resolved = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(resolved, true, 'an unstarted worker cannot emit a shutdown sentinel');
+    await closing;
+    assert.equal(joined, 1);
   });
 });

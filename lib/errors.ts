@@ -36,6 +36,10 @@ export class Http3Error extends Error {
   readonly fallbackOccurred?: boolean;
   /** Structured runtime snapshot associated with the error when available. */
   readonly runtimeInfo?: import('./runtime.js').RuntimeInfo;
+  /** Details of a failed native addon load, including when WASM bootstrap also fails. */
+  readonly nativeBinding?: import('./runtime.js').NativeBindingFailure;
+  /** Original addon error when a subsequent WASM bootstrap also failed. */
+  readonly nativeBindingError?: Error;
 
   /**
    * @param message - Human-readable description.
@@ -60,6 +64,8 @@ export class Http3Error extends Error {
       servername?: string;
       fallbackOccurred?: boolean;
       runtimeInfo?: import('./runtime.js').RuntimeInfo;
+      nativeBinding?: import('./runtime.js').NativeBindingFailure;
+      nativeBindingError?: Error;
       cause?: Error;
     },
   ) {
@@ -80,6 +86,8 @@ export class Http3Error extends Error {
     this.servername = options?.servername;
     this.fallbackOccurred = options?.fallbackOccurred;
     this.runtimeInfo = options?.runtimeInfo;
+    this.nativeBinding = options?.nativeBinding;
+    this.nativeBindingError = options?.nativeBindingError;
   }
 }
 

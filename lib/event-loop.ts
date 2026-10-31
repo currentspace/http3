@@ -6,6 +6,7 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Http3Error, ERR_HTTP3_RUNTIME_UNSUPPORTED } from './errors.js';
+import type { NativeBindingFailure } from './runtime.js';
 
 /** Sentinel event emitted by each Rust worker thread before exit. */
 export const EVENT_SHUTDOWN_COMPLETE = 15;
@@ -516,7 +517,10 @@ export function getBinding(): NativeBinding {
       return loaded;
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === ERR_HTTP3_RUNTIME_UNSUPPORTED) {
-        throw new Http3Error(error.message, ERR_HTTP3_RUNTIME_UNSUPPORTED, { cause: error });
+        const diagnostic = error as Error & { reasonCode?: string; nativeBinding?: NativeBindingFailure };
+        throw new Http3Error(error.message, ERR_HTTP3_RUNTIME_UNSUPPORTED, {
+          cause: error, reasonCode: diagnostic.reasonCode, nativeBinding: diagnostic.nativeBinding,
+        });
       }
       throw error;
     }
@@ -808,9 +812,8 @@ export class ClientEventLoop implements ClientEventLoopLike {
         });
 
     this.worker.close(errorCode, reason);
-    this.worker.requestShutdown();
-
-    await waitForShutdownOrTimeout(sentinel);
+    // No worker exists when cancellation wins before connect().
+    if (this.worker.requestShutdown()) await waitForShutdownOrTimeout(sentinel);
     this._shutdownResolve = null;
 
     this.worker.joinWorker();

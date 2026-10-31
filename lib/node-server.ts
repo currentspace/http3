@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import type { RuntimeInfo } from './runtime.js';
 import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
 import type { Socket } from 'node:net';
@@ -324,6 +325,7 @@ export class Http3NodeServer extends EventEmitter {
       this.sessions.add(session);
       session.once('close', () => this.sessions.delete(session));
     });
+    this.transport.on('runtime', info => this.emit('runtime', info));
     this.transport.on('error', error => this.startFailed(error));
     this.transport.on('sessionError', (error, session) => this.emit('sessionError', error, session));
     this.transport.on('listening', () => {
@@ -354,6 +356,8 @@ export class Http3NodeServer extends EventEmitter {
     if (this.closing) this.closeTransport();
     this.emit('error', error);
   }
+  /** Pending, selected, or failed runtime snapshot from the underlying transport. */
+  get runtimeInfo(): RuntimeInfo | null { return this.transport.runtimeInfo; }
   address(): AddressInfo | null { return this.transport.address(); }
   listen(options: ListenOptions, callback?: () => void): this;
   listen(port: number, callback?: () => void): this;

@@ -882,7 +882,7 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
         if (shouldAbortConnect()) {
           await eventLoop.close();
           session._eventLoop = null;
-          return;
+          throw abortSignalError(options?.signal);
         }
         try {
           await eventLoop.connect(resolved.socketAddress, options?.servername ?? resolved.servername);
@@ -898,7 +898,7 @@ export function connect(authority: ConnectionEndpoint, options?: ConnectOptions)
         if (shouldAbortConnect()) {
           await eventLoop.close();
           session._eventLoop = null;
-          return;
+          throw abortSignalError(options?.signal);
         }
         session._startMetricsEmitter(options?.metricsIntervalMs ?? 1000, () => session.getMetrics());
       });

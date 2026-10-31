@@ -2,7 +2,7 @@ import {
   createSecureServer, createNodeServerFactory as rootFactory,
   createExpressHandler as rootHandler, Http3Error, WasmMemoryError,
   RequestBodyTooLargeError, ERR_HTTP3_WASM_MEMORY_LIMIT, ERR_HTTP3_RECEIVE_BUFFER_LIMIT,
-  type RuntimeInfo, type RuntimeAttemptFailure, type RuntimeOptions,
+  type RuntimeInfo, type RuntimeAttemptFailure, type RuntimeOptions, type NativeBindingFailure,
   type ServerOptions, type ConnectOptions, type QuicServerOptions, type QuicConnectOptions,
   type IncomingHeaders, type StreamFlags, type RespondOptions, type RequestAsyncOptions,
   type SessionMetrics, type SessionCloseInfo, type GoawayInfo, type PingCallback,
@@ -34,6 +34,12 @@ void listenNest; void proxy; void createDevTls;
 const app = createExpressHandler((_req, res) => res.end('ok'));
 const options: NodeServerOptions = {};
 const server = createNodeServerFactory(options)(app);
+const selectedRuntime: RuntimeInfo | null = server.runtimeInfo;
+void selectedRuntime;
+const nativeBindingFailure: NativeBindingFailure | undefined = selectedRuntime?.nativeBinding;
+void nativeBindingFailure;
+// @ts-expect-error Runtime selection is exposed as a read-only snapshot getter.
+server.runtimeInfo = null;
 const listen: ListenOptions = { port: 0, host: '::' };
 server.listen(listen);
 server.listen(0, '::', () => {});

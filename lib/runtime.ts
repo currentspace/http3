@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { getBinding } from './event-loop.js';
 import {
   Http3Error,
   ERR_HTTP3_FAST_PATH_UNAVAILABLE,
@@ -17,7 +18,8 @@ export type RuntimeReasonCode =
   | 'auto-selected-fast'
   | 'fast-path-unavailable'
   | 'platform-default'
-  | 'runtime-error';
+  | 'runtime-error'
+  | 'native-binding-unavailable';
 
 export interface RuntimeAttemptFailure {
   code: string;
@@ -25,6 +27,21 @@ export interface RuntimeAttemptFailure {
   driver?: RuntimeDriver;
   errno?: number;
   syscall?: string;
+}
+
+export interface NativeBindingFailure {
+  platform: string;
+  arch: string;
+  libc: 'musl' | 'glibc' | null;
+  packageName: string;
+  category: 'unpublished' | 'missing' | 'unloadable' | 'override';
+  message: string;
+}
+
+/** Internal decision made before any native constructor is called. */
+export interface RuntimeSelectionDecision {
+  wasm: boolean;
+  nativeBindingError?: Http3Error;
 }
 
 export interface RuntimeInfo {
@@ -38,6 +55,7 @@ export interface RuntimeInfo {
   errno?: number;
   syscall?: string;
   warningCode?: string;
+  nativeBinding?: NativeBindingFailure;
   fastAttempt?: RuntimeAttemptFailure | null;
 }
 
@@ -72,6 +90,7 @@ export interface ParsedNativeRuntimeError {
 }
 
 const NATIVE_RUNTIME_ERROR_PREFIX = /^(ERR_HTTP3_[A-Z_]+)\s+([^:]+):\s+(.*)$/u;
+const NATIVE_RUNTIME_ERROR_TAG = /^\[h3:(fast-path|runtime-io)(?:\|[a-z_]+=[^\]|\s]+)*\]\s+(.*)$/u;
 let cachedFastPathFailure: CachedFastPathFailure | null = null;
 const emittedRuntimeWarnings = new Set<string>();
 
@@ -129,6 +148,7 @@ export function updateRuntimeInfo(
 ): RuntimeInfo {
   const snapshot: RuntimeInfo = {
     ...info,
+    ...(info.nativeBinding ? { nativeBinding: { ...info.nativeBinding } } : {}),
     fastAttempt: info.fastAttempt ? { ...info.fastAttempt } : null,
   };
   target._runtimeInfo = snapshot;
@@ -164,11 +184,18 @@ export function driverForMode(mode: SelectedRuntimeMode, platform = process.plat
 export function parseNativeRuntimeError(err: unknown): ParsedNativeRuntimeError | null {
   if (!(err instanceof Error)) return null;
 
-  const match = err.message.match(NATIVE_RUNTIME_ERROR_PREFIX);
+  // Native tagged_message() prefixes the legacy runtime text with a
+  // structured category. Only these two categories may enter selection;
+  // IO, configuration, and TLS errors must retain their original behavior.
+  const tagged = err.message.match(NATIVE_RUNTIME_ERROR_TAG);
+  const match = (tagged?.[2] ?? err.message).match(NATIVE_RUNTIME_ERROR_PREFIX);
   if (!match) return null;
 
   const [, code, rawMeta, message] = match;
   if (code !== ERR_HTTP3_FAST_PATH_UNAVAILABLE && code !== ERR_HTTP3_RUNTIME_UNSUPPORTED) {
+    return null;
+  }
+  if (tagged && ((tagged[1] === 'fast-path') !== (code === ERR_HTTP3_FAST_PATH_UNAVAILABLE))) {
     return null;
   }
 
@@ -380,7 +407,7 @@ function buildFailureInfo(
   };
 }
 
-function enrichRuntimeError(error: unknown, info: RuntimeInfo): unknown {
+function enrichRuntimeError(error: unknown, info: RuntimeInfo, nativeBindingError?: Error): unknown {
   if (error instanceof Http3Error) {
     return new Http3Error(error.message, error.code, {
       quicCode: error.quicCode,
@@ -397,6 +424,8 @@ function enrichRuntimeError(error: unknown, info: RuntimeInfo): unknown {
       servername: error.servername,
       fallbackOccurred: error.fallbackOccurred ?? info.fallbackOccurred,
       runtimeInfo: info,
+      nativeBinding: error.nativeBinding ?? info.nativeBinding,
+      nativeBindingError: error.nativeBindingError ?? nativeBindingError,
       cause: error,
     });
   }
@@ -419,10 +448,72 @@ function enrichRuntimeError(error: unknown, info: RuntimeInfo): unknown {
   });
 }
 
+/** Resolve the addon lazily; only a tagged loader error may select WASM. */
+export function resolveRuntimeSelection(
+  target: RuntimeAware,
+  options: RuntimeOptions | undefined,
+  probe: () => unknown = getBinding,
+): RuntimeSelectionDecision {
+  const runtime = normalizeRuntimeOptions(options);
+  if (runtime.runtimeMode === 'wasm') return { wasm: true };
+  try {
+    probe();
+    return { wasm: false };
+  } catch (error: unknown) {
+    if (!(error instanceof Http3Error) || error.code !== ERR_HTTP3_RUNTIME_UNSUPPORTED ||
+      error.reasonCode !== 'native-binding-unavailable' || !error.nativeBinding) throw error;
+    if (runtime.runtimeMode === 'auto' && runtime.fallbackPolicy === 'warn-and-fallback') {
+      return { wasm: true, nativeBindingError: error };
+    }
+    const info: RuntimeInfo = {
+      ...createPendingRuntimeInfo(options), reasonCode: error.reasonCode,
+      message: error.message, nativeBinding: error.nativeBinding,
+    };
+    target._runtimeInfo = info;
+    throw enrichRuntimeError(error, info);
+  }
+}
+
+async function runWasmSelection<T>(
+  target: RuntimeAware,
+  options: RuntimeOptions | undefined,
+  decision: RuntimeSelectionDecision,
+  attempt: (mode: SelectedRuntimeMode) => Promise<T>,
+): Promise<T> {
+  const runtime = normalizeRuntimeOptions(options);
+  const nativeError = decision.nativeBindingError;
+  let result: T;
+  try {
+    result = await attempt('wasm');
+  } catch (error: unknown) {
+    const info = buildFailureInfo(runtime.runtimeMode, runtime.fallbackPolicy, 'wasm', error);
+    info.nativeBinding = nativeError?.nativeBinding;
+    target._runtimeInfo = info;
+    if (nativeError && !(error instanceof Http3Error)) {
+      const cause = error instanceof Error ? error : new Error(String(error));
+      const code = 'code' in cause && typeof cause.code === 'string' ? cause.code : ERR_HTTP3_RUNTIME_UNSUPPORTED;
+      throw new Http3Error(cause.message, code, {
+        cause, runtimeInfo: info, nativeBinding: nativeError.nativeBinding, nativeBindingError: nativeError,
+        requestedMode: runtime.runtimeMode, reasonCode: info.reasonCode ?? undefined,
+      });
+    }
+    throw enrichRuntimeError(error, info, nativeError);
+  }
+  const info = createSelectedRuntimeInfo(
+    runtime.runtimeMode, runtime.fallbackPolicy, 'wasm',
+    nativeError ? 'native-binding-unavailable' : 'requested-wasm',
+    { fallbackOccurred: Boolean(nativeError), message: nativeError?.message },
+  );
+  if (nativeError) info.nativeBinding = nativeError.nativeBinding;
+  updateRuntimeInfo(target, info, runtime.onRuntimeEvent);
+  return result;
+}
+
 export function runWithRuntimeSelectionSync<T>(
   target: RuntimeAware,
   options: RuntimeOptions | undefined,
   attempt: (mode: SelectedRuntimeMode) => T,
+  decision = resolveRuntimeSelection(target, options),
 ): T {
   const runtime = normalizeRuntimeOptions(options);
 
@@ -441,7 +532,7 @@ export function runWithRuntimeSelectionSync<T>(
   // explicit throw rather than silently falling through to the 'auto'
   // branch below (which would attempt 'fast' then 'portable' instead of
   // honoring — or rejecting — what was actually requested).
-  if (runtime.runtimeMode === 'wasm') {
+  if (decision.wasm) {
     throw new Http3Error(
       "runtimeMode 'wasm' cannot be constructed via the synchronous native-runtime " +
       'selector (runWithRuntimeSelectionSync) — wasm server construction is ' +
@@ -548,8 +639,10 @@ export async function runWithRuntimeSelection<T>(
   target: RuntimeAware,
   options: RuntimeOptions | undefined,
   attempt: (mode: SelectedRuntimeMode) => Promise<T>,
+  decision = resolveRuntimeSelection(target, options),
 ): Promise<T> {
   const runtime = normalizeRuntimeOptions(options);
+  if (decision.wasm) return runWasmSelection(target, options, decision, attempt);
 
   const run = async (mode: SelectedRuntimeMode, reasonCode: string): Promise<T> => {
     try {
@@ -569,15 +662,6 @@ export async function runWithRuntimeSelection<T>(
 
   if (runtime.runtimeMode === 'portable') {
     return await run('portable', 'requested-portable');
-  }
-
-  // Early branch mirroring 'portable' above: 'wasm' is fully resolved here
-  // (no auto/fallback dance) — the wasm branch of
-  // lib/client-event-loop-factory.ts's createClientEventLoop is the only
-  // thing `attempt` does in this case, and it never touches the native
-  // binding (docs/WASM_CLIENT_PLAN.md §6.6).
-  if (runtime.runtimeMode === 'wasm') {
-    return await run('wasm', 'requested-wasm');
   }
 
   if (runtime.runtimeMode === 'fast') {

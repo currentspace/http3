@@ -74,6 +74,7 @@ export type {
   RuntimeDriver,
   RuntimeReasonCode,
   RuntimeInfo,
+  NativeBindingFailure,
   RuntimeAttemptFailure,
   RuntimeOptions,
 } from './runtime.js';
