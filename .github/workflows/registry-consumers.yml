@@ -1,0 +1,159 @@
+name: Published registry consumers
+
+# Manually qualify an already-published version. All consumer packages come
+# from npm; this workflow never builds or downloads candidate artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact published version, for example 0.9.10 or 1.0.0-rc.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - name: Validate exact registry version
+        id: version
+        env:
+          HTTP3_REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          const version = process.env.HTTP3_REQUESTED_VERSION;
+          const number = '(?:0|[1-9][0-9]*)';
+          const identifier = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)';
+          const exact = new RegExp(`^${number}\\.${number}\\.${number}(?:-${identifier}(?:\\.${identifier})*)?$`);
+          if (typeof version !== 'string' || version !== version.trim() || !exact.test(version)) {
+            throw new Error('version must be an exact release or prerelease version, without a tag, range, path, or build metadata');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          NODE
+
+  installed:
+    name: ${{ matrix.platform.target }} / Node ${{ matrix.node.major }} / ${{ matrix.profile }}
+    needs: validate-version
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - target: linux-x64-gnu
+            runner: ubuntu-22.04
+            arch: x64
+            alpine: false
+            native: true
+          - target: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            alpine: false
+            native: true
+          - target: linux-x64-musl
+            runner: ubuntu-24.04
+            arch: x64
+            alpine: true
+            native: true
+          - target: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            alpine: true
+            native: true
+          - target: darwin-x64
+            runner: macos-26-intel
+            arch: x64
+            alpine: false
+            native: true
+          - target: darwin-arm64
+            runner: macos-26
+            arch: arm64
+            alpine: false
+            native: true
+          - target: win32-x64
+            runner: windows-latest
+            arch: x64
+            alpine: false
+            native: false
+        node:
+          - major: '24'
+            version: '24.22.1'
+          - major: '26'
+            version: '26.12.1'
+        profile: [normal, omit-optional]
+    env:
+      HTTP3_REGISTRY_VERSION: ${{ needs.validate-version.outputs.version }}
+      HTTP3_INSTALL_PROFILE: ${{ matrix.profile }}
+      HTTP3_EXPECT_NATIVE: ${{ matrix.platform.native }}
+      HTTP3_EXPECT_ARCH: ${{ matrix.platform.arch }}
+      HTTP3_NODE_MAJOR: ${{ matrix.node.major }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node.version }}
+      - name: Require native runner architecture and prepare receipts
+        run: |
+          node -e 'require("node:assert/strict").equal(process.arch, process.env.HTTP3_EXPECT_ARCH)'
+          mkdir -p "$RUNNER_TEMP/registry-consumer"
+      - name: Resolve Windows OpenSSL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) {
+            $opensslDir = Join-Path $env:ProgramFiles 'Git\usr\bin'
+            if (-not (Test-Path (Join-Path $opensslDir 'openssl.exe'))) {
+              throw 'OpenSSL is required to create isolated test certificates'
+            }
+            $opensslDir >> $env:GITHUB_PATH
+          }
+      - name: Verify registry install on the host
+        if: ${{ !matrix.platform.alpine }}
+        run: |
+          args=()
+          if [ "$HTTP3_INSTALL_PROFILE" = normal ]; then
+            if [ "$HTTP3_EXPECT_NATIVE" = true ]; then
+              args+=(--native)
+            else
+              args+=(--include-optional)
+            fi
+          fi
+          node scripts/platform-smoke.mjs --registry-version "$HTTP3_REGISTRY_VERSION" \
+            "${args[@]}" --receipt "$RUNNER_TEMP/registry-consumer/receipt.json"
+      - name: Verify registry install on native Alpine architecture
+        if: matrix.platform.alpine
+        run: |
+          image=$(node -p 'require("./containers/node-musl-images.json")[process.env.HTTP3_NODE_MAJOR]')
+          docker run --rm \
+            -e HTTP3_REGISTRY_VERSION -e HTTP3_INSTALL_PROFILE -e HTTP3_EXPECT_ARCH \
+            -v "$GITHUB_WORKSPACE:/candidate:ro" \
+            -v "$RUNNER_TEMP/registry-consumer:/receipts" \
+            -w /candidate "$image" sh -eu -c '
+              apk add --no-cache openssl
+              node -e '\''require("node:assert/strict").equal(process.arch, process.env.HTTP3_EXPECT_ARCH)'\''
+              set -- --registry-version "$HTTP3_REGISTRY_VERSION" --receipt /receipts/receipt.json
+              if [ "$HTTP3_INSTALL_PROFILE" = normal ]; then set -- "$@" --native; fi
+              node scripts/platform-smoke.mjs "$@"
+            '
+      - name: Upload registry consumer receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registry-${{ needs.validate-version.outputs.version }}-${{ matrix.platform.target }}-node${{ matrix.node.major }}-${{ matrix.profile }}
+          path: ${{ runner.temp }}/registry-consumer/receipt.json
+          if-no-files-found: warn
