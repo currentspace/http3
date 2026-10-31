@@ -90,6 +90,7 @@ export interface ParsedNativeRuntimeError {
 }
 
 const NATIVE_RUNTIME_ERROR_PREFIX = /^(ERR_HTTP3_[A-Z_]+)\s+([^:]+):\s+(.*)$/u;
+const NATIVE_RUNTIME_ERROR_TAG = /^\[h3:(fast-path|runtime-io)(?:\|[a-z_]+=[^\]|\s]+)*\]\s+(.*)$/u;
 let cachedFastPathFailure: CachedFastPathFailure | null = null;
 const emittedRuntimeWarnings = new Set<string>();
 
@@ -183,11 +184,18 @@ export function driverForMode(mode: SelectedRuntimeMode, platform = process.plat
 export function parseNativeRuntimeError(err: unknown): ParsedNativeRuntimeError | null {
   if (!(err instanceof Error)) return null;
 
-  const match = err.message.match(NATIVE_RUNTIME_ERROR_PREFIX);
+  // Native tagged_message() prefixes the legacy runtime text with a
+  // structured category. Only these two categories may enter selection;
+  // IO, configuration, and TLS errors must retain their original behavior.
+  const tagged = err.message.match(NATIVE_RUNTIME_ERROR_TAG);
+  const match = (tagged?.[2] ?? err.message).match(NATIVE_RUNTIME_ERROR_PREFIX);
   if (!match) return null;
 
   const [, code, rawMeta, message] = match;
   if (code !== ERR_HTTP3_FAST_PATH_UNAVAILABLE && code !== ERR_HTTP3_RUNTIME_UNSUPPORTED) {
+    return null;
+  }
+  if (tagged && ((tagged[1] === 'fast-path') !== (code === ERR_HTTP3_FAST_PATH_UNAVAILABLE))) {
     return null;
   }
 
