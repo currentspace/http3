@@ -3,6 +3,39 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
+## 1.0.0 candidate
+
+- Merged PRs #24, #25, #26 and #27 in order using merge commits. Main at
+  `bcc5a1e84b59fec608c58682c058e13432f4b25c` has the exact tree of qualified
+  stack head `f4b39f85f7463b1e9750ec71e735df220594cf09`.
+- Automatic workflows were disabled only for the merge batch, then restored
+  to their previous states before versioned release preparation.
+- Root, Rust and all six native sidecars are aligned to 1.0.0. The new musl
+  x64/arm64 and Intel macOS packages require bootstrap and Trusted Publisher
+  setup before stable publication. This candidate entry does not claim that
+  1.0.0 has been published.
+- Platform implementation qualification is recorded in
+  [PLATFORM_COVERAGE_EVIDENCE.md](./PLATFORM_COVERAGE_EVIDENCE.md): hosted run
+  `41151580339` passed 29 jobs with publication skipped. A normal versioned
+  release dry run, full hosted checks, and registry readbacks are required
+  separately for 1.0.0.
+- The user explicitly approved retaining the documented manual Safari
+  limitation for 1.0.0. Manual Safari and Windows browser trust remain
+  unqualified; neither automated WebKit nor Windows Node/WASM runtime checks
+  are presented as those browser qualifications.
+- Stable publication updates `latest` only; `canary` remains independent.
+- The versioned local gate passed 17 checks: lint, TypeScript/workerd types,
+  Node-API boundary, both Clippy configurations, Rust unit/loom/mock suites,
+  native/JS rebuild, 606 Node tests with WASM integration enabled, 67 FFI tests,
+  concurrency/load gates, and packed installation/declarations. The separate
+  WASM suite passed 135 tests. Local browser trust and fresh WASM compilation
+  remain hosted gates; the local WASM checks used the existing core artifact.
+- Single 32/128 MiB WASM facade responses from fresh packed 1.0.0 consumers
+  passed byte counts and SHA-256 checks on Node 24 and 26 with natural exit.
+- Bootstrap dry runs for all three new sidecars passed. Preparation also fixed
+  npm 12's package-name-keyed pack metadata handling in the bootstrap and
+  publication helpers; npm 11 array and npm 12 map regressions passed.
+
 ## 0.9.9
 
 - Published as [v0.9.9](https://github.com/currentspace/http3/releases/tag/v0.9.9)

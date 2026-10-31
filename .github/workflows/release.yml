@@ -254,6 +254,7 @@ jobs:
         env:
           HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
           HTTP3_DRY_RUN: "1"
+          HTTP3_MIRROR_CANARY_ON_LATEST: "0"
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-npm-release.mjs
 
@@ -261,6 +262,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
+          HTTP3_MIRROR_CANARY_ON_LATEST: "0"
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-npm-release.mjs
 

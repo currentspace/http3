@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { parseNpmPackMetadata } from './npm-pack-metadata.mjs';
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -92,8 +93,8 @@ function packedFiles(directory) {
     cwd: directory,
     capture: true,
   });
-  const parsed = JSON.parse(result.stdout.trim());
-  const metadata = Array.isArray(parsed) ? parsed[0] : parsed;
+  const { name } = readJson(join(directory, 'package.json'));
+  const metadata = parseNpmPackMetadata(result.stdout, name);
   return new Set(
     (metadata.files ?? [])
       .map((entry) => entry?.path)

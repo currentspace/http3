@@ -33,13 +33,13 @@ workflow is not proof that an unpublished sidecar has been qualified or released
 
 | Target | Sidecar suffix | Publication baseline |
 | --- | --- | --- |
-| Linux glibc x64 | linux-x64-gnu | Included in 0.9.9 |
-| Linux glibc arm64 | linux-arm64-gnu | Included in 0.9.9 |
-| macOS arm64 | darwin-arm64 | Included in 0.9.9 |
-| Linux musl x64 | linux-x64-musl | Candidate qualified; first publication pending |
-| Linux musl arm64 | linux-arm64-musl | Candidate qualified; first publication pending |
-| macOS Intel | darwin-x64 | Candidate qualified; first publication pending |
-| Windows x64 | none | Candidate WASM fallback qualified; no native driver |
+| Linux glibc x64 | linux-x64-gnu | Included in 1.0.0; previously available in 0.9.9 |
+| Linux glibc arm64 | linux-arm64-gnu | Included in 1.0.0; previously available in 0.9.9 |
+| macOS arm64 | darwin-arm64 | Included in 1.0.0; previously available in 0.9.9 |
+| Linux musl x64 | linux-x64-musl | Added in 1.0.0 |
+| Linux musl arm64 | linux-arm64-musl | Added in 1.0.0 |
+| macOS Intel | darwin-x64 | Added in 1.0.0 |
+| Windows x64 | none | WASM fallback in 1.0.0; no native driver |
 
 The platform-coverage candidate passed native builds and installed consumers on
 Node 24/26, including the three new targets and Windows WASM fallback. See

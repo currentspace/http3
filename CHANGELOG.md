@@ -1,11 +1,30 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
+
+- Select the bundled WASM runtime automatically when the native addon cannot
+  load. Preserve strict fallback policy and explicit native modes, and expose
+  the selected runtime through `Http3NodeServer.runtimeInfo` and runtime events.
+- Add native packages for Linux musl x64/arm64 and Intel macOS. Qualify native
+  and no-addon consumers on Node 24/26, including Windows x64 through WASM.
+- Admit large WASM stream writes in bounded slices so single-buffer responses
+  through 128 MiB work without raising the 64 MiB WASM heap limit. Preserve
+  callbacks, trailers, backpressure, cancellation, and raw QUIC half-close.
+- Preserve the exact native driver setup failure and apply fallback policy in
+  JavaScript. Linux hosts that restrict io_uring select native poll with an
+  accurate warning; explicit fast and strict auto do not silently fall back.
+- Release sockets and native callbacks after cancelled startup or failed binds,
+  and allow raw QUIC servers to restart safely from their close event.
 
 - Report native binding startup failures with `ERR_HTTP3_RUNTIME_UNSUPPORTED`,
   the OS/architecture and Linux libc. Distinguish unpublished prebuild targets
   from missing optional platform packages and binaries that fail to load.
   Preserve loader causes, local source builds and explicit WASM selection.
+
+Manual Safari and Windows browser trust qualification remain incomplete. This
+release retains the explicitly approved documented Safari limitation; automated
+WebKit checks are not represented as manual Safari qualification. Windows Node
+WASM runtime qualification is separate from browser trust qualification.
 
 ## 0.9.9
 

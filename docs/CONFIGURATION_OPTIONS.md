@@ -36,7 +36,7 @@ Used by `createSecureServer()` for server-side TLS material and related helpers.
 
 Used by `createSecureServer()` and `serveFetch()`.
 
-The unreleased platform-coverage series adds automatic WASM fallback when the
+Version 1.0.0 adds automatic WASM fallback when the
 native addon cannot load. All four runtime modes apply to the H3/raw QUIC server
 and client options below. `fallbackPolicy` governs both native fast-to-portable
 and native-binding-to-WASM fallback; explicit native modes never select WASM.

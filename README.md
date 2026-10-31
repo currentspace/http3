@@ -21,10 +21,9 @@ HTTP/3, HTTP/2, and raw QUIC server/client package for Node.js 24+, powered by R
 npm install @currentspace/http3
 ```
 
-The automatic WASM fallback, bounded large writes, facade runtime metadata, and
-new native targets described below are **unreleased platform-coverage changes**.
-Published 0.9.9 requires explicit WASM and does not contain these changes; use a
-built candidate to evaluate them until a new release is published.
+Version **1.0.0** adds automatic WASM fallback, bounded large writes, facade
+runtime metadata, and native packages for Linux musl and Intel macOS. Earlier
+0.9.9 installations require explicit WASM when a native addon is unavailable.
 
 Keep optional dependencies enabled for native performance. If the native addon
 cannot load, the default `auto` mode selects the bundled WASM runtime and emits
@@ -39,9 +38,8 @@ WASM, and the CLI; it does not bundle native binaries, docs, or examples.
 | Windows | None | WASM |
 | Other Node platforms | None in the release matrix | WASM; platform qualification varies |
 
-The new musl and Intel macOS targets require publication of matching sidecars;
-published 0.9.9 contains only macOS arm64 and Linux glibc arm64/x64. There is no
-install-time compiler fallback. See
+All six native targets use matching 1.0.0 sidecars. There is no install-time
+compiler fallback. See
 [`docs/SUPPORT_MATRIX.md`](https://github.com/currentspace/http3/blob/HEAD/docs/SUPPORT_MATRIX.md).
 
 ## Quick server example

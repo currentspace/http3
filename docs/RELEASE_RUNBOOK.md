@@ -14,10 +14,10 @@
 4. Confirm npm dist-tags for the root package and each native sidecar package.
    Stable publication uses the configured npm Trusted Publisher (OIDC) and does
    not require an `NPM_TOKEN` secret. Canary is an independent channel: the
-   established tokenless release path updates `latest` only. The optional legacy
-   canary-mirroring step runs when `NPM_TOKEN` is configured; it is not a stable
-   release prerequisite. Do not report canary alignment unless registry readback
-   confirms it.
+   release workflow explicitly updates `latest` only, even if a token is
+   configured. The publisher's optional legacy canary-mirroring behavior is
+   disabled by `HTTP3_MIRROR_CANARY_ON_LATEST=0` in that workflow. Do not report
+   canary alignment unless registry readback confirms it.
 
 For a candidate PR, first synchronize versions and release notes, then run
 `gh workflow run release.yml --ref <candidate-branch> -f dist_tag=latest -f dry_run=true`.
@@ -67,7 +67,12 @@ Do not hard-wire new benchmark gates into CI until the baseline criteria in
 ## One-Time Bootstrap For A New Native Package
 
 - New native sidecar packages must exist on npm before Trusted Publisher can be configured for them.
-- Use a prerelease bootstrap version such as `<version>-bootstrap.0`, publish it with `pnpm run release:bootstrap:native -- --binary <downloaded-node-file> --version <version>-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm.
+- Use a prerelease bootstrap version such as `<version>-bootstrap.0`, publish it with `pnpm run release:bootstrap:native -- --package-dir npm/<target> --binary <downloaded-node-file> --version <version>-bootstrap.0 --publish`, then configure Trusted Publisher for that package in npm. Always specify the package directory: the helper's historical default is the GNU Linux x64 package.
+- Match the publisher to `currentspace/http3`, workflow filename `release.yml`,
+  with direct `npm publish` allowed and no GitHub environment unless the
+  workflow explicitly declares one. Read back existing configurations before
+  changing them. New packages require interactive npm authentication for their
+  first publication and publisher configuration.
 - After Trusted Publisher is saved for the new package, publish the real release version through `release.yml`.
 
 ## Post-Release Validation
@@ -120,6 +125,16 @@ on real x64 and arm64 runners. Default Docker can emit the existing native
 fast-to-portable warning; only a binding-unavailable/WASM fallback is a failure
 for the normal musl install. Native x64 runs are required for qualification;
 emulated runs are supplementary reproduction evidence.
+
+After publication, dispatch `registry-consumers.yml` with `version=<exact-version>`.
+Its 28 consumer cells use registry-only installations across the six native
+targets and Windows x64 on Node 24/26, with normal and omitted optional
+dependencies. Every cell retains a receipt with actual package resolutions,
+integrity values, file hashes, and runtime assertions. The local equivalent is
+`node scripts/platform-smoke.mjs --registry-version <version> --native --receipt <file>`;
+omit `--native` to omit optional packages and require WASM, or use
+`--include-optional` on Windows to test normal installation with WASM. Registry
+mode cannot be combined with candidate tarball or sidecar overrides.
 
 When preparing several PRs with Actions temporarily disabled, retain the prior
 repository Actions permissions and verify the disabled setting before pushing.

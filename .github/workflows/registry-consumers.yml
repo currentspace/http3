@@ -140,6 +140,7 @@ jobs:
         run: |
           image=$(node -p 'require("./containers/node-musl-images.json")[process.env.HTTP3_NODE_MAJOR]')
           docker run --rm \
+            -e GITHUB_SHA \
             -e HTTP3_REGISTRY_VERSION -e HTTP3_INSTALL_PROFILE -e HTTP3_EXPECT_ARCH \
             -v "$GITHUB_WORKSPACE:/candidate:ro" \
             -v "$RUNNER_TEMP/registry-consumer:/receipts" \

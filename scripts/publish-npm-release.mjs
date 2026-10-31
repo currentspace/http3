@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { parseNpmPackMetadata } from './npm-pack-metadata.mjs';
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
@@ -138,8 +139,8 @@ function packMetadata(directory) {
     cwd: directory,
     capture: true,
   });
-  const parsed = JSON.parse(result.stdout.trim());
-  return Array.isArray(parsed) ? parsed[0] : parsed;
+  const { name } = readJson(join(directory, 'package.json'));
+  return parseNpmPackMetadata(result.stdout, name);
 }
 
 function packagedFiles(directory) {
