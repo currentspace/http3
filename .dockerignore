@@ -1,5 +1,9 @@
 .git
-.github
+# The release test executes this workflow's real input validator.
+.github/*
+!.github/workflows
+.github/workflows/*
+!.github/workflows/registry-consumers.yml
 node_modules
 dist
 dist-test

@@ -2,25 +2,18 @@ import assert from 'node:assert';
 import { connectAsync, connectQuicAsync } from '../../../lib/index.js';
 import type { RuntimeInfo } from '../../../lib/runtime.js';
 import type { QuicStream } from '../../../lib/quic-stream.js';
+import { assertRuntimeInfo, parseExpectedFallback, type ExpectedRuntimeMode } from './runtime-expectations.js';
 
 const SERVER_HOST = process.env.SERVER_HOST ?? 'sfu';
 const RAW_PORT = Number.parseInt(process.env.RAW_QUIC_PORT ?? '9080', 10);
 const H3_PORT = Number.parseInt(process.env.H3_PORT ?? '9443', 10);
 const CLIENT_RUNTIME_MODE = process.env.CLIENT_RUNTIME_MODE as 'auto' | 'fast' | 'portable' | undefined;
 const CLIENT_FALLBACK_POLICY = process.env.CLIENT_FALLBACK_POLICY as 'error' | 'warn-and-fallback' | undefined;
-type ExpectedRuntimeMode = 'auto' | 'fast' | 'portable';
 
 const EXPECT_CLIENT_SELECTED_MODE = process.env.EXPECT_CLIENT_SELECTED_MODE as ExpectedRuntimeMode | undefined;
 const EXPECT_CLIENT_FALLBACK = parseExpectedFallback(process.env.EXPECT_CLIENT_FALLBACK);
 const EXPECT_SERVER_SELECTED_MODE = process.env.EXPECT_SERVER_SELECTED_MODE as ExpectedRuntimeMode | undefined;
 const EXPECT_SERVER_FALLBACK = parseExpectedFallback(process.env.EXPECT_SERVER_FALLBACK);
-
-function parseExpectedFallback(value: string | undefined): boolean | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  return value === 'true';
-}
 
 function collectQuic(stream: QuicStream, timeoutMs = 5000): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -38,26 +31,6 @@ function collectQuic(stream: QuicStream, timeoutMs = 5000): Promise<string> {
       reject(err);
     });
   });
-}
-
-function assertRuntimeInfo(
-  actual: RuntimeInfo | null,
-  expectedMode: ExpectedRuntimeMode | undefined,
-  expectedFallback: boolean | undefined,
-  label: string,
-): void {
-  assert.ok(actual, `${label} should expose runtimeInfo`);
-  if (expectedMode === 'auto') {
-    assert.match(actual?.selectedMode ?? '', /^(fast|portable)$/, `${label} selectedMode`);
-    const expectedAutoFallback = actual?.selectedMode === 'portable';
-    assert.strictEqual(actual?.fallbackOccurred, expectedAutoFallback, `${label} auto fallback consistency`);
-  } else if (expectedMode) {
-    assert.strictEqual(actual?.selectedMode, expectedMode, `${label} selectedMode`);
-  }
-  if (expectedFallback !== undefined) {
-    assert.strictEqual(actual?.fallbackOccurred, expectedFallback, `${label} fallbackOccurred`);
-  }
-  assert.ok(actual?.driver, `${label} driver`);
 }
 
 async function requestText(
@@ -114,6 +87,7 @@ async function main(): Promise<void> {
   };
   assertRuntimeInfo(runtime.quic, EXPECT_SERVER_SELECTED_MODE, EXPECT_SERVER_FALLBACK, 'raw server');
   assertRuntimeInfo(runtime.http3, EXPECT_SERVER_SELECTED_MODE, EXPECT_SERVER_FALLBACK, 'http3 server');
+  console.log(JSON.stringify({ passed: true, client: { quic: rawSession.runtimeInfo, http3: h3Session.runtimeInfo }, server: runtime }));
 
   await rawSession.close();
   await h3Session.close();

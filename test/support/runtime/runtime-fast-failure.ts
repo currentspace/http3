@@ -7,6 +7,7 @@ import {
 import { serveFetch } from '../../../lib/fetch-adapter.js';
 import type { FetchHandler } from '../../../lib/fetch-adapter.js';
 import { generateTestCerts } from '../generate-certs.js';
+import { assertRuntimeInfo } from './runtime-expectations.js';
 
 async function waitForAddress(server: { address(): { address: string; family: string; port: number } | null }, timeoutMs = 5000): Promise<void> {
   const startedAt = Date.now();
@@ -43,7 +44,12 @@ async function main(): Promise<void> {
       fallbackPolicy: 'error',
     });
     await waitForAddress(probeServer);
-    await probeServer.close();
+    try {
+      assertRuntimeInfo(probeServer.runtimeInfo, 'fast', false, 'fast capability probe');
+      console.log('Fast capability probe passed with io_uring; unavailable-path assertions do not apply on this host');
+    } finally {
+      await probeServer.close();
+    }
     return;
   } catch (err) {
     assertFastPathError(err);
@@ -94,6 +100,7 @@ async function main(): Promise<void> {
     }),
     assertFastPathError,
   );
+  console.log('All strict H3/raw QUIC client/server probes rejected with ERR_HTTP3_FAST_PATH_UNAVAILABLE');
 }
 
 main().catch((err: unknown) => {

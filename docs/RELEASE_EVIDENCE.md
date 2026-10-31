@@ -35,6 +35,16 @@ and remaining qualification work for each release candidate.
 - Bootstrap dry runs for all three new sidecars passed. Preparation also fixed
   npm 12's package-name-keyed pack metadata handling in the bootstrap and
   publication helpers; npm 11 array and npm 12 map regressions passed.
+- Initial versioned CI at `4c296bd` exposed two fixture defects: Docker auto
+  tests inherited a contradictory `fallbackOccurred=false` expectation, and
+  Docker verification omitted the workflow file required by its new input
+  validator test. Neither failure changed production transport behavior.
+  Auto assertions now check the actual selected driver, reason, and fallback
+  consistently; strict native expectations remain exact. The build context
+  includes only the required workflow file. A real six-lane ARM64 Docker
+  matrix passed, including io_uring under unconfined/privileged profiles; an
+  old-expectation control reproduced the failure, and a capable auto-fast
+  control passed. Workflow validation passed in Node 24/26 containers.
 
 ## 0.9.9
 

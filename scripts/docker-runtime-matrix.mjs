@@ -89,7 +89,9 @@ runLane('auto fallback lane', [
   CLIENT_RUNTIME_MODE: 'auto',
   CLIENT_FALLBACK_POLICY: 'warn-and-fallback',
   EXPECT_CLIENT_SELECTED_MODE: 'auto',
+  EXPECT_CLIENT_FALLBACK: 'auto',
   EXPECT_SERVER_SELECTED_MODE: 'auto',
+  EXPECT_SERVER_FALLBACK: 'auto',
 });
 
 runLane('fast failure lane', ['run', '--rm', 'fast-check']);
