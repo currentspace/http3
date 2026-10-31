@@ -183,6 +183,7 @@ async function main() {
     assert.ok(warnings[0].message.includes(process.platform));
     assert.ok(warnings[0].message.includes(process.arch));
   } else {
+    assert.equal(warnings.length, nativeFastPathUnavailable ? 1 : 0, 'native auto must warn exactly once when its fast path is unavailable');
     if (nativeFastPathUnavailable) await strictNative();
     assert.ok(warnings.every(warning => !warning.message.includes('wasm')), 'native install must not fall back to WASM');
   }
