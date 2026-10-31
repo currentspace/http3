@@ -91,7 +91,14 @@ Primary files: `bin/native-binding-error.cjs`, `lib/event-loop.ts`,
    startup path. Refactor `_listenWasm` to consume the original decision rather
    than relabeling the request as explicit WASM or rerunning a native attempt.
    Keep argument validation and public error timing compatible. Cover close
-   during startup, bind retries, and partial startup cleanup.
+   during startup, bind retries, and partial startup cleanup. Cancellation
+   must reject the selection attempt rather than return a value that the
+   selector could mistake for successful startup. Close newly allocated UDP
+   sockets after both asynchronous bind errors and synchronous bind throws.
+   Require fresh processes to exit naturally after cancellation before or
+   during connect, including native constructors that have not started a
+   worker. Test restarting from the server's `close` event as well as after
+   awaiting `close()`; an older shutdown must not clear a newer listener's state.
 5. Report successful fallback as `requestedMode: 'auto'`, `selectedMode: 'wasm'`,
    `driver: 'wasm'`, `fallbackOccurred: true`, and
    `reasonCode: 'native-binding-unavailable'`. Keep `fastAttempt` for actual
@@ -209,6 +216,13 @@ because `npm install --omit=optional` is an explicit reported scenario.
 | Intel macOS, normal install | Correct sidecar installed; auto selects native; H2/H3 and raw QUIC smoke |
 | WASM large writes | `throughput.cjs wasm 32 buffer` succeeds, plus assertion-based integrity/backpressure cases |
 | All packed candidates | `.wasm` artifact present and loadable, public declaration compilation, correct sidecar versions |
+
+Run the installed native consumer harness on every GNU Linux and macOS
+architecture, including Intel macOS. Source-tree transport tests and an addon
+load/typecheck smoke alone do not prove that the packed package's `auto` server
+selects native and serves both H2 and H3. Install the matching candidate sidecar
+explicitly until its version is published, and retain that distinction in the
+qualification evidence.
 
 Use the repository's supported Node-major matrix for qualification. Require
 native architecture execution for release evidence; emulated amd64 is useful
