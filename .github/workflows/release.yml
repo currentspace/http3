@@ -17,6 +17,11 @@ on:
         required: true
         default: true
         type: boolean
+      qualification_only:
+        description: Run artifact and installed-consumer gates without registry or publish steps
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   prebuilds:
@@ -32,6 +37,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-26
             target: aarch64-apple-darwin
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +63,7 @@ jobs:
         run: pnpm exec napi build --release --platform --target ${{ matrix.target }}
 
       - name: Check Linux glibc compatibility
-        if: runner.os == 'Linux'
+        if: endsWith(matrix.target, '-gnu')
         run: python3 scripts/check-linux-prebuild-abi.py http3.*.node
 
       - name: Upload prebuild artifact
@@ -113,7 +120,7 @@ jobs:
 
   validate-prebuilds:
     name: validate (${{ matrix.target }}, node ${{ matrix.node-version }})
-    needs: prebuilds
+    needs: [prebuilds, prebuilds-musl, build-wasm]
     strategy:
       fail-fast: false
       matrix:
@@ -136,6 +143,12 @@ jobs:
           - os: macos-26
             target: aarch64-apple-darwin
             node-version: "26.12.1"
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            node-version: "24.22.1"
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            node-version: "26.12.1"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,6 +169,12 @@ jobs:
         with:
           pattern: prebuild-*
           merge-multiple: true
+
+      - name: Download wasm artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-client-artifact
+          path: dist/wasm
 
       - name: Verify expected prebuilds
         run: node scripts/verify-prebuilds.mjs
@@ -181,8 +200,21 @@ jobs:
       - name: Smoke install packed artifact
         run: node scripts/smoke-install.mjs
 
+      - name: Qualify installed native HTTP and QUIC APIs
+        run: |
+          node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
+          mkdir -p artifacts/packed
+          pnpm pack --config.ignore-scripts=true --pack-destination artifacts/packed
+          node scripts/pack-host-native.mjs artifacts/packed
+          package_version=$(node -p "require('./package.json').version")
+          native_target=$(node --input-type=module -e "import { nativePackages, selectNativePackage } from './scripts/native-packages.mjs'; console.log(selectNativePackage(nativePackages()).dir)")
+          node scripts/platform-smoke.mjs --native \
+            --tarball "artifacts/packed/currentspace-http3-$package_version.tgz" \
+            --sidecar "artifacts/packed/currentspace-http3-$native_target-$package_version.tgz"
+
   publish:
-    needs: [prebuilds, validate-prebuilds, build-wasm]
+    if: ${{ !inputs.qualification_only }}
+    needs: [prebuilds, prebuilds-musl, validate-prebuilds, validate-musl, build-wasm, qualify-fallback]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -231,3 +263,14 @@ jobs:
           HTTP3_DIST_TAG: ${{ inputs.dist_tag }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/publish-npm-release.mjs
+
+  prebuilds-musl:
+    uses: ./.github/workflows/musl-prebuilds.yml
+
+  validate-musl:
+    needs: [prebuilds-musl, build-wasm]
+    uses: ./.github/workflows/musl-consumers.yml
+
+  qualify-fallback:
+    needs: build-wasm
+    uses: ./.github/workflows/platform-fallback.yml

@@ -261,10 +261,10 @@ pub(crate) fn create_platform_driver(
     match runtime_mode {
         TransportRuntimeMode::Fast => {
             reactor_metrics::record_driver_setup_attempt(RuntimeDriverKind::IoUring);
-            // Clone the socket before io_uring takes ownership — enables
-            // fallback to poll if io_uring setup fails (e.g. ENOMEM).
-            let fallback_socket = socket.try_clone().ok();
-            match io_uring::IoUringDriver::new(socket) {
+            // Return typed setup failures to the JS runtime selector. It owns
+            // auto -> portable fallback and strict-fast/error policy, including
+            // accurate runtime metadata and process-wide capability caching.
+            match io_uring::IoUringDriver::create(socket) {
                 Ok((driver, waker)) => {
                     reactor_metrics::record_driver_setup_success(RuntimeDriverKind::IoUring);
                     Ok((
@@ -274,41 +274,7 @@ pub(crate) fn create_platform_driver(
                 }
                 Err(error) => {
                     reactor_metrics::record_driver_setup_failure(RuntimeDriverKind::IoUring);
-                    match error.raw_os_error() {
-                        Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::ENOSYS)
-                        | Some(libc::ENOMEM) => {
-                            // Auto-fallback to poll driver
-                            if let Some(sock) = fallback_socket {
-                                log::warn!("io_uring setup failed ({error}), falling back to poll");
-                                reactor_metrics::record_driver_setup_attempt(
-                                    RuntimeDriverKind::Poll,
-                                );
-                                match poll::PollDriver::new(sock) {
-                                    Ok((driver, waker)) => {
-                                        reactor_metrics::record_driver_setup_success(
-                                            RuntimeDriverKind::Poll,
-                                        );
-                                        return Ok((
-                                            PlatformDriver::Poll(driver),
-                                            PlatformWaker::Poll(waker),
-                                        ));
-                                    }
-                                    Err(poll_error) => {
-                                        reactor_metrics::record_driver_setup_failure(
-                                            RuntimeDriverKind::Poll,
-                                        );
-                                        return Err(Http3NativeError::Io(poll_error));
-                                    }
-                                }
-                            }
-                            Err(Http3NativeError::fast_path_unavailable(
-                                "io_uring",
-                                "io_uring_setup",
-                                error,
-                            ))
-                        }
-                        _ => Err(Http3NativeError::Io(error)),
-                    }
+                    Err(error)
                 }
             }
         }

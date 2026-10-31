@@ -643,14 +643,15 @@ pub(crate) fn build_gso_cmsg(buf: &mut [u8], segment_size: u16) -> usize {
     // SAFETY: buf is large enough for the cmsghdr + u16 data.
     #[allow(unsafe_code)]
     unsafe {
-        let hdr = libc::cmsghdr {
-            cmsg_len: cmsg_len as _,
-            cmsg_level: SOL_UDP,
-            cmsg_type: UDP_SEGMENT,
-        };
-        std::ptr::write(buf.as_mut_ptr().cast(), hdr);
+        // musl has explicit padding fields; initialize those too. The byte
+        // buffer need not have cmsghdr alignment, so use unaligned writes.
+        let mut hdr: libc::cmsghdr = std::mem::zeroed();
+        hdr.cmsg_len = cmsg_len as _;
+        hdr.cmsg_level = SOL_UDP;
+        hdr.cmsg_type = UDP_SEGMENT;
+        std::ptr::write_unaligned(buf.as_mut_ptr().cast(), hdr);
         let data_ptr = buf.as_mut_ptr().add(cmsg_data_offset());
-        std::ptr::write(data_ptr.cast::<u16>(), segment_size);
+        std::ptr::write_unaligned(data_ptr.cast::<u16>(), segment_size);
     }
     cmsg_align(cmsg_len)
 }
@@ -734,11 +735,12 @@ mod tests {
     #[test]
     fn parse_recv_cmsgs_stops_on_unalignable_cmsg_len() {
         let mut control = vec![0u8; std::mem::size_of::<libc::cmsghdr>()];
-        let hdr = libc::cmsghdr {
-            cmsg_len: usize::MAX as _,
-            cmsg_level: libc::IPPROTO_IP,
-            cmsg_type: libc::IP_TOS,
-        };
+        // SAFETY: zeroed integer fields (including musl padding) are valid.
+        #[allow(unsafe_code)]
+        let mut hdr: libc::cmsghdr = unsafe { std::mem::zeroed() };
+        hdr.cmsg_len = usize::MAX as _;
+        hdr.cmsg_level = libc::IPPROTO_IP;
+        hdr.cmsg_type = libc::IP_TOS;
         #[allow(unsafe_code)]
         unsafe {
             std::ptr::write_unaligned(control.as_mut_ptr().cast(), hdr);
@@ -749,5 +751,34 @@ mod tests {
         assert!(parsed.local_ip.is_none());
         assert!(parsed.tos.is_none());
         assert!(parsed.segment_size.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gso_cmsg_initializes_musl_padding_and_accepts_unaligned_storage() {
+        let mut storage = [0xa5; 40];
+        let control = &mut storage[1..33];
+        let length = build_gso_cmsg(control, 1200);
+        assert_eq!(length, cmsg_align(std::mem::size_of::<libc::cmsghdr>() + 2));
+        // SAFETY: build_gso_cmsg wrote a complete header and u16 into this
+        // buffer. Both pointers deliberately have arbitrary byte alignment.
+        #[allow(unsafe_code)]
+        let (header, segment) = unsafe {
+            (
+                std::ptr::read_unaligned::<libc::cmsghdr>(control.as_ptr().cast()),
+                std::ptr::read_unaligned::<u16>(control.as_ptr().add(cmsg_data_offset()).cast()),
+            )
+        };
+        assert_eq!(
+            header.cmsg_len as usize,
+            std::mem::size_of::<libc::cmsghdr>() + 2
+        );
+        assert_eq!(header.cmsg_level, SOL_UDP);
+        assert_eq!(header.cmsg_type, UDP_SEGMENT);
+        assert_eq!(segment, 1200);
+        #[cfg(all(target_env = "musl", target_pointer_width = "64"))]
+        assert_eq!(header.__pad1, 0);
+        assert_eq!(storage[0], 0xa5);
+        assert_eq!(storage[33], 0xa5);
     }
 }

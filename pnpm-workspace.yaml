@@ -24,6 +24,9 @@ catalog:
 
 # Source builds use local native artifacts, not previously published prebuilds.
 ignoredOptionalDependencies:
+  - "@currentspace/http3-darwin-x64"
+  - "@currentspace/http3-linux-arm64-musl"
+  - "@currentspace/http3-linux-x64-musl"
   - "@currentspace/http3-darwin-arm64"
   - "@currentspace/http3-linux-arm64-gnu"
   - "@currentspace/http3-linux-x64-gnu"

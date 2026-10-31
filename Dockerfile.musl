@@ -1,0 +1,38 @@
+# Build on the same architecture as the Alpine runtime. BoringSSL, bindgen,
+# ring and jemalloc all use the Alpine C/C++ toolchain rather than a GNU sysroot.
+ARG NODE_IMAGE=node:24.22.1-alpine3.24@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
+FROM ${NODE_IMAGE} AS build
+RUN apk add --no-cache build-base clang clang-dev llvm-dev cmake perl python3 \
+      linux-headers curl git openssl binutils
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain 1.99.1
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_BUILD_JOBS=4
+WORKDIR /workspace
+COPY . .
+# Both the addon and host build scripts must use the dynamic musl CRT:
+# bindgen needs dlopen(libclang). Do not pass --target for this native build,
+# because Cargo would then omit these rustflags from host build scripts.
+RUN mkdir -p .cargo && printf '%s\n' \
+      '[target.x86_64-unknown-linux-musl]' \
+      'rustflags = ["-C", "target-feature=-crt-static"]' \
+      '[target.aarch64-unknown-linux-musl]' \
+      'rustflags = ["-C", "target-feature=-crt-static"]' > .cargo/config.toml
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/workspace/target \
+    case "$(uname -m)" in \
+      aarch64) target=aarch64-unknown-linux-musl; arch=arm64 ;; \
+      x86_64) target=x86_64-unknown-linux-musl; arch=x64 ;; \
+      *) exit 1 ;; \
+    esac \
+    && python3 -m unittest discover -s scripts/tests -p test_musl_prebuild.py \
+    && cargo test --locked --release --lib --no-default-features --features os-runtime -- transport:: \
+    && cargo build --locked --release --lib \
+    && mkdir /artifacts \
+    && cp "target/release/libhttp3.so" "/artifacts/http3.linux-$arch-musl.node" \
+    && { printf '%s\n' "$target"; rustc --version; cargo --version; cc --version; cmake --version; apk info -v; } > "/artifacts/musl-build-$arch.txt" \
+    && python3 scripts/check-musl-prebuild.py "/artifacts/http3.linux-$arch-musl.node" \
+    && node -e 'const b = require(process.argv[1]); for (const k of ["NativeWorkerServer", "NativeWorkerClient", "NativeQuicServer", "NativeQuicClient"]) if (typeof b[k] !== "function") throw Error(k)' "/artifacts/http3.linux-$arch-musl.node"
+
+FROM scratch AS artifact
+COPY --from=build /artifacts/ /

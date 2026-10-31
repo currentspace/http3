@@ -1,73 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-
-VERSION=$(node -p "require('./package.json').version")
-echo "Building prebuilds for @currentspace/http3@$VERSION"
-echo ""
-
-# Detect current platform
-ARCH=$(uname -m)
-OS=$(uname -s)
-
-build_target() {
-  local target="$1"
-  local label="$2"
-  echo "--- Building $label ($target) ---"
-  npx napi build --release --platform --target "$target"
-  echo ""
-}
-
-# Always build for the current platform
-if [ "$OS" = "Darwin" ] && [ "$ARCH" = "arm64" ]; then
-  build_target "aarch64-apple-darwin" "macOS ARM64"
-elif [ "$OS" = "Darwin" ] && [ "$ARCH" = "x86_64" ]; then
-  build_target "x86_64-apple-darwin" "macOS x64"
-elif [ "$OS" = "Linux" ] && [ "$ARCH" = "aarch64" ]; then
-  build_target "aarch64-unknown-linux-gnu" "Linux ARM64"
-elif [ "$OS" = "Linux" ] && [ "$ARCH" = "x86_64" ]; then
-  build_target "x86_64-unknown-linux-gnu" "Linux x64"
+# Select the host sidecar from manifests, including libc. For release musl builds
+# use Dockerfile.musl so BoringSSL and the addon share a pinned Alpine sysroot.
+TARGET=$(node --input-type=module -e '
+import { hostPlatform } from "./scripts/native-packages.mjs";
+const { platform, arch, libc } = hostPlatform();
+const cpu = {x64: "x86_64", arm64: "aarch64"}[arch];
+if (!cpu || !["linux", "darwin"].includes(platform)) throw Error(`Unsupported native host: ${platform}/${arch}`);
+console.log(`${cpu}-${platform === "darwin" ? "apple-darwin" : `unknown-linux-${libc === "musl" ? "musl" : "gnu"}`}`);
+')
+if [[ "$TARGET" == *-musl ]]; then
+  # Omit --target: bindgen's host build script also needs dynamic musl/dlopen.
+  cargo --config 'build.rustflags=["-C", "target-feature=-crt-static"]' build --release --locked --lib
+  node --input-type=module -e '
+import { copyFileSync } from "node:fs";
+import { nativePackages, selectNativePackage } from "./scripts/native-packages.mjs";
+copyFileSync("target/release/libhttp3.so", selectNativePackage(nativePackages()).pkg.main);
+'
 else
-  echo "Unsupported platform: $OS/$ARCH"
-  exit 1
+  pnpm exec napi build --release --platform --target "$TARGET"
 fi
-
-# Cross-compile additional targets if toolchains are installed
-if [ "$OS" = "Darwin" ]; then
-  # On macOS, try to cross-compile for the other arch
-  if [ "$ARCH" = "arm64" ] && rustup target list --installed | grep -q x86_64-apple-darwin; then
-    build_target "x86_64-apple-darwin" "macOS x64 (cross)"
-  elif [ "$ARCH" = "x86_64" ] && rustup target list --installed | grep -q aarch64-apple-darwin; then
-    build_target "aarch64-apple-darwin" "macOS ARM64 (cross)"
+if [[ "$TARGET" == *-apple-darwin ]]; then
+  if [[ "$TARGET" == aarch64-* ]]; then
+    OTHER_TARGET=x86_64-apple-darwin
+  else
+    OTHER_TARGET=aarch64-apple-darwin
+  fi
+  if rustup target list --installed | grep -qx "$OTHER_TARGET"; then
+    pnpm exec napi build --release --platform --target "$OTHER_TARGET"
   fi
 fi
-
-# Build TypeScript
-echo "--- Building TypeScript ---"
-npx tsc
-echo ""
-
-# Copy prebuilds into platform-specific npm directories
-echo "--- Copying prebuilds to npm/ ---"
-for node_file in *.node; do
-  case "$node_file" in
-    http3.darwin-arm64.node)
-      cp "$node_file" npm/darwin-arm64/
-      echo "  -> npm/darwin-arm64/$node_file"
-      ;;
-    http3.linux-arm64-gnu.node)
-      cp "$node_file" npm/linux-arm64-gnu/
-      echo "  -> npm/linux-arm64-gnu/$node_file"
-      ;;
-  esac
-done
-
-echo ""
-echo "Prebuilds ready:"
-ls -lh *.node 2>/dev/null || echo "  (no .node files in root)"
-echo ""
-echo "Platform packages:"
-ls -lh npm/darwin-arm64/*.node 2>/dev/null || echo "  npm/darwin-arm64/ — no prebuild"
-ls -lh npm/linux-arm64-gnu/*.node 2>/dev/null || echo "  npm/linux-arm64-gnu/ — no prebuild"
+pnpm run patch:native-loader
+pnpm run build:dist
+node --input-type=module -e '
+import { copyFileSync, existsSync } from "node:fs";
+import { nativePackages } from "./scripts/native-packages.mjs";
+for (const { dir, pkg } of nativePackages()) {
+  if (existsSync(pkg.main)) {
+    copyFileSync(pkg.main, `npm/${dir}/${pkg.main}`);
+    console.log(`Prepared npm/${dir}/${pkg.main}`);
+  }
+}
+'

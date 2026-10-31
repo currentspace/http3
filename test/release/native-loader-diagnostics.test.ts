@@ -58,6 +58,7 @@ function failure(platform: string, arch: string, options?: Parameters<typeof loa
 describe('native loader diagnostics', () => {
   for (const [platform, arch, musl] of [
     ['darwin', 'x64', false], ['linux', 'x64', true], ['linux', 'arm64', true], ['win32', 'x64', false],
+    ['freebsd', 'x64', false], ['linux', 's390x', true],
   ] as const) {
     if (`${manifest.name}-${platform}-${arch}${platform === 'linux' ? (musl ? '-musl' : '-gnu') : ''}` in manifest.optionalDependencies) continue;
     it(`names unpublished target ${platform}-${arch}${musl ? '-musl' : ''}`, () => {
@@ -114,7 +115,7 @@ describe('native loader diagnostics', () => {
 
   it('accepts a local binary on an unpublished target', () => {
     const binding = {};
-    assert.equal(load('darwin', 'x64', { modules: { './http3.darwin-x64.node': binding } }), binding);
+    assert.equal(load('freebsd', 'x64', { modules: { './http3.freebsd-x64.node': binding } }), binding);
   });
 
   it('accepts a valid explicit native override', () => {

@@ -113,14 +113,20 @@ mod tests {
         hdr.msg_hdr.msg_name = (&mut addr as *mut libc::sockaddr_storage).cast();
         hdr.msg_hdr.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as _;
 
-        let rc =
-            unsafe { libc::recvmmsg(fd, &mut hdr, 1, libc::MSG_DONTWAIT, std::ptr::null_mut()) };
+        let rc = unsafe {
+            libc::recvmmsg(
+                fd,
+                &mut hdr,
+                1,
+                libc::MSG_DONTWAIT as _,
+                std::ptr::null_mut(),
+            )
+        };
         if rc > 0 { hdr.msg_len as usize } else { 0 }
     }
 
     fn io_uring_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::transport::io_uring::test_lock()
     }
 
     /// Probe whether `io_uring_setup(2)` is permitted in this environment.
@@ -427,7 +433,7 @@ mod tests {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = cmsg_buf.as_mut_ptr().cast();
-        msg.msg_controllen = cmsg_len;
+        msg.msg_controllen = cmsg_len as _;
 
         let rc = unsafe { libc::sendmsg(sender_fd, &msg, 0) };
         eprintln!(
@@ -534,7 +540,7 @@ mod tests {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = cmsg_buf.as_mut_ptr().cast();
-        msg.msg_controllen = cmsg_len;
+        msg.msg_controllen = cmsg_len as _;
 
         let rc = unsafe { libc::sendmsg(sender_fd, &msg, 0) };
         assert!(rc > 0, "sendmsg should succeed");
@@ -629,7 +635,7 @@ mod tests {
 
         let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[0], 100);
         tx_hdrs[0].msg_hdr.msg_control = tx_cmsg_bufs[0].as_mut_ptr().cast();
-        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
+        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len as _;
 
         eprintln!(
             "Vec layout: controllen={cmsg_len} cmsg_bytes={:02x?}",
@@ -735,11 +741,11 @@ mod tests {
 
         let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[0], 200);
         tx_hdrs[0].msg_hdr.msg_control = tx_cmsg_bufs[0].as_mut_ptr().cast();
-        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
+        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len as _;
 
         // Test hypothesis: sendmmsg with MSG_DONTWAIT vs sendmsg with 0
         let rc_mmsg =
-            unsafe { libc::sendmmsg(sender_fd, tx_hdrs.as_mut_ptr(), 1, libc::MSG_DONTWAIT) };
+            unsafe { libc::sendmmsg(sender_fd, tx_hdrs.as_mut_ptr(), 1, libc::MSG_DONTWAIT as _) };
         eprintln!(
             "gso_vec_layout_with_pktinfo_and_gro: sendmmsg(MSG_DONTWAIT) rc={rc_mmsg} msg_len={}",
             tx_hdrs[0].msg_len
@@ -849,7 +855,7 @@ mod tests {
 
         let cmsg_len = build_gso_cmsg(&mut tx_cmsg_bufs[0], batch.segment_size);
         tx_hdrs[0].msg_hdr.msg_control = tx_cmsg_bufs[0].as_mut_ptr().cast();
-        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len;
+        tx_hdrs[0].msg_hdr.msg_controllen = cmsg_len as _;
 
         let rc = unsafe { libc::sendmsg(sender_fd, &tx_hdrs[0].msg_hdr, 0) };
         eprintln!("group_for_gso_coalesced_send: sendmsg rc={rc}");
