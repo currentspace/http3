@@ -1,0 +1,15 @@
+run=41148612055
+head=107df8432b0861485c01e4b1b409e1923509c332
+job=124383936666 validate (x86_64-unknown-linux-gnu, node 26.12.1)
+conclusion=failure
+url=https://github.com/currentspace/http3/actions/runs/41148612055/job/124383936666
+2026-10-31T00:24:49.8412110Z ℹ tests 56
+2026-10-31T00:24:49.8413035Z ℹ pass 55
+2026-10-31T00:24:49.8413452Z ℹ fail 0
+2026-10-31T00:25:00.4760625Z ℹ tests 42
+2026-10-31T00:25:00.4761312Z ℹ pass 42
+2026-10-31T00:25:00.4761565Z ℹ fail 0
+2026-10-31T00:25:28.0783342Z AssertionError [ERR_ASSERTION]: consumer.cjs native failed: 
+2026-10-31T00:25:28.0785020Z H2/H3 wasm: {"requestedMode":"wasm","fallbackPolicy":"warn-and-fallback","selectedMode":"wasm","driver":"wasm","fallbackOccurred":false,"reasonCode":"requested-wasm","fastAttempt":null}
+2026-10-31T00:25:28.0787051Z Error: [h3:io|errno=22] IO error: Invalid argument (os error 22)
+2026-10-31T00:25:28.0832957Z ##[error]Process completed with exit code 1.

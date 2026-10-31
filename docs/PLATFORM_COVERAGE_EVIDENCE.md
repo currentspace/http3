@@ -18,7 +18,8 @@ bootstrap and Trusted Publisher setup before a release.
 
 ## Local evidence
 
-- Runtime branch `0dad84c`: isolated npm installs with `--omit=optional` pass
+- Stacked code candidate `107df8432b0861485c01e4b1b409e1923509c332`:
+  isolated npm installs with `--omit=optional` pass
   H2/H3 and raw QUIC auto fallback, strict-mode errors, facade runtime metadata,
   explicit WASM, and warning deduplication on macOS arm64 / Node 26.13.0.
 - The same candidate installed with its matching local native sidecar selects
@@ -26,15 +27,20 @@ bootstrap and Trusted Publisher setup before a release.
 - `scripts/smoke-install.mjs` validates root/subpath exports and installed
   declarations under `node`, `node16`, `nodenext`, and `bundler`, plus both
   `worker` and `workerd` conditions without Node types.
-- Combined runtime/write revision `831d135`: 552 Node core/runtime/interop/release
-  tests, 67 FFI tests, and 128 WASM tests passed with zero skips. Lint and both
-  typecheck targets passed. Content hashes cover transfers through 128 MiB,
+- The final rebuilt candidate passed 557 Node core/runtime/interop/release
+  tests, 67 FFI tests, and 133 WASM tests with zero failures or skips. Lint,
+  both typecheck targets, and actionlint passed. Content hashes cover transfers through 128 MiB,
   uploads, raw QUIC, paused concurrent responses, trailer ordering, and resets.
   Three paused/resumed 32 MiB responses peaked at 9,043,968 bytes of WASM memory
   from an initial 1,966,080 bytes.
-- Native-package revision `a812b37`: the macOS native addon was rebuilt;
-  228 Rust unit tests, the full Rust interop/mock suite, and 38 release tests
-  passed. Fresh packed fallback/native installs and declaration checks passed.
+- The final macOS native addon was rebuilt before those tests. All 228 Rust
+  unit tests and 72 Rust interop/mock tests passed. Both Clippy configurations
+  passed with existing warnings. Fresh packed fallback/native installs and
+  declaration checks passed, including 1,000 native portable GETs at concurrency
+  50. Fresh-process regressions prove cancellation and failed raw QUIC binds
+  release native callbacks without relying on forced process exit. UDP bind
+  failures release their sockets; raw QUIC supports restart from its close event.
+  [Final local results and artifact hashes](../.github/release-evidence/platform-coverage/final-local-validation.json).
 - Native Alpine arm64: 49 transport tests, 6 ABI checker tests, and actual addon
   load passed with Rust 1.99.1, GCC 15.2.0, CMake 4.2.3, Alpine 3.24.3, and
   BoringSSL 5.3.0. Clean installed consumers on Node 24.22.1 and 26.12.1 pass
@@ -45,6 +51,13 @@ bootstrap and Trusted Publisher setup before a release.
   artifacts. Missing native addons failed under auto; explicit WASM succeeded.
   A single WASM 32 MiB response reset with H3 code 268, while streamed data
   succeeded. Repro exit status alone was not treated as a pass.
+- The unchanged supplied scripts also pass against fresh installs of final
+  candidate `107df84`: auto serves H2/H3 with and without the native sidecar;
+  the missing-sidecar case emits exactly one fallback warning. Single-buffer
+  WASM downloads complete at 32 and 128 MiB, and the portable request-rate
+  script completes. Output assertions reject errors/timeouts despite the
+  scripts' unconditional zero exit status; the separate stream tests assert
+  content hashes. [Final repro output](../.github/release-evidence/platform-coverage/final-supplied-repros.json).
 
 The installed-consumer gate is `node scripts/platform-smoke.mjs`; the native
 variant takes `--native --sidecar <candidate.tgz>` and optionally
@@ -93,3 +106,12 @@ consumer gates, and skips publication. Future release dry runs still require an
 unused version and registry checks. Windows and Intel/macOS/Linux x64 results
 must come from actual hosted runs; local arm64 or emulated x64 results do not
 prove those targets.
+
+The added installed-native gate in [run 41148612055](https://github.com/currentspace/http3/actions/runs/41148612055)
+found a GNU Linux x64 fast-driver startup failure on both Node majors. Its other
+27 jobs passed and publication was skipped. The native error retained errno 22
+but did not identify the failing setup operation; the JavaScript selector also
+did not recognize the native structured error prefix. Follow-up changes must
+preserve setup stage/errno, return unavailable driver capabilities to the
+JavaScript policy selector, and qualify the unchanged auto/native assertions.
+This run is retained as a failure receipt, not final qualification.

@@ -1,0 +1,209 @@
+{
+  "source": "107df8432b0861485c01e4b1b409e1923509c332",
+  "platform": "darwin-arm64",
+  "node": "v26.13.0",
+  "preflight": [
+    {
+      "name": "build",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "build"
+      ],
+      "exit_code": 0,
+      "seconds": 11.342,
+      "counts": []
+    },
+    {
+      "name": "build-test",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "build:test"
+      ],
+      "exit_code": 0,
+      "seconds": 0.259,
+      "counts": []
+    },
+    {
+      "name": "typecheck",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "typecheck"
+      ],
+      "exit_code": 0,
+      "seconds": 0.491,
+      "counts": []
+    },
+    {
+      "name": "workerd",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "typecheck:workerd"
+      ],
+      "exit_code": 0,
+      "seconds": 0.132,
+      "counts": []
+    },
+    {
+      "name": "lint",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "lint"
+      ],
+      "exit_code": 0,
+      "seconds": 4.64,
+      "counts": []
+    },
+    {
+      "name": "actionlint",
+      "command": [
+        "actionlint"
+      ],
+      "exit_code": 0,
+      "seconds": 1.003,
+      "counts": []
+    }
+  ],
+  "tests": [
+    {
+      "name": "node",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "test:node"
+      ],
+      "exit_code": 0,
+      "seconds": 49.783,
+      "counts": [
+        "# tests 557",
+        "# pass 557",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0",
+        "# todo 0"
+      ]
+    },
+    {
+      "name": "ffi",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "test:ffi"
+      ],
+      "exit_code": 0,
+      "seconds": 6.902,
+      "counts": [
+        "\u2139 tests 67",
+        "\u2139 pass 67",
+        "\u2139 fail 0",
+        "\u2139 cancelled 0",
+        "\u2139 skipped 0",
+        "\u2139 todo 0"
+      ]
+    },
+    {
+      "name": "wasm",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "test:wasm"
+      ],
+      "exit_code": 0,
+      "seconds": 51.771,
+      "counts": [
+        "\u2139 tests 133",
+        "\u2139 pass 133",
+        "\u2139 fail 0",
+        "\u2139 cancelled 0",
+        "\u2139 skipped 0",
+        "\u2139 todo 0"
+      ]
+    },
+    {
+      "name": "rust-full",
+      "command": [
+        "pnpm",
+        "--config.verify-deps-before-run=false",
+        "run",
+        "test:rust:full"
+      ],
+      "exit_code": 0,
+      "seconds": 36.89,
+      "counts": [
+        "test result: ok. 228 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s",
+        "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.06s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s",
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.03s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.49s"
+      ]
+    },
+    {
+      "name": "packed-fallback",
+      "command": [
+        "node",
+        "scripts/platform-smoke.mjs"
+      ],
+      "exit_code": 0,
+      "seconds": 3.214,
+      "counts": []
+    },
+    {
+      "name": "packed-types",
+      "command": [
+        "node",
+        "scripts/smoke-install.mjs"
+      ],
+      "exit_code": 0,
+      "seconds": 7.615,
+      "counts": []
+    }
+  ],
+  "artifact_sha256": {
+    "http3.darwin-arm64.node": "106e3ef7e7bcdfab19fe7c740f9f1d76eb32fd80d915ae7ee3e3fbcec2d1eb16",
+    "dist/wasm/http3_client.wasm": "bba2d4f54f068d6bf0a87a3bc698470ac60c5d18fefca80cb7962d2195893af3"
+  },
+  "additional_checks": {
+    "cargo clippy --lib": {
+      "exit_code": 0,
+      "note": "Existing warnings remain."
+    },
+    "cargo clippy --tests --features bench-internals --no-default-features": {
+      "exit_code": 0,
+      "note": "Existing warnings remain."
+    },
+    "installed_native_consumer": {
+      "exit_code": 0,
+      "log": "final-macos-native-install.log",
+      "requests": 1000,
+      "concurrency": 50
+    },
+    "compiled_test_inventory": {
+      "source_files": 124,
+      "compiled_files": 124,
+      "stale_compiled_test_files": 0
+    }
+  }
+}

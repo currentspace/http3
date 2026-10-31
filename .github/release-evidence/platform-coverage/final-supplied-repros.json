@@ -1,0 +1,71 @@
+{
+  "source": "107df8432b0861485c01e4b1b409e1923509c332",
+  "platform": "darwin-arm64",
+  "node": "26.13.0",
+  "cases": [
+    {
+      "native_sidecar": false,
+      "command": [
+        "node",
+        "server-modes.cjs",
+        "auto"
+      ],
+      "exit_code": 0,
+      "stdout": "auto: listening; server.runtimeInfo {\"requestedMode\":\"auto\",\"fallbackPolicy\":\"warn-and-fallback\",\"selectedMode\":\"wasm\",\"driver\":\"wasm\",\"fallbackOccurred\":true,\"reasonCode\":\"native-binding-unavailable\",\"message\":\"Cannot load the native binding for darwin arm64: the optional platform package @currentspace/http3-darwin-arm64@0.9.9 is missing. Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. Keep the root and platform package versions aligned.\",\"warningCode\":\"WARN_HTTP3_RUNTIME_FALLBACK\",\"fastAttempt\":null,\"nativeBinding\":{\"platform\":\"darwin\",\"arch\":\"arm64\",\"libc\":null,\"packageName\":\"@currentspace/http3-darwin-arm64\",\"category\":\"missing\",\"message\":\"Cannot load the native binding for darwin arm64: the optional platform package @currentspace/http3-darwin-arm64@0.9.9 is missing. Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. Keep the root and platform package versions aligned.\"}}; server.transport.runtimeInfo {\"requestedMode\":\"auto\",\"fallbackPolicy\":\"warn-and-fallback\",\"selectedMode\":\"wasm\",\"driver\":\"wasm\",\"fallbackOccurred\":true,\"reasonCode\":\"native-binding-unavailable\",\"message\":\"Cannot load the native binding for darwin arm64: the optional platform package @currentspace/http3-darwin-arm64@0.9.9 is missing. Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. Keep the root and platform package versions aligned.\",\"warningCode\":\"WARN_HTTP3_RUNTIME_FALLBACK\",\"fastAttempt\":null,\"nativeBinding\":{\"platform\":\"darwin\",\"arch\":\"arm64\",\"libc\":null,\"packageName\":\"@currentspace/http3-darwin-arm64\",\"category\":\"missing\",\"message\":\"Cannot load the native binding for darwin arm64: the optional platform package @currentspace/http3-darwin-arm64@0.9.9 is missing. Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. Keep the root and platform package versions aligned.\"}}\nauto: h2 -> ok 2.0\nauto: h3 -> ok 3.0\n",
+      "stderr": "(node:31833) [WARN_HTTP3_RUNTIME_FALLBACK] Warning: @currentspace/http3 runtime fallback selected wasm (wasm): Cannot load the native binding for darwin arm64: the optional platform package @currentspace/http3-darwin-arm64@0.9.9 is missing. Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. Keep the root and platform package versions aligned.\n{\"requestedMode\":\"auto\",\"fallbackPolicy\":\"warn-and-fallback\",\"selectedMode\":\"wasm\",\"driver\":\"wasm\",\"fallbackOccurred\":true,\"reasonCode\":\"native-binding-unavailable\",\"message\":\"Cannot load the native binding for darwin arm64: the optional platform package @currentspace/http3-darwin-arm64@0.9.9 is missing. Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. Keep the root and platform package versions aligned.\",\"warningCode\":\"WARN_HTTP3_RUNTIME_FALLBACK\",\"fastAttempt\":null,\"nativeBinding\":{\"platform\":\"darwin\",\"arch\":\"arm64\",\"libc\":null,\"packageName\":\"@currentspace/http3-darwin-arm64\",\"category\":\"missing\",\"message\":\"Cannot load the native binding for darwin arm64: the optional platform package @currentspace/http3-darwin-arm64@0.9.9 is missing. Reinstall with optional dependencies enabled (npm install --include=optional), or install that exact package version explicitly. Keep the root and platform package versions aligned.\"}}\n(Use `node --trace-warnings ...` to show where the warning was created)\n",
+      "assertions_passed": true
+    },
+    {
+      "native_sidecar": true,
+      "command": [
+        "node",
+        "server-modes.cjs",
+        "auto"
+      ],
+      "exit_code": 0,
+      "stdout": "auto: listening; server.runtimeInfo {\"requestedMode\":\"auto\",\"fallbackPolicy\":\"warn-and-fallback\",\"selectedMode\":\"fast\",\"driver\":\"kqueue\",\"fallbackOccurred\":false,\"reasonCode\":\"auto-selected-fast\",\"fastAttempt\":null}; server.transport.runtimeInfo {\"requestedMode\":\"auto\",\"fallbackPolicy\":\"warn-and-fallback\",\"selectedMode\":\"fast\",\"driver\":\"kqueue\",\"fallbackOccurred\":false,\"reasonCode\":\"auto-selected-fast\",\"fastAttempt\":null}\nauto: h2 -> ok 2.0\nauto: h3 -> ok 3.0\n",
+      "stderr": "",
+      "assertions_passed": true
+    },
+    {
+      "native_sidecar": true,
+      "command": [
+        "node",
+        "throughput.cjs",
+        "wasm",
+        "32",
+        "buffer"
+      ],
+      "exit_code": 0,
+      "stdout": "wasm buffer 32 MiB: ok, 99 MiB/s\n",
+      "stderr": "",
+      "assertions_passed": true
+    },
+    {
+      "native_sidecar": true,
+      "command": [
+        "node",
+        "throughput.cjs",
+        "wasm",
+        "128",
+        "buffer"
+      ],
+      "exit_code": 0,
+      "stdout": "wasm buffer 128 MiB: ok, 101 MiB/s\n",
+      "stderr": "",
+      "assertions_passed": true
+    },
+    {
+      "native_sidecar": true,
+      "command": [
+        "node",
+        "request-rate.cjs",
+        "portable"
+      ],
+      "exit_code": 0,
+      "stdout": "portable: 9820 req/s, rss 143 MiB\n",
+      "stderr": "",
+      "assertions_passed": true
+    }
+  ]
+}
