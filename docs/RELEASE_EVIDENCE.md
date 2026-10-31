@@ -3,33 +3,97 @@
 `CHANGELOG.md` supplies public release notes. This ledger records validation
 and remaining qualification work for each release candidate.
 
-## 1.0.0 candidate
+## 1.0.0
+
+- Published the root and all six native sidecars to npm as `1.0.0` from
+  `9655393063f8639d5a8c312850d06e4fcba1f1eb` through
+  [Release run 41233850938, attempt 2](https://github.com/currentspace/http3/actions/runs/41233850938/attempts/2).
+  All seven packages report `latest: 1.0.0`; the existing `canary` tags are
+  unchanged. [GitHub release v1.0.0](https://github.com/currentspace/http3/releases/tag/v1.0.0)
+  was published on October 31, 2026 at 20:04:02 UTC. Its annotated tag resolves
+  to the exact published source commit above.
+- The publishing run has 30 successful latest job results: 28 successful jobs
+  were carried forward from attempt 1, followed by the successful Intel macOS
+  Node 24 retry and publisher. The same seven native/WASM build artifact IDs,
+  archive digests and extracted bytes were reused and independently reverified.
+  This was a targeted retry, not a second execution of all 30 jobs.
+- Attempt 1's Intel Node 24 runtime-test step stopped making observable
+  progress and was cancelled after exceeding the project's five-minute
+  whole-suite watchdog duration. The workflow's direct test command had only
+  a per-test timeout. GitHub never exposed its job/step log, and the run-log
+  archive omitted that job; its only annotation records cancellation. No
+  final test output or cleanup result was available, so the cause remains
+  unknown. At the unchanged source, the retry passed 73 runtime tests in
+  27.18 seconds and 44 streaming/cancellation tests in 16.62 seconds, with no
+  failures, skips or cancellations. Packed installation and native H2/H3/raw
+  QUIC plus 1,000 portable GETs at concurrency 50 also passed. The publisher
+  did not execute in attempt 1.
+- Independent anonymous downloads verified all seven registry tarballs
+  against their SHA-512 integrity and SHA-1 metadata, package layouts,
+  exports/declarations, exact optional-dependency versions, and sidecar
+  OS/CPU/libc metadata. All six native binaries and the bundled WASM core
+  match the actual publishing run's artifacts byte for byte. Separately,
+  `npm audit signatures --include-attestations` cryptographically verified
+  all seven packages with no invalid or missing signatures; provenance
+  identifies the publishing source and workflow run/attempt. These are
+  distinct checks from the publisher's successful upload/tag readbacks.
+- Fresh registry installations passed 13 type/export/CLI checks on each of
+  Node 24 and 26. Six actual registry consumer runs passed: on each Node major,
+  single 32/128 MiB WASM responses passed exact byte counts and SHA-256 checks
+  with natural exit; standalone Nest passed 28 tests; and the combined
+  Next/Express/Nest application passed 29 development and 29 production tests.
+  The copied Nest fixture initially expected obsolete `Alt-Svc` `ma=60`;
+  its assertion was corrected to the documented `ma=86400` contract without
+  changing the published library or lockfile. Initial failures, the fixture
+  diff, and hashes are retained alongside the successful runs.
+- The separate clean-registry
+  [qualification run 41236654798](https://github.com/currentspace/http3/actions/runs/41236654798)
+  passed all 29 jobs: 28 consumer cells and the input validator. Independent
+  inspection verified all 28 uploaded receipts: seven targets × two Node
+  majors × two install profiles, with 12 native and 16 WASM outcomes. Registry
+  URLs/integrity and every installed-file hash/size match the independently
+  downloaded 1.0.0 tarballs. Actual H2/H3/raw QUIC output and native 1,000-GET
+  results passed; artifact archive hashes match GitHub's digests.
+- Available sanitized logs, artifact/download manifests, tarball audits, signature
+  results and consumer receipts are retained under
+  `artifacts/releases/1.0.0/`. Original cancelled and failed attempts remain
+  part of that history. The public
+  [release evidence asset](https://github.com/currentspace/http3/releases/download/v1.0.0/release-evidence.json)
+  records the source, runs, artifact IDs/hashes and result summaries; its
+  downloaded SHA-256 is
+  `e287f3cfa1e989f2860dec5cf7e7f59073285be5dd081e83d6d5f27a3894847a`.
 
 - Merged PRs #24, #25, #26 and #27 in order using merge commits. Main at
   `bcc5a1e84b59fec608c58682c058e13432f4b25c` has the exact tree of qualified
   stack head `f4b39f85f7463b1e9750ec71e735df220594cf09`.
 - Automatic workflows were disabled only for the merge batch, then restored
   to their previous states before versioned release preparation.
-- Root, Rust and all six native sidecars are aligned to 1.0.0. The new musl
-  x64/arm64 and Intel macOS packages require bootstrap and Trusted Publisher
-  setup before stable publication. This candidate entry does not claim that
-  1.0.0 has been published.
+- Root, Rust and all six native sidecars are aligned to 1.0.0. Bootstrap and
+  Trusted Publisher setup for musl x64/arm64 and Intel macOS were completed
+  before the stable publication. The original 13 workflow states and enabled
+  Actions permissions were restored; five added workflows bring the total
+  to 18 active workflows.
 - Platform implementation qualification is recorded in
   [PLATFORM_COVERAGE_EVIDENCE.md](./PLATFORM_COVERAGE_EVIDENCE.md): hosted run
-  `41151580339` passed 29 jobs with publication skipped. A normal versioned
-  release dry run, full hosted checks, and registry readbacks are required
-  separately for 1.0.0.
+  `41151580339` passed 29 jobs with publication skipped. The later normal
+  versioned [release dry run 41222699801](https://github.com/currentspace/http3/actions/runs/41222699801)
+  at `1dfa0ef9bffa21d1fff7e07740d135040bd80b9c` passed all 30 jobs and seven
+  package dry runs. The only change from that source to published `9655393`
+  pins npm in the one-time bootstrap workflow; published source, release
+  workflow and tests are identical. All required hosted checks passed at
+  `9655393` before stable publication.
 - The user explicitly approved retaining the documented manual Safari
   limitation for 1.0.0. Manual Safari and Windows browser trust remain
   unqualified; neither automated WebKit nor Windows Node/WASM runtime checks
   are presented as those browser qualifications.
-- Stable publication updates `latest` only; `canary` remains independent.
+- Stable publication updated `latest` only; `canary` remains independent.
 - The versioned local gate passed 17 checks: lint, TypeScript/workerd types,
   Node-API boundary, both Clippy configurations, Rust unit/loom/mock suites,
   native/JS rebuild, 606 Node tests with WASM integration enabled, 67 FFI tests,
   concurrency/load gates, and packed installation/declarations. The separate
-  WASM suite passed 135 tests. Local browser trust and fresh WASM compilation
-  remain hosted gates; the local WASM checks used the existing core artifact.
+  WASM suite passed 135 tests. Those local WASM checks used the existing core
+  artifact; the subsequent hosted release built and qualified a fresh core.
+  Browser trust qualification retains the limitations above.
 - Single 32/128 MiB WASM facade responses from fresh packed 1.0.0 consumers
   passed byte counts and SHA-256 checks on Node 24 and 26 with natural exit.
 - Bootstrap dry runs for all three new sidecars passed. Preparation also fixed
@@ -57,17 +121,32 @@ and remaining qualification work for each release candidate.
   Both complete Docker FFI suites pass 67 tests and exit naturally on Node 24/26,
   with a guard proving the former forced-exit hooks were not needed.
 - The older `4c296bd` release dry run failed an Intel Node 26 backpressure
-  fixture when its synchronous second request encountered temporary QUIC
-  congestion capacity exhaustion. The same test passed at `9510929`; the
-  documented asynchronous admission API is the appropriate fixture contract.
+  fixture when its synchronous second request encountered request-admission
+  blocking. The underlying cause was not established; congestion capacity
+  exhaustion was not proven. The same test passed at `9510929`; the documented
+  asynchronous admission API is the appropriate fixture contract.
   The correction retains the concurrent response before upload consumption,
   paused-buffer bound and complete upload byte/hash assertions.
 - Intel macOS and Linux arm64 musl bootstrap versions `1.0.0-bootstrap.0`
   were accepted through interactive local publication before publication was
   restricted to GitHub Actions. Their registry tarball checksums and native
   bytes match the prepared qualification artifacts. Npm assigned both
-  `bootstrap` and `latest` to those first versions. Stable 1.0.0 remains
-  unpublished; subsequent publication must run on GitHub-hosted runners.
+  `bootstrap` and `latest` to those first versions. All subsequent publication,
+  including stable 1.0.0, ran on GitHub-hosted runners.
+- The Linux x64 musl bootstrap was published by
+  [GitHub run 41232925869](https://github.com/currentspace/http3/actions/runs/41232925869).
+  That workflow remains failed because its post-publication tarball comparison
+  used different metadata-file modes: the controller's private umask produced
+  `0600`, while the publishing helper preserved `0644` for the manifest and
+  README. Repacking with those mode differences reproduced both tarball
+  hashes exactly. Independent registry integrity, complete payload/native-byte
+  comparison, and cryptographic signature/provenance checks passed. This was
+  a false failure of the tarball-mode comparison after successful publication;
+  the version was neither republished nor silently treated as a green workflow.
+  Earlier preparation failed before authentication because the bundled npm
+  differed from the required version; npm 12.2.1 was then pinned explicitly.
+  Two login attempts expired without authentication or publication, with
+  credential cleanup recorded. These failures remain in the release history.
 
 ## 0.9.9
 

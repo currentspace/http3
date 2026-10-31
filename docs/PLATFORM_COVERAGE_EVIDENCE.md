@@ -1,7 +1,9 @@
 # Platform coverage implementation evidence
 
-Date: 2026-10-30. This records candidate implementation checks, not npm
-publication or production qualification. Source requirements are in
+Updated: 2026-10-31. The implementation is merged and published to npm as
+1.0.0 from `9655393063f8639d5a8c312850d06e4fcba1f1eb`. This ledger distinguishes
+the earlier candidate checks from publication and registry qualification.
+Source requirements are in
 [PLATFORM_COVERAGE_PLAN.md](./PLATFORM_COVERAGE_PLAN.md).
 
 ## Review sequence
@@ -11,10 +13,10 @@ publication or production qualification. Source requirements are in
 3. [Native musl/Intel packages, ABI compatibility, and release gates](https://github.com/currentspace/http3/pull/26).
 4. [Runtime/platform documentation and consolidated validation evidence](https://github.com/currentspace/http3/pull/27).
 
-The PRs form a stack and should be reviewed/merged in that order. Root and
-sidecar versions remain 0.9.9 during review; no new npm package is implied by
-the candidate manifests. New sidecars still require their first-publication
-bootstrap and Trusted Publisher setup before a release.
+The PRs were merged in that order. Root, Rust and all six native sidecars were
+then aligned to 1.0.0; bootstrap and Trusted Publisher setup for the three new
+sidecars were completed before stable publication. The checks below at 0.9.9
+remain historical candidate evidence, separate from the 1.0.0 results.
 
 ## Local evidence
 
@@ -136,7 +138,7 @@ releases its memory mapping. Only recognized capability failures permit retry;
 unrelated I/O and configuration errors remain errors.
 This run is retained as a failure receipt, not final qualification.
 
-[Final run 41151580339](https://github.com/currentspace/http3/actions/runs/41151580339)
+[Implementation qualification 41151580339](https://github.com/currentspace/http3/actions/runs/41151580339)
 passed at `74a7c977db89b79c0fb71630e55b13cbdfd7e261`: **29 successful jobs,
 publication skipped**. It builds all six native targets and the shared WASM
 artifact, runs ten no-addon platform/Node combinations, four Alpine combinations
@@ -164,8 +166,69 @@ ring creation and rejects only buffer-ring registration with `EINVAL`, proving
 the same policy behavior on Node 24/26.
 [Fault-test attribution and receipts](../.github/release-evidence/platform-coverage/hosted-native/pbuf-fault/summary.json).
 
-The combined candidate is qualified; intermediate PR heads did not each run
-automatic CI. The final follow-up contains only test-fixture cleanup and
-documentation/evidence. Merging, selecting an unused release version, first
-publication of the three new sidecars, Trusted Publisher setup, and clean
-registry-install verification remain separate release work.
+Intermediate PR heads did not each run automatic CI. The combined candidate
+was qualified before merge, and versioned hosted checks ran after Actions was
+restored. The original enabled permissions and 13 workflow states were restored;
+the five newly added workflows bring the current total to 18 active workflows.
+
+## Published 1.0.0 evidence
+
+[Release 41233850938, attempt 2](https://github.com/currentspace/http3/actions/runs/41233850938/attempts/2)
+published all seven npm packages from `9655393063f8639d5a8c312850d06e4fcba1f1eb`.
+All 30 latest job results passed: 28 successful jobs were inherited from attempt
+1, and the Intel Node 24 validator and publisher ran successfully in attempt 2.
+The seven build artifact IDs, archive hashes, and native/WASM bytes were
+unchanged across that targeted retry. All seven `latest` tags now identify
+1.0.0; existing `canary` tags are unchanged.
+
+Attempt 1's Intel Node 24 runtime step stalled and was cancelled before the
+publisher executed. GitHub supplied neither its job/step log nor an entry in
+the run-log archive; its annotation only records the cancellation. The cause
+and final test/cleanup state remain unknown. At the unchanged source, the retry
+passed 73 runtime tests in 27.18 seconds, 44 streaming/cancellation tests in
+16.62 seconds, packed installation, and the installed native H2/H3/raw QUIC
+and 1,000 portable GET scenario. This establishes a successful retry without
+claiming a diagnosed cause for the original stall.
+
+Independent anonymous registry downloads passed SHA-512/SHA-1 integrity,
+package-layout/export/declaration checks, exact optional-version pins, and
+sidecar platform metadata checks for all seven packages. All six native
+binaries and the WASM core match the actual publishing artifacts byte for
+byte. A separate cryptographic signature/attestation audit verified all seven
+packages with no invalid or missing signatures, including provenance for the
+publishing source and workflow attempt.
+
+Fresh registry consumers passed 13 type/export/CLI checks per Node major and
+single 32/128 MiB WASM byte/hash checks on Node 24 and 26. On each major,
+standalone Nest passed 28 tests and the combined Next/Express/Nest application
+passed 29 development and 29 production tests. The copied Nest assertion
+initially expected obsolete `Alt-Svc` `ma=60` and was corrected to the documented
+`ma=86400` contract; the published library and lockfile were unchanged. The
+failed runs, fixture diff and hashes are retained with the successful results.
+
+The separate [registry consumer matrix](https://github.com/currentspace/http3/actions/runs/41236654798)
+passed all 29 jobs: an input validator and 28 cells covering seven targets,
+two Node majors and two install profiles. Independent receipt inspection
+verified all 12 native and 16 WASM outcomes, registry 1.0.0/source `9655393`,
+registry URLs/integrity, and every installed-file hash and size against the
+independently downloaded tarballs. Receipts include actual H2/H3/raw QUIC output
+and the native 1,000-GET scenario; downloaded artifact archive hashes match
+GitHub's digests.
+
+The x64 musl bootstrap was successfully published from GitHub Actions even
+though its workflow later failed a tarball comparison: manifest/README file
+modes differed between the private preparation directory and the publishing
+helper. Repacking reproduced both hashes; independent complete-payload,
+native-byte, integrity and cryptographic provenance audits passed. That failed
+workflow and the earlier bootstrap, fixture and qualification failures remain
+recorded in [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md#100). Available sanitized
+receipts are retained under `artifacts/releases/1.0.0/`.
+
+The [v1.0.0 GitHub release](https://github.com/currentspace/http3/releases/tag/v1.0.0)
+is published, with its annotated tag resolving to the exact npm source commit.
+Its [public evidence asset](https://github.com/currentspace/http3/releases/download/v1.0.0/release-evidence.json)
+records the run/artifact identities, hashes and qualification summaries.
+Manual Safari remains unqualified under the user's explicitly approved
+documented release limitation.
+Windows browser trust also remains unqualified. Automated WebKit and Windows
+Node/WASM results do not establish those browser qualifications.

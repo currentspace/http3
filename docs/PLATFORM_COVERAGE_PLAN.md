@@ -1,8 +1,13 @@
 # Platform coverage and automatic WASM fallback
 
-Date: 2026-10-30. Status: implemented and qualified in a stacked PR series;
-merge and npm publication remain separate release steps.
-Qualification results and remaining release steps are tracked in
+Updated: 2026-10-31. Status: implemented, merged through PRs #24–27, and
+published to npm as 1.0.0 from `9655393063f8639d5a8c312850d06e4fcba1f1eb`
+in [Release run 41233850938, attempt 2](https://github.com/currentspace/http3/actions/runs/41233850938/attempts/2).
+All 30 latest job results passed, including 28 inherited successes. All seven
+registry tarball/artifact and cryptographic signature audits passed, followed
+by the 28-cell registry consumer matrix and independent receipt verification.
+The [v1.0.0 release and annotated tag](https://github.com/currentspace/http3/releases/tag/v1.0.0)
+identify that exact published source. Detailed results are tracked in
 [PLATFORM_COVERAGE_EVIDENCE.md](./PLATFORM_COVERAGE_EVIDENCE.md).
 
 Source request: `/tmp/http3-platforms/README.md`, with consumer repros in
@@ -21,7 +26,7 @@ and a second napi-rs WASI runtime are outside this implementation. Prefer a
 separate `darwin-x64` sidecar over changing the existing arm64 distribution.
 Other Node platforms may use WASM, but list only tested platforms as qualified.
 
-## What is already present
+## Baseline before implementation
 
 - `966c611` already replaces the misleading npm error with platform/libc-aware
   diagnostics in `bin/native-binding-error.cjs`, preserves causes, and patches
@@ -195,6 +200,11 @@ Add `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and
   discovers `npm/*` and publishes sidecars before the root. Gate the root release
   on complete matching sidecars and clean installed-package verification.
 
+All three sidecars were bootstrapped and configured for Trusted Publishing
+before the 1.0.0 release. Their 1.0.0 binaries were built and qualified on the
+actual target architectures. Bootstrap failures and independent readbacks are
+retained in [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md#100).
+
 The loader can retain generated branches for other targets: route final failure
 through the structured diagnostics/selection boundary. Do not build or publish
 the generated loader's separate napi-rs WASI path.
@@ -246,19 +256,20 @@ pre-change native setup; keep performance evidence separate from correctness.
 
 ## 5. Documentation and delivery sequence
 
-Update `README.md`, `docs/RUNTIME_MODES.md`, `docs/SUPPORT_MATRIX.md`,
+The implementation updated `README.md`, `docs/RUNTIME_MODES.md`, `docs/SUPPORT_MATRIX.md`,
 `docs/WASM_RUNTIME.md`, `docs/NODE_SERVER.md`, `docs/ERROR_HANDLING.md`, and
-`docs/RELEASE_RUNBOOK.md`. Several guides still claim WASM is client-only or
-always opt-in despite existing server support. Include all four modes, the
-selection table, tested platform coverage, strict-policy examples, facade
-logging, and remaining WASM capability/memory limits.
+`docs/RELEASE_RUNBOOK.md`. These guides describe all four modes, the selection
+table, tested platform coverage, strict-policy examples, facade logging, and
+remaining WASM capability/memory limits, replacing the former client-only or
+always-opt-in descriptions.
 
-Attribute the spec's roughly half request rate and one-tenth bulk throughput
-to its 0.9.9 macOS-arm64 measurements, including workload and date. They are
-context for choosing a runtime, not portable performance guarantees. Add fresh
-post-change measurements before release.
+The spec's roughly half request rate and one-tenth bulk throughput refer to
+its 0.9.9 macOS-arm64 measurements. Those figures and the subsequent interleaved
+baseline/candidate measurements are retained in
+[the evidence ledger](./PLATFORM_COVERAGE_EVIDENCE.md#performance-baseline), with
+workload and host context; they are not portable performance guarantees.
 
-Suggested review units, each including its focused tests and documentation:
+The following review units were merged as PRs #24–27, with their tests and documentation:
 
 1. Structured binding selection, async H3 fallback, and facade observability.
 2. Bounded WASM writes and completion/backpressure regressions; can develop in
@@ -267,11 +278,15 @@ Suggested review units, each including its focused tests and documentation:
 4. Cross-platform installed-consumer qualification, final documentation matrix,
    and release evidence. Windows WASM is a required fallback qualification lane.
 
-Runtime fallback can ship before the new sidecars once units 1/2 and their
-platform gates pass; musl and Intel packages can follow. Publishing remains a
-separate release action. After publication, repeat clean registry installs with
-and without optional dependencies before declaring the consumer's launcher
-workaround removable. Publication is separate from the implementation PR series.
+Runtime fallback, bounded writes, and all six native sidecars shipped together
+in 1.0.0. Packed qualification and registry byte/signature audits passed.
+Clean registry installs with and without optional dependencies passed the
+28-cell [registry matrix](https://github.com/currentspace/http3/actions/runs/41236654798),
+and every installed-file receipt was independently compared with the published
+tarballs. Manual Safari remains unqualified under the user's explicitly
+approved documented release limitation. Windows browser trust also remains
+unqualified. Automated WebKit and Windows Node/WASM checks do not establish
+those results.
 
 Runner reference: [GitHub-hosted runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 Musl toolchain reference: [napi-rs cross-building and native dependencies](https://napi.rs/docs/cross-build).
