@@ -61,6 +61,8 @@ export interface WasmQuicClientEventLoopOptions extends CommonWasmClientOptions 
  * `implements` the imported interface.
  */
 export class WasmQuicClientEventLoop {
+  /** Bound Node stream staging and owned payload copies within the WASM heap. */
+  readonly maxStreamSendBytes = 64 * 1024;
   private readonly core: Http3WasmCore;
   private readonly opts: WasmQuicClientEventLoopOptions;
   private readonly dispatch: (events: WasmEvent[]) => void;

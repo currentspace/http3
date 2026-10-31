@@ -38,6 +38,59 @@ export interface BackpressureState {
 
 export type NativeWriteCallback = (error?: Error | null) => void;
 
+/**
+ * One large Node write, retained in JS while bounded slices enter the transport.
+ * The send callback means admission, not peer delivery. A full event-loop turn
+ * between slices lets deferred BLOCKED/DRAIN events and UDP input run before
+ * asking the stream's existing backpressure machinery to admit more bytes.
+ * @internal
+ */
+export class BoundedStreamWrite {
+  private offset = 0;
+  private continuation: NodeJS.Immediate | undefined;
+
+  constructor(
+    private body: Buffer | null,
+    private readonly limit: number,
+    private readonly fin: boolean,
+    private send: ((data: Buffer, fin: boolean, callback: NativeWriteCallback) => void) | null,
+    private callback: NativeWriteCallback | null,
+  ) {
+    this.schedule();
+  }
+
+  cancel(error: Error): void {
+    this.complete(error);
+  }
+
+  private complete(error?: Error | null): void {
+    const callback = this.callback;
+    if (!callback) return;
+    clearImmediate(this.continuation);
+    this.continuation = undefined;
+    this.body = null;
+    this.send = null;
+    this.callback = null;
+    callback(error);
+  }
+
+  private schedule(): void {
+    this.continuation = setImmediate(() => {
+      this.continuation = undefined;
+      const body = this.body;
+      if (!body || !this.send) return;
+      const end = Math.min(this.offset + this.limit, body.length);
+      this.send(body.subarray(this.offset, end), this.fin && end === body.length, error => {
+        if (!this.callback) return; // A stream close already cancelled this write.
+        if (error) { this.complete(error); return; }
+        this.offset = end;
+        if (end === body.length) this.complete();
+        else this.schedule();
+      });
+    });
+  }
+}
+
 export interface NativeWriteWindow {
   highWaterMark: number;
   admittedBytes: number;

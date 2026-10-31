@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { setImmediate as nextTurn, setTimeout as delay } from 'node:timers/promises';
 import { connect as connectH2 } from 'node:http2';
+import { createServer as createTcpServer } from 'node:net';
+import { createSocket } from 'node:dgram';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Http3SecureServer } from '../../lib/server.js';
 import { ServerHttp3Stream } from '../../lib/stream.js';
-import { connectAsync } from '../../lib/client.js';
+import { connectAsync, type ConnectOptions } from '../../lib/client.js';
 import type { NativeEvent, ServerEventLoopLike } from '../../lib/event-loop.js';
 import { generateTestCerts } from '../support/generate-certs.js';
 
@@ -160,9 +162,23 @@ const variants = process.env.HTTP3_WASM === '1'
   ? ['h2', 'native-h3', 'wasm-h3'] as const : ['h2', 'native-h3'] as const;
 type Variant = 'h2' | 'native-h3' | 'wasm-h3';
 
-async function fixture(t: TestContext, variant: Variant, handler: (stream: ServerHttp3Stream) => void) {
+async function fixture(
+  t: TestContext, variant: Variant, handler: (stream: ServerHttp3Stream) => void,
+  options: { server?: Http3SecureServer; dnsLookup?: ConnectOptions['dnsLookup'] } = {},
+) {
   const runtimeMode = variant === 'wasm-h3' ? 'wasm' : 'portable';
-  const server = new Http3SecureServer({ ...tls, runtimeMode });
+  const server = options.server ?? new Http3SecureServer({ ...tls, runtimeMode });
+  let session: ReturnType<typeof connectH2> | Awaited<ReturnType<typeof connectAsync>> | undefined;
+  // Startup can fail before connectAsync returns. Always release the listener,
+  // and let test cancellation abort a client that has not completed its handshake.
+  t.after(async () => {
+    try {
+      if (variant === 'h2') (session as ReturnType<typeof connectH2> | undefined)?.destroy();
+      else await session?.close();
+    } finally {
+      await server.close();
+    }
+  });
   server.on('stream', (stream, headers) => {
     stream.on('error', () => {});
     if (headers[':path'] === '/probe') { stream.respond({ ':status': '200' }); stream.end('ok'); return; }
@@ -170,24 +186,53 @@ async function fixture(t: TestContext, variant: Variant, handler: (stream: Serve
   });
   const listening = once(server, 'listening'); server.listen(0, '::'); await listening;
   const origin = `https://localhost:${server.address()!.port}`;
-  const session = variant === 'h2' ? connectH2(origin, { rejectUnauthorized: false })
-    : await connectAsync(origin, { rejectUnauthorized: false, runtimeMode });
-  t.after(async () => {
-    if (variant === 'h2') (session as ReturnType<typeof connectH2>).destroy();
-    else await session.close();
-    await server.close();
-  });
+  session = variant === 'h2' ? connectH2(origin, { rejectUnauthorized: false })
+    : await connectAsync(origin, { rejectUnauthorized: false, runtimeMode, signal: t.signal, dnsLookup: options.dnsLookup });
+  const connectedSession = session;
   const tracked = () => {
     const state = server as unknown as { _streams: Map<string, unknown>; _h2SessionStreams: Map<unknown, Set<unknown>> };
     return state._streams.size + [...state._h2SessionStreams.values()].reduce((n, streams) => n + streams.size, 0);
   };
   const probe = async () => {
-    const request = session.request({ ':path': '/probe' }, { endStream: true });
+    const request = connectedSession.request({ ':path': '/probe' }, { endStream: true });
     let body = ''; for await (const data of request) body += String(data);
     assert.equal(body, 'ok', 'cancellation must leave the connection usable');
   };
-  return { session, tracked, probe };
+  return { session: connectedSession, tracked, probe };
 }
+
+test('lifecycle fixture cancellation during connection releases both listeners', async t => {
+  const server = new Http3SecureServer({ ...tls, runtimeMode: 'portable' });
+  t.after(() => server.close());
+  let connecting!: ReturnType<typeof fixture>;
+  let port = 0;
+  let lookupStarted!: () => void;
+  const lookup = new Promise<void>(resolve => { lookupStarted = resolve; });
+  await t.test('cancel an unfinished connection when its test completes', async child => {
+    connecting = fixture(child, 'native-h3', () => assert.fail('no request should be created'), {
+      server,
+      dnsLookup: async () => {
+        port = server.address()!.port;
+        lookupStarted();
+        return new Promise(() => {});
+      },
+    });
+    // Observe rejection immediately; the outer test verifies its actual cause.
+    void connecting.catch(() => {});
+    await lookup;
+  });
+  await assert.rejects(connecting, { name: 'AbortError' });
+  assert.equal(server.address(), null);
+  assert.ok(port > 0);
+  const udp = createSocket('udp6');
+  t.after(() => { udp.close(); });
+  const udpListening = once(udp, 'listening');
+  udp.bind(port, '::'); await udpListening;
+  const tcp = createTcpServer();
+  t.after(() => new Promise<void>(resolve => tcp.close(() => resolve())));
+  const tcpListening = once(tcp, 'listening');
+  tcp.listen(port, '::'); await tcpListening;
+});
 
 for (const variant of variants) {
   for (const action of ['destroy', 'destroy-error', 'close'] as const) {
@@ -255,8 +300,10 @@ for (const variant of variants) {
   });
 
   if (variant !== 'h2') {
-    test(`${variant}: respondWithBody finishes locally without cancelling queued transport bytes`, { timeout: 15000 }, async t => {
-      const payload = Buffer.alloc(20 * 1024 * 1024, 0x62);
+    test(`${variant}: respondWithBody shortcut finishes locally without cancelling queued transport bytes`, { timeout: 15000 }, async t => {
+      // WASM now streams bodies above its 64 KiB admission bound. Exercise the
+      // shortcut here; large-writes.test.ts covers its backpressured path.
+      const payload = Buffer.alloc(variant === 'wasm-h3' ? 64 * 1024 : 20 * 1024 * 1024, 0x62);
       let serverClosed!: Promise<unknown[]>;
       const { session, tracked } = await fixture(t, variant, stream => {
         serverClosed = once(stream, 'close');

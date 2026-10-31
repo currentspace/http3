@@ -3,6 +3,7 @@ import type { Http3Session } from './session.js';
 import type { ServerEventLoopLike, ClientEventLoopLike } from './event-loop.js';
 import {
   type BackpressureState,
+  BoundedStreamWrite,
   createBackpressureState,
   ensureBackpressureState,
   createNativeWriteWindow,
@@ -149,6 +150,10 @@ export class ServerHttp3Stream extends Duplex {
   private _creditRetry: NodeJS.Immediate | undefined;
   private _closeSent = false;
   private _finalChunk: Buffer | null = null;
+  private _boundedWrite: BoundedStreamWrite | null = null;
+  private _queuedWasmTrailers: Array<{ name: string; value: string }> | null = null;
+  private _trailerCallback: ((error?: Error | null) => void) | null = null;
+  private _trailerContinuation: NodeJS.Immediate | undefined;
 
   /** The HTTP/3 stream ID. */
   get id(): number { return this._streamId; }
@@ -190,6 +195,17 @@ export class ServerHttp3Stream extends Duplex {
    */
   respondWithBody(headers: IncomingHeaders, body: Buffer | string): void {
     if (this._headersSent) return;
+    const buf = typeof body === 'string' ? Buffer.from(body) : body;
+    const limit = this._eventLoop?.maxStreamSendBytes;
+    if (limit && buf.length > limit) {
+      try {
+        this.respond(headers);
+        this.end(buf);
+      } catch (error) {
+        this.destroy(error instanceof Error ? error : new Error(String(error)));
+      }
+      return;
+    }
     this._headersSent = true;
     this._finSent = true;
 
@@ -197,8 +213,6 @@ export class ServerHttp3Stream extends Duplex {
     if (!h.some((entry) => entry.name === ':status')) {
       h.unshift({ name: ':status', value: '200' });
     }
-
-    const buf = typeof body === 'string' ? Buffer.from(body) : body;
 
     try {
       this._eventLoop?.sendResponse(
@@ -219,9 +233,45 @@ export class ServerHttp3Stream extends Duplex {
 
   /** Send trailing headers after the response body is complete. */
   sendTrailers(trailers: IncomingHeaders): void {
+    const headers = incomingHeadersToNativeHeaders(trailers);
+    if (this._eventLoop?.maxStreamSendBytes && !this.writableEnded &&
+        (this.writableLength > 0 || this._boundedWrite || this._blocked)) {
+      // WASM may still hold most of a large write in JS. Finalize the writable
+      // queue before sending trailing HEADERS (which also carry FIN).
+      this._queuedWasmTrailers = headers;
+      this.end();
+      return;
+    }
     this._finSent = true;
-    const h = incomingHeadersToNativeHeaders(trailers);
-    this._eventLoop?.sendTrailers(this._connHandle, this._streamId, h);
+    this._eventLoop?.sendTrailers(this._connHandle, this._streamId, headers);
+  }
+
+  private _flushWasmTrailers(): void {
+    this._trailerContinuation = undefined;
+    if (!this._trailerCallback || !this._queuedWasmTrailers) return;
+    if (this._blocked) {
+      this._bp = ensureBackpressureState(this._bp);
+      this._bp.drainCallbacks.push(error => {
+        if (error) this._completeWasmTrailers(error);
+        else this._flushWasmTrailers();
+      });
+      return;
+    }
+    try {
+      this._eventLoop?.sendTrailers(this._connHandle, this._streamId, this._queuedWasmTrailers);
+      this._completeWasmTrailers();
+    } catch (error) {
+      this._completeWasmTrailers(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private _completeWasmTrailers(error?: Error | null): void {
+    clearImmediate(this._trailerContinuation);
+    this._trailerContinuation = undefined;
+    this._queuedWasmTrailers = null;
+    const callback = this._trailerCallback;
+    this._trailerCallback = null;
+    callback?.(error);
   }
 
   /**
@@ -333,7 +383,23 @@ export class ServerHttp3Stream extends Duplex {
     return super.end(finalCallback);
   }
 
+  private _writeBounded(chunk: Buffer, limit: number, fin: boolean, callback: (error?: Error | null) => void): void {
+    this._boundedWrite = new BoundedStreamWrite(chunk, limit, fin,
+      (slice, final, next) => {
+        if (final) this._writeFinalChunk(slice, next);
+        else this._writeChunk(slice, next);
+      }, error => {
+        this._boundedWrite = null;
+        callback(error);
+      });
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const limit = this._eventLoop?.maxStreamSendBytes;
+    if (limit && chunk.length > limit) {
+      this._writeBounded(chunk, limit, false, callback);
+      return;
+    }
     this._onActivity();
     if (this._blocked) {
       // Native is backed up — skip streamSend (it would just queue more
@@ -374,6 +440,11 @@ export class ServerHttp3Stream extends Duplex {
   }
 
   private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const limit = this._eventLoop?.maxStreamSendBytes;
+    if (limit && chunk.length > limit) {
+      this._writeBounded(chunk, limit, true, callback);
+      return;
+    }
     this._onActivity();
     let written: number;
     try {
@@ -413,6 +484,13 @@ export class ServerHttp3Stream extends Duplex {
 
   _final(callback: (error?: Error | null) => void): void {
     this._onActivity();
+    if (this._queuedWasmTrailers) {
+      this._finSent = true;
+      this._trailerCallback = callback;
+      // The final body slice may have just queued a deferred BLOCKED event.
+      this._trailerContinuation = setImmediate(() => this._flushWasmTrailers());
+      return;
+    }
     if (this._finSent || !this._eventLoop) {
       callback();
       return;
@@ -450,6 +528,9 @@ export class ServerHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    this._boundedWrite?.cancel(error ?? new Error('stream destroyed'));
+    this._finalChunk = null;
+    this._completeWasmTrailers(error ?? new Error('stream destroyed'));
     // Automatic destruction after both halves finish must leave admitted
     // response bytes in the transport; finish is not a delivery acknowledgement.
     if (!this.readableEnded || !this.writableFinished) this._closeTransport(0x010c);
@@ -497,6 +578,7 @@ export class ClientHttp3Stream extends Duplex {
   private _creditRetry: NodeJS.Immediate | undefined;
   private _closeSent = false;
   private _finalChunk: Buffer | null = null;
+  private _boundedWrite: BoundedStreamWrite | null = null;
   /**
    * @internal — set after the response HEADERS arrive. Subsequent
    * HEADERS frames are treated as trailing headers and emitted as
@@ -607,7 +689,23 @@ export class ClientHttp3Stream extends Duplex {
     return super.end(finalCallback);
   }
 
+  private _writeBounded(chunk: Buffer, limit: number, fin: boolean, callback: (error?: Error | null) => void): void {
+    this._boundedWrite = new BoundedStreamWrite(chunk, limit, fin,
+      (slice, final, next) => {
+        if (final) this._writeFinalChunk(slice, next);
+        else this._writeChunk(slice, next);
+      }, error => {
+        this._boundedWrite = null;
+        callback(error);
+      });
+  }
+
   private _writeChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const limit = this._eventLoop?.maxStreamSendBytes;
+    if (limit && chunk.length > limit) {
+      this._writeBounded(chunk, limit, false, callback);
+      return;
+    }
     this._onActivity();
     if (this._blocked) {
       this._bp = ensureBackpressureState(this._bp);
@@ -637,6 +735,11 @@ export class ClientHttp3Stream extends Duplex {
   }
 
   private _writeFinalChunk(chunk: Buffer, callback: (error?: Error | null) => void): void {
+    const limit = this._eventLoop?.maxStreamSendBytes;
+    if (limit && chunk.length > limit) {
+      this._writeBounded(chunk, limit, true, callback);
+      return;
+    }
     this._onActivity();
     let written: number;
     try {
@@ -707,6 +810,8 @@ export class ClientHttp3Stream extends Duplex {
   }
 
   override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    this._boundedWrite?.cancel(error ?? new Error('stream destroyed'));
+    this._finalChunk = null;
     if (!this._closeSent && (!this.readableEnded || !this.writableFinished)) {
       this._closeSent = true;
       this._eventLoop?.streamClose(this._streamId, 0x010c);
