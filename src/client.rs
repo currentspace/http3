@@ -269,6 +269,9 @@ impl NativeWorkerClient {
         if let Some(mut h) = self.handle.take() {
             h.join();
         }
+        // connect() consumes this callback; pre-connect cancellation must
+        // release it here so its TSFN does not keep Node alive.
+        self.tsfn = None;
     }
 
     #[napi]
@@ -276,6 +279,7 @@ impl NativeWorkerClient {
         if let Some(mut h) = self.handle.take() {
             h.shutdown();
         }
+        self.tsfn = None;
         Ok(())
     }
 }

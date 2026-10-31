@@ -812,9 +812,8 @@ export class ClientEventLoop implements ClientEventLoopLike {
         });
 
     this.worker.close(errorCode, reason);
-    this.worker.requestShutdown();
-
-    await waitForShutdownOrTimeout(sentinel);
+    // No worker exists when cancellation wins before connect().
+    if (this.worker.requestShutdown()) await waitForShutdownOrTimeout(sentinel);
     this._shutdownResolve = null;
 
     this.worker.joinWorker();
