@@ -12,6 +12,7 @@ const { createDevTls } = require('@currentspace/http3/dev');
 const expected = process.argv[2];
 assert.ok(['native', 'wasm'].includes(expected));
 const warnings = [];
+let nativeFastPathUnavailable = false;
 process.on('warning', warning => {
   if (warning.code === 'WARN_HTTP3_RUNTIME_FALLBACK') warnings.push(warning);
 });
@@ -32,6 +33,7 @@ function runtime(info, explicit = false) {
     assert.ok(['fast', 'portable'].includes(info.selectedMode));
     assert.notEqual(info.reasonCode, 'native-binding-unavailable');
     if (info.fallbackOccurred) assert.equal(info.reasonCode, 'fast-path-unavailable');
+    if (info.reasonCode === 'fast-path-unavailable') nativeFastPathUnavailable = true;
   }
 }
 async function collect(stream) {
@@ -123,6 +125,48 @@ async function strict() {
     await assert.rejects(connectQuicAsync('https://127.0.0.1:9', { ca: tls.ca, alpn: ['platform-smoke'], ...options }), unsupported);
   }
 }
+// This branch runs only after a real installed native auto attempt reports
+// that its fast path is unavailable. Capable native hosts keep their own path.
+async function strictNative() {
+  await turn();
+  const warningCount = warnings.length;
+  const unavailable = error => {
+    assert.ok(error instanceof Http3Error);
+    assert.equal(error.code, 'ERR_HTTP3_FAST_PATH_UNAVAILABLE');
+    assert.equal(error.reasonCode, 'fast-path-unavailable');
+    assert.equal(error.driver, 'io_uring');
+    assert.equal(typeof error.errno, 'number');
+    assert.match(error.syscall, /^io_uring_/);
+    assert.equal(error.runtimeInfo.selectedMode, null);
+    assert.equal(error.runtimeInfo.fallbackOccurred, false);
+    return true;
+  };
+  for (const options of [{ runtimeMode: 'fast' }, { runtimeMode: 'auto', fallbackPolicy: 'error' }]) {
+    const server = createNodeServerFactory({ key: tls.key, cert: tls.cert, ...options })(() => {});
+    try {
+      await assert.rejects(new Promise((resolve, reject) => {
+        server.once('listening', resolve);
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1');
+      }), unavailable);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+    await assert.rejects(connectAsync('https://127.0.0.1:9', {
+      ca: tls.ca, connectTimeoutMs: 1000, ...options,
+    }), unavailable);
+    const raw = createQuicServer({ key: tls.key, cert: tls.cert, alpn: ['platform-smoke'], ...options });
+    try { await assert.rejects(raw.listen(0, '127.0.0.1'), unavailable); }
+    finally { await raw.close(); }
+    await assert.rejects(connectQuicAsync('https://127.0.0.1:9', {
+      ca: tls.ca, alpn: ['platform-smoke'], connectTimeoutMs: 1000, ...options,
+    }), unavailable);
+  }
+  await turn();
+  assert.equal(warnings.length, warningCount, 'strict native failures must not emit fallback warnings');
+  console.log('Native strict: fast and auto/error rejected across H3 and raw QUIC clients/servers');
+}
+
 async function main() {
   await h3('wasm');
   await turn();
@@ -139,6 +183,7 @@ async function main() {
     assert.ok(warnings[0].message.includes(process.platform));
     assert.ok(warnings[0].message.includes(process.arch));
   } else {
+    if (nativeFastPathUnavailable) await strictNative();
     assert.ok(warnings.every(warning => !warning.message.includes('wasm')), 'native install must not fall back to WASM');
   }
   console.log(`PASS ${process.platform}/${process.arch} ${process.version}: ${expected} installed consumer`);
