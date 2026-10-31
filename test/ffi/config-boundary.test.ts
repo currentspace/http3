@@ -20,18 +20,16 @@ import {
   EVENT_NEW_STREAM,
   EVENT_DATA,
 } from '../support/native-test-helpers.js';
-import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 const binding = loadBinding();
 
-// Native objects may retain ThreadsafeFunction references; force clean exit
-// while preserving failures.
-forceNativeTestExit(200);
+// These config checks use the portable driver; fast-path availability is tested
+// separately. Register cleanup before startup so failures also release TSFNs.
 
 describe('Config boundary — options cross JS-to-Rust FFI', () => {
   // ── maxIdleTimeoutMs ──────────────────────────────────────────
 
-  it('maxIdleTimeoutMs is respected', async () => {
+  it('maxIdleTimeoutMs is respected', async (t) => {
     const certs = generateTestCerts();
     const serverEvents = createEventCollector();
     const clientEvents = createEventCollector();
@@ -41,19 +39,23 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
+        runtimeMode: 'portable',
         maxIdleTimeoutMs: 2000,
       },
       serverEvents.callback,
     );
+    t.after(() => { server.shutdown(); });
     const addr = server.listen(0, '127.0.0.1');
 
     const client = new binding.NativeQuicClient(
       {
         rejectUnauthorized: false,
+        runtimeMode: 'portable',
         maxIdleTimeoutMs: 2000,
       },
       clientEvents.callback,
     );
+    t.after(() => { client.shutdown(); });
     client.connect(`127.0.0.1:${addr.port}`, 'localhost');
 
     await clientEvents.waitForEvent(EVENT_HANDSHAKE_COMPLETE, 5000);
@@ -79,7 +81,7 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
 
   // ── enableDatagrams ──────────────────────────────────────────
 
-  it('enableDatagrams allows sendDatagram (QUIC)', async () => {
+  it('enableDatagrams allows sendDatagram (QUIC)', async (t) => {
     const certs = generateTestCerts();
     const serverEvents = createEventCollector();
     const clientEvents = createEventCollector();
@@ -89,19 +91,23 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
+        runtimeMode: 'portable',
         enableDatagrams: true,
       },
       serverEvents.callback,
     );
+    t.after(() => { server.shutdown(); });
     const addr = server.listen(0, '127.0.0.1');
 
     const client = new binding.NativeQuicClient(
       {
         rejectUnauthorized: false,
+        runtimeMode: 'portable',
         enableDatagrams: true,
       },
       clientEvents.callback,
     );
+    t.after(() => { client.shutdown(); });
     client.connect(`127.0.0.1:${addr.port}`, 'localhost');
 
     await clientEvents.waitForEvent(EVENT_HANDSHAKE_COMPLETE, 5000);
@@ -127,7 +133,7 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
 
   // ── rejectUnauthorized=false ─────────────────────────────────
 
-  it('rejectUnauthorized=false accepts self-signed', async () => {
+  it('rejectUnauthorized=false accepts self-signed', async (t) => {
     const certs = generateTestCerts();
     const serverEvents = createEventCollector();
     const clientEvents = createEventCollector();
@@ -137,15 +143,18 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
+        runtimeMode: 'portable',
       },
       serverEvents.callback,
     );
+    t.after(() => { server.shutdown(); });
     const addr = server.listen(0, '127.0.0.1');
 
     const client = new binding.NativeQuicClient(
-      { rejectUnauthorized: false },
+      { rejectUnauthorized: false, runtimeMode: 'portable' },
       clientEvents.callback,
     );
+    t.after(() => { client.shutdown(); });
     client.connect(`127.0.0.1:${addr.port}`, 'localhost');
 
     // Should successfully complete the handshake.
@@ -162,7 +171,7 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
 
   // ── rejectUnauthorized=true ──────────────────────────────────
 
-  it('rejectUnauthorized=true rejects self-signed', async () => {
+  it('rejectUnauthorized=true rejects self-signed', async (t) => {
     const certs = generateTestCerts();
     const serverEvents = createEventCollector();
     const clientEvents = createEventCollector();
@@ -172,15 +181,18 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
+        runtimeMode: 'portable',
       },
       serverEvents.callback,
     );
+    t.after(() => { server.shutdown(); });
     const addr = server.listen(0, '127.0.0.1');
 
     const client = new binding.NativeQuicClient(
-      { rejectUnauthorized: true },
+      { rejectUnauthorized: true, runtimeMode: 'portable' },
       clientEvents.callback,
     );
+    t.after(() => { client.shutdown(); });
     client.connect(`127.0.0.1:${addr.port}`, 'localhost');
 
     // Handshake should fail — expect an ERROR or SESSION_CLOSE event rather
@@ -208,7 +220,7 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
 
   // ── custom ALPN ──────────────────────────────────────────────
 
-  it('custom ALPN is negotiated (QUIC)', async () => {
+  it('custom ALPN is negotiated (QUIC)', async (t) => {
     const certs = generateTestCerts();
     const serverEvents = createEventCollector();
     const clientEvents = createEventCollector();
@@ -220,19 +232,23 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
         key: certs.key,
         cert: certs.cert,
         disableRetry: true,
+        runtimeMode: 'portable',
         alpn: customAlpn,
       },
       serverEvents.callback,
     );
+    t.after(() => { server.shutdown(); });
     const addr = server.listen(0, '127.0.0.1');
 
     const client = new binding.NativeQuicClient(
       {
         rejectUnauthorized: false,
+        runtimeMode: 'portable',
         alpn: customAlpn,
       },
       clientEvents.callback,
     );
+    t.after(() => { client.shutdown(); });
     client.connect(`127.0.0.1:${addr.port}`, 'localhost');
 
     // If ALPN matches, the handshake should complete.
@@ -257,7 +273,7 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
 
   // ── clientAuth=require rejects unauthenticated ───────────────
 
-  it('clientAuth=require rejects unauthenticated', async () => {
+  it('clientAuth=require rejects unauthenticated', async (t) => {
     const mtls = generateMutualTlsTestCerts();
     const serverEvents = createEventCollector();
     const clientEvents = createEventCollector();
@@ -269,9 +285,11 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
         ca: mtls.ca.cert,
         clientAuth: 'require',
         disableRetry: true,
+        runtimeMode: 'portable',
       },
       serverEvents.callback,
     );
+    t.after(() => { server.shutdown(); });
     const addr = server.listen(0, '127.0.0.1');
 
     // Client does NOT provide a client cert — server will close the connection
@@ -280,9 +298,11 @@ describe('Config boundary — options cross JS-to-Rust FFI', () => {
       {
         ca: mtls.ca.cert,
         rejectUnauthorized: false,
+        runtimeMode: 'portable',
       },
       clientEvents.callback,
     );
+    t.after(() => { client.shutdown(); });
     client.connect(`127.0.0.1:${addr.port}`, 'localhost');
 
     // The QUIC handshake itself may complete (TLS allows it), but the server

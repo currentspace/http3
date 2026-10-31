@@ -7,16 +7,14 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateTestCerts } from '../support/generate-certs.js';
-import { forceNativeTestExit } from '../support/force-native-exit.js';
 
 // Load the native binding directly (bypassing TS wrappers).
 const binding = require('../../../index.js');
 
 const EVENT_SHUTDOWN_COMPLETE = 15;
 
-// Error-path tests intentionally create native objects whose ThreadsafeFunctions
-// are never consumed. Force a clean exit after all tests while preserving failures.
-forceNativeTestExit(100);
+// Generic state checks use portable mode, with cleanup registered before startup
+// so every error path releases its native worker and TSFN references.
 
 function waitForShutdown(events: any[], timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -136,17 +134,19 @@ describe('FFI error propagation', () => {
   // ── State errors ───────────────────────────────────────────────
 
   describe('state errors', () => {
-    it('NativeQuicServer.listen() twice throws', async () => {
+    it('NativeQuicServer.listen() twice throws', async (t) => {
       const events: any[] = [];
       const server = new binding.NativeQuicServer(
         {
           key: certs.key,
           cert: certs.cert,
           disableRetry: true,
+          runtimeMode: 'portable',
         },
         (_err: Error | null, batch: any[]) => { events.push(...batch); },
       );
 
+      t.after(() => { server.shutdown(); });
       const addr = server.listen(0, '127.0.0.1');
       assert.ok(addr.port > 0, 'first listen should succeed');
 
@@ -165,7 +165,7 @@ describe('FFI error propagation', () => {
       await waitForShutdown(events);
     });
 
-    it('NativeQuicClient.connect() twice throws', async () => {
+    it('NativeQuicClient.connect() twice throws', async (t) => {
       // Need a server to connect to first.
       const serverEvents: any[] = [];
       const server = new binding.NativeQuicServer(
@@ -173,17 +173,20 @@ describe('FFI error propagation', () => {
           key: certs.key,
           cert: certs.cert,
           disableRetry: true,
+          runtimeMode: 'portable',
         },
         (_err: Error | null, batch: any[]) => { serverEvents.push(...batch); },
       );
+      t.after(() => { server.shutdown(); });
       const sAddr = server.listen(0, '127.0.0.1');
 
       const clientEvents: any[] = [];
       const client = new binding.NativeQuicClient(
-        { rejectUnauthorized: false },
+        { rejectUnauthorized: false, runtimeMode: 'portable' },
         (_err: Error | null, batch: any[]) => { clientEvents.push(...batch); },
       );
 
+      t.after(() => { client.shutdown(); });
       const addr = client.connect(`127.0.0.1:${sAddr.port}`, 'localhost');
       assert.ok(addr.port > 0, 'first connect should succeed');
 
@@ -208,23 +211,26 @@ describe('FFI error propagation', () => {
   // ── Post-shutdown errors ───────────────────────────────────────
 
   describe('post-shutdown errors', () => {
-    it('NativeQuicClient methods throw after shutdown', async () => {
+    it('NativeQuicClient methods throw after shutdown', async (t) => {
       const serverEvents: any[] = [];
       const server = new binding.NativeQuicServer(
         {
           key: certs.key,
           cert: certs.cert,
           disableRetry: true,
+          runtimeMode: 'portable',
         },
         (_err: Error | null, batch: any[]) => { serverEvents.push(...batch); },
       );
+      t.after(() => { server.shutdown(); });
       const sAddr = server.listen(0, '127.0.0.1');
 
       const clientEvents: any[] = [];
       const client = new binding.NativeQuicClient(
-        { rejectUnauthorized: false },
+        { rejectUnauthorized: false, runtimeMode: 'portable' },
         (_err: Error | null, batch: any[]) => { clientEvents.push(...batch); },
       );
+      t.after(() => { client.shutdown(); });
       client.connect(`127.0.0.1:${sAddr.port}`, 'localhost');
 
       client.shutdown();
@@ -262,13 +268,14 @@ describe('FFI error propagation', () => {
   // ── Address parsing errors ─────────────────────────────────────
 
   describe('address parsing errors', () => {
-    it('NativeQuicClient.connect() with invalid address throws', async () => {
+    it('NativeQuicClient.connect() with invalid address throws', async (t) => {
       const events: any[] = [];
       const client = new binding.NativeQuicClient(
-        { rejectUnauthorized: false },
+        { rejectUnauthorized: false, runtimeMode: 'portable' },
         (_err: Error | null, batch: any[]) => { events.push(...batch); },
       );
 
+      t.after(() => { client.shutdown(); });
       assert.throws(
         () => { client.connect('not-a-valid-address', 'localhost'); },
         (err: Error) => {
@@ -285,17 +292,19 @@ describe('FFI error propagation', () => {
       client.shutdown();
     });
 
-    it('NativeQuicServer.listen() with invalid address throws', () => {
+    it('NativeQuicServer.listen() with invalid address throws', (t) => {
       const events: any[] = [];
       const server = new binding.NativeQuicServer(
         {
           key: certs.key,
           cert: certs.cert,
           disableRetry: true,
+          runtimeMode: 'portable',
         },
         (_err: Error | null, batch: any[]) => { events.push(...batch); },
       );
 
+      t.after(() => { server.shutdown(); });
       assert.throws(
         () => { server.listen(0, 'not-a-valid-host!!!'); },
         (err: Error) => {

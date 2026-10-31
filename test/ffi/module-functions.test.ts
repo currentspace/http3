@@ -69,15 +69,16 @@ describe('FFI module functions', () => {
       assert.strictEqual(snap.outboundAdmissionWriteReadyEventsTotal, 0);
     });
 
-    it('counters increment after server creation', () => {
+    it('counters increment after server creation', (t) => {
       const certs = generateTestCerts();
       const noop = (_err: Error | null, _events: any[]): void => {};
 
-      // Constructing a NativeQuicServer spawns a worker thread.
+      // Listening starts a worker; this telemetry check uses the portable driver.
       const server = new binding.NativeQuicServer(
-        { key: certs.key, cert: certs.cert, disableRetry: true },
+        { key: certs.key, cert: certs.cert, disableRetry: true, runtimeMode: 'portable' },
         noop,
       );
+      t.after(() => { server.shutdown(); });
       server.listen(0, '127.0.0.1');
 
       const snap = binding.runtimeTelemetry();
@@ -112,16 +113,17 @@ describe('FFI module functions', () => {
       assert.strictEqual(snap.enabled, false, 'trace should be disabled');
     });
 
-    it('resetLifecycleTrace() clears events', () => {
+    it('resetLifecycleTrace() clears events', (t) => {
       binding.setLifecycleTraceEnabled(true);
 
       // Generate at least one trace event by creating + shutting down a server.
       const certs = generateTestCerts();
       const noop = (_err: Error | null, _events: any[]): void => {};
       const server = new binding.NativeQuicServer(
-        { key: certs.key, cert: certs.cert, disableRetry: true },
+        { key: certs.key, cert: certs.cert, disableRetry: true, runtimeMode: 'portable' },
         noop,
       );
+      t.after(() => { server.shutdown(); });
       server.listen(0, '127.0.0.1');
       server.shutdown();
 

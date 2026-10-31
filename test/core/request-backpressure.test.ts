@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDevTls } from '../../lib/dev-cert.js';
 import { Http3NodeServer, Http3IncomingMessage } from '../../lib/node-server.js';
-import { connectAsync } from '../../lib/client.js';
+import { connectAsync, Http3ClientSession } from '../../lib/client.js';
 import type { IncomingMessage } from 'node:http';
 
 let directory: string;
@@ -21,6 +21,14 @@ const modes = process.env.HTTP3_WASM === '1' ? ['portable', 'wasm'] as const : [
 for (const runtimeMode of modes) {
   for (const protocol of ['h2', 'h3'] as const) {
     test(`${runtimeMode} ${protocol}: paused 20 MiB upload stays bounded and does not block another stream`, async t => {
+      const pending: Promise<unknown>[] = [];
+      const streams = new Set<Readable | Writable>();
+      const observe = <T>(promise: Promise<T>): Promise<T> => {
+        pending.push(promise);
+        // Cleanup can reject these before the main assertions await them.
+        void promise.catch(() => {});
+        return promise;
+      };
       let startReading: () => void = () => assert.fail('upload not received');
       let received!: (request: IncomingMessage) => void;
       const incoming = new Promise<IncomingMessage>(resolve => { received = resolve; });
@@ -28,9 +36,11 @@ for (const runtimeMode of modes) {
       let failed!: (error: Error) => void;
       const handled = new Promise<void>((resolve, reject) => { completed = resolve; failed = reject; });
       const server = new Http3NodeServer({ key: tls.key, cert: tls.cert, runtimeMode }, (req, res) => {
+        streams.add(req); streams.add(res);
         if (req.url !== '/upload') { res.end('concurrent'); return; }
         received(req);
         startReading = () => {
+          void observe(handled);
           let bytes = 0;
           const hash = createHash('sha256');
           const slow = new Writable({ highWaterMark: 16384, write(chunk: Buffer, _encoding, callback) {
@@ -42,21 +52,35 @@ for (const runtimeMode of modes) {
           }, failed);
         };
       });
+      let session: ReturnType<typeof connectH2> | Http3ClientSession | undefined;
+      t.after(async () => {
+        try {
+          for (const stream of streams) stream.destroy();
+          await session?.destroy();
+        } finally {
+          await new Promise<void>(resolve => server.close(() => resolve()));
+          await Promise.allSettled(pending);
+        }
+      });
       server.listen(0); await once(server, 'listening');
-      t.after(async () => new Promise<void>(resolve => server.close(() => resolve())));
       const origin = `https://localhost:${server.address()!.port}`;
-      const session = protocol === 'h2' ? connectH2(origin, { ca: tls.ca }) : await connectAsync(origin, { ca: tls.ca, runtimeMode: 'portable' });
-      t.after(async () => { await session.close(); });
+      session = protocol === 'h2' ? connectH2(origin, { ca: tls.ca }) : await connectAsync(origin, { ca: tls.ca, runtimeMode: 'portable', signal: t.signal });
       const upload = session.request({ ':method': 'PATCH', ':path': '/upload', 'content-type': 'multipart/form-data; boundary=test' });
-      const response = (async () => { const chunks: Buffer[] = []; for await (const chunk of upload) chunks.push(chunk as Buffer); return Buffer.concat(chunks).toString(); })();
+      streams.add(upload);
+      const response = observe((async () => { const chunks: Buffer[] = []; for await (const chunk of upload) chunks.push(chunk as Buffer); return Buffer.concat(chunks).toString(); })());
       const chunk = Buffer.alloc(64 * 1024, 0x61);
       const expected = createHash('sha256');
       const source = Readable.from((function* () { for (let i = 0; i < 320; i++) { expected.update(chunk); yield chunk; } })());
-      const sending = pipeline(source, upload);
+      streams.add(source);
+      const sending = observe(pipeline(source, upload));
       const req = await incoming;
       // Hold the upload without consuming any body, then use the same session.
       await new Promise(resolve => setTimeout(resolve, 150));
-      const other = session.request({ ':path': '/ready' }, { endStream: true });
+      // QUIC request HEADERS share congestion capacity with the paused upload.
+      // Wait for admission, but require the response before reading that upload.
+      const other = session instanceof Http3ClientSession
+        ? await session.requestAsync({ ':path': '/ready' }, { endStream: true, timeoutMs: 3000, signal: t.signal })
+        : session.request({ ':path': '/ready' }, { endStream: true });
       let text = ''; for await (const value of other) text += String(value);
       assert.equal(text, 'concurrent');
       assert.equal(req.destroyed, false);
