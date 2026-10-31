@@ -134,7 +134,6 @@ const session = await connectAsync('127.0.0.1:4433', {
   servername: 'localhost',
   rejectUnauthorized: false, // self-signed cert for this example
   runtimeMode: 'wasm',
-  fallbackPolicy: 'error', // fail loudly if the artifact/toolchain is missing
 });
 
 console.log(session.runtimeInfo); // { selectedMode: 'wasm', driver: 'wasm', ... }
