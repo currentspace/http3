@@ -200,6 +200,17 @@ jobs:
       - name: Smoke install packed artifact
         run: node scripts/smoke-install.mjs
 
+      - name: Qualify installed native HTTP and QUIC APIs
+        run: |
+          mkdir -p artifacts/packed
+          pnpm pack --config.ignore-scripts=true --pack-destination artifacts/packed
+          node scripts/pack-host-native.mjs artifacts/packed
+          package_version=$(node -p "require('./package.json').version")
+          native_target=$(node --input-type=module -e "import { nativePackages, selectNativePackage } from './scripts/native-packages.mjs'; console.log(selectNativePackage(nativePackages()).dir)")
+          node scripts/platform-smoke.mjs --native \
+            --tarball "artifacts/packed/currentspace-http3-$package_version.tgz" \
+            --sidecar "artifacts/packed/currentspace-http3-$native_target-$package_version.tgz"
+
   publish:
     if: ${{ !inputs.qualification_only }}
     needs: [prebuilds, prebuilds-musl, validate-prebuilds, validate-musl, build-wasm, qualify-fallback]
