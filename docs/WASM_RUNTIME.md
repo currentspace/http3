@@ -1,6 +1,6 @@
-# WASM Client Runtime
+# WASM Runtime
 
-`@currentspace/http3` can run its HTTP/3 and raw QUIC **client** on top of a
+`@currentspace/http3` can run its HTTP/3 and raw QUIC clients and Node servers on top of a
 WebAssembly build of the same protocol core the native N-API binding uses,
 selected with `runtimeMode: 'wasm'`. This is a usage guide. For the full
 design rationale, the rejected alternatives (napi-rs wasm, wasm-bindgen,
@@ -22,16 +22,16 @@ that material.
   construction, but Workers has no outbound UDP client socket API yet. See
   [Workers / workerd status](#workers--workerd-status-not-yet-deployed)
   below.
-- It is **client-only**. Servers (`createSecureServer`, `createQuicServer`)
-  always run on the native binding; passing `runtimeMode: 'wasm'` to either
-  throws `ERR_HTTP3_RUNTIME_UNSUPPORTED` immediately (N1 in the plan).
-- It is **opt-in only**. `runtimeMode: 'auto'` (the default) never selects
-  `'wasm'` — auto-selection only ever chooses between the native `'fast'`
-  and `'portable'` drivers described in
-  [RUNTIME_MODES.md](./RUNTIME_MODES.md). You must ask for `'wasm'`
-  explicitly, and `fallbackPolicy` has no effect on it: if construction
-  fails (e.g. the compiled artifact is missing), the connect call rejects
-  with that error — it never silently falls back to the native binding.
+- It supports Node servers (`createSecureServer`, `createNodeServerFactory`,
+  `createQuicServer`) and clients through the same public APIs as native.
+- Default `auto` selects WASM if the native binding cannot load, unless
+  `fallbackPolicy: 'error'` forbids it. Explicit fast/portable remain native-only.
+  Fallback is observable through `runtimeInfo`, the `runtime` event,
+  `onRuntimeEvent`, and `WARN_HTTP3_RUNTIME_FALLBACK`. Missing native binaries
+  and native driver unavailability have distinct reason codes.
+- Explicit `runtimeMode: 'wasm'` never loads native and ignores fallback policy.
+  An absent or corrupt WASM artifact causes startup failure; there is no retry
+  through native after explicit WASM fails.
 
 ## Prerequisites: building the artifact
 
@@ -111,9 +111,8 @@ outside the package directory).
 import { readFileSync } from 'node:fs';
 import { createSecureServer, connectAsync } from '@currentspace/http3';
 
-// Any HTTP/3 server works here — this one is this repo's own, native, for
-// a fully self-contained example. The wasm runtime is client-only, so the
-// server side is always native regardless of the client's runtimeMode.
+// Any HTTP/3 server works here. This server uses auto independently of
+// the client's explicit WASM choice.
 const server = createSecureServer({
   key: readFileSync('server.key'),
   cert: readFileSync('server.crt'),
@@ -135,7 +134,6 @@ const session = await connectAsync('127.0.0.1:4433', {
   servername: 'localhost',
   rejectUnauthorized: false, // self-signed cert for this example
   runtimeMode: 'wasm',
-  fallbackPolicy: 'error', // fail loudly if the artifact/toolchain is missing
 });
 
 console.log(session.runtimeInfo); // { selectedMode: 'wasm', driver: 'wasm', ... }
@@ -242,10 +240,26 @@ except:
 | Option | Behavior under `runtimeMode: 'wasm'` |
 | --- | --- |
 | `qlogDir` / `qlogLevel` | Silently ignored — no qlog in the wasm build (see [Limitations](#current-limitations)). `session.exportQlog()` always returns `null` (verified). |
-| `keylog` | Delivered via the `'keylog'` session event with real NSS-format key material, whether `keylog` is `true` or a string path — verified: `CLIENT_HANDSHAKE_TRAFFIC_SECRET`/`SERVER_HANDSHAKE_TRAFFIC_SECRET`/etc. arrive as real event payloads. The wasm core never writes key material to disk, though: even with a string path, that file is only ever created empty. If your tooling tails an actual `SSLKEYLOGFILE`-style file on disk rather than consuming the `'keylog'` event, it will see nothing on the wasm path — consume the event instead. |
+| Client `keylog` | Delivered via the `'keylog'` session event with NSS-format key material for `true` or a string path. The WASM core does not write these events to the path; consume the events rather than tailing that file. |
+| Server `keylog` | Disabled: the server ABI has no keylog drain operation. |
 | `cert` / `key` (H3 `connect`/`connectAsync`) | N/A on native either — the H3 client has no mTLS option in this library today, wasm included. See [Limitations](#current-limitations). |
 | `cert` / `key` (`connectQuic`/`connectQuicAsync`) | Fully supported — raw QUIC client mTLS works the same as native. |
-| `fallbackPolicy` | Has no effect — see [What this is](#what-this-is-and-isnt) above. |
+| `fallbackPolicy` | Controls automatic fallback; has no effect for explicit WASM. |
+
+## Large-write completion and trailers
+
+Node stream `write`, `end`, and `respondWithBody` keep large bodies in JS and
+admit bounded slices into WASM. Callbacks and writable `finish` describe local
+admission, not peer acknowledgment. Large `respondWithBody` remains backpressured:
+allow a paused peer to resume consuming before waiting for local completion.
+Otherwise its flow-control window can prevent the remaining body from being
+admitted.
+
+Calling `sendTrailers` while a bounded WASM write is pending finalizes the
+writable queue and waits for its body to drain before sending trailing HEADERS
+with FIN. No more body writes may follow that call. Destroying an unfinished
+H3 or raw QUIC stream cancels its pending continuation and resets the peer;
+normal completed streams preserve already admitted data.
 
 ## Current limitations
 
@@ -258,17 +272,24 @@ except:
   stream's `error` event; `respondWithBody()` reports it through `error`.
   The failed stream is cancelled, and the connection remains usable. Direct
   WASM memory helpers and datagram sends throw the error synchronously.
-  Handle stream errors and use smaller writes with backpressure. The suite
-  covers successful 20 MiB single-buffer responses and recoverable rejection
-  of 32 MiB and 64 MiB writes; these are test cases, not fixed size limits.
-  Available space depends on other live streams and protocol state. This
+  Public Node streams split large writes (including `end(buffer)` and
+  `respondWithBody`) into bounded slices, yielding between admissions and
+  respecting transport backpressure. A single large body need not fit in the
+  WASM heap. Respect `write()`/`drain`; available space still depends on other
+  live streams and protocol state. The low-level exported event-loop/ABI send
+  methods do not provide Node stream slicing: submit bounded chunks there.
+  Datagrams remain atomic and are never split. This
   handles payload allocation failures, not every possible out-of-memory
   failure inside Rust or the TLS/QUIC dependencies.
 - **No qlog.** Excluded from the wasm build entirely (N5) — the `qlog-files`
   Cargo feature (`quiche/qlog`) is not enabled when building
   `crates/http3-wasm` (`--no-default-features --features wasm-abi`).
-  Keylog is available instead, delivered as events rather than a tailed
-  file (see the options table above).
+  Client keylog is available as events (see the options table above); server
+  keylog is disabled because the server ABI does not expose a drain operation.
+- **Native-only server options.** WASM H3 rejects explicit `sessionTicketKeys`
+  and `reusePort: true` requests rather than silently dropping their semantics. Native
+  receive/send batch tuning does not apply to WASM. These limitations also
+  apply when auto selects WASM.
 - **No H3 client mTLS.** This mirrors an existing native asymmetry, not a
   wasm-specific gap: the H3 `ConnectOptions` type has no `cert`/`key`
   fields on **either** runtime. Raw QUIC client mTLS (`cert`/`key` on
@@ -563,8 +584,8 @@ for the full ABI contract.
 | --- | --- |
 | Native, best driver for the platform, no fallback | `runtimeMode: 'fast'` |
 | Native, portable driver (works in restricted containers) | `runtimeMode: 'portable'` |
-| Native, best-effort with fallback (default) | `runtimeMode: 'auto'` (or omit) |
-| The wasm client runtime | `runtimeMode: 'wasm'` (must be explicit — `'auto'` never selects it) |
+| Prefer native, with portable/WASM fallback (default) | `runtimeMode: 'auto'` (or omit) |
+| Explicit WASM client or Node server | `runtimeMode: 'wasm'` |
 
 See [RUNTIME_MODES.md](./RUNTIME_MODES.md) for the full native `fast`/
 `portable`/`auto` semantics.

@@ -1,0 +1,119 @@
+{
+  "kind": "Deterministic local kernel-syscall rejection against an installed candidate",
+  "combined_source_commit": "1c1c2215d0da043fac6ab77dabaf01098d23c6eb",
+  "native_source_commit": "b8abbeb4f839e9d1c5c061e39915b1d416daed76",
+  "native_rebased_commit": "91085f28d546c194375b1c006022148c42bed158",
+  "kernel": "7.0.14-linuxkit",
+  "architecture": "arm64",
+  "fault": {
+    "syscall": "io_uring_register",
+    "argument_index": 1,
+    "argument_value": 22,
+    "operation": "IORING_REGISTER_PBUF_RING",
+    "errno": 22,
+    "all_other_syscalls": "allowed by this container-only profile",
+    "profile": {
+      "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/seccomp.json",
+      "sha256": "64dcdd2a17b111a10567dfcb6c842d87bc2b3b6a68a733f95ac8aee9b860d01a"
+    }
+  },
+  "artifacts": [
+    {
+      "role": "root package",
+      "filename": "currentspace-http3-0.9.9.tgz",
+      "sha256": "50fe0b9024501e2aba10106fd4e801a17af1e78f6adebe75a7cb43ac3dbb3bd8"
+    },
+    {
+      "role": "exact native sidecar",
+      "filename": "currentspace-http3-linux-arm64-musl-0.9.9.tgz",
+      "sha256": "f5c116291f2626bfb52c78fd07e3dd75e948981d9d36dcf476af455e96882197"
+    },
+    {
+      "role": "native addon",
+      "filename": "http3.linux-arm64-musl.node",
+      "sha256": "465591ddd27ebadaa34b81b8e036d72b5cc0acdc20c2f91ca4b08a27cfc3ba37"
+    }
+  ],
+  "artifact_retention": "Binary/tarball artifacts are identified by recorded SHA256; this evidence directory contains text receipts only.",
+  "harness": {
+    "source": "scripts/platform-smoke.mjs",
+    "sha256": "cbeed64033a93bbcbf477f7aa1a7f0545bd7821483c2b7a2ba84ab89c8e5d645"
+  },
+  "initial_fixture": {
+    "source": "scripts/fixtures/platform-consumer.cjs",
+    "source_commit": "1c1c2215d0da043fac6ab77dabaf01098d23c6eb",
+    "sha256": "f1fd2d6de47a9c05657070f87c552143134432e4824757284753cc988e2e4df7"
+  },
+  "warning_count_fixture": {
+    "basis": "Initial fixture plus the recorded temporary assertion patch; production package artifacts were unchanged.",
+    "sha256": "b05e9db67593fa2ced5e4f76c37fc82ebe2f9dc74409ff2505081ed047cf99c1",
+    "patch": {
+      "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/one-warning-assertion.patch",
+      "sha256": "bbe67d71934303f304eca2115f6dd9ac8b83b69a02ed98775d2bf81b0da21eb1"
+    }
+  },
+  "results": {
+    "24": {
+      "status": "passed",
+      "kernel": "7.0.14-linuxkit",
+      "architecture": "arm64",
+      "selectedMode": "portable",
+      "driver": "poll",
+      "errno": 22,
+      "syscall": "io_uring_register_buf_ring",
+      "successful_gets": 1000,
+      "concurrency": 50,
+      "strict_rejections": 8,
+      "fallback_warning_count": 1,
+      "native_pbuf_rejections_traced": 5,
+      "process_exit": 0,
+      "image": "node:24.22.1-alpine3.24@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53",
+      "trace_receipt": {
+        "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/node24-trace.txt",
+        "sha256": "a83e8a161226c01f8feba73e2604ea9e043ee38281c1be2f8bea91d1e1e8d645"
+      },
+      "setup_syscalls": {
+        "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/node24-setup-syscalls.txt",
+        "sha256": "846be0c28b1cffbd86e0a4f0be69f4c2df9affce65a2eb7cbc2ad2f81118ecff"
+      },
+      "warning_count_receipt": {
+        "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/node24-warning-count.txt",
+        "sha256": "b1b7534f8dbfbbd336040a6df34708c0ad9dcda7c3665ad540fd423f63f6b0f7"
+      },
+      "source_trace_log_sha256": "8066da243c9e99d4b1e510637752dde1acc9e7a21f2b50be76a8f7d1c308ddd6",
+      "source_trace_log_retained": false,
+      "trace_note": "Full strace output was reduced to acceptance lines and the first setup/register sequence; the original source-log hash is preserved above."
+    },
+    "26": {
+      "status": "passed",
+      "kernel": "7.0.14-linuxkit",
+      "architecture": "arm64",
+      "selectedMode": "portable",
+      "driver": "poll",
+      "errno": 22,
+      "syscall": "io_uring_register_buf_ring",
+      "successful_gets": 1000,
+      "concurrency": 50,
+      "strict_rejections": 8,
+      "fallback_warning_count": 1,
+      "native_pbuf_rejections_traced": 5,
+      "process_exit": 0,
+      "image": "node:26.12.1-alpine3.24@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797",
+      "trace_receipt": {
+        "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/node26-trace.txt",
+        "sha256": "36c7901bdf64917c50b8b1acc62375e51f9c5f53e97318fe6f35907cea7e747c"
+      },
+      "setup_syscalls": {
+        "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/node26-setup-syscalls.txt",
+        "sha256": "af9db345bbd1f796e46e1ead8409f24dce1d331bedbb91d067ddeb9bd88b1e81"
+      },
+      "warning_count_receipt": {
+        "path": ".github/release-evidence/platform-coverage/hosted-native/pbuf-fault/node26-warning-count.txt",
+        "sha256": "8224d815a0c25b987645e6a9f3ad0ee1d16401404775ac422db89e608c1f07fa"
+      },
+      "source_trace_log_sha256": "84af2c1961f0d5e24770e97c3b83b16ed67b1cbe86c99eb4c2ae5527b8b01069",
+      "source_trace_log_retained": false,
+      "trace_note": "Full strace output was reduced to acceptance lines and the first setup/register sequence; the original source-log hash is preserved above."
+    }
+  }
+}

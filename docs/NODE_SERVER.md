@@ -38,8 +38,10 @@ app.get('/', request => ({ httpVersion: request.raw.httpVersion }));
 app.listen({ port: 8443, host: '127.0.0.1' }).catch(console.error);
 ```
 
-Requires Node 24+. Native prebuilds support macOS arm64 and Linux glibc x64/arm64.
-See [the support matrix](./SUPPORT_MATRIX.md) before using another platform.
+Requires Node 24+. Default `auto` mode selects native where available and falls
+back to the bundled WASM runtime if the addon cannot load. Explicit `portable`
+in the example requires a working native addon. See the
+[support matrix](./SUPPORT_MATRIX.md) for native package and qualification status.
 Permit both TCP and UDP on the selected port. Use a browser-trusted certificate
 for browser clients. The factory adds `Alt-Svc: h3=":PORT"; ma=86400`; a handler can
 replace or remove it. This advertises the bound port, so deployments with port
@@ -55,6 +57,9 @@ resolution can resolve the subpaths through `typesVersions`.
 
 ## Supported surface
 
+- Read-only `runtimeInfo` and the `runtime` event expose the transport's selected
+  runtime directly. `onRuntimeEvent` remains available in factory options and
+  is invoked once per selection; no access to private transport state is needed.
 - `listen({ port, host }, callback)` and `listen(port, host, callback)`, `address()`, `listening`, `close(callback)`,
   and `listening`, `error`, `close` events. Hostnames are resolved before binding.
 - Readable request bodies with `method`, `url`, normalized `headers`, `rawHeaders`,
@@ -67,6 +72,14 @@ resolution can resolve the subpaths through `typesVersions`.
   no-ops on H2/H3; they do not tune the shared connection. Readable/writable lifecycle flags reflect the backing stream.
   Cancelling it resets the request stream, not other requests sharing its QUIC/H2
   connection.
+
+```js
+const server = createNodeServerFactory({ ...tls })((_req, res) => res.end('ok'));
+server.on('error', console.error);
+server.listen(8443, '127.0.0.1', () => {
+  console.log(server.runtimeInfo); // selectedMode, driver, fallbackOccurred, reasonCode
+});
+```
 
 The H3/H2 objects are facades, not instances of Node's `IncomingMessage`,
 `ServerResponse` or `net.Socket`. The handler signature accepts familiar Node

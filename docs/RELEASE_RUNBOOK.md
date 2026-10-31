@@ -32,7 +32,7 @@ source revision, browser evidence, and matching curl checks.
 
 ## Local Gate
 
-Linux prebuilds must pass `scripts/check-linux-prebuild-abi.py` before upload.
+GNU Linux prebuilds must pass `scripts/check-linux-prebuild-abi.py` before upload.
 The GLIBC_2.34 symbol limit preserves the published 0.9.2 floor. Build Linux x64
 on the pinned Ubuntu 22.04 runner: newer headers redirect BoringSSL 5's CPU
 environment parsing to `__isoc23_strtoull`, raising the floor to GLIBC_2.38.
@@ -79,7 +79,61 @@ Do not hard-wire new benchmark gates into CI until the baseline criteria in
   `scripts/smoke-install.mjs` packs the current host sidecar as well as the root;
   candidate browser installs must do the same to avoid using an older
   same-version registry binary. Use `node scripts/pack-host-native.mjs DIR`.
-- Confirm npm dist-tags for `@currentspace/http3`, `@currentspace/http3-linux-x64-gnu`, `@currentspace/http3-linux-arm64-gnu`, and `@currentspace/http3-darwin-arm64`.
+- Confirm npm dist-tags for the root and every sidecar listed in its
+  `optionalDependencies`, including the new musl and Intel macOS packages once
+  they are published. Do not maintain a separate three-package release list.
+
+## Platform coverage qualification
+
+The platform series adds `linux-x64-musl`, `linux-arm64-musl`, and `darwin-x64`.
+Bootstrap each new npm package and configure its Trusted Publisher before its
+first real release using the procedure above. A source manifest entry does not
+prove the sidecar exists in the registry. All root/sidecar versions must match.
+
+Musl builds need both Rust host build scripts and the addon to use a compatible
+dynamic CRT configuration: BoringSSL bindgen loads libclang at build time.
+Verify architecture and dynamic dependencies, then test in a clean Alpine Node
+runtime without the compiler environment. The GNU GLIBC symbol-floor check
+does not apply to musl; do not weaken it to accept a different ABI.
+
+Use `scripts/platform-smoke.mjs` for an isolated installed candidate:
+
+```sh
+# Build dist and the WASM artifact first. Creates a fresh npm consumer and
+# installs the packed root with --omit=optional, then checks H2/H3/raw QUIC.
+node scripts/platform-smoke.mjs
+
+# Existing prepacked candidates, including a newly built matching sidecar:
+node scripts/platform-smoke.mjs --native --tarball /path/root.tgz --sidecar /path/sidecar.tgz
+```
+
+The harness requires OpenSSL on PATH for temporary certificates; it installs no
+system trust. It asserts response status/content, runtime metadata, strict-mode
+errors, and process warning counts, and fails nonzero on timeout. Explicit WASM
+is also checked when native is present. `scripts/smoke-install.mjs` separately
+checks installed declarations in all supported TypeScript resolution modes.
+
+`platform-fallback.yml` is a reusable release gate for Node 24/26 on Windows,
+GNU Linux x64/arm64, and macOS arm64/Intel. It consumes the same WASM build as
+the release. Musl consumer jobs test both absent and installed native sidecars
+on real x64 and arm64 runners. Default Docker can emit the existing native
+fast-to-portable warning; only a binding-unavailable/WASM fallback is a failure
+for the normal musl install. Native x64 runs are required for qualification;
+emulated runs are supplementary reproduction evidence.
+
+When preparing several PRs with Actions temporarily disabled, retain the prior
+repository Actions permissions and verify the disabled setting before pushing.
+Record local checks and unrun platform gates explicitly. For final consolidated
+qualification, keep automatic workflows disabled while enabling the manual
+Release workflow. Restore original repository/workflow settings after checks
+and final updates are complete; the absence of per-PR checks is not qualification evidence.
+No npm publication is part of preparing the PR series.
+
+For implementation PRs that intentionally retain an already published version,
+dispatch `release.yml` with `qualification_only=true` and `dry_run=true`.
+This runs build and installed-consumer gates but skips the publish job, including
+its registry-version availability check. The normal release dry run still
+requires an unused version and remains required before actual publication.
 
 ## Rollback
 

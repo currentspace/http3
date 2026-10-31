@@ -3,15 +3,13 @@
 ## Runtime
 
 - Node.js support floor: `>=24.0.0`
-- CI-tested Node.js majors: `24`, `25`, and `26`
-- Node.js 26 status: Current as of 2026-05-20; scheduled to enter LTS in
-  October 2026 according to the Node.js release schedule.
+- Release qualification Node.js majors: `24` and `26` (exact versions pinned in workflows).
 - Module target: Node ESM/CJS-compatible package output
 - Browser compatibility smoke: Chromium, Firefox, and WebKit automated over the HTTPS entrypoint with H3 protocol assertions
 
 ## Protocol Support
 
-- HTTP/3: supported over QUIC/UDP via Rust worker transport
+- HTTP/3: supported over QUIC/UDP via native Rust workers or the WASM core
 - HTTP/2: supported over TLS/TCP via Node `node:http2`
 - Unified listener: both protocols on the same host/port
 - QUIC-LB plaintext CID mode: supported via `quicLb + serverId`
@@ -24,17 +22,33 @@
 - macOS: kqueue (`fast` and `portable`)
 - Linux `fast`: io_uring
 - Linux `portable`: readiness-based `poll(2)` + `eventfd`
-- QUIC engine: quiche 0.29
+- WASM: quiche/BoringSSL over Node UDP sockets; no native driver needed
+- QUIC engine: quiche 0.30
 
-## Platform Targets (N-API prebuild intent)
+## Native package targets
 
-- Prebuilds are shared across Node 24/25/26 through Node-API and are split by
-  supported OS/arch/libc, not by `NODE_MODULE_VERSION`.
-- Linux x64 (gnu)
-- Linux arm64 (gnu)
-- macOS arm64
-- Other platforms may require local native compilation and are not part of the
-  current prebuild release set.
+Node-API prebuilds are split by OS/architecture/libc, not Node module version.
+The following are the release build and installed-consumer targets. A configured
+workflow is not proof that an unpublished sidecar has been qualified or released.
+
+| Target | Sidecar suffix | Publication baseline |
+| --- | --- | --- |
+| Linux glibc x64 | linux-x64-gnu | Included in 0.9.9 |
+| Linux glibc arm64 | linux-arm64-gnu | Included in 0.9.9 |
+| macOS arm64 | darwin-arm64 | Included in 0.9.9 |
+| Linux musl x64 | linux-x64-musl | Candidate qualified; first publication pending |
+| Linux musl arm64 | linux-arm64-musl | Candidate qualified; first publication pending |
+| macOS Intel | darwin-x64 | Candidate qualified; first publication pending |
+| Windows x64 | none | Candidate WASM fallback qualified; no native driver |
+
+The platform-coverage candidate passed native builds and installed consumers on
+Node 24/26, including the three new targets and Windows WASM fallback. See
+[source-bound qualification evidence](./PLATFORM_COVERAGE_EVIDENCE.md). These
+results do not change the package contents already published as 0.9.9.
+
+Other Node platforms may use the WASM fallback but are not qualified merely
+because the generated native loader recognizes their names. Native Windows,
+Android, FreeBSD, OpenHarmony, and other architectures are not release targets.
 
 ## Package layout and source builds
 
@@ -46,42 +60,42 @@ Native startup failures name the OS/architecture and Linux libc, distinguish
 unpublished targets from missing optional packages, and retain the original
 loader errors as causes. See [startup error handling](./ERROR_HANDLING.md#native-binding-startup-failures).
 
-There is no automatic native compilation during npm installation. Unsupported
-prebuild targets require a supported source build of this repository and an
-absolute `NAPI_RS_NATIVE_LIBRARY_PATH` pointing to the resulting `.node` binary.
-Intel macOS distribution CI exercises this explicit source-build path; it does
-not establish a published Intel macOS sidecar. Native Windows/musl are not
-qualified. The packed-install test compiles installed declarations with legacy
-`node`, `node16`, `nodenext`, and `bundler` resolution.
+There is no automatic native compilation during npm installation. Default
+`auto` uses the bundled WASM runtime when native loading fails. Explicit native
+modes require a matching sidecar or an absolute `NAPI_RS_NATIVE_LIBRARY_PATH`
+pointing to a compatible source-built `.node` file. Source builds can load even
+on an unpublished target. The packed-install test compiles installed declarations
+with legacy `node`, `node16`, `nodenext`, and `bundler` resolution.
 
 ## Runtime Modes By Environment
 
 | Environment | `fast` | `portable` | `auto` |
 | --- | --- | --- | --- |
-| macOS | supported (`kqueue`) | supported (`kqueue`) | prefers `fast` |
+| macOS with an addon | supported (`kqueue`) | supported (`kqueue`) | prefers `fast` |
 | Native Linux with `io_uring` allowed | supported (`io_uring`) | supported (`poll`) | prefers `fast` |
 | Ordinary Docker/Kubernetes on Linux | usually blocked by seccomp | supported | falls back to `portable` if allowed |
 | Docker/Kubernetes with `seccomp=unconfined` or equivalent custom seccomp allowing `io_uring_*` | supported | supported | prefers `fast` |
 | `privileged: true` container | supported | supported | prefers `fast` |
+| Native addon absent/unloadable | unsupported | unsupported | WASM if policy permits |
 
-## WASM Client Runtime
+Linux native rows assume a matching libc sidecar. `portable` is a native poll
+driver, not a synonym for WASM.
 
-- `runtimeMode: 'wasm'` runs the same HTTP/3 + raw QUIC **client** protocol
-  core (quiche + BoringSSL) compiled to `wasm32-wasip1`, driven from Node.js
-  over a `node:dgram` adapter — not a reimplementation, not a native-driver
-  substitute.
-- Protocol support: HTTP/3 client (no client mTLS, matching an existing
-  native asymmetry) and raw QUIC client (mTLS supported) — no server
-  support on either protocol.
-- `runtimeMode: 'auto'` never selects `'wasm'`; it must be requested
-  explicitly, and `fallbackPolicy` does not apply to it.
-- See [WASM_RUNTIME.md](./WASM_RUNTIME.md) for build steps, usage examples,
-  and limitations.
+## WASM Runtime
 
-| Platform | Status |
-| --- | --- |
-| Node.js (same `>=24.0.0` floor as native) | Supported today via `runtimeMode: 'wasm'` |
-| Cloudflare Workers / `workerd` | Designed for, not yet deployable — blocked on outbound UDP client sockets ([cloudflare/workerd discussion #4463](https://github.com/cloudflare/workerd/discussions/4463)) |
+- The same H3 and raw QUIC protocol core (quiche + BoringSSL) is compiled to
+  `wasm32-wasip1` and driven from Node.js through `node:dgram` adapters.
+- H3 and raw QUIC clients and servers are supported. Raw QUIC supports mTLS;
+  H3 clients have no mTLS option in either runtime.
+- Default `auto` selects WASM when the native addon cannot load, with a warning
+  and structured metadata. Strict policy and explicit native modes reject it.
+- Explicit WASM never probes the native loader.
+- Windows x64, macOS arm64/Intel, and GNU Linux x64/arm64 installed fallback
+  checks passed in `platform-fallback.yml`; Alpine x64/arm64 checks passed in the
+  musl consumer lanes. The evidence document identifies the qualified source.
+- See [WASM_RUNTIME.md](./WASM_RUNTIME.md) for options, memory limits, and the
+  separate workerd client status. Node server support does not establish
+  support for server sockets in Workers.
 
 ## Container / Deployment Notes
 

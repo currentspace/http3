@@ -1,0 +1,9 @@
+run=41151580339
+head=74a7c977db89b79c0fb71630e55b13cbdfd7e261
+job=124389094065 prebuilds (macos-26, aarch64-apple-darwin)
+conclusion=success
+url=https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094065
+2026-10-31T00:43:06.3073760Z   1.99.1-aarch64-apple-darwin installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+2026-10-31T00:43:06.4524210Z   1.99.1-aarch64-apple-darwin unchanged - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+2026-10-31T00:43:06.9538070Z rustc 1.99.1 (58cf8f9c3 2026-10-13)
+2026-10-31T00:43:37.3598830Z    Compiling boring-sys v5.3.0

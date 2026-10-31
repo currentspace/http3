@@ -1,0 +1,8 @@
+Fault-injection runtime: {"platform":"linux","arch":"arm64","node":"v26.12.1","kernel":"7.0.14-linuxkit"}
+H2/H3 auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"portable","driver":"poll","fallbackOccurred":true,"reasonCode":"fast-path-unavailable","message":"Invalid argument (os error 22)","errno":22,"syscall":"io_uring_register_buf_ring","warningCode":"WARN_HTTP3_RUNTIME_FALLBACK","fastAttempt":{"code":"ERR_HTTP3_FAST_PATH_UNAVAILABLE","message":"Invalid argument (os error 22)","driver":"io_uring","errno":22,"syscall":"io_uring_register_buf_ring"}}
+QUIC auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"portable","driver":"poll","fallbackOccurred":true,"reasonCode":"fast-path-unavailable","message":"Invalid argument (os error 22)","errno":22,"syscall":"io_uring_register_buf_ring","warningCode":"WARN_HTTP3_RUNTIME_FALLBACK","fastAttempt":{"code":"ERR_HTTP3_FAST_PATH_UNAVAILABLE","message":"Invalid argument (os error 22)","driver":"io_uring","errno":22,"syscall":"io_uring_register_buf_ring"}}
+Native portable: 1000 GETs, concurrency 50, 1183 req/s (informational)
+Native strict: fast and auto/error rejected across H3 and raw QUIC clients/servers
+PASS linux/arm64 v26.12.1: native installed consumer
+PBUF_RING rejection count: 5
+39    io_uring_register(22, IORING_REGISTER_PBUF_RING, {ring_addr=0xfffb73c5c000, ring_entries=512, bgid=0, flags=0}, 1) = -1 EINVAL (Invalid argument)

@@ -9,7 +9,7 @@ different transport.
 
 These options are available anywhere the library creates QUIC state:
 
-- `createSecureServer()`
+- `createSecureServer()` / `createNodeServerFactory()`
 - `serveFetch()`
 - `connect()` / `connectAsync()`
 - `createQuicServer()`
@@ -19,26 +19,36 @@ These options are available anywhere the library creates QUIC state:
 
 | Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `runtimeMode` | `'auto' \| 'fast' \| 'portable'` | `'auto'` | Requested runtime policy. |
-| `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Whether `auto` may fall back from `fast` to `portable`. |
+| `runtimeMode` | `'auto' \| 'fast' \| 'portable' \| 'wasm'` | `'auto'` | Requested runtime policy. |
+| `fallbackPolicy` | `'error' \| 'warn-and-fallback'` | `'warn-and-fallback'` | Whether `auto` may fall back to native portable or WASM. |
 | `onRuntimeEvent` | `(info) => void` | `none` | Callback invoked when runtime selection completes or falls back. |
 
 ### Returned metadata
 
-Client sessions and server objects expose `runtimeInfo`:
+Client sessions and server objects, including `Http3NodeServer`, expose a read-only
+`runtimeInfo` getter. It is pending before selection and contains the selected
+mode after startup. The public shape includes:
 
 ```ts
 type RuntimeInfo = {
-  requestedMode: 'auto' | 'fast' | 'portable';
+  requestedMode: 'auto' | 'fast' | 'portable' | 'wasm';
   fallbackPolicy: 'error' | 'warn-and-fallback';
-  selectedMode: 'fast' | 'portable' | null;
-  driver: 'io_uring' | 'poll' | 'kqueue' | null;
+  selectedMode: 'fast' | 'portable' | 'wasm' | null;
+  driver: 'io_uring' | 'poll' | 'kqueue' | 'wasm' | null;
   fallbackOccurred: boolean;
   reasonCode: string | null;
   message?: string;
   errno?: number;
   syscall?: string;
   warningCode?: string;
+  nativeBinding?: {
+    platform: string;
+    arch: string;
+    libc: 'musl' | 'glibc' | null;
+    packageName: string;
+    category: 'unpublished' | 'missing' | 'unloadable' | 'override';
+    message: string;
+  };
   fastAttempt?: {
     code: string;
     message: string;
@@ -60,7 +70,8 @@ The same object is emitted on the `'runtime'` event and passed to
 - Linux: `io_uring`
 - macOS: `kqueue`
 - Never falls back automatically.
-- If unavailable, startup/connect fails with `ERR_HTTP3_FAST_PATH_UNAVAILABLE`.
+- If the driver is unavailable, startup/connect fails with `ERR_HTTP3_FAST_PATH_UNAVAILABLE`.
+- If the addon cannot load, it fails with `ERR_HTTP3_RUNTIME_UNSUPPORTED` and platform details.
 
 ### `runtimeMode: 'portable'`
 
@@ -68,17 +79,40 @@ The same object is emitted on the `'runtime'` event and passed to
 - Linux: readiness-based `poll(2)` + `eventfd`
 - macOS: still uses `kqueue`, but reports `selectedMode: 'portable'`
 - Intended for ordinary Docker/Kubernetes containers and restricted hosts.
+- Requires a loadable native addon; it does not select WASM.
 
 ### `runtimeMode: 'auto'`
 
-- Tries `fast` first.
-- If the fast path is unavailable and `fallbackPolicy` is `warn-and-fallback`,
-  retries with `portable`.
-- After one `ERR_HTTP3_FAST_PATH_UNAVAILABLE` result, the process caches that
-  failure and skips repeated fast-path probes until restart.
-- Emits a structured `'runtime'` event, populates `runtimeInfo`, and emits a
-  process warning with code `WARN_HTTP3_RUNTIME_FALLBACK`.
-- If fallback is forbidden, fails with `ERR_HTTP3_FAST_PATH_UNAVAILABLE`.
+- Resolves the native binding lazily before constructing native state. If it
+  cannot load and policy permits fallback, selects the existing WASM runtime.
+- With a loadable binding, tries native `fast` first, then native `portable`
+  only for `ERR_HTTP3_FAST_PATH_UNAVAILABLE` when fallback is permitted.
+- Caches fast-driver unavailability across the process to avoid repeated probes.
+- Binding fallback reports `reasonCode: 'native-binding-unavailable'`; native
+  driver fallback reports `reasonCode: 'fast-path-unavailable'`.
+- Emits the `runtime` event, invokes `onRuntimeEvent`, populates `runtimeInfo`,
+  and emits `WARN_HTTP3_RUNTIME_FALLBACK` once per distinct fallback cause.
+- Binding diagnostics name OS, architecture, Linux libc, expected sidecar and
+  whether it is missing, unpublished, or found but unable to load.
+- With `fallbackPolicy: 'error'`, binding failure is
+  `ERR_HTTP3_RUNTIME_UNSUPPORTED`; fast-driver failure remains
+  `ERR_HTTP3_FAST_PATH_UNAVAILABLE`.
+- TLS, DNS, socket-bind, configuration, and application failures do not trigger
+  fallback. A failed WASM bootstrap does not emit a successful fallback warning.
+
+### `runtimeMode: 'wasm'`
+
+Uses the bundled quiche/BoringSSL WASM core over Node UDP sockets for H3 or raw
+QUIC clients and servers. It does not probe native loading, and fallback policy
+has no effect on explicit WASM. Missing/corrupt WASM artifacts cause startup to
+fail. See [WASM limitations](./WASM_RUNTIME.md#current-limitations).
+
+| Request | Native binding loads | Native binding cannot load |
+| --- | --- | --- |
+| auto, warn-and-fallback (defaults) | native fast, with portable driver fallback | WASM with warning |
+| auto, error | strict native fast | typed unsupported error |
+| fast / portable | requested native mode | typed unsupported error |
+| wasm | WASM without probing native | WASM without probing native |
 
 ## Topology and worker ownership
 
@@ -116,13 +150,20 @@ Observable surfaces:
 
 ## Environment matrix
 
+Native rows below assume a compatible addon is installed. See the
+[support matrix](./SUPPORT_MATRIX.md) for package targets.
+
 | Environment | `fast` | `portable` | `auto` |
 | --- | --- | --- | --- |
-| macOS | `kqueue` | `kqueue` | selects `fast` |
+| macOS with a native addon | `kqueue` | `kqueue` | selects `fast` |
 | Native Linux with `io_uring` allowed | `io_uring` | `poll` | selects `fast` |
 | Ordinary Docker/Kubernetes container on Linux | usually fails with `ERR_HTTP3_FAST_PATH_UNAVAILABLE` | works | falls back to `portable` if allowed |
 | Docker/Kubernetes with `seccomp=unconfined` (or equivalent custom seccomp allowing `io_uring_*`) | works | works | selects `fast` |
 | `privileged: true` container | works, but broader than necessary | works | selects `fast` |
+| No loadable native addon (including Windows) | unsupported | unsupported | WASM if fallback is allowed |
+
+An Alpine container with a musl addon can still emit a native fast-to-portable
+warning when seccomp blocks io_uring. That is distinct from selecting WASM.
 
 ## Capability and privilege matrix
 
@@ -150,9 +191,10 @@ release campaign:
 | --- | --- | --- |
 | `fast` | Lowest syscall overhead, highest throughput headroom on Linux | Requires host/container support for the fast driver |
 | `portable` | Works in ordinary Linux containers and restricted environments | Higher per-I/O overhead than `io_uring` on Linux |
-| `auto` | Best available runtime with explicit fallback visibility | You must handle warnings/runtime events if you care about placement |
+| `auto` | Native performance where available, WASM otherwise | Observe runtime events when placement matters |
+| `wasm` | No native addon, same QUIC/H3 protocol core | Lower throughput and a bounded heap; see the dated measurements in the README |
 
-The package keeps QUIC and HTTP/3 in all three modes. Runtime fallback never
+The package keeps QUIC and HTTP/3 in all four modes. Runtime fallback never
 silently downgrades to HTTP/2 or HTTP/1.
 
 ## Endpoint formats and hostname support

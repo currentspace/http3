@@ -1,0 +1,149 @@
+{
+  "run_id": 41151580339,
+  "run_url": "https://github.com/currentspace/http3/actions/runs/41151580339",
+  "hosted_source": "74a7c977db89b79c0fb71630e55b13cbdfd7e261",
+  "status": "completed",
+  "conclusion": "success",
+  "run_updated_at": "2026-10-31T00:52:41Z",
+  "recorded_at": "2026-10-31T00:57:51.862999+00:00",
+  "scope": "Shared WASM build/test and ten installed no-native-addon consumers; other run jobs have separate receipts.",
+  "receipt_format": "Selected GitHub job-log lines with original timestamps; ANSI formatting removed.",
+  "source_relationship": {
+    "local_source": "13d8a31f93657872b0c02ceceac694cac6011bd3",
+    "production_code_identical": true,
+    "changed_files": [
+      "test/core/server-stream-lifecycle.test.ts"
+    ],
+    "note": "Local changes are lifecycle test cleanup and its regression. This is combined-stack validation, not standalone intermediate-PR CI."
+  },
+  "hosted_wasm_tests": {
+    "tests": 133,
+    "passed": 133,
+    "failed": 0,
+    "cancelled": 0,
+    "skipped": 0
+  },
+  "jobs": [
+    {
+      "id": 124389093918,
+      "name": "build-wasm",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124389093918",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:42:09Z",
+      "completed_at": "2026-10-31T00:47:39Z",
+      "receipt": "job-124389093918.log",
+      "sha256": "5db63caa2f31d878a8a33ee3fde19cf93db71253152174026be61dba8da2f27a"
+    },
+    {
+      "id": 124390669419,
+      "name": "qualify-fallback / no native addon (windows-latest, Node 24.22.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669419",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:48Z",
+      "completed_at": "2026-10-31T00:48:49Z",
+      "receipt": "job-124390669419.log",
+      "sha256": "ecc31debf28f52e2222b23656ddc1b6908dbebc2a5f1b35c2827f892d24045fa"
+    },
+    {
+      "id": 124390669428,
+      "name": "qualify-fallback / no native addon (ubuntu-24.04, Node 26.12.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669428",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:41Z",
+      "completed_at": "2026-10-31T00:48:10Z",
+      "receipt": "job-124390669428.log",
+      "sha256": "63221ab270152925861a33c389700c4bf3653bb7d824ab507df78411b1750fa8"
+    },
+    {
+      "id": 124390669445,
+      "name": "qualify-fallback / no native addon (ubuntu-24.04-arm, Node 26.12.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669445",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:44Z",
+      "completed_at": "2026-10-31T00:48:12Z",
+      "receipt": "job-124390669445.log",
+      "sha256": "4b2f4fbf70985e7b4d96f304808c406cd345b5557f63373e386431599293a3a4"
+    },
+    {
+      "id": 124390669461,
+      "name": "qualify-fallback / no native addon (macos-26, Node 24.22.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669461",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:42Z",
+      "completed_at": "2026-10-31T00:48:46Z",
+      "receipt": "job-124390669461.log",
+      "sha256": "abe44c2f4dc7bddedb394f7916f483b3b74cb9e3ec4ca8e93de288d443c3a299"
+    },
+    {
+      "id": 124390669477,
+      "name": "qualify-fallback / no native addon (ubuntu-24.04, Node 24.22.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669477",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:41Z",
+      "completed_at": "2026-10-31T00:48:01Z",
+      "receipt": "job-124390669477.log",
+      "sha256": "e053b2aea84a9613586aa9e78d0a86757dfc532ae5b57a1bf1f5bfe8986552d1"
+    },
+    {
+      "id": 124390669480,
+      "name": "qualify-fallback / no native addon (ubuntu-24.04-arm, Node 24.22.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669480",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:43Z",
+      "completed_at": "2026-10-31T00:48:00Z",
+      "receipt": "job-124390669480.log",
+      "sha256": "693f28cdeb5ae31f356a904b32061505d70838fde66a6cbec88c9fbe0cccf174"
+    },
+    {
+      "id": 124390669485,
+      "name": "qualify-fallback / no native addon (macos-26-intel, Node 24.22.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669485",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:43Z",
+      "completed_at": "2026-10-31T00:49:43Z",
+      "receipt": "job-124390669485.log",
+      "sha256": "a66cf5cd9ac186667b2b7812aa6f06be92e430df1c3799c29328201c4a3b2cb9"
+    },
+    {
+      "id": 124390669488,
+      "name": "qualify-fallback / no native addon (macos-26, Node 26.12.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669488",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:52Z",
+      "completed_at": "2026-10-31T00:48:49Z",
+      "receipt": "job-124390669488.log",
+      "sha256": "172b03c73781a8dcd2e2ba5d6a503dc64ad43091c6ecf4b4177158a877b17e70"
+    },
+    {
+      "id": 124390669501,
+      "name": "qualify-fallback / no native addon (macos-26-intel, Node 26.12.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669501",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:42Z",
+      "completed_at": "2026-10-31T00:49:15Z",
+      "receipt": "job-124390669501.log",
+      "sha256": "cd818636c16043e52f56b4f21ad1c88f4eb61c22f41510d9f5de477fb61e797d"
+    },
+    {
+      "id": 124390669553,
+      "name": "qualify-fallback / no native addon (windows-latest, Node 26.12.1)",
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339/job/124390669553",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-31T00:47:42Z",
+      "completed_at": "2026-10-31T00:49:05Z",
+      "receipt": "job-124390669553.log",
+      "sha256": "ffd9a9cfa3eac56b4abfc4b44a84a7cdf1dedb04b1bc72169fde786081072459"
+    }
+  ]
+}

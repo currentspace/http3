@@ -1,0 +1,5 @@
+H2/H3 wasm: {"requestedMode":"wasm","fallbackPolicy":"warn-and-fallback","selectedMode":"wasm","driver":"wasm","fallbackOccurred":false,"reasonCode":"requested-wasm","fastAttempt":null}
+H2/H3 auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"fast","driver":"kqueue","fallbackOccurred":false,"reasonCode":"auto-selected-fast","fastAttempt":null}
+QUIC auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"fast","driver":"kqueue","fallbackOccurred":false,"reasonCode":"auto-selected-fast","fastAttempt":null}
+Native portable: 1000 GETs, concurrency 50, 8126 req/s (informational)
+PASS darwin/arm64 v26.13.0: native installed consumer

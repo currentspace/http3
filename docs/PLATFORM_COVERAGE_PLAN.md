@@ -1,6 +1,9 @@
 # Platform coverage and automatic WASM fallback
 
-Date: 2026-10-30. Status: proposed implementation plan; no runtime changes made.
+Date: 2026-10-30. Status: implemented and qualified in a stacked PR series;
+merge and npm publication remain separate release steps.
+Qualification results and remaining release steps are tracked in
+[PLATFORM_COVERAGE_EVIDENCE.md](./PLATFORM_COVERAGE_EVIDENCE.md).
 
 Source request: `/tmp/http3-platforms/README.md`, with consumer repros in
 `/tmp/http3-platforms/repro/`. Baseline: `main` at `966c611`, package version 0.9.9.
@@ -89,7 +92,14 @@ Primary files: `bin/native-binding-error.cjs`, `lib/event-loop.ts`,
    startup path. Refactor `_listenWasm` to consume the original decision rather
    than relabeling the request as explicit WASM or rerunning a native attempt.
    Keep argument validation and public error timing compatible. Cover close
-   during startup, bind retries, and partial startup cleanup.
+   during startup, bind retries, and partial startup cleanup. Cancellation
+   must reject the selection attempt rather than return a value that the
+   selector could mistake for successful startup. Close newly allocated UDP
+   sockets after both asynchronous bind errors and synchronous bind throws.
+   Require fresh processes to exit naturally after cancellation before or
+   during connect, including native constructors that have not started a
+   worker. Test restarting from the server's `close` event as well as after
+   awaiting `close()`; an older shutdown must not clear a newer listener's state.
 5. Report successful fallback as `requestedMode: 'auto'`, `selectedMode: 'wasm'`,
    `driver: 'wasm'`, `fallbackOccurred: true`, and
    `reasonCode: 'native-binding-unavailable'`. Keep `fastAttempt` for actual
@@ -208,6 +218,13 @@ because `npm install --omit=optional` is an explicit reported scenario.
 | WASM large writes | `throughput.cjs wasm 32 buffer` succeeds, plus assertion-based integrity/backpressure cases |
 | All packed candidates | `.wasm` artifact present and loadable, public declaration compilation, correct sidecar versions |
 
+Run the installed native consumer harness on every GNU Linux and macOS
+architecture, including Intel macOS. Source-tree transport tests and an addon
+load/typecheck smoke alone do not prove that the packed package's `auto` server
+selects native and serves both H2 and H3. Install the matching candidate sidecar
+explicitly until its version is published, and retain that distinction in the
+qualification evidence.
+
 Use the repository's supported Node-major matrix for qualification. Require
 native architecture execution for release evidence; emulated amd64 is useful
 for reproduction but not a replacement for native x64 qualification.
@@ -217,8 +234,9 @@ io_uring even with the correct musl binary installed. In that environment,
 `auto` legitimately selects native `portable` with the existing
 `fast-path-unavailable` warning. Require **no WASM/binding-unavailable fallback**
 there; require no warning for explicit portable, and test warning-free auto on
-an io_uring-capable host. Do not suppress an existing meaningful warning to
-satisfy an ambiguous assertion.
+an io_uring-capable host. This differs from the spec's literal warning-free
+Alpine auto clause under restrictive Docker policy. Preserve the diagnostic
+and record that acceptance distinction explicitly.
 
 Run lint, typecheck (including workerd boundaries), runtime/release/core/WASM
 tests, native H3/QUIC interop, and packed-install checks. Rebuild WASM/native
@@ -253,7 +271,7 @@ Runtime fallback can ship before the new sidecars once units 1/2 and their
 platform gates pass; musl and Intel packages can follow. Publishing remains a
 separate release action. After publication, repeat clean registry installs with
 and without optional dependencies before declaring the consumer's launcher
-workaround removable. No implementation or publication is part of this plan.
+workaround removable. Publication is separate from the implementation PR series.
 
 Runner reference: [GitHub-hosted runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 Musl toolchain reference: [napi-rs cross-building and native dependencies](https://napi.rs/docs/cross-build).

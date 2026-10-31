@@ -1,0 +1,13 @@
+run=41151580339
+head=74a7c977db89b79c0fb71630e55b13cbdfd7e261
+job=124389094066 prebuilds-musl / prebuild musl (arm64)
+conclusion=success
+url=https://github.com/currentspace/http3/actions/runs/41151580339/job/124389094066
+2026-10-31T00:42:34.4895281Z #8 7.900   1.99.1-aarch64-unknown-linux-musl installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+2026-10-31T00:42:36.9681187Z #12 [build 7/7] RUN --mount=type=cache,target=/root/.cargo/registry     --mount=type=cache,target=/workspace/target     case "$(uname -m)" in       aarch64) target=aarch64-unknown-linux-musl; arch=arm64 ;;       x86_64) target=x86_64-unknown-linux-musl; arch=x64 ;;       *) exit 1 ;;     esac     && python3 -m unittest discover -s scripts/tests -p test_musl_prebuild.py     && cargo test --locked --release --lib --no-default-features --features os-runtime -- transport::     && cargo build --locked --release --lib     && mkdir /artifacts     && cp "target/release/libhttp3.so" "/artifacts/http3.linux-$arch-musl.node"     && { printf '%s\n' "$target"; rustc --version; cargo --version; cc --version; cmake --version; apk info -v; } > "/artifacts/musl-build-$arch.txt"     && python3 scripts/check-musl-prebuild.py "/artifacts/http3.linux-$arch-musl.node"     && node -e 'const b = require(process.argv[1]); for (const k of ["NativeWorkerServer", "NativeWorkerClient", "NativeQuicServer", "NativeQuicClient"]) if (typeof b[k] !== "function") throw Error(k)' "/artifacts/http3.linux-$arch-musl.node"
+2026-10-31T00:42:37.1539156Z #12 0.225 /tmp/http3.linux-arm64-musl.node: AArch64; musl runtime dependencies ['libc.musl-aarch64.so.1']
+2026-10-31T00:42:37.1539995Z #12 0.225 /tmp/http3.linux-arm64-musl.node: AArch64; musl runtime dependencies ['libc.musl-aarch64.so.1', 'libgcc_s.so.1']
+2026-10-31T00:42:40.5717283Z #12 3.643   Downloaded boring-sys v5.3.0
+2026-10-31T00:43:01.4855990Z #12 24.44    Compiling boring-sys v5.3.0
+2026-10-31T00:45:42.7774675Z #12 186.0 test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.17s
+2026-10-31T00:47:28.1860399Z #12 291.4 /artifacts/http3.linux-arm64-musl.node: AArch64; musl runtime dependencies ['libc.musl-aarch64.so.1', 'libgcc_s.so.1', 'libstdc++.so.6']

@@ -1,0 +1,20 @@
+run=41151580339
+head=74a7c977db89b79c0fb71630e55b13cbdfd7e261
+job=124391354736 validate (x86_64-unknown-linux-gnu, node 26.12.1)
+conclusion=success
+url=https://github.com/currentspace/http3/actions/runs/41151580339/job/124391354736
+2026-10-31T00:50:50.3210100Z ℹ tests 56
+2026-10-31T00:50:50.3210587Z ℹ pass 55
+2026-10-31T00:50:50.3210802Z ℹ fail 0
+2026-10-31T00:51:00.0124631Z ℹ tests 42
+2026-10-31T00:51:00.0125131Z ℹ pass 42
+2026-10-31T00:51:00.0125350Z ℹ fail 0
+2026-10-31T00:51:14.1981596Z ##[group]Run node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
+2026-10-31T00:51:14.1982657Z node -e 'console.log("Native runtime host:", JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,kernel:require("node:os").release()}))'
+2026-10-31T00:51:14.3441169Z Native runtime host: {"platform":"linux","arch":"x64","node":"v26.12.1","kernel":"6.8.0-1070-azure"}
+2026-10-31T00:51:17.9297712Z H2/H3 wasm: {"requestedMode":"wasm","fallbackPolicy":"warn-and-fallback","selectedMode":"wasm","driver":"wasm","fallbackOccurred":false,"reasonCode":"requested-wasm","fastAttempt":null}
+2026-10-31T00:51:17.9299655Z H2/H3 auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"portable","driver":"poll","fallbackOccurred":true,"reasonCode":"fast-path-unavailable","message":"Invalid argument (os error 22)","errno":22,"syscall":"io_uring_register_buf_ring","warningCode":"WARN_HTTP3_RUNTIME_FALLBACK","fastAttempt":{"code":"ERR_HTTP3_FAST_PATH_UNAVAILABLE","message":"Invalid argument (os error 22)","driver":"io_uring","errno":22,"syscall":"io_uring_register_buf_ring"}}
+2026-10-31T00:51:17.9301547Z QUIC auto: {"requestedMode":"auto","fallbackPolicy":"warn-and-fallback","selectedMode":"portable","driver":"poll","fallbackOccurred":true,"reasonCode":"fast-path-unavailable","message":"Invalid argument (os error 22)","errno":22,"syscall":"io_uring_register_buf_ring","warningCode":"WARN_HTTP3_RUNTIME_FALLBACK","fastAttempt":{"code":"ERR_HTTP3_FAST_PATH_UNAVAILABLE","message":"Invalid argument (os error 22)","driver":"io_uring","errno":22,"syscall":"io_uring_register_buf_ring"}}
+2026-10-31T00:51:17.9302544Z Native portable: 1000 GETs, concurrency 50, 7846 req/s (informational)
+2026-10-31T00:51:17.9302898Z Native strict: fast and auto/error rejected across H3 and raw QUIC clients/servers
+2026-10-31T00:51:17.9303210Z PASS linux/x64 v26.12.1: native installed consumer

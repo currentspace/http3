@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "scope": "One local validation startup timeout; no production transport fix is claimed.",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v26.13.0"
+  },
+  "initial_run": {
+    "source": "1c1c2215d0da043fac6ab77dabaf01098d23c6eb",
+    "command": "HTTP3_WASM=1 pnpm run test:wasm",
+    "test": "native-h3: request FIN and automatic destruction preserve a queued 20 MiB response",
+    "timeout_ms": 15000,
+    "observed_duration_ms": 15001.111417,
+    "runner_summary_after_diagnostic_capture": {
+      "exit_code": 1,
+      "tests": 133,
+      "pass": 132,
+      "fail": 0,
+      "cancelled": 1
+    },
+    "process_disposition": "The owner terminated the failed test process after diagnostic capture; this run was not counted as passing.",
+    "comparison_to_hosted_source": {
+      "source": "74a7c977db89b79c0fb71630e55b13cbdfd7e261",
+      "changed_files": [
+        "scripts/fixtures/platform-consumer.cjs"
+      ],
+      "note": "Only the installed-consumer warning assertion changed; production code and the failing lifecycle/WASM tests were identical."
+    }
+  },
+  "diagnosis": {
+    "method": "Read-only Node inspector state and closure scopes, socket inventory, and a short native thread sample captured before termination.",
+    "confirmed_phase": "The fixture was awaiting connectAsync; its session binding had not initialized.",
+    "confirmed_no_transfer": "The server handler variables raw and sending were undefined; no request stream or response pipeline had been created.",
+    "remaining_resources": {
+      "listening_tcp_server": 1,
+      "native_server_workers": 8,
+      "tracked_server_streams": 0,
+      "tracked_server_sessions": 0
+    },
+    "confirmed_cleanup_defect": "The fixture registered t.after only after connectAsync returned, leaving the already-started server unowned when connection startup timed out.",
+    "connection_timeout_cause": "Unknown. The evidence does not distinguish a DNS, handshake, socket, scheduling, or other startup cause.",
+    "diagnostic_limits": [
+      "The failed client object was no longer retained when inspected; its close error was unavailable.",
+      "Native lifecycle tracing was disabled, so no per-connection history was available.",
+      "Aggregate native telemetry recorded zero driver setup failures, runtime-error exits, sink errors, and dropped events; these counters do not identify the timeout cause."
+    ],
+    "aggregate_native_counts": {
+      "driverSetupAttemptsTotal": 436,
+      "driverSetupFailureTotal": 0,
+      "workerThreadSpawnsTotal": 436,
+      "workerThreadStopsTotal": 428,
+      "workerLoopExitByRuntimeErrorTotal": 0,
+      "eventBatchDroppedEventsTotal": 0,
+      "eventBatchSinkErrorsTotal": 0
+    },
+    "lifecycle_trace_enabled": false
+  },
+  "cleanup_fix": {
+    "source": "13d8a31f93657872b0c02ceceac694cac6011bd3",
+    "file": "test/core/server-stream-lifecycle.test.ts",
+    "changes": [
+      "Register cleanup before listen and connect awaits.",
+      "Close the server in finally even if session cleanup fails.",
+      "Pass the test abort signal into connectAsync."
+    ],
+    "regression": "Cancel a pending connection during DNS resolution, require AbortError, then rebind both TCP and UDP on the released server port.",
+    "transfer_assertions_and_timeouts_unchanged": true,
+    "production_files_changed": false
+  },
+  "followup_validation": {
+    "candidate_native_artifact_sha256": "106e3ef7e7bcdfab19fe7c740f9f1d76eb32fd80d915ae7ee3e3fbcec2d1eb16",
+    "focused_lifecycle_suite": {
+      "tests": 31,
+      "pass": 31,
+      "fail": 0
+    },
+    "five_focused_native_20_mib_repeats": [
+      {
+        "pass": true,
+        "test_duration_ms": 274.57675
+      },
+      {
+        "pass": true,
+        "test_duration_ms": 271.449625
+      },
+      {
+        "pass": true,
+        "test_duration_ms": 269.850792
+      },
+      {
+        "pass": true,
+        "test_duration_ms": 272.891042
+      },
+      {
+        "pass": true,
+        "test_duration_ms": 273.057459
+      }
+    ],
+    "final_local_source": "13d8a31f93657872b0c02ceceac694cac6011bd3",
+    "final_local_suites": {
+      "node": {
+        "exit_code": 0,
+        "tests": 571,
+        "pass": 571,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "ffi": {
+        "exit_code": 0,
+        "tests": 67,
+        "pass": 67,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "wasm": {
+        "exit_code": 0,
+        "tests": 135,
+        "pass": 135,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    "additional_final_local_checks": [
+      {
+        "name": "rust-full",
+        "exit_code": 0
+      },
+      {
+        "name": "packed-fallback",
+        "exit_code": 0
+      },
+      {
+        "name": "packed-types",
+        "exit_code": 0
+      }
+    ],
+    "hosted_run": {
+      "id": 41151580339,
+      "url": "https://github.com/currentspace/http3/actions/runs/41151580339",
+      "source": "74a7c977db89b79c0fb71630e55b13cbdfd7e261",
+      "conclusion": "success",
+      "successful_jobs": 29,
+      "publish": "skipped"
+    },
+    "hosted_to_local_diff": [
+      "test/core/server-stream-lifecycle.test.ts"
+    ],
+    "interpretation": "Successful repeats and final suites did not reproduce the startup timeout. They verify the cleanup fix and exercised transfers; they do not establish or eliminate the original connection-startup cause."
+  }
+}
